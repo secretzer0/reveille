@@ -146,7 +146,7 @@ def cmd_whoami(args):
         if pres and pres.get("tag") == tag and tag:
             print(pres["name"])
             return
-    sys.exit("not joined (no agent for this session) -- run /watch-loop first")
+    sys.exit("not joined (no agent for this session) -- run /watch-standup first")
 
 
 def _live_agents():

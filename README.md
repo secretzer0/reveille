@@ -1,6 +1,6 @@
-# watch-loop — an agent message bus for Claude Code
+# Agent message bus for Claude Code
 
-Event-driven, real-time messaging between Claude Code sessions over the filesystem. Sessions sign up to a self-organizing global bus under a unique name, send each other unicast messages, and broadcast to a persistent shared log. A session in a `/watch-loop` reacts the instant a message arrives — no polling, no timers.
+Event-driven, real-time messaging between Claude Code sessions over the filesystem. Sessions sign up to a self-organizing global bus under a unique name, send each other unicast messages, and broadcast to a persistent shared log. A session in `/watch-standup` reacts the instant a message arrives — no polling, no timers.
 
 Linux only (kernel `inotify`). Zero dependencies: `python3` + the kernel. No pip, no `apt`, no `sudo`.
 
@@ -35,7 +35,6 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 ## Usage
 
 ```
-/watch-loop --name NAME [--fresh] -- PROMPT   join the bus, react to messages with PROMPT
 /watch-standup --name ROLE [--fresh]          join as ROLE for standup coordination (baked prompt)
 /watch-standup --round                        make every agent re-post status now (one round)
 /watch-send --to NAME | --all [--subject S] -- MESSAGE   unicast, or broadcast to everyone
@@ -46,7 +45,7 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 
 ### Standup mode
 
-`/watch-standup` is `/watch-loop` with the coordination prompt frozen in: each agent posts its status, reacts to peers, replies to directed asks, and re-posts **only when its status changed** (storm guard baked in, not fat-fingered). One short line per dev:
+`/watch-standup` drives the bus (`bus.py` + `fswatch.py`) with the coordination prompt frozen in: each agent posts its status, reacts to peers, replies to directed asks, and re-posts **only when its status changed** (storm guard baked in, not fat-fingered). One short line per dev:
 
 ```
 /watch-standup --name architect       # terminal 1
@@ -64,14 +63,14 @@ Example — two sessions:
 
 ```
 # session 1
-/watch-loop --name reviewer -- review any diff I'm sent, reply to the sender with findings
+/watch-standup --name reviewer
 
 # session 2
-/watch-loop --name builder -- on each message run the build, then broadcast pass/fail
+/watch-standup --name builder
 /watch-send --to reviewer -- here's the diff for PR 12: <...>
 ```
 
-`reviewer` wakes the instant the message lands, runs its prompt, replies via `/watch-send --to builder`. No directories were configured by either side — they found each other by name on the global bus.
+`reviewer` wakes the instant the message lands, ingests it, replies via `/watch-send --to builder`. No directories were configured by either side — they found each other by name on the global bus.
 
 ## Bus layout
 
@@ -91,7 +90,7 @@ broadcast/<ts>-..json  append-only shared log, one file per broadcast (ts-ordere
 - **Names are unique among live agents.** Joining a name a live agent holds fails; a stale name (its session gone) is reclaimed.
 - **Liveness is best-effort** — an agent is "live" while its session's watcher process exists. An agent busy in a long prompt (watcher momentarily disarmed) can briefly read as stale. `bus.py prune` clears dead presence; broadcast GC tolerates ghosts via the 7-day cap.
 - **Atomic drops.** Sends write to `.tmp/` then `rename` into the target inbox / broadcast dir, so a reader never sees a half-written message.
-- **One loop per session.** Re-running `/watch-loop` supersedes the running watcher (tagged by `$CLAUDE_CODE_SESSION_ID`); `/watch-stop` kills only this session's watcher.
+- **One loop per session.** Re-running `/watch-standup` supersedes the running watcher (tagged by `$CLAUDE_CODE_SESSION_ID`); `/watch-stop` kills only this session's watcher.
 
 ## Development
 
@@ -128,8 +127,7 @@ bus.py whoami [--tag T]    list [--json]    prune    leave --name N    paths --n
 
 | Command | Switches | Does |
 |---|---|---|
-| `/watch-loop` | `--name NAME` (req), `--fresh`, `-- PROMPT` (req) | Join bus, run PROMPT on each message. `--fresh` skips broadcast backlog. |
-| `/watch-standup` | `--name ROLE` (req) **or** `--round`; `--fresh` | Join as ROLE with baked standup prompt + storm guard. `--round` makes everyone re-post once. |
+| `/watch-standup` | `--name ROLE` (req) **or** `--round`; `--fresh` | Join as ROLE with baked standup prompt + storm guard. `--round` makes everyone re-post once. `--fresh` skips broadcast backlog. |
 | `/watch-send` | `--to NAME` **xor** `--all`; `--subject S`; `-- MESSAGE` | Unicast to NAME's inbox, or broadcast to the shared log. |
 | `/watch-list` | — | Roster: each agent `LIVE` / `stale`. |
 | `/watch-kick` | `NAME` (req), `--force` | Evict NAME: LEAVE directive; `--force` removes presence + kills its watcher. |

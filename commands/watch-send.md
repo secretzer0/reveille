@@ -11,7 +11,7 @@ Parse `$ARGUMENTS`: exactly one of `--to NAME` or `--all`, optional `--subject S
    ```
    FROM=$(python3 ~/.claude/scripts/bus.py whoami)
    ```
-   If that errors ("not joined"), you have not joined the bus — tell the user to run `/watch-loop --name ...` first (or, if they just want a one-off send, ask which name to send as and pass it as `--from`).
+   If that errors ("not joined"), you have not joined the bus — tell the user to run `/watch-standup --name ...` first (or, if they just want a one-off send, ask which name to send as and pass it as `--from`).
 
 2. Send:
    ```

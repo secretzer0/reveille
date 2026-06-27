@@ -20,7 +20,6 @@ install:
 	install -d "$(CLAUDE)/scripts" "$(CLAUDE)/commands"
 	install -m 0755 src/fswatch.py "$(CLAUDE)/scripts/fswatch.py"
 	install -m 0755 src/bus.py "$(CLAUDE)/scripts/bus.py"
-	install -m 0644 commands/watch-loop.md "$(CLAUDE)/commands/watch-loop.md"
 	install -m 0644 commands/watch-send.md "$(CLAUDE)/commands/watch-send.md"
 	install -m 0644 commands/watch-list.md "$(CLAUDE)/commands/watch-list.md"
 	install -m 0644 commands/watch-standup.md "$(CLAUDE)/commands/watch-standup.md"
@@ -30,9 +29,9 @@ install:
 
 uninstall:
 	rm -f "$(CLAUDE)/scripts/fswatch.py" "$(CLAUDE)/scripts/bus.py" \
-	      "$(CLAUDE)/commands/watch-loop.md" "$(CLAUDE)/commands/watch-send.md" \
-	      "$(CLAUDE)/commands/watch-list.md" "$(CLAUDE)/commands/watch-standup.md" \
-	      "$(CLAUDE)/commands/watch-kick.md" "$(CLAUDE)/commands/watch-stop.md"
+	      "$(CLAUDE)/commands/watch-send.md" "$(CLAUDE)/commands/watch-list.md" \
+	      "$(CLAUDE)/commands/watch-standup.md" "$(CLAUDE)/commands/watch-kick.md" \
+	      "$(CLAUDE)/commands/watch-stop.md"
 	@echo "removed from $(CLAUDE)."
 
 lint:

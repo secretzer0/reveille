@@ -1,5 +1,5 @@
 ---
-description: "Leave the agent bus and stop THIS session's watch-loop."
+description: "Leave the agent bus and stop THIS session's standup/bus loop."
 argument-hint: ""
 ---
 
