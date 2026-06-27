@@ -1,54 +1,64 @@
 ---
-description: "Run a prompt every time watched files/dirs change (real-time, inotify-driven). Event-driven sibling of /loop."
-argument-hint: "PATH [PATH ...] -- PROMPT"
+description: "Join the agent message bus under a unique name and react to messages in real time (inotify-driven)."
+argument-hint: "--name NAME [--fresh] -- PROMPT"
 ---
 
-Start a **filesystem-triggered loop**. Unlike `/loop` (timer-based), this fires the moment a watched path changes — a real-time dropbox for agent-to-agent comms.
+Join the self-organizing **agent message bus** and run a loop that reacts to messages the instant they arrive. The bus is a well-known global directory (`~/.claude/agent-bus`, override `$CLAUDE_AGENT_BUS`) — no paths to configure. Other sessions find you by your name; you watch only your own inbox plus the shared broadcast log.
 
-**If `$ARGUMENTS` is empty, do NOT start anything — print this usage and stop:**
+**If `$ARGUMENTS` has no `--name`, do NOT start anything — print this usage and stop:**
 
 ```
-/watch-loop PATH [PATH ...] -- PROMPT
+/watch-loop --name NAME [--fresh] -- PROMPT
 
-Runs PROMPT every time any watched file/dir changes (real-time, inotify).
+Join the agent bus as NAME and run PROMPT each time a message arrives.
+
+  --name NAME   your unique handle on the bus (required; fails if a live agent holds it)
+  --fresh       skip the broadcast backlog; only react to messages from now on
+  PROMPT        what to do with received messages (after `--`)
 
 Examples:
-  /watch-loop ~/agent-inbox -- read new files, act on them, then move each to processed/
-  /watch-loop ./shared/state.json -- reload state and report what changed
-  /watch-loop ./dirA ./dirB ~/notes.md -- summarize what changed across all three
-  /watch-loop --timeout 60 ./inbox -- process new drops; also wake every 60s to housekeep
-  /watch-loop --all ./src -- rebuild on every save (wakes mid-write too)
+  /watch-loop --name reviewer -- review any diff I'm sent and reply with findings
+  /watch-loop --name builder --fresh -- on each message, run the build and broadcast pass/fail
 
-Paths before `--` are watched together. Everything after `--` is the prompt.
-A dir catches move-in/delete/close-write inside it; a file catches writes to it.
-Stop with /watch-stop (Esc alone won't — the bg watcher keeps running).
+Talk to peers:  /watch-send --to NAME|--all -- MESSAGE
+See who's here:  /watch-list      Leave:  /watch-stop
 ```
 
-Otherwise, parse `$ARGUMENTS`: everything before `--` is the watch PATH list; everything after `--` is the PROMPT to run on each change. If there is no `--`, treat the first token as the path and ask the user for the prompt.
+Parse `$ARGUMENTS`: `--name NAME` (required), optional `--fresh`, and the PROMPT after `--`.
 
-Then run this loop:
+Then:
 
-1. **Replace any existing watcher for this session** — one watch-loop per session; a new `/watch-loop` supersedes the old one. Run this as its OWN foreground command (not combined with the arm step):
+1. **Join the bus.** `BUS=~/.claude/scripts/bus.py`.
+   ```
+   python3 ~/.claude/scripts/bus.py join --name NAME [--fresh]
+   ```
+   It prints two lines — your INBOX dir and the BROADCAST dir — capture both. If it exits non-zero (name held by a live agent, or invalid name), report the error and stop; do not loop.
+
+2. **Replace any prior watcher for this session** (one loop per session) — run alone, not combined with the arm step (a combined `pkill ...; python3 ...fswatch...` self-kills, exit 144):
    ```
    pkill -f "[f]swatch.py --tag $CLAUDE_CODE_SESSION_ID" || true
    ```
-   It must be separate: if you put the `python3 ...fswatch.py...` arm in the same command line, pkill matches that un-bracketed `fswatch.py` in its own shell and self-kills (exit 144). Run pkill alone first.
 
-2. **Arm the watcher** in the background (this is what makes it event-driven, not polled):
+3. **Drain pending** (non-destructive):
    ```
-   python3 ~/.claude/scripts/fswatch.py --tag "$CLAUDE_CODE_SESSION_ID" <PATHS>
+   python3 ~/.claude/scripts/bus.py pending --name NAME --json
    ```
-   Launch it with `run_in_background: true`. The `--tag "$CLAUDE_CODE_SESSION_ID"` stamps this session's id into the process so `/watch-stop` can kill THIS window's watcher only (other windows run their own, untouched) — always include it. It blocks on inotify and exits — printing the changed entries — the instant any watched path changes. End your turn; the harness re-invokes you when it exits.
+   Returns `{inbox:[{file,msg}], broadcasts:[{file,ts,msg}], cursor_to}`.
 
-3. **On wake**, do NOT trust the printed list alone. **Rescan the watched dirs** (`ls`/Read) — the directory listing is the source of truth. Events that land between the watcher exiting and you relaunching it are not captured, so the listing closes that race. ponytail: rescan-on-wake, not perfect event capture.
+4. **If anything is pending**, run the user's PROMPT over the message bodies (inbox + broadcasts together, as one batch). When done, **ack** what you handled — this is what moves inbox files out and advances your broadcast cursor (nothing is consumed until you ack, so a failed prompt loses nothing):
+   ```
+   python3 ~/.claude/scripts/bus.py ack --name NAME --consumed <inbox file paths, comma-separated> --cursor <cursor_to>
+   ```
+   Then go back to step 3 — messages that arrived while the prompt ran are now pending (post-eval rescan; nothing missed, no per-message storm).
 
-4. **Run the PROMPT** against what actually changed/arrived. For a dropbox/mailbox, after processing a file, move it aside (e.g. into a `processed/` or `.done/` subdir) so the next rescan doesn't reprocess it.
+5. **If nothing is pending**, arm the watcher in the background and end your turn:
+   ```
+   python3 ~/.claude/scripts/fswatch.py --arrivals --tag "$CLAUDE_CODE_SESSION_ID" <INBOX> <BROADCAST>
+   ```
+   `run_in_background: true`. `--arrivals` wakes only on new messages / move-in (not on you moving consumed files out). The watcher exits the instant a message lands; the harness re-invokes you → resume at step 3. (A broadcast you sent yourself may wake the watcher; `pending` filters your own broadcasts out, so it's a harmless extra cycle.)
 
-5. **Re-arm** — re-run step 2 (the arm command) as a fresh background call, then end your turn. No pkill on re-arm — the watcher already exited when it woke you; step 1's pkill is only for superseding a watcher at `/watch-loop` invocation time. Repeat until stopped.
-
-**Stopping:** run `/watch-stop`, or the user says "stop". Then kill THIS session's watcher — `pkill -f "[f]swatch.py --tag $CLAUDE_CODE_SESSION_ID"` (or `TaskStop` the bg task) — and do not re-arm. NOTE: Esc alone does NOT stop the loop; it interrupts the turn but the background watcher keeps running and will re-wake you when a file changes. The watcher process must be killed.
+**Stopping:** `/watch-stop` (leaves the bus + kills this session's watcher). Esc alone does NOT stop it — the background watcher keeps running and re-wakes you.
 
 Notes:
-- Watching a **directory** catches move-in/delete/close-after-write of files inside it (non-recursive). Watching a **file** catches writes to that file.
-- Default fires only on *complete* messages: file closed after write (`IN_CLOSE_WRITE`) or atomically moved in (`IN_MOVED_TO`) — not bare create, so a `> dir/file` writer wakes you at close (full content), not on the empty file. For atomic drops, write the temp **outside** the watched dir then `mv` it in (a temp inside the watched dir would wake you on its own close).
-- Add `--all` before the paths to also wake on in-progress writes (`IN_MODIFY`); add `--timeout SECONDS` to also wake periodically even with no change (exit code 2 = timed out).
+- You never write to your own inbox, and consumed messages move to `processed/` (a move-out, ignored by `--arrivals`) — so your own activity can't trigger the loop. Only real arrivals do.
+- To reply or message peers during the prompt, call `/watch-send` (or `bus.py send`) — see that command.

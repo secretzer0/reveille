@@ -14,18 +14,22 @@ build: test
 
 test:
 	python3 tests/test_fswatch.py
+	python3 tests/test_bus.py
 
 install:
 	install -d "$(CLAUDE)/scripts" "$(CLAUDE)/commands"
 	install -m 0755 src/fswatch.py "$(CLAUDE)/scripts/fswatch.py"
+	install -m 0755 src/bus.py "$(CLAUDE)/scripts/bus.py"
 	install -m 0644 commands/watch-loop.md "$(CLAUDE)/commands/watch-loop.md"
+	install -m 0644 commands/watch-send.md "$(CLAUDE)/commands/watch-send.md"
+	install -m 0644 commands/watch-list.md "$(CLAUDE)/commands/watch-list.md"
 	install -m 0644 commands/watch-stop.md "$(CLAUDE)/commands/watch-stop.md"
 	@echo "installed to $(CLAUDE) — restart running sessions to load the commands."
 
 uninstall:
-	rm -f "$(CLAUDE)/scripts/fswatch.py" \
-	      "$(CLAUDE)/commands/watch-loop.md" \
-	      "$(CLAUDE)/commands/watch-stop.md"
+	rm -f "$(CLAUDE)/scripts/fswatch.py" "$(CLAUDE)/scripts/bus.py" \
+	      "$(CLAUDE)/commands/watch-loop.md" "$(CLAUDE)/commands/watch-send.md" \
+	      "$(CLAUDE)/commands/watch-list.md" "$(CLAUDE)/commands/watch-stop.md"
 	@echo "removed from $(CLAUDE)."
 
 lint:

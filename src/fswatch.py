@@ -5,12 +5,16 @@ Prints each changed entry (one per line) and exits 0.
 Exit 2 = --timeout elapsed with no change. Exit 1 = bad usage / watch error.
 
 Usage:
-    fswatch.py [--timeout SECONDS] [--all] PATH [PATH ...]
+    fswatch.py [--timeout SECONDS] [--all] [--arrivals] PATH [PATH ...]
     fswatch.py --selftest
 
---all  also wake on in-progress writes (IN_MODIFY). Default reports only
-       "message complete" events (close-after-write, atomic move-in, delete)
-       -- the right signal for an agent dropbox where writers drop whole files.
+--all       also wake on in-progress writes (IN_MODIFY).
+--arrivals  wake only on new content / move-in (IN_CLOSE_WRITE | IN_MOVED_TO);
+            ignore removals and moves-out -- so consuming a mailbox by moving
+            files out never re-triggers the watcher.
+
+Default reports "message complete" events (close-after-write, atomic move-in,
+delete) -- the right signal for an agent dropbox where writers drop whole files.
 """
 import ctypes
 import os
@@ -87,11 +91,15 @@ if __name__ == "__main__":
     if a and a[0] == "--selftest":
         _selftest()
         sys.exit(0)
-    mask = BASE_MASK
     timeout = None
+    extra = 0
+    base = BASE_MASK
     while a and a[0].startswith("--"):
         if a[0] == "--all":
-            mask |= IN_MODIFY
+            extra |= IN_MODIFY
+            a = a[1:]
+        elif a[0] == "--arrivals":
+            base = IN_CLOSE_WRITE | IN_MOVED_TO  # only new content / move-in; ignore removals
             a = a[1:]
         elif a[0] == "--timeout" and len(a) >= 2:
             timeout = float(a[1])
@@ -100,8 +108,9 @@ if __name__ == "__main__":
             a = a[2:]  # session marker in argv for per-session kill; ignored here
         else:
             sys.exit(f"unknown option: {a[0]}")
+    mask = base | extra
     if not a:
-        sys.exit("usage: fswatch.py [--timeout SECONDS] [--all] PATH [PATH ...]")
+        sys.exit("usage: fswatch.py [--timeout SECONDS] [--all] [--arrivals] PATH [PATH ...]")
     changed = watch(a, timeout=timeout, mask=mask)
     if not changed:
         sys.exit(2)

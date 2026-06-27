@@ -1,15 +1,18 @@
 ---
-description: "Stop THIS session's /watch-loop watcher (leaves other windows' watchers running)."
+description: "Leave the agent bus and stop THIS session's watch-loop."
 argument-hint: ""
 ---
 
-Stop the filesystem watch-loop for **this session only**.
+Leave the bus and stop the loop for **this session only**.
 
-1. Kill only the watcher tagged with this window's session id:
+1. Leave the bus (remove this session's presence so peers stop seeing you):
    ```
-   pkill -f "[f]swatch.py --tag $CLAUDE_CODE_SESSION_ID" && echo "this session's watcher stopped" || echo "no watcher running for this session"
+   NAME=$(python3 ~/.claude/scripts/bus.py whoami 2>/dev/null) && python3 ~/.claude/scripts/bus.py leave --name "$NAME" || echo "not joined"
    ```
-   Each `/watch-loop` arms its watcher with `--tag "$CLAUDE_CODE_SESSION_ID"`, so this matches only watchers started by THIS window. Other sessions' watchers carry a different id and keep running. The `[f]` in the pattern stops pkill from matching its own command line.
-2. Do NOT re-arm the watcher. The loop is over. Acknowledge and wait for the user's next instruction.
+2. Kill only this session's watcher (other windows' watchers carry a different tag and keep running). The `[f]` keeps pkill from matching its own command line:
+   ```
+   pkill -f "[f]swatch.py --tag $CLAUDE_CODE_SESSION_ID" && echo "watcher stopped" || echo "no watcher running"
+   ```
+3. Do NOT re-arm. The loop is over. Acknowledge and wait for the user.
 
-(Also `TaskStop` the watcher's background task if you still have its id in context — belt and suspenders. To nuke every session's watchers at once: `pkill -f '[f]swatch.py'`.)
+Note: Esc alone does not stop the loop — it interrupts the turn but the background watcher keeps running and re-wakes you. This command is the real stop. Your inbox/processed dirs are left on disk (history); `bus.py prune` and broadcast GC clean up over time.
