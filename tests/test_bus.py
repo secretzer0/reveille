@@ -86,6 +86,24 @@ def test_fresh_join_skips_history():
     assert len(p["broadcasts"]) == 0, "fresh join should skip prior broadcasts"
 
 
+def test_kick_sends_leave_then_force_removes():
+    root, env = make_env()
+    bus(env, "join", "--name", "victim", "--tag", "TAG_v")
+    # cooperative: a LEAVE directive lands in the victim's inbox
+    bus(env, "kick", "--name", "victim", "--from", "boss")
+    p = json.loads(bus(env, "pending", "--name", "victim", "--json").stdout)
+    assert any((i["msg"] or {}).get("body") == "DIRECTIVE:LEAVE" for i in p["inbox"]), p
+    # force: presence is removed (watcher pkill is a no-op here, no real process)
+    bus(env, "kick", "--name", "victim", "--from", "boss", "--force")
+    assert not os.path.exists(os.path.join(root, "agents", "victim.json"))
+
+
+def test_kick_unknown_agent_errors():
+    _, env = make_env()
+    r = bus(env, "kick", "--name", "ghost", "--from", "boss", check=False)
+    assert r.returncode != 0
+
+
 def test_live_name_collision_blocks():
     root, env = make_env()
     tag = "TAG_live_collide_xyz"

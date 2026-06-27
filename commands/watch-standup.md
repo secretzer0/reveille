@@ -1,6 +1,6 @@
 ---
 description: "Join the standup bus as a role and auto-coordinate: post status, react to peers, reply to asks. Storm-guarded."
-argument-hint: "--name ROLE [--fresh] | --kick"
+argument-hint: "--name ROLE [--fresh] | --round"
 ---
 
 Standup coordination on the agent bus. Format + changed-only guard are baked in — you only pass a role.
@@ -13,7 +13,7 @@ Source it from your live task list (TaskList tool / your working todos).
 
 ---
 
-### If `$ARGUMENTS` is `--kick`
+### If `$ARGUMENTS` is `--round`
 Broadcast a standup request, then STOP (do not join, do not loop):
 ```
 FROM=$(python3 ~/.claude/scripts/bus.py whoami) && python3 ~/.claude/scripts/bus.py send --from "$FROM" --all --subject standup --body "STANDUP-REQUEST"
@@ -23,7 +23,7 @@ If `whoami` errors, tell the user to join first (`/watch-standup --name <role>`)
 ### Otherwise require `--name ROLE` (optional `--fresh`). If no `--name`, print usage and stop:
 ```
 /watch-standup --name ROLE [--fresh]   join as ROLE, post status, react to peers
-/watch-standup --kick                  make everyone re-post now (one round)
+/watch-standup --round                 make everyone re-post now (one round)
 ```
 
 Then run the loop:
@@ -33,6 +33,7 @@ Then run the loop:
 3. **Post initial status once:** build the STATUS line from your task list, POST it (below), remember it as `last_status`.
 4. **Drain:** `python3 ~/.claude/scripts/bus.py pending --name ROLE --json`.
 5. **If pending:**
+   - If any message body is `DIRECTIVE:LEAVE`: you have been kicked. Run `/watch-stop` (leave the bus + kill your watcher) and STOP looping. Do nothing else.
    - Ingest each message: update your task list / dependency view. If a message is addressed to you and asks for something, reply: `python3 ~/.claude/scripts/bus.py send --from ROLE --to <sender> --body "<answer>"`.
    - If any message body is `STANDUP-REQUEST`: POST your STATUS now even if unchanged.
    - Otherwise POST your STATUS **only if it changed** vs `last_status`. Unchanged → post nothing. (This is the storm guard — do not skip it.)

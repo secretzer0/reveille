@@ -37,9 +37,10 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 ```
 /watch-loop --name NAME [--fresh] -- PROMPT   join the bus, react to messages with PROMPT
 /watch-standup --name ROLE [--fresh]          join as ROLE for standup coordination (baked prompt)
-/watch-standup --kick                         make every agent re-post status now (one round)
+/watch-standup --round                        make every agent re-post status now (one round)
 /watch-send --to NAME | --all [--subject S] -- MESSAGE   unicast, or broadcast to everyone
 /watch-list                                   who's on the bus (live / stale)
+/watch-kick NAME [--force]                     evict an agent (LEAVE directive; --force removes + kills)
 /watch-stop                                   leave the bus + stop this session's loop
 ```
 
@@ -53,7 +54,11 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 /watch-standup --name roc-api-dev      # terminal 3   ...one per role
 ```
 
-Status line: `NEED:… BLOCKED-BY:… I-BLOCK:… OPEN:[…] CLOSED:[…]`, sourced from the agent's task list. The shared broadcast log is the standup board; late joiners replay it. `/watch-standup --kick` forces a full fresh round (start of day, after a merge).
+Status line: `NEED:… BLOCKED-BY:… I-BLOCK:… OPEN:[…] CLOSED:[…]`, sourced from the agent's task list. The shared broadcast log is the standup board; late joiners replay it. `/watch-standup --round` forces a full fresh round (start of day, after a merge).
+
+### Kicking an agent
+
+`/watch-kick NAME` drops a `DIRECTIVE:LEAVE` message in NAME's inbox; a `/watch-standup` (or any loop that handles the directive) receives it, runs `/watch-stop`, and exits cleanly. For a hung or already-dead agent, `/watch-kick NAME --force` deletes its presence file and `pkill`s its watcher by tag (same machine), skipping graceful cleanup.
 
 Example — two sessions:
 
@@ -115,5 +120,19 @@ bus.py join   --name N [--tag T] [--fresh]        sign up (prints inbox + broadc
 bus.py send   --from N (--to N | --all) [--subject S] [--body B|-]
 bus.py pending --name N [--json]                  non-destructive: unread inbox + broadcasts
 bus.py ack    --name N [--consumed f1,f2] [--cursor TS]   move consumed out, advance cursor
+bus.py kick   --name N [--from F] [--force]        LEAVE directive; --force removes presence + kills watcher
 bus.py whoami [--tag T]    list [--json]    prune    leave --name N    paths --name N
 ```
+
+### Full slash-command / switch reference
+
+| Command | Switches | Does |
+|---|---|---|
+| `/watch-loop` | `--name NAME` (req), `--fresh`, `-- PROMPT` (req) | Join bus, run PROMPT on each message. `--fresh` skips broadcast backlog. |
+| `/watch-standup` | `--name ROLE` (req) **or** `--round`; `--fresh` | Join as ROLE with baked standup prompt + storm guard. `--round` makes everyone re-post once. |
+| `/watch-send` | `--to NAME` **xor** `--all`; `--subject S`; `-- MESSAGE` | Unicast to NAME's inbox, or broadcast to the shared log. |
+| `/watch-list` | — | Roster: each agent `LIVE` / `stale`. |
+| `/watch-kick` | `NAME` (req), `--force` | Evict NAME: LEAVE directive; `--force` removes presence + kills its watcher. |
+| `/watch-stop` | — | Leave the bus + kill this session's watcher. |
+
+`fswatch.py` and `bus.py` switches are above; the slash commands are thin drivers over them.

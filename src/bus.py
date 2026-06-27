@@ -246,6 +246,31 @@ def cmd_send(args):
     print(f"sent {msg['id'][:8]} -> {args.to}")
 
 
+def cmd_kick(args):
+    # Evict a peer. Cooperative: drop a LEAVE directive in its inbox (a loop that
+    # handles DIRECTIVE:LEAVE stops itself). --force: also remove presence + kill
+    # the target's watcher by its tag (same machine, same user).
+    _valid(args.name)
+    pres = _presence(args.name)
+    if not pres:
+        sys.exit(f"no such agent: {args.name!r}")
+    inbox = _p(args.name, "inbox")
+    if os.path.isdir(inbox):
+        msg = {"id": uuid.uuid4().hex, "from": args.sender, "to": args.name,
+               "ts": time.time_ns(), "subject": "directive", "body": "DIRECTIVE:LEAVE"}
+        _atomic_write(inbox, f"{msg['ts']}-{args.sender}-{msg['id'][:8]}.json", json.dumps(msg))
+        print(f"sent LEAVE to {args.name}")
+    if args.force:
+        try:
+            os.remove(_p("agents", f"{args.name}.json"))
+        except OSError:
+            pass
+        tag = pres.get("tag")
+        if tag:
+            subprocess.run(["pkill", "-f", f"fswatch.py --tag {tag}"])
+        print(f"forced: removed presence + killed watcher for {args.name}")
+
+
 def cmd_pending(args):
     _valid(args.name)
     inbox_d = _p(args.name, "inbox")
@@ -326,6 +351,10 @@ def main():
     g.add_argument("--to"); g.add_argument("--all", action="store_true")
     s.add_argument("--subject", default=""); s.add_argument("--body", default="")
     s.set_defaults(fn=cmd_send)
+
+    k = sub.add_parser("kick"); k.add_argument("--name", required=True)
+    k.add_argument("--from", dest="sender", default="operator")
+    k.add_argument("--force", action="store_true"); k.set_defaults(fn=cmd_kick)
 
     pe = sub.add_parser("pending"); pe.add_argument("--name", required=True)
     pe.add_argument("--json", action="store_true"); pe.set_defaults(fn=cmd_pending)
