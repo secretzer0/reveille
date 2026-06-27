@@ -36,10 +36,24 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 
 ```
 /watch-loop --name NAME [--fresh] -- PROMPT   join the bus, react to messages with PROMPT
+/watch-standup --name ROLE [--fresh]          join as ROLE for standup coordination (baked prompt)
+/watch-standup --kick                         make every agent re-post status now (one round)
 /watch-send --to NAME | --all [--subject S] -- MESSAGE   unicast, or broadcast to everyone
 /watch-list                                   who's on the bus (live / stale)
 /watch-stop                                   leave the bus + stop this session's loop
 ```
+
+### Standup mode
+
+`/watch-standup` is `/watch-loop` with the coordination prompt frozen in: each agent posts its status, reacts to peers, replies to directed asks, and re-posts **only when its status changed** (storm guard baked in, not fat-fingered). One short line per dev:
+
+```
+/watch-standup --name architect       # terminal 1
+/watch-standup --name shared-dev       # terminal 2
+/watch-standup --name roc-api-dev      # terminal 3   ...one per role
+```
+
+Status line: `NEED:… BLOCKED-BY:… I-BLOCK:… OPEN:[…] CLOSED:[…]`, sourced from the agent's task list. The shared broadcast log is the standup board; late joiners replay it. `/watch-standup --kick` forces a full fresh round (start of day, after a merge).
 
 Example — two sessions:
 
