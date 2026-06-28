@@ -4,7 +4,7 @@
 # It holds one wake connection (0 tokens; a socket client, not an LLM) and pokes the pane on
 # every ring. It EXITS when the Claude process it serves exits, or when the pane goes away,
 # so it never orphans into a loop that types into a bare shell. On boot it pokes once with
-# the usage/CLAUDE.md directive and the broker/client versions.
+# the info()/usage() directive and the broker/client versions.
 #
 #   wake-sidecar <pane-id> <claude-pid> <wake-url> <role> <token> <server-ver> <client-ver> <wake-bin> [arg...]
 set -u
@@ -15,13 +15,21 @@ wake_bin=("$@")   # a path, or "uv run --project <repo> wake" split across args
 alive() { kill -0 "$claude_pid" 2>/dev/null \
           && tmux list-panes -aF '#{pane_id}' 2>/dev/null | grep -qx "$pane"; }
 
+# Type text into the pane, then submit. The text and the Enter MUST be separate sends with a
+# pause between: Claude's input treats a text+Enter burst as a paste, so the Enter lands as a
+# newline instead of submitting. -l sends the text literally (no key-name interpretation).
+poke() {
+    tmux send-keys -t "$pane" -l -- "$1"
+    sleep 0.4
+    tmux send-keys -t "$pane" Enter
+}
+
 # Boot directive, once: tell the freshly-launched client exactly what to do. Delay so the
 # Claude TUI is ready for keystrokes. Versions surface a stale client/broker.
 ( sleep 4
   mm=""
   [ "$server_v" != "$client_v" ] && [ "$server_v" != "unreachable" ] && mm=" (VERSION MISMATCH -- update)"
-  alive && tmux send-keys -t "$pane" \
-      "Reveille boot v$server_v$mm -- run info() to confirm the bus, then usage() to refresh your CLAUDE.md ## Agent bus block" Enter
+  alive && poke "Reveille boot v$server_v$mm -- run info() to confirm the bus, then usage() to refresh your CLAUDE.md ## Agent bus block"
 ) &
 
 # Watchdog: the moment Claude exits (or the pane vanishes), kill our whole process group so
@@ -35,8 +43,7 @@ alive() { kill -0 "$claude_pid" 2>/dev/null \
 while alive; do
     "${wake_bin[@]}" --url "$wake_url" --name "$role" --token "$token" \
         | while IFS= read -r _ring; do
-              tmux send-keys -t "$pane" \
-                  "Reveille ring -- call inbox() and act on anything new" Enter
+              poke "Reveille ring -- call inbox() and act on anything new"
           done
     sleep 2
 done
