@@ -3,16 +3,26 @@
 # from the real pane shell -- NOT Claude's Bash sandbox -- so it is not reaped with exit 144.
 # It holds one wake connection (0 tokens; a socket client, not an LLM) and pokes the pane on
 # every ring. It EXITS when the Claude process it serves exits, or when the pane goes away,
-# so it never orphans into a loop that types into a bare shell.
+# so it never orphans into a loop that types into a bare shell. On boot it pokes once with
+# the usage/CLAUDE.md directive and the broker/client versions.
 #
-#   wake-sidecar <pane-id> <claude-pid> <wake-url> <role> <token> <wake-bin> [wake-bin-arg...]
+#   wake-sidecar <pane-id> <claude-pid> <wake-url> <role> <token> <server-ver> <client-ver> <wake-bin> [arg...]
 set -u
 
-pane="$1"; claude_pid="$2"; wake_url="$3"; role="$4"; token="$5"; shift 5
+pane="$1"; claude_pid="$2"; wake_url="$3"; role="$4"; token="$5"; server_v="$6"; client_v="$7"; shift 7
 wake_bin=("$@")   # a path, or "uv run --project <repo> wake" split across args
 
 alive() { kill -0 "$claude_pid" 2>/dev/null \
           && tmux list-panes -aF '#{pane_id}' 2>/dev/null | grep -qx "$pane"; }
+
+# Boot directive, once: tell the freshly-launched client exactly what to do. Delay so the
+# Claude TUI is ready for keystrokes. Versions surface a stale client/broker.
+( sleep 4
+  mm=""
+  [ "$server_v" != "$client_v" ] && [ "$server_v" != "unreachable" ] && mm=" (VERSION MISMATCH -- update)"
+  alive && tmux send-keys -t "$pane" \
+      "agentbus boot v$server_v$mm -- call usage() and update your CLAUDE.md ## Agent bus block from it" Enter
+) &
 
 # Watchdog: the moment Claude exits (or the pane vanishes), kill our whole process group so
 # the wake child -- which may be blocked on the socket -- dies with us. setsid put this

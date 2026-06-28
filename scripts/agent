@@ -33,16 +33,26 @@ WAKE_URL="$_scheme://$_hostport/wake"              # http(s)://host:port[/..] ->
 WAKE_BIN="$REPO/.venv/bin/wake"
 [ -x "$WAKE_BIN" ] || WAKE_BIN="uv run --project $REPO wake"
 
+# Versions for the liveness line + the sidecar boot poke (combo = daemon + wake, one repo).
+CLIENT_V="$($WAKE_BIN --version 2>/dev/null || echo '?')"
+SERVER_V="$(curl -fsS "$AGENTBUS_URL/version" 2>/dev/null || echo 'unreachable')"
+
 # Real-time wake sidecar. Needs tmux (a pane to poke) + setsid (own session, so it can
 # self-reap without touching this shell). $$ is captured BEFORE `exec claude` -- exec keeps
-# the pid, so it is Claude's pid; the sidecar watches it and exits when Claude exits.
+# the pid, so it is Claude's pid; the sidecar watches it and exits when Claude exits. On
+# boot the sidecar also pokes the pane once with the usage/CLAUDE.md directive + versions.
+sidecar="off (need tmux + setsid)"
 if [ -n "${TMUX_PANE:-}" ] && command -v setsid >/dev/null 2>&1; then
-    setsid -f "$REPO/scripts/wake-sidecar" \
-        "$TMUX_PANE" "$$" "$WAKE_URL" "$AGENT_ROLE" "$AGENTBUS_TOKEN" $WAKE_BIN \
-        && echo "agentbus: wake sidecar armed (pane $TMUX_PANE -> $WAKE_URL) -- 0-token idle, exits with claude" >&2
-else
-    echo "agentbus: no wake sidecar (need tmux + setsid); agent relies on per-turn inbox()" >&2
+    if setsid -f "$REPO/scripts/wake-sidecar" \
+        "$TMUX_PANE" "$$" "$WAKE_URL" "$AGENT_ROLE" "$AGENTBUS_TOKEN" "$SERVER_V" "$CLIENT_V" $WAKE_BIN; then
+        sidecar="armed (exits with claude)"
+    fi
 fi
 
-echo "agentbus: this session is '$AGENT_ROLE'" >&2
+# Liveness / integration status for this agent.
+echo "agentbus: role=$AGENT_ROLE  broker=$AGENTBUS_URL (v$SERVER_V)  client=v$CLIENT_V  sidecar: $sidecar" >&2
+if [ "$SERVER_V" != "unreachable" ] && [ "$SERVER_V" != "$CLIENT_V" ]; then
+    echo "agentbus: WARNING broker v$SERVER_V != client v$CLIENT_V -- update" >&2
+fi
+
 exec claude "$@"

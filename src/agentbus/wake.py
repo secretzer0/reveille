@@ -20,6 +20,8 @@ import sys
 
 import websockets
 
+from agentbus import __version__
+
 
 async def _watch(url, name, token):
     sep = "&" if "?" in url else "?"
@@ -42,6 +44,7 @@ def main():
     ap.add_argument("--url", required=True, help="ws://host:port/wake")
     ap.add_argument("--name", required=True, help="your bus name")
     ap.add_argument("--token", default=None)
+    ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args()
     try:
         sys.exit(asyncio.run(_watch(a.url, a.name, a.token)))

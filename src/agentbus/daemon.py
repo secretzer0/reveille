@@ -32,7 +32,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from agentbus import store
+from agentbus import __version__, store
 
 TOKEN = os.environ.get("AGENTBUS_TOKEN") or None  # None = open (trusted LAN)
 
@@ -300,6 +300,10 @@ async def health(_request):
     return PlainTextResponse("ok")
 
 
+async def version_http(_request):
+    return PlainTextResponse(__version__)
+
+
 async def usage_http(_request):
     return PlainTextResponse(USAGE)
 
@@ -315,6 +319,7 @@ def build_app():
     return Starlette(
         routes=[
             Route("/health", health),
+            Route("/version", version_http),
             Route("/usage", usage_http),
             WebSocketRoute("/wake", wake_ws),
             Mount("/", app=mcp_app),
