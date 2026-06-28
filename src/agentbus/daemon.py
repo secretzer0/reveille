@@ -128,6 +128,16 @@ async def usage(ctx: Context = None) -> str:
 
 
 @mcp.tool()
+async def info(ctx: Context = None) -> str:
+    """Reveille status banner: tool version, your bus name, and whether your wake sidecar
+    is attached right now. Call it on boot to confirm the bus works end to end."""
+    me = _me(ctx)
+    attached = bool(_waiters.get(me))
+    return (f"Reveille v{__version__} -- you are '{me}' -- "
+            f"sidecar: {'ATTACHED (real-time wake)' if attached else 'not attached (no real-time wake)'}")
+
+
+@mcp.tool()
 async def send(to: str, body: str, subject: str = "",
                reply_to: int | list[int] | None = None, ctx: Context = None) -> dict:
     """Send a message. to='*' broadcasts; else unicast to one agent. reply_to is a

@@ -50,9 +50,9 @@ if [ -n "${TMUX_PANE:-}" ] && command -v setsid >/dev/null 2>&1; then
 fi
 
 # Liveness / integration status for this agent.
-echo "agentbus: role=$AGENT_ROLE  broker=$AGENTBUS_URL (v$SERVER_V)  client=v$CLIENT_V  sidecar: $sidecar" >&2
+echo "Reveille v$SERVER_V: role=$AGENT_ROLE  broker=$AGENTBUS_URL  client=v$CLIENT_V  sidecar: $sidecar" >&2
 if [ "$SERVER_V" != "unreachable" ] && [ "$SERVER_V" != "$CLIENT_V" ]; then
-    echo "agentbus: WARNING broker v$SERVER_V != client v$CLIENT_V -- update" >&2
+    echo "Reveille: WARNING broker v$SERVER_V != client v$CLIENT_V -- update" >&2
 fi
 
 exec claude "$@"

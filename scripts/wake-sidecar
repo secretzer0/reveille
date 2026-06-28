@@ -21,7 +21,7 @@ alive() { kill -0 "$claude_pid" 2>/dev/null \
   mm=""
   [ "$server_v" != "$client_v" ] && [ "$server_v" != "unreachable" ] && mm=" (VERSION MISMATCH -- update)"
   alive && tmux send-keys -t "$pane" \
-      "agentbus boot v$server_v$mm -- call usage() and update your CLAUDE.md ## Agent bus block from it" Enter
+      "Reveille boot v$server_v$mm -- run info() to confirm the bus, then usage() to refresh your CLAUDE.md ## Agent bus block" Enter
 ) &
 
 # Watchdog: the moment Claude exits (or the pane vanishes), kill our whole process group so
@@ -36,7 +36,7 @@ while alive; do
     "${wake_bin[@]}" --url "$wake_url" --name "$role" --token "$token" \
         | while IFS= read -r _ring; do
               tmux send-keys -t "$pane" \
-                  "agentbus ring -- call inbox() and act on anything new" Enter
+                  "Reveille ring -- call inbox() and act on anything new" Enter
           done
     sleep 2
 done
