@@ -220,9 +220,15 @@ async def wake_ws(ws: WebSocket):
         recv = asyncio.create_task(ws.receive_text())
         woke = asyncio.create_task(q.get())
         done, pending = await asyncio.wait({recv, woke}, return_when=asyncio.FIRST_COMPLETED)
+        ring = woke in done and recv not in done  # mail arrived, client still connected
         for t in pending:
             t.cancel()
-        if woke in done and not recv.done():
+        # Retrieve every task's result/exception so none is "never retrieved": a client
+        # that drops while parked makes recv raise WebSocketDisconnect *inside* its task.
+        for t in (recv, woke):
+            with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                await t
+        if ring:
             n = len(store.inbox(_conn, name))
             await ws.send_json({"wake": True, "reason": "message", "unread": n})
             log.info("%s wake ring (%s unread)", name, n)
@@ -277,6 +283,7 @@ def _setup_logging():
     log.handlers[:] = [h]
     log.setLevel(os.environ.get("AGENTBUS_LOG", "INFO").upper())
     log.propagate = False
+    logging.getLogger("mcp").setLevel(logging.WARNING)  # drop per-request "Processing request" noise
 
 
 def main():
