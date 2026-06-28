@@ -37,6 +37,55 @@ from agentbus import store
 
 TOKEN = os.environ.get("AGENTBUS_TOKEN") or None  # None = open (trusted LAN)
 
+# The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
+# on any machine fetches it over the wire -- never points at a file on someone's disk.
+USAGE = """AGENTBUS usage. Single source: usage() tool or GET /usage. Ignore repo file paths.
+
+IDENTITY: bus name = X-Agent header from $AGENT_ROLE, read per call. Set AGENT_ROLE in pane
+before launch (scripts/agent <name> does it). Unset -> "unset-agent"; relaunch to fix.
+TOKEN: $AGENTBUS_TOKEN from env. Never hardcode/prompt/paste. Bearer on /mcp, ?token= on
+/wake. Broker with no token = open mode.
+
+INSTALL or FIX:
+1. AGENT_ROLE + AGENTBUS_TOKEN set in launching shell.
+2. join(url="http://<broker-host>:8765") once. Confirm name via whoami().
+3. Reachable per WAKE below.
+4. Put CLAUDE.md block (bottom) in your CLAUDE.md; delete any old agentbus section.
+
+TOOLS:
+- join(url,name="",fresh=False) -> {name,wake_url,unread}. fresh skips backlog.
+- send(to,body,subject="",reply_to=None) -> {id,thread_id,parents,delivered_to}. to="*"=
+  broadcast. delivered_to = live-now push targets, NOT readership (offline read via inbox).
+- inbox() -> unread, direct+broadcast, oldest first. ack(ids) when handled.
+- whoami() usage() presence()[live,connected] thread(id) trace(id) graph(id) leave().
+
+WAKE (stay reachable, 0-token idle):
+- Launch via `scripts/agent <role>` in tmux: it auto-arms a wake sidecar in the LAUNCH
+  shell (outside Claude's Bash sandbox, so not reaped). You sit dormant at 0 tokens; on a
+  real message the sidecar pokes your pane awake. Do NOT arm wake yourself -- the launcher
+  owns it. A poke reads "agentbus ring..." -> call inbox(), act, ack(ids).
+- Never background wake from the Claude Bash tool: it dies exit 144 (SIGSTKFLT), reaped
+  before it parks, and --timeout won't help.
+- Headless / no tmux: no sidecar, no real-time. Call inbox() at top of each turn; msgs
+  queue durably (you lose only instant delivery).
+
+ETIQUETTE: unicast default; broadcast only if most peers care. reply_to to thread. ack
+handled. DIRECTIVE:LEAVE to you = leave(), stop.
+
+--- CLAUDE.md block (replace any old agentbus section) ---
+## Agent bus
+On a shared bus; identity+token from env, never hardcode:
+- $AGENT_ROLE = my bus name (X-Agent header), set by launching pane.
+- $AGENTBUS_TOKEN = bus secret, from env.
+Startup: join(url="http://<broker-host>:8765").
+Reachable: launched via `scripts/agent <role>` in tmux -> a wake sidecar pokes my pane on
+real messages; I sit at 0 tokens until then. On a poke (or each turn): inbox(), act,
+ack(). Do NOT arm wake myself. Headless/no tmux: no real-time, just inbox() per turn.
+Messaging: unicast default, broadcast only if most peers care, reply_to to thread.
+DIRECTIVE:LEAVE to me = leave().
+Full ref: usage() or GET <broker>/usage.
+"""
+
 log = logging.getLogger("agentbus")  # logs client name + thread id per op; level via AGENTBUS_LOG
 
 _conn = None  # one connection, used only from the event-loop thread (async tools)
@@ -89,6 +138,13 @@ async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context 
 async def whoami(ctx: Context = None) -> str:
     """Your bus name for this session (from the X-Agent header)."""
     return _me(ctx)
+
+
+@mcp.tool()
+async def usage(ctx: Context = None) -> str:
+    """How to attach to the bus and stay reachable (identity, token, join/inbox/send,
+    wake, and the exit-144 sandbox fallback). Authoritative copy, served by the broker."""
+    return USAGE
 
 
 @mcp.tool()
@@ -256,6 +312,10 @@ async def health(_request):
     return PlainTextResponse("ok")
 
 
+async def usage_http(_request):
+    return PlainTextResponse(USAGE)
+
+
 def build_app():
     mcp_app = mcp.streamable_http_app()
 
@@ -267,6 +327,7 @@ def build_app():
     return Starlette(
         routes=[
             Route("/health", health),
+            Route("/usage", usage_http),
             WebSocketRoute("/wake", wake_ws),
             Mount("/", app=mcp_app),
         ],

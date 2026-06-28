@@ -4,10 +4,16 @@
 #   agent roc-api-dev            # this tmux pane is roc-api-dev on the bus
 #   agent iphone-dev             # another pane / machine is iphone-dev
 #
-# It sets $AGENT_ROLE for the session, which Claude Code expands into the
-# `X-Agent` header of the agentbus MCP server (registered once, user scope).
-# So every pane shares one MCP registration but gets its own identity.
-# $AGENTBUS_TOKEN (the shared bus secret) is inherited from your shell if set.
+# Sets $AGENT_ROLE (-> the MCP X-Agent header) and inherits $AGENTBUS_TOKEN, so every
+# pane shares one MCP registration but gets its own identity.
+#
+# In tmux it ALSO arms a wake sidecar in THIS shell -- the real terminal, NOT Claude's
+# Bash sandbox, so it is not reaped with exit 144. The sidecar parks on the broker socket
+# at TRUE 0 tokens (it is a plain WS client, not an LLM) while the Claude session sits
+# dormant (also 0 tokens). Only when a real message rings does it poke this pane awake
+# with `tmux send-keys`, so the agent runs exactly one turn -- for real work, never to
+# poll. That is 0-token idle with real-time delivery; a timer/poll loop would instead
+# spend tokens every interval just to ask "anything yet?".
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
@@ -18,6 +24,37 @@ fi
 export AGENT_ROLE="$1"
 shift
 export AGENTBUS_TOKEN="${AGENTBUS_TOKEN:-}"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENTBUS_URL="${AGENTBUS_URL:-http://127.0.0.1:8765}"
+_hostport="${AGENTBUS_URL#*://}"; _hostport="${_hostport%%/*}"   # strip scheme + any path
+_scheme=ws; [ "${AGENTBUS_URL%%://*}" = "https" ] && _scheme=wss
+WAKE_URL="$_scheme://$_hostport/wake"              # http(s)://host:port[/..] -> ws(s)://host:port/wake
+WAKE_BIN="$REPO/.venv/bin/wake"
+[ -x "$WAKE_BIN" ] || WAKE_BIN="uv run --project $REPO wake"
+
+# Real-time wake sidecar. Only in tmux (it needs a pane to poke). Backgrounded in the
+# launch shell so it survives `exec claude`; the loop guard stops it once the pane is gone.
+# ponytail: plain `&`; if Ctrl-C ever kills it, the next `agent <name>` re-arms. Upgrade to
+# setsid + an explicit reaper only if that proves flaky.
+if [ -n "${TMUX_PANE:-}" ]; then
+    pane="$TMUX_PANE"
+    (
+        while tmux list-panes -aF '#{pane_id}' 2>/dev/null | grep -qx "$pane"; do
+            rc=0
+            $WAKE_BIN --url "$WAKE_URL" --name "$AGENT_ROLE" \
+                      --token "$AGENTBUS_TOKEN" --timeout 1800 || rc=$?
+            case $rc in
+                0) tmux send-keys -t "$pane" \
+                       "agentbus ring -- call inbox() and act on anything new" Enter || break ;;
+                1) sleep 5 ;;   # broker unreachable; back off before re-parking
+            esac                # rc 2 = silence timeout: just re-park (also a heartbeat)
+        done
+    ) &
+    echo "agentbus: wake sidecar armed (pane $pane -> $WAKE_URL) -- 0-token idle, real-time pokes on ring" >&2
+else
+    echo "agentbus: not in tmux; no wake sidecar (this agent relies on per-turn inbox())" >&2
+fi
 
 echo "agentbus: this session is '$AGENT_ROLE'" >&2
 exec claude "$@"
