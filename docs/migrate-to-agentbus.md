@@ -111,25 +111,13 @@ This makes every FUTURE session use the bus, not just this one. Clean cutover �
 12. Continue the in_progress task from `uncommitted_work`, on the right branch. Real
     coding — pick up where the export says, not from scratch.
 
-### PHASE 7 — stay reachable (wake loop)
-13. Arm the wake client on the `wake_url` from join, in the background
-    (`run_in_background`). It connects, blocks at 0 tokens, exits when the daemon pushes:
-    ```
-    uv run --project <claude-mcp repo> wake --url <wake_url> --name "$AGENT_ROLE" --token "$AGENTBUS_TOKEN" --timeout 1800
-    ```
-14. When `wake` exits:
-    - **exit 0 (rang)** — `inbox`. Ingest each; reply unicast (`reply_to` to thread) if
-      asked. `DIRECTIVE:LEAVE` body = you were kicked -> `leave`, stop the loop. Then
-      `ack` the ids handled.
-    - **exit 2 (timeout/silence)** — nothing waiting; any tool call already heartbeats
-      your presence. Re-post STATUS only if it changed.
-    - Re-arm (step 13). Keep coding between rings.
-
-    **If `wake` is reaped with exit 144** (some sandboxed harnesses kill long-blocking
-    background processes before they can park), don't fight it: drop the background wake
-    and just call `inbox` at the top of each turn. Coordination is unchanged — messages
-    queue durably and you read them when you next act; you only lose the instant push.
-    Agents in a real tmux/systemd pane keep the parked wake and 0-token idle.
+### PHASE 7 — stay reachable
+13. You are reachable automatically: launching via `scripts/agent <role>` (tmux) arms a
+    wake sidecar that holds your wake socket at 0 tokens and pokes your pane on each
+    message. Do not run wake yourself.
+14. On a poke ("agentbus ring...") or any turn: `inbox` -> handle each (reply unicast,
+    `reply_to` to thread; a `DIRECTIVE:LEAVE` body = you were kicked -> `leave`) -> `ack`
+    the ids. No tmux -> no poke; just `inbox` each turn (messages queue durably).
 
 ### Done
 On agentbus: connected, history restored, state imported, CLAUDE.md adopts the MCP,
@@ -184,9 +172,14 @@ header). The broker is at `http://127.0.0.1:8765` (the LAN name on remote machin
 On session start:
 1. `join(url="http://127.0.0.1:8765")` -> your `wake_url` + unread count.
 2. drain: `inbox` -> handle each -> `ack` the ids.
-3. arm the wake client in the background so you sleep until pinged (0 tokens):
-   `uv run --project <claude-mcp repo> wake --url <wake_url> --name "$AGENT_ROLE" --token "$AGENTBUS_TOKEN" --timeout 1800`
-4. on wake (exit 0) -> `inbox` -> handle -> `ack` -> re-arm. exit 2 (silence) -> re-arm.
+3. stay reachable: the sidecar from `scripts/agent <role>` pokes your pane on each message
+   (0-token idle); don't run wake yourself. On a poke or any turn: `inbox` -> handle ->
+   `ack`. No tmux -> `inbox` each turn.
+
+Message style — caveman ultra (save tokens): write every bus message terse --
+drop articles/filler/pleasantries, fragments OK, short synonyms. Keep ids, paths,
+SHAs, error text, and the STATUS line VERBATIM (exact technical substance never
+drops). e.g. "NEED architect ratify ADR-045. blocks #25/#20." not a paragraph.
 
 Messaging — directed by default:
 - Need from / blocking / unblocking a specific peer -> `send(to="<peer>", body=...)`.

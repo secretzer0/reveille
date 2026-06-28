@@ -14,11 +14,10 @@ Identity: each agent's MCP registration sends a static `X-Agent: <name>` header;
 tools resolve "me" from it. Auth: an optional shared `AGENTBUS_TOKEN` (Bearer on
 HTTP, ?token= on the WS). Unset = open mode, fine for a fully trusted LAN.
 
-Wake: a session, while asleep between turns, runs wake.py -- a tiny WS client that
-connects with its name, blocks on the socket (0 tokens), and exits when this daemon
-pushes a frame. The daemon pushes the instant a message for that agent is sent. The
-session wakes, pulls its mail over MCP, acts, re-arms wake.py. The exit-to-wake shape
-of a file doorbell, but pushed over the network instead of an inotify event.
+Wake: scripts/agent runs a wake sidecar -- a tiny WS client that connects with the
+agent's name and holds the socket (0 tokens). The daemon pushes a frame the instant a
+message for that agent is sent; the sidecar pokes the agent's tmux pane (send-keys),
+waking the session to pull its mail over MCP. One held connection, one poke per message.
 """
 import asyncio
 import contextlib
@@ -39,51 +38,32 @@ TOKEN = os.environ.get("AGENTBUS_TOKEN") or None  # None = open (trusted LAN)
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
-USAGE = """AGENTBUS usage. Single source: usage() tool or GET /usage. Ignore repo file paths.
+USAGE = """AGENTBUS usage. Source: usage() tool or GET /usage. Tool signatures are in your
+MCP tool schemas; this is only what they don't cover.
 
-IDENTITY: bus name = X-Agent header from $AGENT_ROLE, read per call. Set AGENT_ROLE in pane
-before launch (scripts/agent <name> does it). Unset -> "unset-agent"; relaunch to fix.
-TOKEN: $AGENTBUS_TOKEN from env. Never hardcode/prompt/paste. Bearer on /mcp, ?token= on
-/wake. Broker with no token = open mode.
+ENV (set by the launching pane; never hardcode or prompt):
+  $AGENT_ROLE      your bus name (the X-Agent header). Unset -> you are "unset-agent".
+  $AGENTBUS_TOKEN  the bus secret.
 
-INSTALL or FIX:
-1. AGENT_ROLE + AGENTBUS_TOKEN set in launching shell.
-2. join(url="http://<broker-host>:8765") once. Confirm name via whoami().
-3. Reachable per WAKE below.
-4. Put CLAUDE.md block (bottom) in your CLAUDE.md; delete any old agentbus section.
-
-TOOLS:
-- join(url,name="",fresh=False) -> {name,wake_url,unread}. fresh skips backlog.
-- send(to,body,subject="",reply_to=None) -> {id,thread_id,parents,delivered_to}. to="*"=
-  broadcast. delivered_to = live-now push targets, NOT readership (offline read via inbox).
-- inbox() -> unread, direct+broadcast, oldest first. ack(ids) when handled.
-- whoami() usage() presence()[live,connected] thread(id) trace(id) graph(id) leave().
-
-WAKE (stay reachable, 0-token idle):
-- Launch via `scripts/agent <role>` in tmux: it auto-arms a wake sidecar in the LAUNCH
-  shell (outside Claude's Bash sandbox, so not reaped). You sit dormant at 0 tokens; on a
-  real message the sidecar pokes your pane awake. Do NOT arm wake yourself -- the launcher
-  owns it. A poke reads "agentbus ring..." -> call inbox(), act, ack(ids).
-- Never background wake from the Claude Bash tool: it dies exit 144 (SIGSTKFLT), reaped
-  before it parks, and --timeout won't help.
-- Headless / no tmux: no sidecar, no real-time. Call inbox() at top of each turn; msgs
-  queue durably (you lose only instant delivery).
-
-ETIQUETTE: unicast default; broadcast only if most peers care. reply_to to thread. ack
-handled. DIRECTIVE:LEAVE to you = leave(), stop.
+USE:
+1. Startup: join(url="http://<broker-host>:8765").
+2. Reachability: launch via `scripts/agent <role>` in tmux. A sidecar then holds your wake
+   socket at 0 tokens and pokes your pane when a real message arrives -- do not run wake
+   yourself. On a poke ("agentbus ring...") or any turn: inbox() -> act -> ack(ids).
+   No tmux -> no poke; just inbox() each turn (messages queue durably).
+3. Messaging: unicast by default; broadcast (to="*") only if most peers care; reply_to to
+   thread. DIRECTIVE:LEAVE addressed to you -> leave().
 
 --- CLAUDE.md block (replace any old agentbus section) ---
 ## Agent bus
-On a shared bus; identity+token from env, never hardcode:
-- $AGENT_ROLE = my bus name (X-Agent header), set by launching pane.
-- $AGENTBUS_TOKEN = bus secret, from env.
+Identity/token from env, never hardcode: $AGENT_ROLE = my bus name, $AGENTBUS_TOKEN = secret.
 Startup: join(url="http://<broker-host>:8765").
-Reachable: launched via `scripts/agent <role>` in tmux -> a wake sidecar pokes my pane on
-real messages; I sit at 0 tokens until then. On a poke (or each turn): inbox(), act,
-ack(). Do NOT arm wake myself. Headless/no tmux: no real-time, just inbox() per turn.
-Messaging: unicast default, broadcast only if most peers care, reply_to to thread.
-DIRECTIVE:LEAVE to me = leave().
-Full ref: usage() or GET <broker>/usage.
+Reachability: launched via `scripts/agent <role>` in tmux -> a sidecar pokes my pane on real
+messages; I idle at 0 tokens and do not run wake myself. On a poke or any turn: inbox(),
+act, ack(). No tmux -> inbox() each turn.
+Messaging: unicast default; broadcast only if most peers care; reply_to to thread.
+DIRECTIVE:LEAVE to me -> leave().
+Full reference: usage() or GET <broker>/usage.
 """
 
 log = logging.getLogger("agentbus")  # logs client name + thread id per op; level via AGENTBUS_LOG
@@ -124,7 +104,7 @@ async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context 
     """Join the bus, telling it where you reach the broker (`url`, e.g.
     http://bigbox.local:8765). Your identity is your X-Agent header (set per session
     from $AGENT_ROLE); pass `name` only to assert it matches. fresh=True skips the
-    backlog. Returns {name, wake_url, unread} -- arm wake.py on wake_url with --name name."""
+    backlog. Returns {name, wake_url, unread}."""
     me = _me(ctx)
     if name and name != me:
         raise ValueError(f"join name {name!r} must match your X-Agent header {me!r}")
