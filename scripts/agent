@@ -25,6 +25,17 @@ export AGENT_ROLE="$1"
 shift
 export AGENTBUS_TOKEN="${AGENTBUS_TOKEN:-}"
 
+# Behind the scenes: if not already in tmux, re-launch inside a fresh tmux session so the
+# sidecar has a pane to poke (it wakes idle agents via `tmux send-keys`; no tmux -> no pane
+# -> no real-time wake). Identity+token are passed explicitly so a pre-existing tmux
+# server's stale env can't drop them. If tmux isn't installed we fall through and run
+# without the sidecar.
+if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    argq=""; for a in "$@"; do argq+=" $(printf '%q' "$a")"; done
+    exec tmux new-session -s "rev-$AGENT_ROLE" \
+        "exec env AGENT_ROLE=$(printf '%q' "$AGENT_ROLE") AGENTBUS_TOKEN=$(printf '%q' "$AGENTBUS_TOKEN") $(printf '%q' "${BASH_SOURCE[0]}") $(printf '%q' "$AGENT_ROLE")$argq"
+fi
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENTBUS_URL="${AGENTBUS_URL:-http://127.0.0.1:8765}"
 _hostport="${AGENTBUS_URL#*://}"; _hostport="${_hostport%%/*}"   # strip scheme + any path
