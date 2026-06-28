@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Persistent wake sidecar for ONE tmux pane. Launched detached (setsid -f) by scripts/agent
+# from the real pane shell -- NOT Claude's Bash sandbox -- so it is not reaped with exit 144.
+# It holds one wake connection (0 tokens; a socket client, not an LLM) and pokes the pane on
+# every ring. It EXITS when the Claude process it serves exits, or when the pane goes away,
+# so it never orphans into a loop that types into a bare shell.
+#
+#   wake-sidecar <pane-id> <claude-pid> <wake-url> <role> <token> <wake-bin> [wake-bin-arg...]
+set -u
+
+pane="$1"; claude_pid="$2"; wake_url="$3"; role="$4"; token="$5"; shift 5
+wake_bin=("$@")   # a path, or "uv run --project <repo> wake" split across args
+
+alive() { kill -0 "$claude_pid" 2>/dev/null \
+          && tmux list-panes -aF '#{pane_id}' 2>/dev/null | grep -qx "$pane"; }
+
+# Watchdog: the moment Claude exits (or the pane vanishes), kill our whole process group so
+# the wake child -- which may be blocked on the socket -- dies with us. setsid put this
+# sidecar in its own session/group, so `kill 0` cannot touch Claude or the pane's shell.
+( while alive; do sleep 2; done; kill -TERM 0 2>/dev/null ) &
+
+# Reconnect loop: one stdout line per ring -> one poke. Reconnect if the stream ends
+# (daemon restart / network blip). The loop and the wake child are torn down by the
+# watchdog above when Claude exits.
+while alive; do
+    "${wake_bin[@]}" --url "$wake_url" --name "$role" --token "$token" \
+        | while IFS= read -r _ring; do
+              tmux send-keys -t "$pane" \
+                  "agentbus ring -- call inbox() and act on anything new" Enter
+          done
+    sleep 2
+done

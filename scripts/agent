@@ -33,27 +33,15 @@ WAKE_URL="$_scheme://$_hostport/wake"              # http(s)://host:port[/..] ->
 WAKE_BIN="$REPO/.venv/bin/wake"
 [ -x "$WAKE_BIN" ] || WAKE_BIN="uv run --project $REPO wake"
 
-# Real-time wake sidecar. Only in tmux (it needs a pane to poke). Backgrounded in the
-# launch shell so it survives `exec claude`; the loop guard stops it once the pane is gone.
-# ponytail: plain `&`; if Ctrl-C ever kills it, the next `agent <name>` re-arms. Upgrade to
-# setsid + an explicit reaper only if that proves flaky.
-if [ -n "${TMUX_PANE:-}" ]; then
-    pane="$TMUX_PANE"
-    (
-        while tmux list-panes -aF '#{pane_id}' 2>/dev/null | grep -qx "$pane"; do
-            rc=0
-            $WAKE_BIN --url "$WAKE_URL" --name "$AGENT_ROLE" \
-                      --token "$AGENTBUS_TOKEN" --timeout 1800 || rc=$?
-            case $rc in
-                0) tmux send-keys -t "$pane" \
-                       "agentbus ring -- call inbox() and act on anything new" Enter || break ;;
-                1) sleep 5 ;;   # broker unreachable; back off before re-parking
-            esac                # rc 2 = silence timeout: just re-park (also a heartbeat)
-        done
-    ) &
-    echo "agentbus: wake sidecar armed (pane $pane -> $WAKE_URL) -- 0-token idle, real-time pokes on ring" >&2
+# Real-time wake sidecar. Needs tmux (a pane to poke) + setsid (own session, so it can
+# self-reap without touching this shell). $$ is captured BEFORE `exec claude` -- exec keeps
+# the pid, so it is Claude's pid; the sidecar watches it and exits when Claude exits.
+if [ -n "${TMUX_PANE:-}" ] && command -v setsid >/dev/null 2>&1; then
+    setsid -f "$REPO/scripts/wake-sidecar" \
+        "$TMUX_PANE" "$$" "$WAKE_URL" "$AGENT_ROLE" "$AGENTBUS_TOKEN" $WAKE_BIN \
+        && echo "agentbus: wake sidecar armed (pane $TMUX_PANE -> $WAKE_URL) -- 0-token idle, exits with claude" >&2
 else
-    echo "agentbus: not in tmux; no wake sidecar (this agent relies on per-turn inbox())" >&2
+    echo "agentbus: no wake sidecar (need tmux + setsid); agent relies on per-turn inbox()" >&2
 fi
 
 echo "agentbus: this session is '$AGENT_ROLE'" >&2

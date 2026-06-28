@@ -266,25 +266,33 @@ async def wake_ws(ws: WebSocket):
     q: asyncio.Queue = asyncio.Queue()
     _waiters.setdefault(name, set()).add(q)
     try:
-        # Already have mail? ring immediately so a just-armed client doesn't miss it.
+        # Ring once if mail is already waiting at connect, so a just-attached client does
+        # not miss it. We do NOT re-ring on still-unacked backlog -- only on new arrivals.
+        # (Re-ringing pending mail is what made a reconnecting client storm on itself.)
         backlog = store.inbox(_conn, name)
         if backlog:
             await ws.send_json({"wake": True, "reason": "backlog", "unread": len(backlog)})
             log.info("%s wake ring (backlog %s)", name, len(backlog))
-            return
-        # Wait for either a notify (mail arrived) or the client going away.
-        recv = asyncio.create_task(ws.receive_text())
-        woke = asyncio.create_task(q.get())
-        done, pending = await asyncio.wait({recv, woke}, return_when=asyncio.FIRST_COMPLETED)
-        ring = woke in done and recv not in done  # mail arrived, client still connected
-        for t in pending:
-            t.cancel()
-        # Retrieve every task's result/exception so none is "never retrieved": a client
-        # that drops while parked makes recv raise WebSocketDisconnect *inside* its task.
-        for t in (recv, woke):
-            with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
-                await t
-        if ring:
+        # Then STAY connected and push one frame per new message until the client drops.
+        # Persistent on purpose: a sidecar holds a single socket -- so presence shows
+        # connected:true and delivery is instant -- instead of reconnecting per ring, which
+        # storms whenever backlog is unacked and never holds a connection.
+        while True:
+            recv = asyncio.create_task(ws.receive_text())
+            woke = asyncio.create_task(q.get())
+            done, pending = await asyncio.wait({recv, woke}, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            # Retrieve each task's result/exception so none is "never retrieved": a client
+            # that drops while parked makes recv raise WebSocketDisconnect inside its task.
+            for t in (recv, woke):
+                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
+                    await t
+            if recv in done:  # client went away
+                break
+            # A notify fired. Coalesce any other queued notifies into this one ring.
+            while not q.empty():
+                q.get_nowait()
             n = len(store.inbox(_conn, name))
             await ws.send_json({"wake": True, "reason": "message", "unread": n})
             log.info("%s wake ring (%s unread)", name, n)
