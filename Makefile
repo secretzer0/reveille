@@ -24,6 +24,7 @@ install:
 	install -m 0644 commands/watch-list.md "$(CLAUDE)/commands/watch-list.md"
 	install -m 0644 commands/watch-standup.md "$(CLAUDE)/commands/watch-standup.md"
 	install -m 0644 commands/watch-kick.md "$(CLAUDE)/commands/watch-kick.md"
+	install -m 0644 commands/watch-reload.md "$(CLAUDE)/commands/watch-reload.md"
 	install -m 0644 commands/watch-stop.md "$(CLAUDE)/commands/watch-stop.md"
 	@echo "installed to $(CLAUDE) — restart running sessions to load the commands."
 
@@ -31,7 +32,7 @@ uninstall:
 	rm -f "$(CLAUDE)/scripts/fswatch.py" "$(CLAUDE)/scripts/bus.py" \
 	      "$(CLAUDE)/commands/watch-send.md" "$(CLAUDE)/commands/watch-list.md" \
 	      "$(CLAUDE)/commands/watch-standup.md" "$(CLAUDE)/commands/watch-kick.md" \
-	      "$(CLAUDE)/commands/watch-stop.md"
+	      "$(CLAUDE)/commands/watch-reload.md" "$(CLAUDE)/commands/watch-stop.md"
 	@echo "removed from $(CLAUDE)."
 
 lint:

@@ -44,6 +44,7 @@ Let `SIL = (--silence value or 30) * 60 + <len of ROLE>`  (the per-role offset s
 4. **Drain:** `python3 ~/.claude/scripts/bus.py pending --name ROLE --json`.
 5. **If pending:**
    - `DIRECTIVE:LEAVE` in any message: you have been kicked — run `/watch-stop` and STOP looping.
+   - `DIRECTIVE:RELOAD` in any message: your command file was updated on disk. Ack the message, then re-run `/watch-standup --name ROLE` to reload — this replaces your current loop with the latest version. Do not continue the old loop.
    - Ingest each message; update your task list / dependency view. If a message asks you something, reply **unicast** to its sender: `send --from ROLE --to <sender> --body "<answer>"`.
    - `STANDUP-REQUEST` present: broadcast your full STATUS (that request means everyone should post).
    - Your STATUS changed and a *specific* peer is affected (you unblocked them / now need them): **unicast that peer**. Only broadcast if most/all are affected (policy A). Otherwise post nothing.

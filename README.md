@@ -40,6 +40,7 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 /watch-send --to NAME | --all [--subject S] -- MESSAGE   unicast, or broadcast to everyone
 /watch-list                                   who's on the bus (live / stale)
 /watch-kick NAME [--force]                     evict an agent (LEAVE directive; --force removes + kills)
+/watch-reload                                 tell every standup agent to reload its command file from disk
 /watch-stop                                   leave the bus + stop this session's loop
 ```
 
@@ -133,6 +134,7 @@ bus.py whoami [--tag T]    list [--json]    prune    leave --name N    paths --n
 | `/watch-send` | `--to NAME` **xor** `--all`; `--subject S`; `-- MESSAGE` | Unicast to NAME's inbox, or broadcast to the shared log. |
 | `/watch-list` | — | Roster: each agent `LIVE` / `stale`. |
 | `/watch-kick` | `NAME` (req), `--force` | Evict NAME: LEAVE directive; `--force` removes presence + kills its watcher. |
+| `/watch-reload` | — | Broadcast `DIRECTIVE:RELOAD`; every standup agent re-invokes itself to load the latest command file. |
 | `/watch-stop` | — | Leave the bus + kill this session's watcher. |
 
 `fswatch.py` and `bus.py` switches are above; the slash commands are thin drivers over them.
