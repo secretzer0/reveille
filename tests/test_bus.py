@@ -104,23 +104,38 @@ def test_kick_unknown_agent_errors():
     assert r.returncode != 0
 
 
+def _age_presence(root, name, seconds_ago):
+    # Liveness is mtime-based; set the presence file's mtime into the past.
+    p = os.path.join(root, "agents", f"{name}.json")
+    t = os.path.getmtime(p) - seconds_ago
+    os.utime(p, (t, t))
+
+
 def test_live_name_collision_blocks():
+    # Fresh presence (just joined) = live -> a different tag is blocked.
     root, env = make_env()
-    tag = "TAG_live_collide_xyz"
-    watchdir = tempfile.mkdtemp()
-    # A live watcher carrying the tag makes the name look held. Arm it the way the
-    # standup loop does -- flags BEFORE --tag -- so liveness must match non-adjacent --tag.
-    w = subprocess.Popen([sys.executable, FSWATCH, "--arrivals", "--timeout", "30", "--tag", tag, watchdir],
-                         env=env)
-    try:
-        time.sleep(0.4)
-        bus(env, "join", "--name", "carol", "--tag", tag)
-        r = bus(env, "join", "--name", "carol", "--tag", "TAG_other", check=False)
-        assert r.returncode != 0, "expected collision against a live holder"
-        assert "held by a live agent" in r.stderr, r.stderr
-    finally:
-        w.terminate()
-        w.wait(timeout=5)
+    bus(env, "join", "--name", "carol", "--tag", "TAG_a")
+    r = bus(env, "join", "--name", "carol", "--tag", "TAG_other", check=False)
+    assert r.returncode != 0 and "held by a live agent" in r.stderr, r.stderr
+
+
+def test_stale_name_is_reclaimable():
+    # Presence older than the liveness TTL -> stale -> a different session reclaims it.
+    root, env = make_env()
+    bus(env, "join", "--name", "carol", "--tag", "TAG_a")
+    _age_presence(root, "carol", 60 * 60)  # 1h > 40m TTL
+    r = bus(env, "join", "--name", "carol", "--tag", "TAG_other")
+    assert r.returncode == 0, "stale name should be reclaimable"
+
+
+def test_touch_keeps_agent_live():
+    root, env = make_env()
+    bus(env, "join", "--name", "ann", "--tag", "T")
+    _age_presence(root, "ann", 60 * 60)  # make stale
+    assert "stale" in bus(env, "list").stdout
+    bus(env, "touch", "--name", "ann")   # refresh
+    out = bus(env, "list").stdout
+    assert "LIVE" in out and "ann" in out, out
 
 
 if __name__ == "__main__":

@@ -36,6 +36,9 @@ import time
 import uuid
 
 BROADCAST_MAX_AGE_NS = 7 * 24 * 3600 * 1_000_000_000  # GC ceiling so a ghost agent can't pin the log forever
+# LIVE = presence touched within this window. Must exceed the standup silence window
+# (default 30m) so an idle-but-alive agent that only wakes on its 30m heartbeat stays LIVE.
+LIVE_TTL_NS = 40 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
@@ -79,17 +82,16 @@ def _read_json(path):
         return None
 
 
-def _tag_alive(tag):
-    # Liveness = the session's watcher process exists. Best-effort: an agent mid-prompt
-    # (no watcher armed) reads as not-alive for a few seconds. ponytail: pgrep heuristic,
-    # tighten with a real heartbeat only if false reaps actually bite.
-    if not tag:
+def _is_live(name):
+    # Liveness = recency, not process. The agent touches its presence file every loop
+    # turn (and on its silence heartbeat), so "alive" = touched within LIVE_TTL_NS. This
+    # does not flap when the watcher is briefly disarmed mid-turn, and a dead agent (no
+    # more touches) ages out to stale on its own. ponytail: mtime TTL, not a pid check.
+    try:
+        mtime_ns = int(os.path.getmtime(_p("agents", f"{name}.json")) * 1e9)
+    except OSError:
         return False
-    # .* between fswatch.py and --tag: the watcher is armed with flags
-    # (--arrivals/--timeout) before --tag, so they are not adjacent.
-    r = subprocess.run(["pgrep", "-f", f"fswatch.py.*--tag {tag}"],
-                       capture_output=True)
-    return r.returncode == 0
+    return (time.time_ns() - mtime_ns) < LIVE_TTL_NS
 
 
 def _presence(name):
@@ -111,7 +113,7 @@ def cmd_join(args):
     _valid(args.name)
     _ensure_dirs()
     existing = _presence(args.name)
-    if existing and _tag_alive(existing.get("tag")) and existing.get("tag") != args.tag:
+    if existing and _is_live(args.name) and existing.get("tag") != args.tag:
         sys.exit(f"name {args.name!r} is held by a live agent (tag {existing.get('tag')}). pick another.")
     _agent_dirs(args.name)
     if not os.path.exists(_p(args.name, "cursor")):
@@ -139,6 +141,16 @@ def cmd_paths(args):
     print(_p("broadcast"))
 
 
+def cmd_touch(args):
+    # Refresh presence mtime -> agent stays LIVE. Called once per loop turn.
+    _valid(args.name)
+    path = _p("agents", f"{args.name}.json")
+    if not os.path.exists(path):
+        sys.exit(f"not joined: {args.name}")
+    os.utime(path, None)
+    print(f"touched {args.name}")
+
+
 def cmd_whoami(args):
     # Resolve this session's bus name from its tag (CLAUDE_CODE_SESSION_ID).
     tag = args.tag
@@ -159,7 +171,7 @@ def _live_agents():
             continue
         pres = _read_json(os.path.join(d, fn))
         if pres:
-            pres["live"] = _tag_alive(pres.get("tag"))
+            pres["live"] = _is_live(pres["name"])
             out.append(pres)
     return out
 
@@ -342,6 +354,7 @@ def main():
 
     lv = sub.add_parser("leave"); lv.add_argument("--name", required=True); lv.set_defaults(fn=cmd_leave)
     pa = sub.add_parser("paths"); pa.add_argument("--name", required=True); pa.set_defaults(fn=cmd_paths)
+    to = sub.add_parser("touch"); to.add_argument("--name", required=True); to.set_defaults(fn=cmd_touch)
     wa = sub.add_parser("whoami")
     wa.add_argument("--tag", default=os.environ.get("CLAUDE_CODE_SESSION_ID", "")); wa.set_defaults(fn=cmd_whoami)
     ls = sub.add_parser("list"); ls.add_argument("--json", action="store_true"); ls.set_defaults(fn=cmd_list)

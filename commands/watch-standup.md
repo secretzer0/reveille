@@ -41,7 +41,7 @@ Let `SIL = (--silence value or 30) * 60 + <len of ROLE>`  (the per-role offset s
 1. **Join:** `python3 ~/.claude/scripts/bus.py join --name ROLE [--fresh]` — capture the two printed lines (INBOX, BROADCAST). Non-zero exit (name held / invalid) → report and stop.
 2. **Replace prior watcher** (alone — never combined with the arm step): `pkill -f "[f]swatch.py.*--tag $CLAUDE_CODE_SESSION_ID" || true`  (the `.*` matches the watcher whichever order its flags are in; kills any duplicate watchers too)
 3. **Join quietly.** Compute your STATUS from your task list and remember it as `last_status`. Do NOT broadcast on join. If you already know you need something from specific peers, unicast just them.
-4. **Drain:** `python3 ~/.claude/scripts/bus.py pending --name ROLE --json`.
+4. **Touch + drain:** `python3 ~/.claude/scripts/bus.py touch --name ROLE` (keeps you shown as LIVE — presence is refreshed every turn), then `python3 ~/.claude/scripts/bus.py pending --name ROLE --json`.
 5. **If pending:**
    - `DIRECTIVE:LEAVE` in any message: you have been kicked — run `/watch-stop` and STOP looping.
    - `DIRECTIVE:RELOAD` in any message: your command file was updated on disk. Ack the message, then re-run `/watch-standup --name ROLE` to reload — this replaces your current loop with the latest version. Do not continue the old loop.
