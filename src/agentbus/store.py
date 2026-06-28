@@ -244,6 +244,45 @@ def thread(conn, thread_id):
     return [_msg(r) for r in rows]
 
 
+def search(conn, *, text=None, since_ns=None, until_ns=None,
+           involves=None, mine_agent=None, thread_id=None, limit=200):
+    """Search the whole message log (read or not). Every filter ANDs together:
+      text       case-insensitive substring in subject OR body
+      since_ns   ts_ns >= since_ns        until_ns  ts_ns <= until_ns
+      involves   agent is sender OR recipient (the full convo touching that agent)
+      mine_agent agent is sender OR recipient (the caller's own slice)
+      thread_id  restrict to one thread
+    involves + mine_agent together => the 1:1 conversation between the two.
+    Returns the most recent <=limit matches, oldest-first. Each carries thread_id so
+    the caller can expand the DAG with thread()/graph()/trace().
+    """
+    where, args = [], []
+    if text:
+        where.append("(subject LIKE ? OR body LIKE ?)")
+        args += [f"%{text}%", f"%{text}%"]
+    if since_ns is not None:
+        where.append("ts_ns >= ?")
+        args.append(since_ns)
+    if until_ns is not None:
+        where.append("ts_ns <= ?")
+        args.append(until_ns)
+    if involves:
+        where.append("(sender=? OR recipient=?)")
+        args += [involves, involves]
+    if mine_agent:
+        where.append("(sender=? OR recipient=?)")
+        args += [mine_agent, mine_agent]
+    if thread_id:
+        where.append("thread_id=?")
+        args.append(thread_id)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    limit = max(1, min(int(limit), 1000))
+    rows = conn.execute(
+        f"SELECT * FROM messages{clause} ORDER BY id DESC LIMIT ?", args + [limit]
+    ).fetchall()
+    return [_msg(r) for r in reversed(rows)]
+
+
 def _subgraph(conn, ids):
     """{messages, edges} for a set of message ids -- edges = links with both
     endpoints inside the set. messages sorted by id; each carries its parents."""

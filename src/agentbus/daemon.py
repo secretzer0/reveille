@@ -29,6 +29,7 @@ import pty
 import re
 import struct
 import termios
+import time
 
 from mcp.server.fastmcp import Context, FastMCP
 from starlette.applications import Starlette
@@ -203,6 +204,42 @@ async def graph(thread_id: int, ctx: Context = None) -> dict:
     """The whole web of a thread as {"messages": [...], "edges": [[parent, child], ...]}."""
     _me(ctx)
     return store.graph(_conn, thread_id)
+
+
+_DUR_RE = re.compile(r"\s*(\d+)\s*([smhd])\s*")
+
+
+def _since_ns(since: str):
+    m = since and _DUR_RE.fullmatch(since)
+    if not m:
+        return None
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+    return time.time_ns() - int(m.group(1)) * mult * 1_000_000_000
+
+
+@mcp.tool()
+async def history(text: str = "", since: str = "", with_agent: str = "", mine: bool = False,
+                  thread_id: int = 0, limit: int = 200, ctx: Context = None) -> dict:
+    """Search the full message log (read OR unread) -- this is how you review past
+    coordination instead of reading the broker DB. Filters AND together:
+      text       case-insensitive substring in subject/body (the topic)
+      since      relative window: '2h', '30m', '1d', '90m' (omit = all time)
+      with_agent only messages where that agent is sender or recipient
+      mine=True  only messages where YOU are sender or recipient (your asks + replies to
+                 you); combine with with_agent for just your 1:1 thread with them
+      thread_id  restrict to one thread
+    Returns the most recent <=limit matches oldest-first as {messages, count}. Each
+    message carries thread_id and parent_id -- pass thread_id to graph()/thread() or an
+    id to trace() to expand the reply DAG."""
+    me = _me(ctx)
+    _seen(me)
+    msgs = store.search(
+        _conn, text=text or None, since_ns=_since_ns(since),
+        involves=with_agent or None, mine_agent=(me if mine else None),
+        thread_id=thread_id or None, limit=limit)
+    log.info("%s history text=%r since=%r with=%r mine=%s -> %s", me, text, since,
+             with_agent, mine, len(msgs))
+    return {"messages": msgs, "count": len(msgs)}
 
 
 @mcp.tool()
