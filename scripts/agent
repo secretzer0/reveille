@@ -1,69 +1,86 @@
 #!/usr/bin/env bash
-# Launch a Claude Code session bound to a bus identity.
+# Launch a Claude Code session bound to a bus identity (Reveille).
 #
-#   agent roc-api-dev            # this tmux pane is roc-api-dev on the bus
-#   agent iphone-dev             # another pane / machine is iphone-dev
+#   agent roc-api-dev                 # role positional
+#   agent --role roc-api-dev          # role flag
+#   AGENT_ROLE=roc-api-dev agent      # role from env
+#   agent roc-api-dev --model opus    # extra args after the role go to claude
 #
-# Sets $AGENT_ROLE (-> the MCP X-Agent header) and inherits $AGENTBUS_TOKEN, so every
-# pane shares one MCP registration but gets its own identity.
+# Config resolves as  CLI flag > environment > default:
+#   role  : --role  | $AGENT_ROLE
+#   token : --token | $AGENTBUS_TOKEN
+#   url   : --url   | $AGENTBUS_URL  | http://127.0.0.1:8765
 #
-# In tmux it ALSO arms a wake sidecar in THIS shell -- the real terminal, NOT Claude's
-# Bash sandbox, so it is not reaped with exit 144. The sidecar parks on the broker socket
-# at TRUE 0 tokens (it is a plain WS client, not an LLM) while the Claude session sits
-# dormant (also 0 tokens). Only when a real message rings does it poke this pane awake
-# with `tmux send-keys`, so the agent runs exactly one turn -- for real work, never to
-# poll. That is 0-token idle with real-time delivery; a timer/poll loop would instead
-# spend tokens every interval just to ask "anything yet?".
+# Sets $AGENT_ROLE (-> the MCP X-Agent header) and $AGENTBUS_TOKEN for the session. In tmux
+# it arms a wake sidecar (Reveille) in the real terminal -- NOT Claude's Bash sandbox, so it
+# is not reaped -- which holds a 0-token socket and pokes this pane the instant a message
+# arrives. Not in tmux: it re-launches inside a fresh tmux session first.
 set -euo pipefail
 
-if [ $# -lt 1 ]; then
-    echo "usage: agent <dev-name> [claude args...]" >&2
+ROLE="${AGENT_ROLE:-}"
+TOKEN="${AGENTBUS_TOKEN:-}"
+URL="${AGENTBUS_URL:-http://127.0.0.1:8765}"
+
+claude_args=()
+role_pos=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --role)    ROLE="$2"; shift 2 ;;
+        --role=*)  ROLE="${1#*=}"; shift ;;
+        --token)   TOKEN="$2"; shift 2 ;;
+        --token=*) TOKEN="${1#*=}"; shift ;;
+        --url)     URL="$2"; shift 2 ;;
+        --url=*)   URL="${1#*=}"; shift ;;
+        --)        shift; claude_args+=("$@"); break ;;
+        -*)        claude_args+=("$1"); shift ;;
+        *)         if [ "$role_pos" -eq 0 ]; then ROLE="$1"; role_pos=1; else claude_args+=("$1"); fi; shift ;;
+    esac
+done
+
+if [ -z "$ROLE" ]; then
+    echo "agent: no role -- pass one (agent <role> | --role X) or set AGENT_ROLE" >&2
     exit 1
 fi
 
-export AGENT_ROLE="$1"
-shift
-export AGENTBUS_TOKEN="${AGENTBUS_TOKEN:-}"
+export AGENT_ROLE="$ROLE"
+export AGENTBUS_TOKEN="$TOKEN"
+export AGENTBUS_URL="$URL"
 
-# Behind the scenes: if not already in tmux, re-launch inside a fresh tmux session so the
-# sidecar has a pane to poke (it wakes idle agents via `tmux send-keys`; no tmux -> no pane
-# -> no real-time wake). Identity+token are passed explicitly so a pre-existing tmux
-# server's stale env can't drop them. If tmux isn't installed we fall through and run
-# without the sidecar.
+# Not in tmux: re-launch inside a fresh tmux session so the sidecar has a pane to poke.
+# Re-pass resolved config as flags so a pre-existing tmux server's stale env can't drop it.
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-    argq=""; for a in "$@"; do argq+=" $(printf '%q' "$a")"; done
-    exec tmux new-session -s "rev-$AGENT_ROLE" \
-        "exec env AGENT_ROLE=$(printf '%q' "$AGENT_ROLE") AGENTBUS_TOKEN=$(printf '%q' "$AGENTBUS_TOKEN") $(printf '%q' "${BASH_SOURCE[0]}") $(printf '%q' "$AGENT_ROLE")$argq"
+    reinvoke=(--role "$ROLE" --token "$TOKEN" --url "$URL" ${claude_args[@]+"${claude_args[@]}"})
+    argq=""; for a in "${reinvoke[@]}"; do argq+=" $(printf '%q' "$a")"; done
+    exec tmux new-session -s "rev-$ROLE" "exec $(printf '%q' "${BASH_SOURCE[0]}")$argq"
 fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AGENTBUS_URL="${AGENTBUS_URL:-http://127.0.0.1:8765}"
-_hostport="${AGENTBUS_URL#*://}"; _hostport="${_hostport%%/*}"   # strip scheme + any path
-_scheme=ws; [ "${AGENTBUS_URL%%://*}" = "https" ] && _scheme=wss
-WAKE_URL="$_scheme://$_hostport/wake"              # http(s)://host:port[/..] -> ws(s)://host:port/wake
+_hostport="${URL#*://}"; _hostport="${_hostport%%/*}"   # strip scheme + any path
+_scheme=ws; [ "${URL%%://*}" = "https" ] && _scheme=wss
+WAKE_URL="$_scheme://$_hostport/wake"                   # http(s)://host:port[/..] -> ws(s)://host:port/wake
 WAKE_BIN="$REPO/.venv/bin/wake"
 [ -x "$WAKE_BIN" ] || WAKE_BIN="uv run --project $REPO wake"
 
 # Versions for the liveness line + the sidecar boot poke (combo = daemon + wake, one repo).
 CLIENT_V="$($WAKE_BIN --version 2>/dev/null || echo '?')"
-SERVER_V="$(curl -fsS "$AGENTBUS_URL/version" 2>/dev/null || echo 'unreachable')"
+SERVER_V="$(curl -fsS "$URL/version" 2>/dev/null || echo 'unreachable')"
 
 # Real-time wake sidecar. Needs tmux (a pane to poke) + setsid (own session, so it can
 # self-reap without touching this shell). $$ is captured BEFORE `exec claude` -- exec keeps
 # the pid, so it is Claude's pid; the sidecar watches it and exits when Claude exits. On
-# boot the sidecar also pokes the pane once with the usage/CLAUDE.md directive + versions.
+# boot the sidecar also pokes the pane once with the info()/usage() directive + versions.
 sidecar="off (need tmux + setsid)"
 if [ -n "${TMUX_PANE:-}" ] && command -v setsid >/dev/null 2>&1; then
     if setsid -f "$REPO/scripts/wake-sidecar" \
-        "$TMUX_PANE" "$$" "$WAKE_URL" "$AGENT_ROLE" "$AGENTBUS_TOKEN" "$SERVER_V" "$CLIENT_V" $WAKE_BIN; then
+        "$TMUX_PANE" "$$" "$WAKE_URL" "$ROLE" "$TOKEN" "$SERVER_V" "$CLIENT_V" $WAKE_BIN; then
         sidecar="armed (exits with claude)"
     fi
 fi
 
 # Liveness / integration status for this agent.
-echo "Reveille v$SERVER_V: role=$AGENT_ROLE  broker=$AGENTBUS_URL  client=v$CLIENT_V  sidecar: $sidecar" >&2
+echo "Reveille v$SERVER_V: role=$ROLE  broker=$URL  client=v$CLIENT_V  sidecar: $sidecar" >&2
 if [ "$SERVER_V" != "unreachable" ] && [ "$SERVER_V" != "$CLIENT_V" ]; then
     echo "Reveille: WARNING broker v$SERVER_V != client v$CLIENT_V -- update" >&2
 fi
 
-exec claude "$@"
+exec claude ${claude_args[@]+"${claude_args[@]}"}
