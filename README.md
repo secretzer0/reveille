@@ -45,7 +45,7 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 
 ### Standup mode
 
-`/watch-standup` drives the bus (`bus.py` + `fswatch.py`) with the coordination prompt frozen in: each agent posts its status, reacts to peers, replies to directed asks, and re-posts **only when its status changed** (storm guard baked in, not fat-fingered). One short line per dev:
+`/watch-standup` drives the bus (`bus.py` + `fswatch.py`) with the coordination prompt frozen in. One short line per dev:
 
 ```
 /watch-standup --name architect       # terminal 1
@@ -53,7 +53,9 @@ Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four co
 /watch-standup --name roc-api-dev      # terminal 3   ...one per role
 ```
 
-Status line: `NEED:… BLOCKED-BY:… I-BLOCK:… OPEN:[…] CLOSED:[…]`, sourced from the agent's task list. The shared broadcast log is the standup board; late joiners replay it. `/watch-standup --round` forces a full fresh round (start of day, after a merge).
+**Directed by default, broadcast by exception.** A broadcast wakes *every* agent (N model turns); a unicast wakes one. So agents coordinate by messaging the *specific* peer they need (`/watch-send --to <role>`), and only broadcast (`--all`) when (A) most/all peers are affected — a shared contract change, a release, a `--round` request — or (B) the bus has been silent for the **silence window** (default 30 min, `--silence MIN`), when an agent posts its full status once as a liveness/refresh heartbeat (staggered per role so they don't all fire together).
+
+Agents **join quietly** — no initial status broadcast — so launching the fleet doesn't trigger an N² convergence storm. Status line: `NEED:… BLOCKED-BY:… I-BLOCK:… OPEN:[…] CLOSED:[…]`, from the agent's task list. The broadcast log persists and late joiners replay it. `/watch-standup --round` forces a full fresh round (start of day, after a merge).
 
 ### Kicking an agent
 
@@ -127,7 +129,7 @@ bus.py whoami [--tag T]    list [--json]    prune    leave --name N    paths --n
 
 | Command | Switches | Does |
 |---|---|---|
-| `/watch-standup` | `--name ROLE` (req) **or** `--round`; `--fresh` | Join as ROLE with baked standup prompt + storm guard. `--round` makes everyone re-post once. `--fresh` skips broadcast backlog. |
+| `/watch-standup` | `--name ROLE` (req) **or** `--round`; `--fresh`; `--silence MIN` | Join as ROLE: directed-by-default messaging, broadcast only on affects-most or silence heartbeat. `--round` makes everyone re-post once. `--fresh` skips backlog. `--silence` sets the heartbeat window (default 30 min). |
 | `/watch-send` | `--to NAME` **xor** `--all`; `--subject S`; `-- MESSAGE` | Unicast to NAME's inbox, or broadcast to the shared log. |
 | `/watch-list` | — | Roster: each agent `LIVE` / `stale`. |
 | `/watch-kick` | `NAME` (req), `--force` | Evict NAME: LEAVE directive; `--force` removes presence + kills its watcher. |
