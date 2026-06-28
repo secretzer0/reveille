@@ -21,18 +21,27 @@ waking the session to pull its mail over MCP. One held connection, one poke per 
 """
 import asyncio
 import contextlib
+import fcntl
 import logging
 import os
+import pathlib
+import pty
+import re
+import struct
+import termios
 
 from mcp.server.fastmcp import Context, FastMCP
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from agentbus import __version__, store
+
+# scripts/agent in this repo -- the web terminal spawns it to launch a session in tmux.
+AGENT_BIN = str(pathlib.Path(__file__).resolve().parents[2] / "scripts" / "agent")
 
 TOKEN = os.environ.get("AGENTBUS_TOKEN") or None  # None = open (trusted LAN)
 
@@ -318,6 +327,126 @@ async def usage_http(_request):
     return PlainTextResponse(USAGE)
 
 
+# ---- web terminal: token+role form -> xterm.js <-> pty running `agent <role>` ----
+
+WEBUI = """<!doctype html><html><head><meta charset="utf-8"><title>Reveille</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+<style>
+ html,body{margin:0;height:100%;background:#000;color:#ddd;font-family:monospace}
+ #login{padding:2rem;max-width:340px}
+ h2{margin:.2rem 0 1rem}
+ input{width:100%;box-sizing:border-box;padding:.5rem;margin:.3rem 0;background:#111;color:#ddd;border:1px solid #444;font-family:monospace}
+ button{margin-top:.6rem;padding:.5rem 1.2rem;background:#2a2;color:#000;border:0;cursor:pointer;font-weight:bold}
+ #err{color:#f66;min-height:1em}
+ #term{position:fixed;inset:0;display:none;padding:4px}
+</style></head><body>
+<div id="login">
+ <h2>Reveille</h2>
+ <input id="token" type="password" placeholder="token" autofocus>
+ <input id="role" placeholder="role (e.g. roc-api-dev)">
+ <button onclick="go()">connect</button>
+ <p id="err"></p>
+</div>
+<div id="term"></div>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+function go(){
+ var token=document.getElementById('token').value;
+ var role=document.getElementById('role').value.trim();
+ if(!role){document.getElementById('err').textContent='role required';return;}
+ var proto=location.protocol==='https:'?'wss':'ws';
+ var ws=new WebSocket(proto+'://'+location.host+'/term?token='+encodeURIComponent(token)+'&role='+encodeURIComponent(role));
+ ws.binaryType='arraybuffer';
+ var term=new Terminal({cursorBlink:true,fontSize:14,fontFamily:'monospace'});
+ var fit=new FitAddon.FitAddon();term.loadAddon(fit);
+ ws.onopen=function(){
+   document.getElementById('login').style.display='none';
+   var el=document.getElementById('term');el.style.display='block';
+   term.open(el);fit.fit();
+   var sz=function(){ws.send('\\x00'+term.cols+'x'+term.rows);};
+   sz();window.addEventListener('resize',function(){fit.fit();sz();});
+   term.onData(function(d){ws.send(d);});
+   term.focus();
+ };
+ ws.onmessage=function(e){term.write(typeof e.data==='string'?e.data:new Uint8Array(e.data));};
+ ws.onclose=function(e){term.write('\\r\\n[disconnected '+e.code+']\\r\\n');};
+ ws.onerror=function(){document.getElementById('err').textContent='connection failed';};
+}
+document.getElementById('token').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('role').focus();});
+document.getElementById('role').addEventListener('keydown',function(e){if(e.key==='Enter')go();});
+</script></body></html>
+"""
+
+
+async def ui_http(_request):
+    return HTMLResponse(WEBUI)
+
+
+def _winsize(fd, cols, rows):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+async def term_ws(ws: WebSocket):
+    """Browser terminal: spawn `agent <role>` on a pty and bridge it to xterm.js. The agent
+    runs in its own tmux session, so closing the tab detaches (session + claude keep running)
+    and reconnecting re-attaches (agent uses tmux new-session -A)."""
+    await ws.accept()
+    token = ws.query_params.get("token") or ""
+    role = re.sub(r"[^A-Za-z0-9_-]", "", ws.query_params.get("role") or "")[:64]
+    if TOKEN and token != TOKEN:
+        await ws.send_text("\r\nauth failed\r\n")
+        await ws.close()
+        return
+    if not role:
+        await ws.send_text("\r\nrole required\r\n")
+        await ws.close()
+        return
+
+    master, slave = pty.openpty()
+    env = {**os.environ, "AGENT_ROLE": role, "AGENTBUS_TOKEN": token,
+           "AGENTBUS_URL": f"http://127.0.0.1:{os.environ.get('AGENTBUS_PORT', '8765')}",
+           "TERM": "xterm-256color"}
+    proc = await asyncio.create_subprocess_exec(
+        AGENT_BIN, role, stdin=slave, stdout=slave, stderr=slave,
+        start_new_session=True, env=env)
+    os.close(slave)
+    loop = asyncio.get_event_loop()
+    log.info("term open role=%s pid=%s", role, proc.pid)
+
+    async def pump_out():  # pty -> browser, in order
+        try:
+            while True:
+                data = await loop.run_in_executor(None, os.read, master, 65536)
+                if not data:
+                    break
+                await ws.send_bytes(data)
+        except Exception:
+            pass
+        with contextlib.suppress(Exception):
+            await ws.close()
+
+    out = asyncio.create_task(pump_out())
+    try:
+        while True:
+            msg = await ws.receive_text()
+            if msg[:1] == "\x00":                      # resize control: "\x00<cols>x<rows>"
+                with contextlib.suppress(ValueError):
+                    c, r = msg[1:].split("x")
+                    _winsize(master, int(c), int(r))
+            else:
+                os.write(master, msg.encode())
+    except Exception:
+        pass
+    finally:
+        out.cancel()
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()                           # detach the tmux client; session persists
+        with contextlib.suppress(OSError):
+            os.close(master)
+        log.info("term close role=%s", role)
+
+
 def build_app():
     mcp_app = mcp.streamable_http_app()
 
@@ -331,7 +460,9 @@ def build_app():
             Route("/health", health),
             Route("/version", version_http),
             Route("/usage", usage_http),
+            Route("/ui", ui_http),
             WebSocketRoute("/wake", wake_ws),
+            WebSocketRoute("/term", term_ws),
             Mount("/", app=mcp_app),
         ],
         middleware=[Middleware(BearerAuth)],

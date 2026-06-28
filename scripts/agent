@@ -51,7 +51,7 @@ export AGENTBUS_URL="$URL"
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     reinvoke=(--role "$ROLE" --token "$TOKEN" --url "$URL" ${claude_args[@]+"${claude_args[@]}"})
     argq=""; for a in "${reinvoke[@]}"; do argq+=" $(printf '%q' "$a")"; done
-    exec tmux new-session -s "rev-$ROLE" "exec $(printf '%q' "${BASH_SOURCE[0]}")$argq"
+    exec tmux new-session -A -s "rev-$ROLE" "exec $(printf '%q' "${BASH_SOURCE[0]}")$argq"
 fi
 
 # Resolve symlinks: agent is usually invoked via a ~/.local/bin/agent symlink, so the raw
