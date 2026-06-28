@@ -85,7 +85,9 @@ def _tag_alive(tag):
     # tighten with a real heartbeat only if false reaps actually bite.
     if not tag:
         return False
-    r = subprocess.run(["pgrep", "-f", f"fswatch.py --tag {tag}"],
+    # .* between fswatch.py and --tag: the watcher is armed with flags
+    # (--arrivals/--timeout) before --tag, so they are not adjacent.
+    r = subprocess.run(["pgrep", "-f", f"fswatch.py.*--tag {tag}"],
                        capture_output=True)
     return r.returncode == 0
 
@@ -267,7 +269,7 @@ def cmd_kick(args):
             pass
         tag = pres.get("tag")
         if tag:
-            subprocess.run(["pkill", "-f", f"fswatch.py --tag {tag}"])
+            subprocess.run(["pkill", "-f", f"fswatch.py.*--tag {tag}"])
         print(f"forced: removed presence + killed watcher for {args.name}")
 
 

@@ -108,8 +108,9 @@ def test_live_name_collision_blocks():
     root, env = make_env()
     tag = "TAG_live_collide_xyz"
     watchdir = tempfile.mkdtemp()
-    # A live watcher carrying the tag makes the name look held.
-    w = subprocess.Popen([sys.executable, FSWATCH, "--tag", tag, "--timeout", "30", watchdir],
+    # A live watcher carrying the tag makes the name look held. Arm it the way the
+    # standup loop does -- flags BEFORE --tag -- so liveness must match non-adjacent --tag.
+    w = subprocess.Popen([sys.executable, FSWATCH, "--arrivals", "--timeout", "30", "--tag", tag, watchdir],
                          env=env)
     try:
         time.sleep(0.4)

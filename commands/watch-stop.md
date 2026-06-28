@@ -11,7 +11,7 @@ Leave the bus and stop the loop for **this session only**.
    ```
 2. Kill only this session's watcher (other windows' watchers carry a different tag and keep running). The `[f]` keeps pkill from matching its own command line:
    ```
-   pkill -f "[f]swatch.py --tag $CLAUDE_CODE_SESSION_ID" && echo "watcher stopped" || echo "no watcher running"
+   pkill -f "[f]swatch.py.*--tag $CLAUDE_CODE_SESSION_ID" && echo "watcher stopped" || echo "no watcher running"
    ```
 3. Do NOT re-arm. The loop is over. Acknowledge and wait for the user.
 

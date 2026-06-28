@@ -39,7 +39,7 @@ If `whoami` errors, tell the user to join first and stop.
 Let `SIL = (--silence value or 30) * 60 + <len of ROLE>`  (the per-role offset staggers heartbeats so agents don't all fire at once). Then run the loop:
 
 1. **Join:** `python3 ~/.claude/scripts/bus.py join --name ROLE [--fresh]` — capture the two printed lines (INBOX, BROADCAST). Non-zero exit (name held / invalid) → report and stop.
-2. **Replace prior watcher** (alone — never combined with the arm step): `pkill -f "[f]swatch.py --tag $CLAUDE_CODE_SESSION_ID" || true`
+2. **Replace prior watcher** (alone — never combined with the arm step): `pkill -f "[f]swatch.py.*--tag $CLAUDE_CODE_SESSION_ID" || true`  (the `.*` matches the watcher whichever order its flags are in; kills any duplicate watchers too)
 3. **Join quietly.** Compute your STATUS from your task list and remember it as `last_status`. Do NOT broadcast on join. If you already know you need something from specific peers, unicast just them.
 4. **Drain:** `python3 ~/.claude/scripts/bus.py pending --name ROLE --json`.
 5. **If pending:**
