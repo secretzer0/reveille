@@ -54,7 +54,10 @@ if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     exec tmux new-session -s "rev-$ROLE" "exec $(printf '%q' "${BASH_SOURCE[0]}")$argq"
 fi
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve symlinks: agent is usually invoked via a ~/.local/bin/agent symlink, so the raw
+# BASH_SOURCE would put REPO at ~/.local instead of the actual repo.
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
 _hostport="${URL#*://}"; _hostport="${_hostport%%/*}"   # strip scheme + any path
 _scheme=ws; [ "${URL%%://*}" = "https" ] && _scheme=wss
 WAKE_URL="$_scheme://$_hostport/wake"                   # http(s)://host:port[/..] -> ws(s)://host:port/wake
