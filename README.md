@@ -1,140 +1,154 @@
-# Agent message bus for Claude Code
+# agentbus
 
-Event-driven, real-time messaging between Claude Code sessions over the filesystem. Sessions sign up to a self-organizing global bus under a unique name, send each other unicast messages, and broadcast to a persistent shared log. A session in `/watch-standup` reacts the instant a message arrives — no polling, no timers.
+A message bus for coordinating Claude Code sessions across machines: one
+SQLite-backed **broker daemon** that serves the messages over **MCP (HTTP)** and the
+wakeups over a **WebSocket**. Sessions join under a name, send threaded
+unicast/broadcast messages, and react the instant something arrives — local agents
+and a remote Mac alike, all on one bus, without polling and without burning tokens
+while idle.
 
-Linux only (kernel `inotify`). Zero dependencies: `python3` + the kernel. No pip, no `apt`, no `sudo`.
+Built and run under `uv` on Python 3.14, isolated from the host OS.
 
-## How it works
+## The design: two planes, one daemon
 
-**In-session constraint.** The model is the executor and only runs when invoked — it can't sit blocked. The only event-driven way to wake a sleeping session is a background process that *exits* (the harness wakes the session on task completion). So the loop is:
+The daemon runs on an always-on host (your LAN box) and serves two planes from one
+SQLite store (`broker.db`, WAL). They have opposite requirements, so they're split.
 
-```
-join bus ─► drain pending ─► run PROMPT over messages ─► ack ─┐
-   ▲                                                          │ (rescan: caught anything that
-   │                                                          │  arrived mid-prompt? loop)
-   │  nothing pending                                         ▼
-   └──── arm watcher (blocks on inotify) ◄── wake ◄── a message lands
-```
+**Data plane — MCP over HTTP.** Every message, thread, reply edge, presence row, and
+read receipt lives in SQLite and is touched *only* through MCP tools (`join`, `send`,
+`inbox`, `thread`, `trace`, `graph`, `ack`, `presence`, ...), served at `/mcp`. No
+message ever lands on the filesystem. Every machine — local at `127.0.0.1`, remote at
+the LAN name — calls the same daemon, so there is one shared bus.
 
-The watcher (`fswatch.py`) blocks until a message arrives, then exits to wake the session; the session processes and re-arms it. It *behaves* like a daemon (idle-blocks, fires on change, coalesces, self-suppresses) but mechanically re-arms each cycle. The loop lives with the session — close the session and it stops.
-
-**Self-suppression is structural, not PID-based** (inotify can't tell who wrote). Each agent watches only its own inbox + the shared broadcast dir, with an arrivals-only mask (`IN_CLOSE_WRITE | IN_MOVED_TO`). An agent never writes to its own inbox, and consumes by *moving* files to `processed/` (a move-out, ignored by the mask). So an agent's own activity can never trigger its loop — only real arrivals do.
-
-**Nothing is lost or double-processed.** `pending` reads messages non-destructively; `ack` is what moves inbox files out and advances the broadcast cursor. A prompt that dies mid-evaluation loses nothing. Multiple arrivals are drained as one batch (no per-message storm), and a post-ack rescan catches anything that landed while the prompt ran.
-
-**Broadcasts persist.** They append to a shared log; each agent has a cursor (last-read position), so agents that join later replay history (unless they join `--fresh`). The log is GC'd once every present agent has read past a message, or after 7 days.
-
-## Install
-
-```bash
-make install        # deploys into ~/.claude  (override: make install CLAUDE=/path/to/.claude)
-```
-
-Copies `src/fswatch.py` + `src/bus.py` into `~/.claude/scripts/` and the four command files into `~/.claude/commands/`. Restart any running session (commands load at session start). `make uninstall` removes them.
-
-## Usage
+**Wake plane — a pushed WebSocket.** MCP is request/response: the server cannot push
+to a Claude session that has ended its turn, and an MCP long-poll would keep the turn
+alive and burn tokens for the entire idle period. So between turns a session arms
+`wake.py` — a tiny WS client that connects with its name and **blocks at 0 tokens** on
+the socket. The daemon **pushes** a ring the instant a message for that agent is sent;
+`wake.py` exits, the harness re-invokes the session, and it pulls its mail over MCP.
 
 ```
-/watch-standup --name ROLE [--fresh]          join as ROLE for standup coordination (baked prompt)
-/watch-standup --round                        make every agent re-post status now (one round)
-/watch-send --to NAME | --all [--subject S] -- MESSAGE   unicast, or broadcast to everyone
-/watch-list                                   who's on the bus (live / stale)
-/watch-kick NAME [--force]                     evict an agent (LEAVE directive; --force removes + kills)
-/watch-reload                                 tell every standup agent to reload its command file from disk
-/watch-stop                                   leave the bus + stop this session's loop
+sender ──MCP send──► daemon (SQLite) ──push ring──► wake.py(recipient)  [0 tokens, parked]
+                                                          │ exits on ring
+                                                          ▼ harness re-invokes session
+                                              session ──MCP inbox──► reads mail, acts, acks
+                                                          └─ re-arms wake.py
 ```
 
-### Standup mode
+This is the **doorbell + mailbox** split: the WS ring is a content-free interrupt; the
+mailbox (SQLite, read over MCP) holds the actual mail.
 
-`/watch-standup` drives the bus (`bus.py` + `fswatch.py`) with the coordination prompt frozen in. One short line per dev:
+**Identity is per session, not per machine.** You run many Claude sessions on one box
+(a tmux pane each), all sharing one MCP registration — so identity can't be baked into
+the config. Instead the registration's `X-Agent` header is a `${AGENT_ROLE}` template
+that Claude Code expands per session from that session's own environment. Each pane
+exports its own `AGENT_ROLE` (the `agent <name>` launcher does this), so one
+registration serves every pane and each gets its own identity. **Auth** is an optional
+shared `AGENTBUS_TOKEN` (Bearer on HTTP, `?token=` on the WS); unset = open mode.
 
-```
-/watch-standup --name architect       # terminal 1
-/watch-standup --name shared-dev       # terminal 2
-/watch-standup --name roc-api-dev      # terminal 3   ...one per role
-```
+## Message model: a DAG, not just a thread
 
-**Directed by default, broadcast by exception.** A broadcast wakes *every* agent (N model turns); a unicast wakes one. So agents coordinate by messaging the *specific* peer they need (`/watch-send --to <role>`), and only broadcast (`--all`) when (A) most/all peers are affected — a shared contract change, a release, a `--round` request — or (B) the bus has been silent for the **silence window** (default 30 min, `--silence MIN`), when an agent posts its full status once as a liveness/refresh heartbeat (staggered per role so they don't all fire together).
+Messages form a directed acyclic graph, so a conversation can both **fork** (one
+message gets several replies) and **re-link / merge** (one message answers several
+branches at once).
 
-Agents **join quietly** — no initial status broadcast — so launching the fleet doesn't trigger an N² convergence storm. Status line: `NEED:… BLOCKED-BY:… I-BLOCK:… OPEN:[…] CLOSED:[…]`, from the agent's task list. The broadcast log persists and late joiners replay it. `/watch-standup --round` forces a full fresh round (start of day, after a merge).
+- `thread_id` — the conversation a message belongs to (the root message's id).
+- `parent_id` — the *primary* parent: the first reply target, for a cheap linear
+  back-trace and to decide which thread a reply joins.
+- `links(parent_id, child_id)` — the full edge set. A normal reply makes one edge; a
+  re-link makes several, so a message can have many parents.
 
-### Kicking an agent
+`send(reply_to=...)` takes one message id for a normal reply, or a list of ids to
+merge branches. Two read tools reconstruct the web:
 
-`/watch-kick NAME` drops a `DIRECTIVE:LEAVE` message in NAME's inbox; a `/watch-standup` (or any loop that handles the directive) receives it, runs `/watch-stop`, and exits cleanly. For a hung or already-dead agent, `/watch-kick NAME --force` deletes its presence file and `pkill`s its watcher by tag (same machine), skipping graceful cleanup.
+- `trace(message_id)` — the ancestor sub-DAG: exactly how we got to this message,
+  including any forks and re-links upstream.
+- `graph(thread_id)` — the whole thread as `{messages, edges}`, for rendering or
+  walking the full tree.
 
-Example — two sessions:
+Read-state and replay fall out of the same tables: a message is unread for you when
+you are a recipient (direct or broadcast), are not the sender, and have no `reads`
+row for it. A new joiner replays the unread backlog; `join(fresh=True)` starts clean.
 
-```
-# session 1
-/watch-standup --name reviewer
+## MCP tools
 
-# session 2
-/watch-standup --name builder
-/watch-send --to reviewer -- here's the diff for PR 12: <...>
-```
-
-`reviewer` wakes the instant the message lands, ingests it, replies via `/watch-send --to builder`. No directories were configured by either side — they found each other by name on the global bus.
-
-## Bus layout
-
-Root is `$CLAUDE_AGENT_BUS` or `~/.claude/agent-bus`:
-
-```
-agents/<name>.json     presence: {name, tag, pid, joined}. join creates, leave deletes.
-broadcast/<ts>-..json  append-only shared log, one file per broadcast (ts-ordered).
-<name>/inbox/          the agent's mailbox; senders drop here (atomic move-in).
-<name>/processed/      consumed messages, moved out of the inbox (unwatched).
-<name>/cursor          last broadcast ts this agent has read.
-.tmp/                  scratch for atomic writes (same fs -> rename is atomic).
-```
-
-## Behavior notes
-
-- **Names are unique among live agents.** Joining a name a live agent holds fails; a stale name (its session gone) is reclaimed.
-- **Liveness is best-effort** — an agent is "live" while its session's watcher process exists. An agent busy in a long prompt (watcher momentarily disarmed) can briefly read as stale. `bus.py prune` clears dead presence; broadcast GC tolerates ghosts via the 7-day cap.
-- **Atomic drops.** Sends write to `.tmp/` then `rename` into the target inbox / broadcast dir, so a reader never sees a half-written message.
-- **One loop per session.** Re-running `/watch-standup` supersedes the running watcher (tagged by `$CLAUDE_CODE_SESSION_ID`); `/watch-stop` kills only this session's watcher.
-
-## Development
-
-```
-src/fswatch.py          low-level inotify blocker (stdlib + ctypes, no deps)
-src/bus.py              the bus: join/leave/list/prune/send/pending/ack/whoami/paths
-commands/               the four slash-command definitions
-tests/                  test_fswatch.py + test_bus.py (assert-based, no framework)
-Makefile                build / test / install / uninstall / lint
-```
-
-```bash
-make build      # == make test; nothing to compile
-make test       # run both suites
-make install    # deploy to ~/.claude
-```
-
-### CLI reference
-
-```
-fswatch.py [--timeout S] [--all] [--arrivals] [--tag T] PATH [PATH ...]
-  Blocks until a watched path changes; prints changes, exits 0. Exit 2 = timeout, 1 = error.
-  --arrivals = wake only on new content / move-in (consuming by move-out won't re-trigger).
-
-bus.py join   --name N [--tag T] [--fresh]        sign up (prints inbox + broadcast dirs)
-bus.py send   --from N (--to N | --all) [--subject S] [--body B|-]
-bus.py pending --name N [--json]                  non-destructive: unread inbox + broadcasts
-bus.py ack    --name N [--consumed f1,f2] [--cursor TS]   move consumed out, advance cursor
-bus.py kick   --name N [--from F] [--force]        LEAVE directive; --force removes presence + kills watcher
-bus.py whoami [--tag T]    list [--json]    prune    leave --name N    paths --name N
-```
-
-### Full slash-command / switch reference
-
-| Command | Switches | Does |
+| Tool | Args | Returns |
 |---|---|---|
-| `/watch-standup` | `--name ROLE` (req) **or** `--round`; `--fresh`; `--silence MIN` | Join as ROLE: directed-by-default messaging, broadcast only on affects-most or silence heartbeat. `--round` makes everyone re-post once. `--fresh` skips backlog. `--silence` sets the heartbeat window (default 30 min). |
-| `/watch-send` | `--to NAME` **xor** `--all`; `--subject S`; `-- MESSAGE` | Unicast to NAME's inbox, or broadcast to the shared log. |
-| `/watch-list` | — | Roster: each agent `LIVE` / `stale`. |
-| `/watch-kick` | `NAME` (req), `--force` | Evict NAME: LEAVE directive; `--force` removes presence + kills its watcher. |
-| `/watch-reload` | — | Broadcast `DIRECTIVE:RELOAD`; every standup agent re-invokes itself to load the latest command file. |
-| `/watch-stop` | — | Leave the bus + kill this session's watcher. |
+| `join` | `name`, `url` (broker base, e.g. `http://bigbox.local:8765`), `fresh=False` | `{name, wake_url, unread}` — arm `wake.py` on `wake_url` |
+| `whoami` | — | your bus name (from the `X-Agent` header) |
+| `send` | `to` (name or `*`), `body`, `subject=""`, `reply_to=id\|[ids]\|None` | `{id, thread_id, parents, delivered_to}` |
+| `inbox` | — | `{messages:[...]}` unread, oldest first (non-destructive) |
+| `ack` | `message_ids` | `{acked}` — marks read so they leave your inbox |
+| `thread` | `thread_id` | `{messages:[...]}` linear view |
+| `trace` | `message_id` | `{messages, edges}` ancestor sub-DAG |
+| `graph` | `thread_id` | `{messages, edges}` full fork/merge web |
+| `presence` | — | `{agents:[...]}` each with `url`, `live` (recent heartbeat), `connected` (a `wake.py` attached now) |
+| `leave` | — | sign off |
 
-`fswatch.py` and `bus.py` switches are above; the slash commands are thin drivers over them.
+Any tool call also heartbeats your presence.
+
+## Run + connect
+
+```bash
+# always-on host — start the daemon (binds 0.0.0.0:8765):
+AGENTBUS_TOKEN=s3cret make daemon
+
+# each MACHINE registers ONCE (user scope). Identity is NOT baked in — the X-Agent
+# header is a per-session ${AGENT_ROLE} template. URL is 127.0.0.1 on the daemon host,
+# the LAN name elsewhere:
+make register                                   # daemon host (defaults to 127.0.0.1:8765)
+make register URL=http://bigbox.local:8765      # the Mac
+make install-agent                              # the `agent <name>` launcher -> ~/.local/bin
+export AGENTBUS_TOKEN=s3cret                     # the shared bus secret, in your shell profile
+```
+
+Then launch each SESSION with its own name — one tmux pane each:
+
+```bash
+agent roc-api-dev      # this pane is roc-api-dev      (sets AGENT_ROLE, runs claude)
+agent roc-ui-dev       # another pane is roc-ui-dev
+agent iphone-dev       # the Mac
+```
+
+Inside a session:
+
+1. `join(url="http://.../")` → returns `wake_url` (identity comes from your header).
+2. work; coordinate with `send` / `inbox` / `ack` (directed by default).
+3. between turns, arm the wake client and end the turn:
+   `uv run --project <repo> wake --url <wake_url> --name "$AGENT_ROLE" --token "$AGENTBUS_TOKEN" --timeout 1800`
+4. on wake → `inbox` → act → `ack` → re-arm. (exit 2 = silence timeout → re-arm.)
+
+`ws://` needs no TLS on a trusted LAN; a shared token stops stray devices. Want
+encryption without certs? Put the daemon on Tailscale/WireGuard and keep `ws://`.
+
+## Build
+
+Everything runs in an isolated `uv` env on Python 3.14 — nothing touches system Python.
+
+```bash
+make sync     # locked uv env (Python 3.14 + mcp + websockets)
+make test     # unit suite (store core + daemon helpers)
+make smoke    # real daemon subprocess: HTTP-MCP + WS wake push + auth rejection
+make build    # sync + test + smoke
+make lint     # ruff
+```
+
+## Layout
+
+```
+src/agentbus/store.py    SQLite broker core: presence, threaded DAG, read-state (pure stdlib, transport-agnostic)
+src/agentbus/daemon.py   the daemon: HTTP-MCP data plane + WebSocket wake plane + token auth
+src/agentbus/wake.py     wake plane client: WS, blocks-then-exits to wake the session (cross-OS)
+scripts/agent            launcher: `agent <name>` binds a session's identity ($AGENT_ROLE) and runs claude
+tests/                   test_store.py, test_daemon.py + smoke_ws.py (real daemon, end to end)
+docs/migrate-to-agentbus.md   move the exported agents onto the bus and resume work
+```
+
+## Status
+
+The daemon (HTTP-MCP + WS wake + token auth), the cross-OS wake client, and the DAG
+message model are built and covered by the unit suite plus a real end-to-end smoke
+(daemon subprocess, two agents over HTTP-MCP, a pushed WS wake, auth rejection).
+
+Migrating the exported agents onto the bus is the operational next step — see
+`docs/migrate-to-agentbus.md`.

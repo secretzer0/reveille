@@ -1,0 +1,39 @@
+[project]
+name = "agentbus"
+version = "0.1.0"
+description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mcp>=1.2",
+    "websockets>=13",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+agentbus-daemon = "agentbus.daemon:main"
+wake = "agentbus.wake:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.9"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "agentbus"
+module-root = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+# tests use compact `setup; act` one-liners. Intentional.
+"tests/*" = ["E702"]

@@ -1,42 +1,102 @@
-CLAUDE ?= $(HOME)/.claude
+REPO := $(abspath .)
+PREFIX ?= $(HOME)/.local/bin
+LOG  := $(REPO)/agentbus.log
+PID  := $(REPO)/agentbus.pid
 
-.PHONY: help build test install uninstall lint clean
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean
 
 help:
-	@echo "make test       run the test suite"
-	@echo "make build      verify (test) — there is nothing to compile; a single zero-dep script"
-	@echo "make install    deploy fswatch.py + commands into $(CLAUDE)"
-	@echo "make uninstall  remove them from $(CLAUDE)"
-	@echo "make lint       ruff check (if installed)"
+	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
+	@echo "make test           unit suite (uv run pytest)"
+	@echo "make smoke          end-to-end smoke: real daemon, HTTP-MCP + WS wake + auth"
+	@echo "make build          sync + test + smoke"
+	@echo "make daemon         run the broker in the FOREGROUND (Ctrl-C to stop)"
+	@echo "make start          start the broker in the background -> agentbus.log. Env: AGENTBUS_TOKEN, AGENTBUS_PORT"
+	@echo "make stop           stop the background broker"
+	@echo "make restart        stop + start"
+	@echo "make status         is the background broker running?"
+	@echo "make logs           tail -f agentbus.log"
+	@echo "make register [URL=] register agentbus once (user scope); identity = per-session \$$AGENT_ROLE"
+	@echo "make install-agent  install the 'agent <name>' launcher into $(PREFIX)"
+	@echo "make unregister      remove the agentbus MCP registration"
+	@echo "make lint           ruff check"
 
-# build == verify it works. No compile step: fswatch.py is a single stdlib+ctypes file.
-build: test
+sync:
+	uv sync
+
+# build == prove it works: locked env, unit suite, real HTTP+WS smoke.
+build: sync test smoke
 
 test:
-	python3 tests/test_fswatch.py
-	python3 tests/test_bus.py
+	uv run pytest -q
 
-install:
-	install -d "$(CLAUDE)/scripts" "$(CLAUDE)/commands"
-	install -m 0755 src/fswatch.py "$(CLAUDE)/scripts/fswatch.py"
-	install -m 0755 src/bus.py "$(CLAUDE)/scripts/bus.py"
-	install -m 0644 commands/watch-send.md "$(CLAUDE)/commands/watch-send.md"
-	install -m 0644 commands/watch-list.md "$(CLAUDE)/commands/watch-list.md"
-	install -m 0644 commands/watch-standup.md "$(CLAUDE)/commands/watch-standup.md"
-	install -m 0644 commands/watch-kick.md "$(CLAUDE)/commands/watch-kick.md"
-	install -m 0644 commands/watch-reload.md "$(CLAUDE)/commands/watch-reload.md"
-	install -m 0644 commands/watch-stop.md "$(CLAUDE)/commands/watch-stop.md"
-	@echo "installed to $(CLAUDE) — restart running sessions to load the commands."
+smoke:
+	uv run python tests/smoke_ws.py
 
-uninstall:
-	rm -f "$(CLAUDE)/scripts/fswatch.py" "$(CLAUDE)/scripts/bus.py" \
-	      "$(CLAUDE)/commands/watch-send.md" "$(CLAUDE)/commands/watch-list.md" \
-	      "$(CLAUDE)/commands/watch-standup.md" "$(CLAUDE)/commands/watch-kick.md" \
-	      "$(CLAUDE)/commands/watch-reload.md" "$(CLAUDE)/commands/watch-stop.md"
-	@echo "removed from $(CLAUDE)."
+# The broker daemon. One process on an always-on host serves every agent (local at
+# 127.0.0.1, remote at the LAN name) over the same SQLite -> one bus. Set
+# AGENTBUS_TOKEN to require auth; AGENTBUS_PORT to change the port (default 8765).
+daemon:
+	uv run agentbus-daemon
+
+# Background lifecycle. Logs go to agentbus.log next to this Makefile; PID in
+# agentbus.pid. Pass env through make, e.g.:  AGENTBUS_TOKEN=s3cret make start
+start: sync
+	@if [ -f "$(PID)" ] && kill -0 `cat "$(PID)"` 2>/dev/null; then \
+	  echo "agentbus already running (pid `cat $(PID)`)"; \
+	else \
+	  nohup "$(REPO)/.venv/bin/agentbus-daemon" >> "$(LOG)" 2>&1 & echo $$! > "$(PID)"; \
+	  sleep 1; \
+	  if kill -0 `cat "$(PID)"` 2>/dev/null; then \
+	    echo "agentbus started (pid `cat $(PID)`) -> $(LOG)"; \
+	  else \
+	    echo "agentbus FAILED to start -- last log lines:"; tail -3 "$(LOG)"; rm -f "$(PID)"; exit 1; \
+	  fi; \
+	fi
+
+stop:
+	@if [ -f "$(PID)" ] && kill -0 `cat "$(PID)"` 2>/dev/null; then \
+	  p=`cat "$(PID)"`; kill $$p 2>/dev/null; \
+	  for i in 1 2 3 4 5 6; do kill -0 $$p 2>/dev/null || break; sleep 0.5; done; \
+	  kill -9 $$p 2>/dev/null || true; \
+	  echo "agentbus stopped (pid $$p)"; \
+	else \
+	  echo "no live pid; clearing any stray daemon"; pkill -f "$(REPO)/.venv/bin/agentbus-daemon" 2>/dev/null || true; \
+	fi; \
+	rm -f "$(PID)"
+
+restart: stop start
+
+status:
+	@if [ -f "$(PID)" ] && kill -0 `cat "$(PID)"` 2>/dev/null; then \
+	  echo "running (pid `cat $(PID)`) -> $(LOG)"; else echo "stopped"; fi
+
+logs:
+	@touch "$(LOG)"; tail -n 80 -f "$(LOG)"
+
+# Register the daemon ONCE per machine (user scope). Identity is NOT baked in here --
+# the X-Agent header and the bearer token are ${VAR} templates that Claude Code expands
+# per session from that session's own env. So one registration serves every tmux pane;
+# each pane just exports its own $AGENT_ROLE (see `agent` launcher / install-agent).
+# URL is 127.0.0.1 on the daemon host, the LAN name elsewhere (override: URL=...).
+register:
+	claude mcp add --transport http --scope user agentbus "$(or $(URL),http://127.0.0.1:8765)/mcp" \
+	  --header 'Authorization: Bearer $${AGENTBUS_TOKEN:-}' \
+	  --header 'X-Agent: $${AGENT_ROLE:-unset-agent}'
+	@echo "registered. each session: export AGENT_ROLE=<dev> (and AGENTBUS_TOKEN) before 'claude',"
+	@echo "or use: agent <dev>   (see make install-agent)"
+
+# Install the 'agent <name>' launcher so a pane is one command: `agent roc-api-dev`.
+install-agent:
+	install -d "$(PREFIX)"
+	install -m 0755 scripts/agent "$(PREFIX)/agent"
+	@echo "installed $(PREFIX)/agent  (ensure $(PREFIX) is on PATH)"
+
+unregister:
+	claude mcp remove agentbus --scope user || true
 
 lint:
-	@command -v ruff >/dev/null 2>&1 && ruff check src tests || echo "ruff not installed — skipping"
+	uv run ruff check src tests
 
 clean:
-	rm -rf src/__pycache__ tests/__pycache__ .ruff_cache .mypy_cache
+	rm -rf src/agentbus/__pycache__ tests/__pycache__ .ruff_cache .mypy_cache .pytest_cache

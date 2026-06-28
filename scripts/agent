@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Launch a Claude Code session bound to a bus identity.
+#
+#   agent roc-api-dev            # this tmux pane is roc-api-dev on the bus
+#   agent iphone-dev             # another pane / machine is iphone-dev
+#
+# It sets $AGENT_ROLE for the session, which Claude Code expands into the
+# `X-Agent` header of the agentbus MCP server (registered once, user scope).
+# So every pane shares one MCP registration but gets its own identity.
+# $AGENTBUS_TOKEN (the shared bus secret) is inherited from your shell if set.
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "usage: agent <dev-name> [claude args...]" >&2
+    exit 1
+fi
+
+export AGENT_ROLE="$1"
+shift
+export AGENTBUS_TOKEN="${AGENTBUS_TOKEN:-}"
+
+echo "agentbus: this session is '$AGENT_ROLE'" >&2
+exec claude "$@"
