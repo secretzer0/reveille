@@ -146,6 +146,8 @@ CHANGES (newest first; re-read after any broker version bump):
        /upload?name=<file> (raw bytes body) -> {"url": "/files/..."}; pass
        [{"url","name","bytes"}] as `attachments` on send (MCP tool or POST /send).
        Messages carry an "attachments" list everywhere (inbox/history/thread).
+       The attachments FIELD is the only form -- never write "[file: ...]" markers
+       into a body; they are plain text and no consumer parses them.
        Agents: need the content -> fetch <broker><url> with your Bearer token;
        otherwise ignore it. Nothing else changes for you.
 0.1.3  Native wake: the tmux keystroke sidecar is GONE. Arm `wake --once` yourself as a
@@ -171,7 +173,7 @@ _conn = None  # one connection, used only from the event-loop thread (async tool
 # In-process wake registry: name -> set of asyncio.Queue, one per connected wake.py.
 # send() notifies; the WS handler awaiting the queue pushes a frame and the client
 # exits. This is the wake signal -- the message itself stays in SQLite, read over MCP.
-_waiters: dict[str, set] = {}
+_waiters: dict[tuple, set] = {}  # (room, name) -> wake queues
 
 # Poke gate: one outstanding wake per agent. A pushed frame sets name -> ts here; no
 # further frames are pushed until the agent polls inbox() (its ack), so wake notifications
@@ -536,6 +538,7 @@ async def wake_ws(ws: WebSocket):
             bucket.discard(q)
             if not bucket:
                 _waiters.pop((room, name), None)
+        log.info("%s wake disconnected", name)
 
 
 # ---- app + auth + run --------------------------------------------------------
@@ -801,9 +804,10 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   margin:.1rem 0 .3rem}
  .row.bcast{border-left:2px solid var(--gold);border-radius:0 8px 8px 0}
- .body img.att{display:block;max-width:520px;max-height:340px;border-radius:8px;
-  border:1px solid var(--line);margin:.35rem 0}
- .body a.attlink{color:var(--gold)}
+ .atts{display:flex;gap:.5rem;flex-wrap:wrap;margin:.3rem 0 .35rem}
+ .atts img.att{display:block;max-width:min(380px,100%);max-height:260px;width:auto;
+  height:auto;border-radius:8px;border:1px solid var(--line);cursor:zoom-in}
+ .atts a.attlink{color:var(--gold)}
  #empty{color:var(--faint);text-align:center;margin-top:4rem}
 
  #jump{position:fixed;right:1.6rem;bottom:8.2rem;display:none;background:var(--card);
@@ -826,10 +830,20 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  #attachBtn{background:none;border:1px solid var(--line);color:var(--dim);border-radius:2em;
   padding:.22rem .9rem;cursor:pointer;font:inherit;font-size:.78rem}
  #attachBtn:hover{color:var(--gold);border-color:var(--gold)}
- .attchip{display:inline-flex;align-items:center;gap:.4rem;background:var(--rail);
-  border:1px solid var(--line);border-radius:1em;padding:.1rem .7rem;font-size:.78rem;
-  color:var(--dim);max-width:14rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
- .attchip b{cursor:pointer;color:var(--gold)}
+ #attchips{display:flex;gap:.5rem;flex-wrap:wrap}
+ .attTile{position:relative;width:58px;height:58px;border-radius:10px;flex:none;
+  border:1px solid var(--line);background:var(--rail);overflow:hidden;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.1rem}
+ .attTile img{width:100%;height:100%;object-fit:cover}
+ .attTile .ext{color:var(--gold);font-weight:800;font-size:.7rem;letter-spacing:.04em}
+ .attTile .fn{color:var(--faint);font-size:.55rem;max-width:52px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+ .attTile .rm{position:absolute;top:2px;right:2px;width:17px;height:17px;
+  border-radius:50%;background:rgba(10,13,18,.85);border:1px solid var(--line);
+  color:var(--fg);font-size:.62rem;line-height:15px;text-align:center;cursor:pointer;
+  opacity:0;transition:opacity .12s}
+ .attTile:hover .rm{opacity:1}
+ .attTile .rm:hover{color:var(--gold);border-color:var(--gold)}
  .khint{color:var(--faint);font-size:.72rem;margin-left:auto}
  #composer.drag{border-color:var(--gold);background:var(--hover)}
  #composer.drag::after{content:"drop files to attach";color:var(--gold);
@@ -987,10 +1001,17 @@ async function uploadFile(f){
 function renderAttchips(){
  const w=$('attchips');w.innerHTML='';
  attachments.forEach((a,i)=>{
-  const c=document.createElement('span');c.className='attchip';
-  c.innerHTML=esc(a.name)+' <b title="remove">\u2715</b>';
-  c.querySelector('b').onclick=()=>{attachments.splice(i,1);renderAttchips();};
-  w.appendChild(c);
+  const t=document.createElement('div');t.className='attTile';t.title=a.name;
+  if(/\.(png|jpe?g|gif|webp|svg)$/i.test(a.url)){
+   t.innerHTML='<img src="'+a.url+qs()+'" alt="">';
+  }else{
+   const ext=(a.name.includes('.')?a.name.split('.').pop():'').toUpperCase().slice(0,4)||'FILE';
+   t.innerHTML='<span class="ext">'+esc(ext)+'</span><span class="fn">'+esc(a.name)+'</span>';
+  }
+  const rm=document.createElement('span');rm.className='rm';rm.textContent='\u2715';
+  rm.title='remove '+a.name;
+  rm.onclick=()=>{attachments.splice(i,1);renderAttchips();};
+  t.appendChild(rm);w.appendChild(t);
  });
 }
 const msgs=new Map();
@@ -1039,24 +1060,13 @@ function matches(m){
  return f.split(/\s+/).some(w=>hay.includes(w));
 }
 
-function bodyHtml(m){
- let h=esc(m.body);
- h=h.replace(/\[file: (\/files\/[^ \]]+)(?: ([^\]]*))?\]/g,(_,url,name)=>{
-  const safe=url+qs();
-  if(/\.(png|jpe?g|gif|webp|svg)$/i.test(url))
-   return '<img class="att" src="'+safe+'" alt="'+(name||'image')+'">';
-  return '<a class="attlink" href="'+safe+'" download="'+(name||'file')+'">'
-    +(name||url.split('/').pop())+'</a>';
- });
- return h;
-}
-
 function attHtml(list){
  if(!list||!list.length)return '';
  return '<div class="atts">'+list.map(a=>{
   const safe=a.url+qs();
   if(/\.(png|jpe?g|gif|webp|svg)$/i.test(a.url))
-   return '<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'">';
+   return '<a href="'+safe+'" target="_blank" rel="noopener" title="open full size">'
+     +'<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'"></a>';
   return '<a class="attlink" href="'+safe+'" download>'+esc(a.name||a.url)+'</a>';
  }).join(' ')+'</div>';
 }
@@ -1086,7 +1096,7 @@ function render(m){
     +'<span class="mid" data-thread="'+m.thread_id+'" title="view thread">#'+m.id
     +(m.thread_id!==m.id?' &middot; thread '+m.thread_id:'')+'</span></div>')
   +(m.subject?'<div class="subj">'+esc(m.subject)+'</div>':'')
-  +'<div class="body">'+bodyHtml(m)+'</div>'+attHtml(m.attachments)+'</div>';
+  +'<div class="body">'+esc(m.body)+'</div>'+attHtml(m.attachments)+'</div>';
  row.style.display=matches(m)?'':'none';
  row.addEventListener('click',e=>{
   if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click

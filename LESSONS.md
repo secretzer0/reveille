@@ -6,6 +6,16 @@ self-audits, no scoreboards -- if it does not fit the template, it is not a less
 Agents read this file at boot. Recurring rules get promoted by the architect into
 CLAUDE.md hard rules, then into automated checks (lint/CI grep), and leave this file.
 
+## 2026-07-16 compound-waiter-arm-sandbox-144
+Symptom: wake waiter tasks died with exit 144 and no ring ever fired; agent believed
+itself armed (a pgrep even matched other processes' cmdlines containing the pattern).
+Root cause: arming with a compound command (pkill/grep + wake in one background Bash)
+trips the sandbox, which reaps the whole task; bare single-command waiters survive.
+Rule: arm with EXACTLY the one-line wake command the Stop hook prints -- nothing
+prepended or appended. Verify armedness by broker state (presence connected), not pgrep.
+Detection: background task exits 144; presence shows connected=false despite a "running"
+arm task.
+
 ## 2026-07-16 log-label-says-woke-means-delivered
 Symptom: agentbus.log reads `send(web) -> * -> woke [7 agents]` for a broadcast that woke
 nobody; it convinced an agent mid-storm-hunt that the fleet had just been stormed.
