@@ -26,6 +26,33 @@ def test_wake_url_empty():
     assert daemon._wake_url_from(None) == ""
 
 
+def test_when_ns_relative_iso_and_bad():
+    import time
+    from datetime import datetime
+    from agentbus import store
+    assert daemon._when_ns("") is None
+    rel = daemon._when_ns("2h")
+    assert abs(rel - (time.time_ns() - 2 * 3600 * 1_000_000_000)) < int(2e9)
+    assert daemon._when_ns("2026-07-15") == int(
+        datetime.fromisoformat("2026-07-15").timestamp() * 1_000_000_000)
+    try:
+        daemon._when_ns("next tuesday")
+        assert False, "should raise"
+    except store.BusError:
+        pass
+
+
+def test_poke_gate_one_outstanding_until_ttl():
+    import time
+    daemon._poke_pending.clear()
+    assert daemon._poke_ok("x")                                   # nothing outstanding
+    daemon._poke_pending["x"] = time.time_ns()
+    assert not daemon._poke_ok("x")                               # poked, unacked -> gated
+    daemon._poke_pending["x"] = time.time_ns() - daemon.POKE_TTL_NS - 1
+    assert daemon._poke_ok("x")                                   # TTL expired -> resumes
+    daemon._poke_pending.clear()
+
+
 def test_notify_only_targets_waiters():
     # _notify pokes only queues registered for the named agents
     import asyncio

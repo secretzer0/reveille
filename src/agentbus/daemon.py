@@ -30,6 +30,7 @@ import re
 import struct
 import termios
 import time
+from datetime import datetime
 
 from mcp.server.fastmcp import Context, FastMCP
 from starlette.applications import Starlette
@@ -56,23 +57,51 @@ ENV (set by the launching pane; never hardcode or prompt):
   $AGENTBUS_TOKEN  the bus secret.
 
 USE:
-1. Startup: join(url="http://<broker-host>:8765").
+1. Startup: join(url="http://<broker-host>:8765"). Join replays only the last 15 min of
+   backlog; recall further back ONLY when explicitly asked, via history(since=...).
 2. Reachability: launch via `scripts/agent <role>` in tmux. A sidecar then holds your wake
-   socket at 0 tokens and pokes your pane when a real message arrives -- do not run wake
-   yourself. On a poke ("agentbus ring...") or any turn: inbox() -> act -> ack(ids).
-   No tmux -> no poke; just inbox() each turn (messages queue durably).
-3. Messaging: unicast by default; broadcast (to="*") only if most peers care; reply_to to
-   thread. DIRECTIVE:LEAVE addressed to you -> leave().
+   socket at 0 tokens and pokes your pane when a message addressed to you arrives -- do
+   not run wake yourself. Only unicast wakes you; broadcasts queue silently until your
+   next turn. No tmux -> no poke; just inbox() each turn (messages queue durably).
+3. Protocol, on a poke or any turn: inbox(), ack() everything.
+   Reply ONLY if: it names you in NEED:, blocks your work, or asks you a direct question.
+   FYI / retraction / method-lesson -> ack, note in your own memory, do NOT reply.
+   Broadcast (to="*") ONLY if: a shared contract changed or you block multiple peers.
+   Nothing owed -> ack and go quiet. Silence is a valid turn.
+   reply_to to thread. DIRECTIVE:LEAVE addressed to you -> leave().
+4. Defects: found one in another agent's repo?
+   LOAD-BEARING (a shared contract/service/pattern peers are coding against right now) ->
+   surface IMMEDIATELY: unicast the owner with NEED: + repro; broadcast only if multiple
+   peers are actively building on the bad pattern.
+   Anything else -> FINISH YOUR CURRENT TASK FIRST, then unicast the owner. A defect
+   report is not an invitation to audit; the owner fixes it.
+5. Lessons: when a defect teaches something, append ONE entry to LESSONS.md at the root
+   of the repo you work in (create it from the template below). Never post lessons,
+   confessionals, or self-audits to the bus. Read your LESSONS.md at boot.
+
+--- LESSONS.md entry template (hard cap 10 lines per entry) ---
+## <date> <slug>
+Symptom: what shipped or almost shipped broken
+Root cause: one sentence
+Rule: what to do differently, imperative
+Detection: grep/lint/test that catches recurrence
 
 --- CLAUDE.md block (replace any old agentbus section) ---
 ## Agent bus
 Identity/token from env, never hardcode: $AGENT_ROLE = my bus name, $AGENTBUS_TOKEN = secret.
-Startup: join(url="http://<broker-host>:8765").
-Reachability: launched via `scripts/agent <role>` in tmux -> a sidecar pokes my pane on real
-messages; I idle at 0 tokens and do not run wake myself. On a poke or any turn: inbox(),
-act, ack(). No tmux -> inbox() each turn.
-Messaging: unicast default; broadcast only if most peers care; reply_to to thread.
-DIRECTIVE:LEAVE to me -> leave().
+Startup: join(url="http://<broker-host>:8765") -- replays last 15 min only; older mail via
+history(since=...) ONLY when explicitly asked. Read LESSONS.md at repo root, if present.
+Reachability: launched via `scripts/agent <role>` in tmux -> a sidecar pokes my pane on
+unicast to me; broadcasts queue until my next turn. I idle at 0 tokens and do not run wake
+myself. No tmux -> inbox() each turn.
+Protocol: inbox(), ack() everything. Reply ONLY if named in NEED:, blocked, or asked
+directly. FYI/retraction/method-lesson -> ack + own notes, no reply. Broadcast ONLY if a
+shared contract changed or I block multiple peers. Nothing owed -> silence is a valid turn.
+reply_to to thread. DIRECTIVE:LEAVE to me -> leave().
+Defects: load-bearing (peers coding against it now) -> surface immediately (unicast owner
+NEED: + repro; broadcast only if several peers build on it). Anything else -> finish my
+current task first, then unicast the owner. Lessons -> one LESSONS.md entry (template via
+usage()), never bus traffic.
 Full reference: usage() or GET <broker>/usage.
 """
 
@@ -84,6 +113,18 @@ _conn = None  # one connection, used only from the event-loop thread (async tool
 # send() notifies; the WS handler awaiting the queue pushes a frame and the client
 # exits. This is the wake signal -- the message itself stays in SQLite, read over MCP.
 _waiters: dict[str, set] = {}
+
+# Poke gate: one outstanding poke per agent. A pushed wake frame sets name -> ts here;
+# no further frames are pushed until the agent polls inbox() (its ack), so pokes never
+# stack up in a busy agent's prompt. The TTL is the escape hatch for a lost frame
+# (sidecar died mid-poke): after it, poking resumes.
+_poke_pending: dict[str, int] = {}
+POKE_TTL_NS = 10 * 60 * 1_000_000_000
+
+
+def _poke_ok(name):
+    ts = _poke_pending.get(name)
+    return ts is None or time.time_ns() - ts > POKE_TTL_NS
 
 mcp = FastMCP("agentbus", stateless_http=True, json_response=True)
 
@@ -113,8 +154,9 @@ def _seen(name):
 async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context = None) -> dict:
     """Join the bus, telling it where you reach the broker (`url`, e.g.
     http://bigbox.local:8765). Your identity is your X-Agent header (set per session
-    from $AGENT_ROLE); pass `name` only to assert it matches. fresh=True skips the
-    backlog. Returns {name, wake_url, unread}."""
+    from $AGENT_ROLE); pass `name` only to assert it matches. Replays only the last
+    15 min of backlog (use history(since=...) to recall further back, only when
+    explicitly asked); fresh=True skips the backlog. Returns {name, wake_url, unread}."""
     me = _me(ctx)
     if name and name != me:
         raise ValueError(f"join name {name!r} must match your X-Agent header {me!r}")
@@ -151,12 +193,14 @@ async def info(ctx: Context = None) -> str:
 async def send(to: str, body: str, subject: str = "",
                reply_to: int | list[int] | None = None, ctx: Context = None) -> dict:
     """Send a message. to='*' broadcasts; else unicast to one agent. reply_to is a
-    message id (or list, to merge branches). Pushes the recipient(s) awake over WS.
+    message id (or list, to merge branches). Unicast pushes the recipient awake over
+    WS; broadcasts queue silently and are read on each recipient's next turn.
     Returns {id, thread_id, parents, delivered_to}."""
     me = _me(ctx)
     _seen(me)
     res = store.send(_conn, me, to, body, subject=subject, reply_to=reply_to)
-    _notify(res["wake"])
+    if to != store.BROADCAST:  # broadcasts never wake: delivery != wakeup, kills N^2 storms
+        _notify(res["wake"])
     log.info("%s send -> %s thread=%s id=%s%s -> woke %s",
              me, to, res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "", res["wake"])
@@ -170,6 +214,7 @@ async def inbox(ctx: Context = None) -> dict:
     Non-destructive: ack(message_ids) when processed."""
     me = _me(ctx)
     _seen(me)
+    _poke_pending.pop(me, None)  # the wake poll: acks the outstanding poke, re-arming the gate
     msgs = store.inbox(_conn, me)
     log.info("%s inbox -> %s unread", me, len(msgs))
     return {"messages": msgs}
@@ -209,36 +254,53 @@ async def graph(thread_id: int, ctx: Context = None) -> dict:
 _DUR_RE = re.compile(r"\s*(\d+)\s*([smhd])\s*")
 
 
-def _since_ns(since: str):
-    m = since and _DUR_RE.fullmatch(since)
-    if not m:
+def _when_ns(spec: str):
+    """Time spec -> ts_ns. Relative ('2h', '30m', '1d') or explicit ISO date/datetime
+    ('2026-07-15', '2026-07-15T09:30', server-local). Empty -> None (open endpoint)."""
+    if not spec:
         return None
-    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
-    return time.time_ns() - int(m.group(1)) * mult * 1_000_000_000
+    m = _DUR_RE.fullmatch(spec)
+    if m:
+        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
+        return time.time_ns() - int(m.group(1)) * mult * 1_000_000_000
+    try:
+        return int(datetime.fromisoformat(spec).timestamp() * 1_000_000_000)
+    except ValueError:
+        raise store.BusError(
+            f"bad time {spec!r}: relative '2h'/'30m'/'1d' or ISO '2026-07-15[THH:MM]'"
+        ) from None
 
 
 @mcp.tool()
-async def history(text: str = "", since: str = "", with_agent: str = "", mine: bool = False,
+async def history(keywords: str = "", since: str = "", until: str = "",
+                  with_agent: str = "", mine: bool = False,
                   thread_id: int = 0, limit: int = 200, ctx: Context = None) -> dict:
     """Search the full message log (read OR unread) -- this is how you review past
     coordination instead of reading the broker DB. Filters AND together:
-      text       case-insensitive substring in subject/body (the topic)
-      since      relative window: '2h', '30m', '1d', '90m' (omit = all time)
+      keywords   space-separated words, e.g. 'reboot deploy upgrade'. A message matches
+                 if ANY word appears anywhere in subject/body, case-insensitive.
+                 Results ranked best-first: more distinct words matched wins, then
+                 more total hits, ties oldest-first.
+      since/until  window endpoints; each is relative ('2h', '30m', '1d') or an
+                 explicit ISO date/datetime ('2026-07-15', '2026-07-15T09:30').
+                 Bare date = midnight, so one full day is since=D, until=D+1.
+                 Omit either endpoint to leave that side open.
       with_agent only messages where that agent is sender or recipient
       mine=True  only messages where YOU are sender or recipient (your asks + replies to
                  you); combine with with_agent for just your 1:1 thread with them
       thread_id  restrict to one thread
-    Returns the most recent <=limit matches oldest-first as {messages, count}. Each
-    message carries thread_id and parent_id -- pass thread_id to graph()/thread() or an
-    id to trace() to expand the reply DAG."""
+    Returns the most recent <=limit matches as {messages, count} (oldest-first when no
+    keywords). Each message carries thread_id and parent_id -- pass thread_id to
+    graph()/thread() or an id to trace() to expand the reply DAG."""
     me = _me(ctx)
     _seen(me)
     msgs = store.search(
-        _conn, text=text or None, since_ns=_since_ns(since),
+        _conn, keywords=keywords.split() or None,
+        since_ns=_when_ns(since), until_ns=_when_ns(until),
         involves=with_agent or None, mine_agent=(me if mine else None),
         thread_id=thread_id or None, limit=limit)
-    log.info("%s history text=%r since=%r with=%r mine=%s -> %s", me, text, since,
-             with_agent, mine, len(msgs))
+    log.info("%s history kw=%r since=%r until=%r with=%r mine=%s -> %s", me, keywords,
+             since, until, with_agent, mine, len(msgs))
     return {"messages": msgs, "count": len(msgs)}
 
 
@@ -302,11 +364,14 @@ async def wake_ws(ws: WebSocket):
     q: asyncio.Queue = asyncio.Queue()
     _waiters.setdefault(name, set()).add(q)
     try:
-        # Ring once if mail is already waiting at connect, so a just-attached client does
-        # not miss it. We do NOT re-ring on still-unacked backlog -- only on new arrivals.
-        # (Re-ringing pending mail is what made a reconnecting client storm on itself.)
-        backlog = store.inbox(_conn, name)
-        if backlog:
+        # Ring once if DIRECT mail is already waiting at connect, so a just-attached
+        # client does not miss it. Broadcasts never ring (here or on arrival) -- they
+        # drain on the agent's next natural turn; ringing them at reconnect made every
+        # daemon restart storm the whole fleet. We do NOT re-ring on still-unacked
+        # backlog -- only on new arrivals.
+        backlog = [m for m in store.inbox(_conn, name) if m["to"] != store.BROADCAST]
+        if backlog and _poke_ok(name):
+            _poke_pending[name] = time.time_ns()
             await ws.send_json({"wake": True, "reason": "backlog", "unread": len(backlog)})
             log.info("%s wake ring (backlog %s)", name, len(backlog))
         # Then STAY connected and push one frame per new message until the client drops.
@@ -326,9 +391,14 @@ async def wake_ws(ws: WebSocket):
                     await t
             if recv in done:  # client went away
                 break
-            # A notify fired. Coalesce any other queued notifies into this one ring.
+            # A notify fired. Coalesce any other queued notifies into this one ring,
+            # and swallow it entirely while a poke is already outstanding (the agent
+            # has an untyped prompt pending; its next inbox() pulls this mail anyway).
             while not q.empty():
                 q.get_nowait()
+            if not _poke_ok(name):
+                continue
+            _poke_pending[name] = time.time_ns()
             n = len(store.inbox(_conn, name))
             await ws.send_json({"wake": True, "reason": "message", "unread": n})
             log.info("%s wake ring (%s unread)", name, n)

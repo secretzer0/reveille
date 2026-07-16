@@ -63,12 +63,54 @@ def test_replay_on_join_then_fresh_skips():
     c = db()
     store.join(c, "alice", "TAG_a")
     store.send(c, "alice", store.BROADCAST, "old news")
-    # a normal late joiner replays the unread backlog...
+    # a normal late joiner replays the recent unread backlog...
     store.join(c, "late", "TAG_l")
     assert len(store.inbox(c, "late")) == 1
     # ...a --fresh joiner starts clean
     store.join(c, "fresh", "TAG_f", fresh=True)
     assert store.inbox(c, "fresh") == []
+
+
+def test_join_catchup_window_skips_old_mail():
+    c = db()
+    store.join(c, "alice", "TAG_a")
+    old = store.send(c, "alice", store.BROADCAST, "ancient history")
+    past = time.time_ns() - store.CATCHUP_NS - int(1e9)
+    c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (past, old["id"]))
+    store.send(c, "alice", store.BROADCAST, "recent news")
+    # a joiner replays only mail inside the catch-up window; older is auto-read
+    store.join(c, "late", "TAG_l")
+    box = store.inbox(c, "late")
+    assert len(box) == 1 and box[0]["body"] == "recent news"
+    # the old message is still in the log for explicit recall
+    assert any(m["body"] == "ancient history" for m in store.thread(c, old["thread_id"]))
+
+
+def test_search_keywords_case_insensitive_ranked():
+    c = db()
+    store.join(c, "a", "TA"); store.join(c, "b", "TB")
+    store.send(c, "a", "b", "we should REBOOT the box")            # 1 word, 1 hit
+    store.send(c, "a", "b", "reboot reboot reboot")                # 1 word, 3 hits
+    store.send(c, "a", "b", "deploy failed, deploy after reboot")  # 2 words, 3 hits
+    store.send(c, "a", "b", "nothing relevant")                    # no match
+    got = store.search(c, keywords=["reboot", "deploy", "UpgraDe"])
+    bodies = [m["body"] for m in got]
+    assert bodies == ["deploy failed, deploy after reboot",  # multi-word beats repeats
+                      "reboot reboot reboot",                # repeats beat single hit
+                      "we should REBOOT the box"]
+
+
+def test_search_explicit_window():
+    c = db()
+    store.join(c, "a", "TA"); store.join(c, "b", "TB")
+    early = store.send(c, "a", "b", "early")
+    mid = store.send(c, "a", "b", "mid")
+    late = store.send(c, "a", "b", "late")
+    base = time.time_ns()
+    for i, m in enumerate([early, mid, late]):
+        c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (base + i * 1000, m["id"]))
+    got = store.search(c, since_ns=base + 1000, until_ns=base + 1000)
+    assert [m["body"] for m in got] == ["mid"]
 
 
 def test_threading_reply_inherits_thread_and_parent():

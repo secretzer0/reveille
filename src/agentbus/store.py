@@ -13,10 +13,10 @@ messages   append-only. recipient = an agent name, or '*' for broadcast.
 reads      (message_id, agent) -- an agent has consumed a message.
 
 A message is UNREAD for agent A when A is a recipient (direct or '*'), A is not
-the sender, and no reads row exists for (message, A). Replay-on-join and catch-up
-both fall out of this for free: a new agent has no reads rows, so inbox() returns
-every broadcast it has not seen. --fresh just pre-inserts reads rows for the
-current backlog so a late joiner starts clean.
+the sender, and no reads row exists for (message, A). Catch-up falls out of this
+for free: join() pre-inserts reads rows for everything older than CATCHUP_NS, so
+a joiner replays only recent traffic (--fresh pre-inserts for the whole backlog,
+starting clean). Older mail stays queryable via history().
 """
 import os
 import re
@@ -26,6 +26,10 @@ import time
 # LIVE = heartbeat within this window. Exceeds the standup silence window (30m
 # default) so an idle-but-alive agent that only wakes on its heartbeat stays LIVE.
 LIVE_TTL_NS = 40 * 60 * 1_000_000_000
+# Join catch-up window: a joiner replays only this much backlog by default; older
+# mail is auto-marked read. Explicit recall of any period stays available via
+# history(since=...).
+CATCHUP_NS = 15 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 BROADCAST = "*"
 
@@ -103,7 +107,8 @@ def _row(conn, name):
 
 def join(conn, name, tag, fresh=False, url=None):
     """Sign up under `name`. Fails if a *live* agent holds it under a different tag.
-    `url` records where the agent lives (its broker base URL), for cross-machine."""
+    `url` records where the agent lives (its broker base URL), for cross-machine.
+    Replays only the last CATCHUP_NS of backlog; fresh=True skips it entirely."""
     valid_name(name)
     now = time.time_ns()
     cur = _row(conn, name)
@@ -114,12 +119,14 @@ def join(conn, name, tag, fresh=False, url=None):
         "ON CONFLICT(name) DO UPDATE SET tag=excluded.tag, url=excluded.url, seen_ns=excluded.seen_ns",
         (name, tag, url, now, now),
     )
-    if fresh:  # start clean: mark the whole current backlog already-read for this agent
-        conn.execute(
-            "INSERT OR IGNORE INTO reads(message_id, agent, read_ns) "
-            "SELECT id, ?, ? FROM messages WHERE sender != ?",
-            (name, now, name),
-        )
+    # Mark everything outside the catch-up window already-read: default joiners see
+    # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
+    cutoff = now if fresh else now - CATCHUP_NS
+    conn.execute(
+        "INSERT OR IGNORE INTO reads(message_id, agent, read_ns) "
+        "SELECT id, ?, ? FROM messages WHERE sender != ? AND ts_ns < ?",
+        (name, now, name, cutoff),
+    )
     return name
 
 
@@ -244,22 +251,27 @@ def thread(conn, thread_id):
     return [_msg(r) for r in rows]
 
 
-def search(conn, *, text=None, since_ns=None, until_ns=None,
+def search(conn, *, keywords=None, since_ns=None, until_ns=None,
            involves=None, mine_agent=None, thread_id=None, limit=200):
     """Search the whole message log (read or not). Every filter ANDs together:
-      text       case-insensitive substring in subject OR body
+      keywords   list of words; a message matches if ANY word appears as a
+                 case-insensitive substring, any position, in subject OR body
       since_ns   ts_ns >= since_ns        until_ns  ts_ns <= until_ns
       involves   agent is sender OR recipient (the full convo touching that agent)
       mine_agent agent is sender OR recipient (the caller's own slice)
       thread_id  restrict to one thread
     involves + mine_agent together => the 1:1 conversation between the two.
-    Returns the most recent <=limit matches, oldest-first. Each carries thread_id so
-    the caller can expand the DAG with thread()/graph()/trace().
+    Returns the most recent <=limit matches. Without keywords: oldest-first. With
+    keywords: ranked best-first -- more distinct words matched wins, then more total
+    hits, ties oldest-first. Each carries thread_id so the caller can expand the DAG
+    with thread()/graph()/trace().
     """
     where, args = [], []
-    if text:
-        where.append("(subject LIKE ? OR body LIKE ?)")
-        args += [f"%{text}%", f"%{text}%"]
+    if keywords:
+        ors = " OR ".join(["(subject LIKE ? OR body LIKE ?)"] * len(keywords))
+        where.append(f"({ors})")
+        for k in keywords:
+            args += [f"%{k}%", f"%{k}%"]
     if since_ns is not None:
         where.append("ts_ns >= ?")
         args.append(since_ns)
@@ -280,7 +292,20 @@ def search(conn, *, text=None, since_ns=None, until_ns=None,
     rows = conn.execute(
         f"SELECT * FROM messages{clause} ORDER BY id DESC LIMIT ?", args + [limit]
     ).fetchall()
-    return [_msg(r) for r in reversed(rows)]
+    msgs = [_msg(r) for r in reversed(rows)]
+    if keywords:
+        # ponytail: rank the most recent <=limit matches, not the whole log; raise
+        # limit if a search needs deeper reach. SQLite LIKE is ASCII-case-insensitive,
+        # matching the Python .count() below.
+        kws = [k.lower() for k in keywords]
+
+        def rank(m):
+            hay = f"{m['subject'] or ''} {m['body']}".lower()
+            hits = [hay.count(k) for k in kws]
+            return (sum(1 for h in hits if h), sum(hits))
+
+        msgs.sort(key=rank, reverse=True)  # stable: ties stay oldest-first
+    return msgs
 
 
 def _subgraph(conn, ids):

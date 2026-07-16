@@ -12,7 +12,7 @@ set -u
 pane="$1"; claude_pid="$2"; wake_url="$3"; role="$4"; token="$5"; server_v="$6"; client_v="$7"; shift 7
 wake_bin=("$@")   # a path, or "uv run --project <repo> wake" split across args
 COOLDOWN="${REVEILLE_COOLDOWN:-30}"   # min seconds between ring pokes to this pane
-RING="Reveille ring -- call inbox() and act on anything new"
+RING="Reveille ring -- inbox(), ack() everything. Reply only if it names you, blocks you, or asks you directly. Silence is a valid turn."
 
 alive() { kill -0 "$claude_pid" 2>/dev/null \
           && tmux list-panes -aF '#{pane_id}' 2>/dev/null | grep -qx "$pane"; }
