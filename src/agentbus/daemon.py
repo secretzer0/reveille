@@ -116,12 +116,22 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.1.5  SHOUT (human page-all): the web composer can send a broadcast that also
+       RINGS every live agent in the room, once, through the poke gate. Web-only
+       by design -- the MCP send tool has no shout parameter and agents must never
+       POST one. A shout ring changes nothing about the reply protocol: inbox(),
+       ack(), reply only if it names you, blocks you, or asks you directly.
+0.1.5  Restarts are now INVISIBLE to armed waiters: `wake --once` exits 0 ONLY on a
+       real ring (wake:true). On the shutdown frame or a dropped connection it
+       reconnects itself with backoff and keeps holding -- the broker always comes
+       back. Remove any shutdown-handling from your re-arm loops; a completed
+       waiter task now always means real mail.
 0.1.4  Wake heartbeat: an armed waiter now sends "hb" over its held socket every 5
        min (WAKE_HB to tune) and the broker touches presence on each -- an idle
        agent with an armed waiter stays LIVE indefinitely.
-0.1.4  Graceful restarts: the broker pushes a final wake frame {"reason":"shutdown"}
-       to every attached waiter before going down. On it: do NOT reply and do not
-       investigate -- just re-arm your waiter; the broker returns within seconds.
+0.1.4  Graceful restarts: the broker pushes a final frame {"reason":"shutdown"} to
+       attached wake sockets before going down (informational; as of 0.1.5 the
+       --once waiter absorbs it and reconnects on its own).
 0.1.4  ROOMS: your token is now a room key. Sessions presenting the same key share
        one isolated room (messages, presence, wake, feed); a different key is a
        different room. Pre-room history landed in the fleet key's room. Agents:
@@ -572,9 +582,12 @@ async def presence_http(request):
 
 
 async def send_http(request):
-    """POST /send {from?, to, subject?, body, reply_to?} -> send a message from the web.
-    Same semantics as the MCP send tool: unicast rings (gate applies), broadcast queues.
-    Unknown senders are auto-joined; an existing agent's name is used as-is (trusted LAN)."""
+    """POST /send {from?, to, subject?, body, reply_to?, attachments?, shout?} -> send
+    a message from the web. Same semantics as the MCP send tool: unicast rings (gate
+    applies), broadcast queues. shout=true with to='*' is the HUMAN page-all: the
+    broadcast also RINGS every live agent in the room, once, through the poke gate.
+    Deliberately web-only -- the MCP send tool has no shout, so agents cannot emit it.
+    Unknown senders are auto-joined; an existing agent's name is used as-is."""
     try:
         d = await request.json()
     except ValueError:
@@ -593,14 +606,16 @@ async def send_http(request):
                          attachments=d.get("attachments"), room=room)
     except store.BusError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    woke = res["wake"] if to != store.BROADCAST else []
+    shout = bool(d.get("shout")) and to == store.BROADCAST
+    woke = res["wake"] if (to != store.BROADCAST or shout) else []
     _notify(room, woke)
     _feed_push(room, {"id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": sender, "to": to,
                 "subject": d.get("subject") or "", "body": body,
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
-    log.info("%s send(web) -> %s thread=%s id=%s delivered=%s woke=%s",
-             sender, to, res["thread_id"], res["id"], res["wake"], woke)
+    log.info("%s send(web)%s -> %s thread=%s id=%s delivered=%s woke=%s",
+             sender, " SHOUT" if shout else "", to, res["thread_id"], res["id"],
+             res["wake"], woke)
     return JSONResponse({"id": res["id"], "thread_id": res["thread_id"],
                          "delivered_to": res["wake"]})
 
@@ -855,6 +870,10 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   font-size:.8rem;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
  #toBtn::before{content:"to: ";color:var(--faint);font-weight:400}
  #toBtn:focus{outline:none;border-color:var(--gold)}
+ #shoutWrap{display:flex;align-items:center;gap:.35rem;color:var(--faint);
+  font-size:.78rem;cursor:pointer;user-select:none;white-space:nowrap}
+ #shoutWrap input{accent-color:var(--gold)}
+ #shoutWrap:has(input:checked){color:var(--gold);font-weight:700}
  #toPanel{display:none;position:absolute;bottom:calc(100% + .4rem);left:0;width:16rem;
   max-height:19rem;overflow-y:auto;background:var(--card);border:1px solid var(--line);
   border-radius:10px;padding:.4rem;z-index:10;box-shadow:0 8px 30px rgba(0,0,0,.45)}
@@ -917,6 +936,8 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
      <div id="toPanel"></div>
     </div>
     <span id="replyChip" title="clear reply"></span>
+    <label id="shoutWrap" title="SHOUT: wake every agent in the room immediately (human page-all)">
+     <input type="checkbox" id="shout">SHOUT</label>
     <input id="subject" placeholder="Subject (optional)">
     <input id="fileInput" type="file" multiple hidden>
    </div>
@@ -1176,6 +1197,7 @@ function renderPicker(){
   p.appendChild(el);
  }
  $('toBtn').textContent=toLabel();
+ $('shoutWrap').style.display=recip.size===0?'flex':'none';
 }
 
 async function loadPresence(){
@@ -1291,13 +1313,14 @@ $('composer').addEventListener('submit',async e=>{
  const targets=recip.size?[...recip]:['*'];   // subgroup = one gated unicast per member
  for(const to of targets){
   const payload={from:myName,to,subject:$('subject').value.trim(),body};
+  if(to==='*'&&$('shout').checked)payload.shout=true;
   if(attachments.length)payload.attachments=attachments.slice();
   if(replyTo)payload.reply_to=replyTo;
   const r=await fetch('/send'+qs(),{method:'POST',headers:{'content-type':'application/json'},
    body:JSON.stringify(payload)});
   if(!r.ok){alert('send to '+to+' failed: '+(await r.text()));return;}
  }
- $('body').value='';$('subject').value='';
+ $('body').value='';$('subject').value='';$('shout').checked=false;
  attachments.length=0;renderAttchips();
  replyTo=null;updateReplyChip();
  for(const el of document.querySelectorAll('.row.active'))el.classList.remove('active');
