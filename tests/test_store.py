@@ -131,6 +131,37 @@ def test_rooms_isolate_everything():
         assert False, "should raise"
     except store.BusError:
         pass
+    # a joiner's catch-up read-marks stay INSIDE its room: joining K2 must not
+    # phantom-read K1 mail (it would block K1 retractions with a fake reader)
+    import time as _t
+    old = store.send(c, "a", store.BROADCAST, "k1 oldie", room="K1")
+    c.execute("UPDATE messages SET ts_ns=? WHERE id=?",
+              (_t.time_ns() - store.CATCHUP_NS - int(1e9), old["id"]))
+    store.join(c, "newcomer", "TN", room="K2")
+    assert store.readers(c, old["id"]) == []
+    store.delete_if_unseen(c, old["id"], "a", room="K1")  # still retractable
+
+
+def test_retract_if_unseen():
+    c = db()
+    store.join(c, "a", "TA"); store.join(c, "b", "TB")
+    m = store.send(c, "a", store.BROADCAST, "oops, mistaken")
+    store.ack(c, "a", [m["id"]])                 # sender's own read never counts
+    store.delete_if_unseen(c, m["id"], "a")
+    assert store.tail(c, limit=5) == []
+    m2 = store.send(c, "a", "b", "hello")
+    store.ack(c, "b", [m2["id"]])                # a real reader blocks retraction
+    try:
+        store.delete_if_unseen(c, m2["id"], "a")
+        assert False, "should raise"
+    except store.BusError:
+        pass
+    assert store.readers(c, m2["id"], exclude="a") == ["b"]
+    try:
+        store.delete_if_unseen(c, m2["id"], "b")  # not the sender
+        assert False, "should raise"
+    except store.BusError:
+        pass
 
 
 def test_attachments_round_trip():

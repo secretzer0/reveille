@@ -146,8 +146,8 @@ def join(conn, name, tag, fresh=False, url=None, room=""):
     cutoff = now if fresh else now - CATCHUP_NS
     conn.execute(
         "INSERT OR IGNORE INTO reads(message_id, agent, read_ns) "
-        "SELECT id, ?, ? FROM messages WHERE sender != ? AND ts_ns < ?",
-        (name, now, name, cutoff),
+        "SELECT id, ?, ? FROM messages WHERE sender != ? AND ts_ns < ? AND room = ?",
+        (name, now, name, cutoff, room),
     )
     return name
 
@@ -423,6 +423,35 @@ def graph(conn, thread_id, room=""):
            conn.execute("SELECT id FROM messages WHERE thread_id=? AND room=?",
                         (thread_id, room))]
     return _subgraph(conn, set(ids))
+
+
+def readers(conn, message_id, exclude=None):
+    """Agents that have read (acked or auto-caught-up) a message, sorted.
+    exclude drops one name -- a sender's own read never counts as being seen."""
+    return sorted(r["agent"] for r in conn.execute(
+        "SELECT agent FROM reads WHERE message_id=? AND agent!=?",
+        (message_id, exclude or "")))
+
+
+def delete_if_unseen(conn, message_id, sender, room=""):
+    """Retract a message nobody has consumed yet: sender-only, and refused the moment
+    any reads row or reply edge references it. Used by the web UI to pull back a
+    mistaken broadcast before anyone has read it."""
+    r = conn.execute("SELECT sender FROM messages WHERE id=? AND room=?",
+                     (message_id, room)).fetchone()
+    if not r:
+        raise BusError(f"no such message in this room: {message_id}")
+    if r["sender"] != sender:
+        raise BusError("not your message")
+    if conn.execute("SELECT 1 FROM reads WHERE message_id=? AND agent!=?",
+                    (message_id, sender)).fetchone():
+        raise BusError("already read by someone -- cannot retract")
+    if conn.execute("SELECT 1 FROM links WHERE parent_id=?", (message_id,)).fetchone():
+        raise BusError("already replied to -- cannot retract")
+    conn.execute("DELETE FROM attachments WHERE message_id=?", (message_id,))
+    conn.execute("DELETE FROM links WHERE child_id=?", (message_id,))
+    conn.execute("DELETE FROM reads WHERE message_id=?", (message_id,))  # sender's own only
+    conn.execute("DELETE FROM messages WHERE id=?", (message_id,))
 
 
 def ack(conn, agent, message_ids):

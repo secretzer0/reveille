@@ -116,6 +116,10 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.1.5  Retract-if-unseen: the web UI can DELETE /message/<id> for the sender's own
+       message while nobody has read or replied to it (mistaken-broadcast eraser).
+       Refused with 409 the moment any read or reply exists. Feed emits
+       {"deleted": id} so open UIs drop the row live.
 0.1.5  SHOUT (human page-all): the web composer can send a broadcast that also
        RINGS every live agent in the room, once, through the poke gate. Web-only
        by design -- the MCP send tool has no shout parameter and agents must never
@@ -672,6 +676,23 @@ async def search_http(request):
     return JSONResponse({"messages": msgs, "count": len(msgs)})
 
 
+async def delete_http(request):
+    """DELETE /message/<mid>?from=<name> -- retract your own message if NOBODY has
+    read or replied to it yet (the mistaken-broadcast eraser). Room-scoped."""
+    room = _room_of(request)
+    sender = request.query_params.get("from") or ""
+    mid = int(request.path_params["mid"])
+    try:
+        store.delete_if_unseen(_conn, mid, sender, room=room)
+    except store.BusError as e:
+        return JSONResponse({"error": str(e),
+                             "readers": store.readers(_conn, mid, exclude=sender)},
+                            status_code=409)
+    _feed_push(room, {"deleted": mid})
+    log.info("%s retracted message %s (unseen)", sender, mid)
+    return JSONResponse({"deleted": mid})
+
+
 async def feed_ws(ws: WebSocket):
     """WS /feed: pushes every bus message as one JSON frame -- the UI's live wire."""
     await ws.accept()
@@ -745,7 +766,21 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  #meDot.on{background:var(--green)}
 
  /* ---- main column ---- */
- #main{display:flex;flex-direction:column;min-width:0;min-height:0}
+ #main{display:flex;flex-direction:column;min-width:0;min-height:0;position:relative}
+ #spin{display:none;position:absolute;inset:0;align-items:center;justify-content:center;
+  background:rgba(14,17,22,.55);backdrop-filter:blur(1px);z-index:6}
+ #spin.on{display:flex}
+ #spin .ring{width:44px;height:44px;border-radius:50%;border:3px solid var(--line);
+  border-top-color:var(--gold);animation:spin .8s linear infinite}
+ @keyframes spin{to{transform:rotate(360deg)}}
+ #toasts{position:fixed;top:1rem;left:50%;transform:translateX(-50%);z-index:30;
+  display:flex;flex-direction:column;gap:.5rem;align-items:center;pointer-events:none}
+ .toast{background:var(--card);border:1px solid #e8555a;color:var(--fg);
+  border-radius:10px;padding:.55rem 1.1rem;font-size:.86rem;max-width:34rem;
+  box-shadow:0 8px 30px rgba(0,0,0,.5);cursor:pointer;pointer-events:auto;
+  animation:toastin .18s ease-out}
+ .toast.info{border-color:var(--gold)}
+ @keyframes toastin{from{opacity:0;transform:translateY(-8px)}to{opacity:1}}
  #top{display:flex;align-items:center;gap:.7rem;padding:.55rem 1.1rem;
   border-bottom:1px solid var(--line);background:var(--bg)}
  #filter{flex:1;max-width:26rem;background:var(--rail);border:1px solid var(--line);
@@ -766,9 +801,21 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   color:var(--fg);padding:0 .6rem;border-radius:7px;font:inherit;font-size:.83rem;
   height:2.2rem}
  #histBar input:focus,#histBar select:focus{outline:none;border-color:var(--gold)}
- #histBar button{background:var(--gold);border:0;color:#14161a;font-weight:700;
+ #histBar input{accent-color:var(--gold)}
+ #histBar input::-webkit-calendar-picker-indicator{
+  filter:invert(70%) sepia(60%) saturate(500%) hue-rotate(360deg);cursor:pointer}
+ .qr{display:flex;gap:.35rem;align-items:center;padding-bottom:.15rem}
+ .qr button{background:none;border:1px solid var(--line);color:var(--dim);
+  border-radius:2em;padding:.28rem .8rem;font:inherit;font-size:.78rem;cursor:pointer}
+ .qr button:hover{color:var(--gold);border-color:var(--gold)}
+ .qr button.on{background:var(--gold);border-color:var(--gold);color:#14161a;font-weight:700}
+ #hGo{background:var(--gold);border:0;color:#14161a;font-weight:700;
   border-radius:7px;padding:0 1.4rem;height:2.2rem;cursor:pointer;font:inherit;
   font-size:.83rem}
+ #histBar .qr button{background:none;border:1px solid var(--line);color:var(--dim)}
+ #histBar .qr button:hover{color:var(--gold);border-color:var(--gold)}
+ #histBar .qr button.on{background:var(--gold);border-color:var(--gold);
+  color:#14161a;font-weight:700}
  #histInfo{display:none;justify-content:space-between;align-items:center;
   margin:.6rem 2.2rem 0;padding:.4rem .9rem;border:1px solid var(--gold);border-radius:8px;
   color:var(--gold);font-size:.82rem}
@@ -799,6 +846,9 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  .head time{color:var(--faint);font-size:.74rem}
  .head .mid{color:var(--faint);font-size:.72rem;opacity:0;margin-left:auto}
  .row:hover .mid{opacity:1}
+ .head .del{color:#e8555a;font-size:.78rem;opacity:0;cursor:pointer;padding:0 .2rem}
+ .row:hover .del{opacity:1}
+ .head .del:hover{font-weight:900}
  .subj{font-weight:650;margin:.12rem 0 .05rem;font-size:.92rem}
  .body{color:#c3ccd8;white-space:pre-wrap;word-break:break-word;
   font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
@@ -859,6 +909,29 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  #send{background:var(--gold);color:#14161a;border:0;border-radius:2em;
   font-weight:800;padding:.4rem 1.8rem;cursor:pointer;font:inherit}
  #send:hover{filter:brightness(1.1)}
+
+ /* ---- notice modal ---- */
+ #dlg{position:fixed;inset:0;background:rgba(6,8,11,.82);backdrop-filter:blur(4px);
+  display:none;align-items:center;justify-content:center;z-index:25}
+ #dlg.on{display:flex}
+ #dlgCard{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:1.6rem 1.8rem;width:26rem;max-width:92vw;box-shadow:0 12px 48px rgba(0,0,0,.5)}
+ #dlgTitle{font-size:.95rem;font-weight:800;color:#e8555a;letter-spacing:.04em;
+  margin-bottom:.4rem}
+ #dlgMsg{color:var(--dim);font-size:.82rem;line-height:1.5;margin-bottom:1rem}
+ #dlgWho{display:none;margin-bottom:1.1rem}
+ #dlgWho.on{display:block}
+ #dlgWho .lbl{color:var(--faint);font-size:.68rem;letter-spacing:.12em;
+  text-transform:uppercase;margin-bottom:.5rem}
+ #dlgReaders{display:flex;flex-wrap:wrap;gap:.4rem;max-height:9rem;overflow-y:auto}
+ .reader{display:inline-flex;align-items:center;gap:.45rem;background:var(--rail);
+  border:1px solid var(--line);border-radius:999px;padding:.22rem .75rem .22rem .28rem;
+  font-size:.78rem;font-weight:600}
+ .reader .dot{width:1.25rem;height:1.25rem;border-radius:50%;display:flex;
+  align-items:center;justify-content:center;font-size:.52rem;font-weight:800;flex:none}
+ #dlgOk{width:100%;background:var(--gold);color:#14161a;border:0;border-radius:8px;
+  padding:.55rem;font:inherit;font-weight:800;cursor:pointer}
+ #dlgOk:hover{filter:brightness(1.08)}
 
  /* ---- login modal ---- */
  #login{position:fixed;inset:0;background:rgba(6,8,11,.82);backdrop-filter:blur(4px);
@@ -930,6 +1003,14 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   <button id="histBtn" title="search the entire bus log">history</button>
  </div>
  <div id="histBar">
+  <div class="hf"><label>Quick range</label>
+   <div class="qr">
+    <button type="button" data-since="1h">1h</button>
+    <button type="button" data-since="6h">6h</button>
+    <button type="button" data-since="24h">24h</button>
+    <button type="button" data-since="7d">7d</button>
+    <button type="button" data-since="">all</button>
+   </div></div>
   <div class="hf"><label>Keywords</label>
    <input id="hKw" placeholder="any match, ranked" style="width:17rem"></div>
   <div class="hf"><label>From</label><input id="hSince" type="datetime-local"></div>
@@ -938,6 +1019,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
    <select id="hAgent"><option value="">any</option></select></div>
   <button id="hGo">Search</button>
  </div>
+ <div id="spin"><div class="ring"></div></div>
  <div id="feed"><div class="inner" id="inner">
   <div id="histInfo"><span id="histLabel"></span><span><b id="backLive">back to live</b></span></div>
   <div id="empty">no traffic yet</div></div></div>
@@ -965,6 +1047,15 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   </form>
  </div>
 </div>
+<div id="toasts"></div>
+<div id="dlg">
+ <div id="dlgCard">
+  <div id="dlgTitle"></div>
+  <div id="dlgMsg"></div>
+  <div id="dlgWho"><div class="lbl">Already seen by</div><div id="dlgReaders"></div></div>
+  <button id="dlgOk">OK</button>
+ </div>
+</div>
 <div id="login">
  <div id="loginCard">
   <h1>REVEILLE</h1>
@@ -980,6 +1071,30 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
+function toast(msg,info){
+ const t=document.createElement('div');
+ t.className='toast'+(info?' info':'');
+ t.textContent=msg;
+ t.onclick=()=>t.remove();
+ $('toasts').appendChild(t);
+ setTimeout(()=>t.remove(),5000);
+}
+function showDialog(title,msg,readers){
+ $('dlgTitle').textContent=title;
+ $('dlgMsg').textContent=msg;
+ const list=$('dlgReaders');list.innerHTML='';
+ $('dlgWho').classList.toggle('on',!!(readers&&readers.length));
+ for(const n of readers||[]){
+  const c=document.createElement('span');c.className='reader';
+  c.innerHTML='<span class="dot" style="color:'+color(n)+';background:'+tint(n)+'">'
+    +initials(n)+'</span><span style="color:'+color(n)+'">'+esc(n)+'</span>';
+  list.appendChild(c);
+ }
+ $('dlg').classList.add('on');$('dlgOk').focus();
+}
+$('dlgOk').onclick=()=>$('dlg').classList.remove('on');
+$('dlg').onclick=e=>{if(e.target.id==='dlg')$('dlg').classList.remove('on');};
+document.addEventListener('keydown',e=>{if(e.key==='Escape')$('dlg').classList.remove('on');});
 let token=localStorage.agentbusToken;
 let myName=localStorage.agentbusName||'human-web';
 const qs=()=>'?token='+encodeURIComponent(token||'');
@@ -993,7 +1108,7 @@ const attachments=[];           // [{name,url}] pending on the composer
 async function uploadFile(f){
  const r=await fetch('/upload'+qs()+'&name='+encodeURIComponent(f.name),
   {method:'POST',body:f});
- if(!r.ok){alert('upload failed: '+(await r.text()));return;}
+ if(!r.ok){toast('upload failed: '+(await r.text()));return;}
  attachments.push(await r.json());
  renderAttchips();
 }
@@ -1094,7 +1209,10 @@ function render(m){
       :'<span class="toname" style="color:'+color(m.to)+'">'+esc(m.to)+'</span>')
     +'<time>'+hhmm(m.ts_ns)+'</time>'
     +'<span class="mid" data-thread="'+m.thread_id+'" title="view thread">#'+m.id
-    +(m.thread_id!==m.id?' &middot; thread '+m.thread_id:'')+'</span></div>')
+    +(m.thread_id!==m.id?' &middot; thread '+m.thread_id:'')+'</span>'
+    +(m.from===myName?'<span class="del" data-del="'+m.id
+      +'" title="retract (only while nobody has read it)">&#10007;</span>':'')
+    +'</div>')
   +(m.subject?'<div class="subj">'+esc(m.subject)+'</div>':'')
   +'<div class="body">'+esc(m.body)+'</div>'+attHtml(m.attachments)+'</div>';
  row.style.display=matches(m)?'':'none';
@@ -1124,6 +1242,7 @@ function clearFeed(){
 
 function toLive(){
  mode='live';follow=true;
+ for(const o of document.querySelectorAll('.qr button'))o.classList.remove('on');
  $('histBtn').classList.remove('on');$('histBar').classList.remove('on');
  $('histInfo').classList.remove('on');
  clearFeed();loadBacklog(true);
@@ -1132,16 +1251,19 @@ function toLive(){
 async function runSearch(params){
  mode='history';follow=false;
  $('histBtn').classList.add('on');
- const q=new URLSearchParams(params);
- const r=await fetch('/search'+qs()+'&'+q.toString());
- if(!r.ok){alert('search failed: '+(await r.text()));return;}
- const data=await r.json();
- clearFeed();
- $('histInfo').classList.add('on');
- $('histLabel').textContent=(params.thread_id?'thread '+params.thread_id:'history')
-   +' -- '+data.count+' message'+(data.count===1?'':'s');
- for(const m of data.messages){msgs.set(m.id,m);$('inner').appendChild(render(m));}
- $('feed').scrollTop=0;
+ busy(true);
+ try{
+  const q=new URLSearchParams(params);
+  const r=await fetch('/search'+qs()+'&'+q.toString());
+  if(!r.ok){toast('search failed: '+(await r.text()));return;}
+  const data=await r.json();
+  clearFeed();
+  $('histInfo').classList.add('on');
+  $('histLabel').textContent=(params.thread_id?'thread '+params.thread_id:'history')
+    +' -- '+data.count+' message'+(data.count===1?'':'s');
+  for(const m of data.messages){msgs.set(m.id,m);$('inner').appendChild(render(m));}
+  $('feed').scrollTop=0;
+ }finally{busy(false);}
 }
 
 // datetime-local is the viewer's LOCAL time; convert to UTC ISO so the broker's
@@ -1160,12 +1282,19 @@ function refilter(){
 
 async function loadBacklog(reset){
  if(mode!=='live')return;
- const r=await fetch('/messages'+qs()+'&limit=300'+(reset?'':'&since_id='+lastId));
- if(r.status===401){showLogin('unauthorized -- check the token');return;}
- if(!r.ok)return;
- if(reset)clearFeed();
- for(const m of (await r.json()).messages)add(m);
+ if(reset)busy(true);
+ try{
+  const r=await fetch('/messages'+qs()+'&limit=300'+(reset?'':'&since_id='+lastId));
+  if(r.status===401){showLogin('unauthorized -- check the token');return;}
+  if(!r.ok)return;
+  if(reset)clearFeed();
+  for(const m of (await r.json()).messages)add(m);
+ }catch(e){
+  setTimeout(()=>loadBacklog(reset),1500);   // broker restarting; keep trying until live
+ }finally{busy(false);}
 }
+
+function busy(on){$('spin').classList.toggle('on',!!on);}
 
 function updateReplyChip(){
  $('replyChip').className=replyTo?'on':'';
@@ -1178,7 +1307,10 @@ function selectRow(row,m){
  recip.clear();replyTo=null;
  if(!was){                                   // click again to deselect back to ALL
   row.classList.add('active');
-  recip.add(m.from);replyTo=m.id;
+  replyTo=m.id;
+  if(m.from===myName){                       // own message: target its recipient, never yourself
+   if(m.to!=='*'&&m.to!==myName)recip.add(m.to);
+  }else recip.add(m.from);
   $('body').focus();
  }
  renderPicker();updateReplyChip();
@@ -1238,7 +1370,7 @@ async function loadPresence(){
     +'<span class="nm">'+esc(a.name)+'</span><span class="st"></span>';
   el.title=a.connected?'wake armed':a.live?'live, waiter down':'stale';
   el.onclick=()=>{selAgents.has(a.name)?selAgents.delete(a.name):selAgents.add(a.name);
-   recip.clear();for(const n of selAgents)recip.add(n);   // filter selection IS the target
+   recip.clear();for(const n of selAgents)if(n!==myName)recip.add(n);   // filter selection IS the target, minus yourself
    renderPicker();loadPresence();refilter();};
   $('agents').appendChild(el);
  }
@@ -1252,6 +1384,11 @@ function connect(){
   $('meDot').title='connected to the room feed';loadBacklog(false);};
  ws.onmessage=e=>{const m=JSON.parse(e.data);
   if(m.error){if(m.error==='bad_token')showLogin('unauthorized -- check the token');return;}
+  if(m.deleted){
+   for(const el of [...$('inner').children])
+    if(+el.dataset.id===m.deleted)el.remove();
+   msgs.delete(m.deleted);return;
+  }
   add(m);};
  ws.onclose=()=>{$('status').classList.remove('on');$('meDot').classList.remove('on');
   $('meDot').title='reconnecting';
@@ -1285,7 +1422,39 @@ $('hGo').onclick=e=>{e.preventDefault();
  runSearch(p);
 };
 $('backLive').onclick=toLive;
-$('inner').addEventListener('click',e=>{
+for(const b of document.querySelectorAll('.qr button'))
+ b.onclick=()=>{
+  for(const o of document.querySelectorAll('.qr button'))o.classList.remove('on');
+  b.classList.add('on');
+  const p={limit:500};
+  if(b.dataset.since)p.since=b.dataset.since;         // relative spec, server-parsed
+  if($('hKw').value.trim())p.keywords=$('hKw').value.trim();
+  if($('hAgent').value.trim())p.agent=$('hAgent').value.trim();
+  $('hSince').value='';$('hUntil').value='';
+  runSearch(p);
+ };
+// manual date edits or leaving history mode deselect the chip
+for(const id of ['hSince','hUntil'])
+ $(id).addEventListener('input',()=>{
+  for(const o of document.querySelectorAll('.qr button'))o.classList.remove('on');});
+$('inner').addEventListener('click',async e=>{
+ const d=e.target.closest('.del');
+ if(d){
+  const r=await fetch('/message/'+d.dataset.del+qs()+'&from='+encodeURIComponent(myName),
+    {method:'DELETE'});
+  if(!r.ok){
+   const err=JSON.parse(await r.text());
+   if(err.readers?.length)
+    showDialog('Cannot retract #'+d.dataset.del,
+     'Retraction is only possible while nobody has read the message.',err.readers);
+   else if(/replied/.test(err.error||''))
+    showDialog('Cannot retract #'+d.dataset.del,
+     'This message already has replies threaded on it.');
+   else
+    showDialog('Cannot retract #'+d.dataset.del,err.error||'retract failed');
+  }
+  return;
+ }
  const t=e.target.closest('.mid');
  if(t)runSearch({thread_id:t.dataset.thread});
 });
@@ -1328,7 +1497,7 @@ $('composer').addEventListener('submit',async e=>{
   if(replyTo)payload.reply_to=replyTo;
   const r=await fetch('/send'+qs(),{method:'POST',headers:{'content-type':'application/json'},
    body:JSON.stringify(payload)});
-  if(!r.ok){alert('send to '+to+' failed: '+(await r.text()));return;}
+  if(!r.ok){toast('send to '+to+' failed: '+(await r.text()));return;}
  }
  $('body').value='';$('subject').value='';$('shout').checked=false;
  attachments.length=0;renderAttchips();
@@ -1488,6 +1657,7 @@ def build_app():
             Route("/presence", presence_http),
             Route("/send", send_http, methods=["POST"]),
             Route("/upload", upload_http, methods=["POST"]),
+            Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
             WebSocketRoute("/wake", wake_ws),
             WebSocketRoute("/feed", feed_ws),
