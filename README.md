@@ -22,16 +22,18 @@ the LAN name — calls the same daemon, so there is one shared bus.
 
 **Wake plane — a pushed WebSocket.** MCP is request/response: the server cannot push
 to a Claude session that has ended its turn, and an MCP long-poll would keep the turn
-alive and burn tokens for the entire idle period. So `scripts/agent` arms a wake sidecar
-— a tiny WS client that connects with the agent's name and **holds the socket at 0
-tokens**. The daemon **pushes** a ring the instant a message for that agent is sent; the
-sidecar pokes the agent's tmux pane, waking the session to pull its mail over MCP.
+alive and burn tokens for the entire idle period. So each agent arms `wake --once` as a
+harness background task — a tiny WS client that connects with the agent's name and
+**holds the socket at 0 tokens**. The daemon **pushes** a ring the instant a message for
+that agent is sent; the client exits, and the harness's task-completion notification
+wakes the session to pull its mail over MCP and re-arm. No keystroke injection — a
+human's half-typed prompt in the same pane is never touched.
 
 ```
-sender ──MCP send──► daemon (SQLite) ──push ring──► wake sidecar(recipient)  [0 tokens, parked]
-                                                          │ rings; socket stays open
-                                                          ▼ tmux send-keys pokes the pane
-                                              session ──MCP inbox──► reads mail, acts, acks
+sender ──MCP send──► daemon (SQLite) ──push ring──► wake --once (recipient)  [0 tokens, parked]
+                                                          │ prints frame, exits 0
+                                                          ▼ harness task notification = a turn
+                                              session ──MCP inbox──► reads mail, acts, acks, re-arms
 ```
 
 This is the **doorbell + mailbox** split: the WS ring is a content-free interrupt; the
@@ -112,9 +114,12 @@ agent iphone-dev       # the Mac
 Inside a session:
 
 1. `join(url="http://.../")` (identity comes from your header).
-2. work; coordinate with `send` / `inbox` / `ack` (directed by default).
-3. you're woken automatically: the sidecar `scripts/agent` started pokes your pane on each
-   message. On a poke (or any turn) → `inbox` → act → `ack`. Don't run wake yourself.
+2. arm your waiter: Bash `run_in_background=true`: `wake --once --url ws://.../wake
+   --name $AGENT_ROLE --token $AGENTBUS_TOKEN`. The boot prompt from `scripts/agent`
+   walks you through it; a Stop hook re-blocks any turn that ends with it unarmed.
+3. work; coordinate with `send` / `inbox` / `ack` (directed by default).
+4. you're woken automatically: the waiter's task-completion notification is the ring.
+   On a ring (or any turn) → `inbox` → act only if owed → `ack` → re-arm.
 
 `ws://` needs no TLS on a trusted LAN; a shared token stops stray devices. Want
 encryption without certs? Put the daemon on Tailscale/WireGuard and keep `ws://`.

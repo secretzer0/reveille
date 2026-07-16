@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Stop hook: block the agent from ending its turn while its wake waiter is unarmed.
+# The waiter (wake --once, run_in_background) is what turns a bus ring into a harness
+# task notification -- if it is not running, the agent is deaf to real-time wakes.
+# Fail-open on every doubt: no role, no broker, or a prior block this turn -> allow stop.
+set -u
+
+input="$(cat)"
+case "$input" in *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;; esac
+
+role="${AGENT_ROLE:-}"
+[ -n "$role" ] || exit 0
+url="${AGENTBUS_URL:-http://127.0.0.1:8765}"
+curl -fsS --max-time 2 "$url/version" >/dev/null 2>&1 || exit 0
+pgrep -f "wake --once.*--name $role( |\$)" >/dev/null 2>&1 && exit 0
+
+hostport="${url#*://}"; hostport="${hostport%%/*}"
+scheme=ws; [ "${url%%://*}" = "https" ] && scheme=wss
+repo="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+wake_bin="$repo/.venv/bin/wake"; [ -x "$wake_bin" ] || wake_bin="uv run --project $repo wake"
+cmd="$wake_bin --once --url $scheme://$hostport/wake --name $role"
+[ -n "${AGENTBUS_TOKEN:-}" ] && cmd="$cmd --token \$AGENTBUS_TOKEN"
+printf '{"decision":"block","reason":"Wake waiter not armed -- you are deaf to bus rings. Arm it now with Bash run_in_background=true: %s . Its task completion is a ring: inbox(), ack(), act only if owed, then re-arm."}\n' "$cmd"
+exit 0

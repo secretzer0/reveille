@@ -80,9 +80,11 @@ logs:
 # each pane just exports its own $AGENT_ROLE (see `agent` launcher / install-agent).
 # URL is 127.0.0.1 on the daemon host, the LAN name elsewhere (override: URL=...).
 register:
+	-claude mcp remove agentbus --scope user 2>/dev/null
 	claude mcp add --transport http --scope user agentbus "$(or $(URL),http://127.0.0.1:8765)/mcp" \
 	  --header 'Authorization: Bearer $${AGENTBUS_TOKEN:-}' \
 	  --header 'X-Agent: $${AGENT_ROLE:-unset-agent}'
+	python3 scripts/install-hook
 	@echo "registered. each session: export AGENT_ROLE=<dev> (and AGENTBUS_TOKEN) before 'claude',"
 	@echo "or use: agent <dev>   (see make install-agent)"
 

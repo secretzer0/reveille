@@ -14,10 +14,11 @@ Identity: each agent's MCP registration sends a static `X-Agent: <name>` header;
 tools resolve "me" from it. Auth: an optional shared `AGENTBUS_TOKEN` (Bearer on
 HTTP, ?token= on the WS). Unset = open mode, fine for a fully trusted LAN.
 
-Wake: scripts/agent runs a wake sidecar -- a tiny WS client that connects with the
-agent's name and holds the socket (0 tokens). The daemon pushes a frame the instant a
-message for that agent is sent; the sidecar pokes the agent's tmux pane (send-keys),
-waking the session to pull its mail over MCP. One held connection, one poke per message.
+Wake: each agent arms `wake --once` as a harness background task -- a tiny WS client
+that connects with the agent's name and holds the socket (0 tokens). The daemon pushes
+a frame the instant a message for that agent is sent; the client exits and the harness's
+task-completion notification wakes the session to pull its mail over MCP and re-arm.
+No keystroke injection anywhere. One held connection, one wake per gate cycle.
 """
 import asyncio
 import contextlib
@@ -60,11 +61,15 @@ ENV (set by the launching pane; never hardcode or prompt):
 USE:
 1. Startup: join(url="http://<broker-host>:8765"). Join replays only the last 15 min of
    backlog; recall further back ONLY when explicitly asked, via history(since=...).
-2. Reachability: launch via `scripts/agent <role>` in tmux. A sidecar then holds your wake
-   socket at 0 tokens and pokes your pane when a message addressed to you arrives -- do
-   not run wake yourself. Only unicast wakes you; broadcasts queue silently until your
-   next turn. No tmux -> no poke; just inbox() each turn (messages queue durably).
-3. Protocol, on a poke or any turn: inbox(), ack() everything.
+2. Reachability: arm a wake waiter as a harness background task (Bash with
+   run_in_background=true): `wake --once --url ws://<broker-host>:8765/wake --name
+   $AGENT_ROLE --token $AGENTBUS_TOKEN`. It holds the socket at 0 tokens and exits on the
+   first ring, so its task-completion notification IS the ring -- no keystrokes, nothing
+   injected into anyone's prompt. On the notification: inbox(), ack(), act only if owed,
+   then RE-ARM the same command. A Stop hook (installed by scripts/agent) blocks ending a
+   turn while the waiter is unarmed. Only unicast rings; broadcasts queue silently.
+   No waiter -> no real-time wake, but mail queues durably; inbox() each turn.
+3. Protocol, on a ring or any turn: inbox(), ack() everything.
    Reply ONLY if: it names you in NEED:, blocks your work, or asks you a direct question.
    FYI / retraction / method-lesson -> ack, note in your own memory, do NOT reply.
    Broadcast (to="*") ONLY if: a shared contract changed or you block multiple peers.
@@ -92,9 +97,10 @@ Detection: grep/lint/test that catches recurrence
 Identity/token from env, never hardcode: $AGENT_ROLE = my bus name, $AGENTBUS_TOKEN = secret.
 Startup: join(url="http://<broker-host>:8765") -- replays last 15 min only; older mail via
 history(since=...) ONLY when explicitly asked. Read LESSONS.md at repo root, if present.
-Reachability: launched via `scripts/agent <role>` in tmux -> a sidecar pokes my pane on
-unicast to me; broadcasts queue until my next turn. I idle at 0 tokens and do not run wake
-myself. No tmux -> inbox() each turn.
+Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
+ws://<broker-host>:8765/wake --name $AGENT_ROLE --token $AGENTBUS_TOKEN`. Its task-completion
+notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. Unicast rings;
+broadcasts queue until my next turn. Waiter down -> mail still queues; inbox() each turn.
 Protocol: inbox(), ack() everything. Reply ONLY if named in NEED:, blocked, or asked
 directly. FYI/retraction/method-lesson -> ack + own notes, no reply. Broadcast ONLY if a
 shared contract changed or I block multiple peers. Nothing owed -> silence is a valid turn.
@@ -109,6 +115,10 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.1.3  Native wake: the tmux keystroke sidecar is GONE. Arm `wake --once` yourself as a
+       harness background task (Bash run_in_background=true); its completion notification
+       is the ring -- inbox(), ack(), re-arm. A Stop hook blocks ending a turn with the
+       waiter unarmed. Nothing is ever typed into your pane again.
 0.1.2  history(): naive ISO times (no offset) now parse as UTC. They were server-local,
        silently shifting UTC-intended windows by the host offset -- false zeros.
        Explicit offsets ('...T09:30Z', '...T09:30-05:00') are honored as written.
@@ -130,10 +140,10 @@ _conn = None  # one connection, used only from the event-loop thread (async tool
 # exits. This is the wake signal -- the message itself stays in SQLite, read over MCP.
 _waiters: dict[str, set] = {}
 
-# Poke gate: one outstanding poke per agent. A pushed wake frame sets name -> ts here;
-# no further frames are pushed until the agent polls inbox() (its ack), so pokes never
-# stack up in a busy agent's prompt. The TTL is the escape hatch for a lost frame
-# (sidecar died mid-poke): after it, poking resumes.
+# Poke gate: one outstanding wake per agent. A pushed frame sets name -> ts here; no
+# further frames are pushed until the agent polls inbox() (its ack), so wake notifications
+# never stack up on a busy agent. The TTL is the escape hatch for a lost frame (waiter
+# died before the agent saw it): after it, waking resumes.
 _poke_pending: dict[str, int] = {}
 POKE_TTL_NS = 10 * 60 * 1_000_000_000
 
@@ -199,12 +209,12 @@ async def usage(ctx: Context = None) -> str:
 
 @mcp.tool()
 async def info(ctx: Context = None) -> str:
-    """Reveille status banner: tool version, your bus name, and whether your wake sidecar
+    """Reveille status banner: tool version, your bus name, and whether your wake waiter
     is attached right now. Call it on boot to confirm the bus works end to end."""
     me = _me(ctx)
     attached = bool(_waiters.get(me))
     return (f"Reveille v{__version__} -- you are '{me}' -- "
-            f"sidecar: {'ATTACHED (real-time wake)' if attached else 'not attached (no real-time wake)'}")
+            f"wake waiter: {'ATTACHED (real-time wake)' if attached else 'NOT ARMED (no real-time wake -- arm wake --once)'}")
 
 
 @mcp.tool()
@@ -397,10 +407,10 @@ async def wake_ws(ws: WebSocket):
             _poke_pending[name] = time.time_ns()
             await ws.send_json({"wake": True, "reason": "backlog", "unread": len(backlog)})
             log.info("%s wake ring (backlog %s)", name, len(backlog))
-        # Then STAY connected and push one frame per new message until the client drops.
-        # Persistent on purpose: a sidecar holds a single socket -- so presence shows
-        # connected:true and delivery is instant -- instead of reconnecting per ring, which
-        # storms whenever backlog is unacked and never holds a connection.
+        # Then stay connected and push one frame per new message until the client drops.
+        # A --once waiter exits after its first frame and reconnects on re-arm; the poke
+        # gate keeps that from storming (unacked backlog rings once, then waits for
+        # inbox()). Streaming clients just hold the socket across rings.
         while True:
             recv = asyncio.create_task(ws.receive_text())
             woke = asyncio.create_task(q.get())

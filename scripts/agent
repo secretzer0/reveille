@@ -11,10 +11,12 @@
 #   token : --token | $AGENTBUS_TOKEN
 #   url   : --url   | $AGENTBUS_URL  | http://127.0.0.1:8765
 #
-# Sets $AGENT_ROLE (-> the MCP X-Agent header) and $AGENTBUS_TOKEN for the session. In tmux
-# it arms a wake sidecar (Reveille) in the real terminal -- NOT Claude's Bash sandbox, so it
-# is not reaped -- which holds a 0-token socket and pokes this pane the instant a message
-# arrives. Not in tmux: it re-launches inside a fresh tmux session first.
+# Sets $AGENT_ROLE (-> the MCP X-Agent header) and $AGENTBUS_TOKEN for the session. Wake is
+# native: the boot prompt tells the agent to arm `wake --once` as a harness background task;
+# its completion notification IS the ring -- no keystroke injection, nothing ever types into
+# a human's half-written prompt. The Stop hook that blocks ending a turn with the waiter
+# unarmed is user-scoped, installed by `make register` (scripts/install-hook). Not in tmux:
+# re-launches inside a tmux session first (persistence/attach/web terminal, not waking).
 set -euo pipefail
 
 ROLE="${AGENT_ROLE:-}"
@@ -46,7 +48,7 @@ export AGENT_ROLE="$ROLE"
 export AGENTBUS_TOKEN="$TOKEN"
 export AGENTBUS_URL="$URL"
 
-# Not in tmux: re-launch inside a fresh tmux session so the sidecar has a pane to poke.
+# Not in tmux: re-launch inside a fresh tmux session (persistence / attach / web terminal).
 # Re-pass resolved config as flags so a pre-existing tmux server's stale env can't drop it.
 if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     reinvoke=(--role "$ROLE" --token "$TOKEN" --url "$URL" ${claude_args[@]+"${claude_args[@]}"})
@@ -64,26 +66,26 @@ WAKE_URL="$_scheme://$_hostport/wake"                   # http(s)://host:port[/.
 WAKE_BIN="$REPO/.venv/bin/wake"
 [ -x "$WAKE_BIN" ] || WAKE_BIN="uv run --project $REPO wake"
 
-# Versions for the liveness line + the sidecar boot poke (combo = daemon + wake, one repo).
+# Versions for the liveness line + the boot prompt. Combo = daemon + wake, one repo.
 CLIENT_V="$($WAKE_BIN --version 2>/dev/null || echo '?')"
 SERVER_V="$(curl -fsS "$URL/version" 2>/dev/null || echo 'unreachable')"
 
-# Real-time wake sidecar. Needs tmux (a pane to poke) + setsid (own session, so it can
-# self-reap without touching this shell). $$ is captured BEFORE `exec claude` -- exec keeps
-# the pid, so it is Claude's pid; the sidecar watches it and exits when Claude exits. On
-# boot the sidecar also pokes the pane once with the info()/usage() directive + versions.
-sidecar="off (need tmux + setsid)"
-if [ -n "${TMUX_PANE:-}" ] && command -v setsid >/dev/null 2>&1; then
-    if setsid -f "$REPO/scripts/wake-sidecar" \
-        "$TMUX_PANE" "$$" "$WAKE_URL" "$ROLE" "$TOKEN" "$SERVER_V" "$CLIENT_V" $WAKE_BIN; then
-        sidecar="armed (exits with claude)"
-    fi
-fi
+mm=""
+[ "$SERVER_V" != "$CLIENT_V" ] && [ "$SERVER_V" != "unreachable" ] && mm=" (VERSION MISMATCH -- update)"
+arm_cmd="$WAKE_BIN --once --url $WAKE_URL --name $ROLE"
+[ -n "$TOKEN" ] && arm_cmd="$arm_cmd --token \$AGENTBUS_TOKEN"
+BOOT="Reveille boot v$SERVER_V$mm. Do now, in order:
+1. join(url=\"$URL\") then info() to confirm the bus.
+2. Arm your wake waiter -- Bash with run_in_background=true: $arm_cmd
+   Its task-completion notification IS a bus ring: inbox(), ack() everything, act only if
+   a message names you / blocks you / asks you directly, then RE-ARM the same command.
+3. usage() and refresh the '## Agent bus' block in this repo's CLAUDE.md from it.
+4. Read LESSONS.md at the repo root, if present. Then wait for work; silence is a valid turn."
 
 # Liveness / integration status for this agent.
-echo "Reveille v$SERVER_V: role=$ROLE  broker=$URL  client=v$CLIENT_V  sidecar: $sidecar" >&2
+echo "Reveille v$SERVER_V: role=$ROLE  broker=$URL  client=v$CLIENT_V  wake=native (arm on boot)" >&2
 if [ "$SERVER_V" != "unreachable" ] && [ "$SERVER_V" != "$CLIENT_V" ]; then
     echo "Reveille: WARNING broker v$SERVER_V != client v$CLIENT_V -- update" >&2
 fi
 
-exec claude ${claude_args[@]+"${claude_args[@]}"}
+exec claude ${claude_args[@]+"${claude_args[@]}"} "$BOOT"
