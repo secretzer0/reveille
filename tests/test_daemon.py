@@ -28,13 +28,16 @@ def test_wake_url_empty():
 
 def test_when_ns_relative_iso_and_bad():
     import time
-    from datetime import datetime
+    from datetime import datetime, timezone
     from agentbus import store
     assert daemon._when_ns("") is None
     rel = daemon._when_ns("2h")
     assert abs(rel - (time.time_ns() - 2 * 3600 * 1_000_000_000)) < int(2e9)
-    assert daemon._when_ns("2026-07-15") == int(
-        datetime.fromisoformat("2026-07-15").timestamp() * 1_000_000_000)
+    # naive ISO = UTC, never server-local: a UTC-intended window must not shift
+    utc_midnight = int(datetime(2026, 7, 15, tzinfo=timezone.utc).timestamp() * 1e9)
+    assert daemon._when_ns("2026-07-15") == utc_midnight
+    assert daemon._when_ns("2026-07-15T00:00Z") == utc_midnight
+    assert daemon._when_ns("2026-07-15T00:00-05:00") == utc_midnight + 5 * 3600 * 10**9
     try:
         daemon._when_ns("next tuesday")
         assert False, "should raise"

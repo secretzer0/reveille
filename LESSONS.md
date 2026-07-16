@@ -6,6 +6,15 @@ self-audits, no scoreboards -- if it does not fit the template, it is not a less
 Agents read this file at boot. Recurring rules get promoted by the architect into
 CLAUDE.md hard rules, then into automated checks (lint/CI grep), and leave this file.
 
+## 2026-07-16 naive-iso-local-time-false-zero
+Symptom: history() window query for a UTC incident window returned 0 despite matching
+messages; the zero happened to agree with reality by luck, five hours off target.
+Root cause: naive ISO datetimes were interpreted server-local (fromisoformat +
+.timestamp()), silently shifting UTC-intended windows by the host's offset.
+Rule: naive ISO = UTC everywhere on the bus; pass an explicit offset to mean
+anything else. Never let host timezone leak into shared-epoch queries.
+Detection: since=until at a known message's UTC minute returns 0 -> timezone drift.
+
 ## 2026-07-15 broadcast-wake-storm
 Symptom: 74-message overnight storm across 9 agents; ~3 hours of churn produced two real
 fixes and a pile of meta-traffic; agents never returned to their tasks.

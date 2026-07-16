@@ -30,7 +30,7 @@ import re
 import struct
 import termios
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
 from starlette.applications import Starlette
@@ -50,7 +50,8 @@ TOKEN = os.environ.get("AGENTBUS_TOKEN") or None  # None = open (trusted LAN)
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
 USAGE = """AGENTBUS usage. Source: usage() tool or GET /usage. Tool signatures are in your
-MCP tool schemas; this is only what they don't cover.
+MCP tool schemas; this is only what they don't cover. Ends with CHANGES: per-version
+behavior changes -- re-read after any broker version bump (info() or GET /version).
 
 ENV (set by the launching pane; never hardcode or prompt):
   $AGENT_ROLE      your bus name (the X-Agent header). Unset -> you are "unset-agent".
@@ -102,7 +103,22 @@ Defects: load-bearing (peers coding against it now) -> surface immediately (unic
 NEED: + repro; broadcast only if several peers build on it). Anything else -> finish my
 current task first, then unicast the owner. Lessons -> one LESSONS.md entry (template via
 usage()), never bus traffic.
-Full reference: usage() or GET <broker>/usage.
+Full reference: usage() or GET <broker>/usage. Broker version bumped -> re-read usage(),
+its CHANGES section says what changed and how to use it.
+"""
+
+CHANGES = """
+CHANGES (newest first; re-read after any broker version bump):
+0.1.2  history(): naive ISO times (no offset) now parse as UTC. They were server-local,
+       silently shifting UTC-intended windows by the host offset -- false zeros.
+       Explicit offsets ('...T09:30Z', '...T09:30-05:00') are honored as written.
+0.1.1  history(): 'text' param replaced by 'keywords' -- space-separated words, OR-matched
+       case-insensitive at any position; results ranked by distinct words matched, then
+       total hits, ties oldest-first. New 'until' param; since/until each take relative
+       ('2h', '1d') or explicit ISO date/datetime. Bare date = midnight UTC.
+0.1.0  Poke gate: one outstanding poke per agent until inbox() acks it (10-min TTL).
+       Broadcasts queue silently and never wake -- only unicast pokes. join() replays
+       only the last 15 min of backlog (fresh=True skips even that).
 """
 
 log = logging.getLogger("agentbus")  # logs client name + thread id per op; level via AGENTBUS_LOG
@@ -175,8 +191,10 @@ async def whoami(ctx: Context = None) -> str:
 @mcp.tool()
 async def usage(ctx: Context = None) -> str:
     """How to attach to the bus and stay reachable (identity, token, join/inbox/send,
-    wake, and the exit-144 sandbox fallback). Authoritative copy, served by the broker."""
-    return USAGE
+    wake, and the exit-144 sandbox fallback), plus CHANGES: what each broker version
+    changed and how to use it. Authoritative copy, served by the broker. Re-read
+    whenever info() reports a new version."""
+    return USAGE + CHANGES
 
 
 @mcp.tool()
@@ -256,7 +274,8 @@ _DUR_RE = re.compile(r"\s*(\d+)\s*([smhd])\s*")
 
 def _when_ns(spec: str):
     """Time spec -> ts_ns. Relative ('2h', '30m', '1d') or explicit ISO date/datetime
-    ('2026-07-15', '2026-07-15T09:30', server-local). Empty -> None (open endpoint)."""
+    ('2026-07-15', '2026-07-15T09:30Z'). Naive (no offset) = UTC -- the bus epoch is
+    UTC, so the server's local timezone never shifts a window. Empty -> None."""
     if not spec:
         return None
     m = _DUR_RE.fullmatch(spec)
@@ -264,11 +283,14 @@ def _when_ns(spec: str):
         mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
         return time.time_ns() - int(m.group(1)) * mult * 1_000_000_000
     try:
-        return int(datetime.fromisoformat(spec).timestamp() * 1_000_000_000)
+        dt = datetime.fromisoformat(spec)
     except ValueError:
         raise store.BusError(
-            f"bad time {spec!r}: relative '2h'/'30m'/'1d' or ISO '2026-07-15[THH:MM]'"
+            f"bad time {spec!r}: relative '2h'/'30m'/'1d' or ISO '2026-07-15[THH:MM][Z]'"
         ) from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1_000_000_000)
 
 
 @mcp.tool()
@@ -282,8 +304,9 @@ async def history(keywords: str = "", since: str = "", until: str = "",
                  Results ranked best-first: more distinct words matched wins, then
                  more total hits, ties oldest-first.
       since/until  window endpoints; each is relative ('2h', '30m', '1d') or an
-                 explicit ISO date/datetime ('2026-07-15', '2026-07-15T09:30').
-                 Bare date = midnight, so one full day is since=D, until=D+1.
+                 explicit ISO date/datetime ('2026-07-15', '2026-07-15T09:30Z').
+                 Naive (no offset) = UTC; add an offset to mean anything else.
+                 Bare date = midnight UTC, so one full day is since=D, until=D+1.
                  Omit either endpoint to leave that side open.
       with_agent only messages where that agent is sender or recipient
       mine=True  only messages where YOU are sender or recipient (your asks + replies to
@@ -431,7 +454,7 @@ async def version_http(_request):
 
 
 async def usage_http(_request):
-    return PlainTextResponse(USAGE)
+    return PlainTextResponse(USAGE + CHANGES)
 
 
 # ---- web terminal: token+role form -> xterm.js <-> pty running `agent <role>` ----
