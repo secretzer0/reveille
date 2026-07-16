@@ -858,6 +858,28 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  .atts img.att{display:block;max-width:min(380px,100%);max-height:260px;width:auto;
   height:auto;border-radius:8px;border:1px solid var(--line);cursor:zoom-in}
  .atts a.attlink{color:var(--gold)}
+ /* ---- rendered markdown attachments ---- */
+ .mdview{flex-basis:100%;background:var(--rail);border:1px solid var(--line);
+  border-radius:10px;padding:.8rem 1rem;max-height:26rem;overflow-y:auto;
+  font-size:.82rem;line-height:1.55;color:var(--fg)}
+ .mdview h1,.mdview h2,.mdview h3,.mdview h4,.mdview h5,.mdview h6{
+  color:var(--gold);margin:.7em 0 .3em;line-height:1.25}
+ .mdview h1{font-size:1.05rem}.mdview h2{font-size:.95rem}.mdview h3{font-size:.88rem}
+ .mdview h4,.mdview h5,.mdview h6{font-size:.82rem}
+ .mdview p{margin:.35em 0}
+ .mdview ul,.mdview ol{margin:.35em 0;padding-left:1.4em}
+ .mdview code{background:var(--hover);border:1px solid var(--line);border-radius:4px;
+  padding:.05em .35em;font-size:.78rem}
+ .mdview pre{background:var(--hover);border:1px solid var(--line);border-radius:8px;
+  padding:.6rem .8rem;margin:.45em 0;overflow-x:auto}
+ .mdview pre code{background:none;border:0;padding:0;white-space:pre}
+ .mdview blockquote{border-left:3px solid var(--gold);margin:.45em 0;
+  padding:.1em 0 .1em .8em;color:var(--dim)}
+ .mdview table{border-collapse:collapse;margin:.45em 0;font-size:.78rem}
+ .mdview th,.mdview td{border:1px solid var(--line);padding:.3em .65em;text-align:left}
+ .mdview th{background:var(--hover);color:var(--gold)}
+ .mdview a{color:var(--gold)}
+ .mdview hr{border:0;border-top:1px solid var(--line);margin:.7em 0}
  #empty{color:var(--faint);text-align:center;margin-top:4rem}
 
  #jump{position:fixed;right:1.6rem;bottom:8.2rem;display:none;background:var(--card);
@@ -1182,8 +1204,64 @@ function attHtml(list){
   if(/\.(png|jpe?g|gif|webp|svg)$/i.test(a.url))
    return '<a href="'+safe+'" target="_blank" rel="noopener" title="open full size">'
      +'<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'"></a>';
-  return '<a class="attlink" href="'+safe+'" download>'+esc(a.name||a.url)+'</a>';
+  const link='<a class="attlink" href="'+safe+'" download>'+esc(a.name||a.url)+'</a>';
+  if(/\.(md|markdown)$/i.test(a.url)&&(a.bytes||0)<300000)
+   return link+'<div class="mdview" data-src="'+safe+'">rendering&hellip;</div>';
+  return link;
  }).join(' ')+'</div>';
+}
+
+// minimal GH-flavored subset: headers, lists, code fences, tables, quotes,
+// hr, bold/italic/inline-code/links. Everything HTML-escaped first.
+function mdToHtml(src){
+ const inline=s=>esc(s)
+  .replace(/`([^`]+)`/g,'<code>$1</code>')
+  .replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>')
+  .replace(/(^|\W)\*([^*\s][^*]*)\*/g,'$1<i>$2</i>')
+  .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+ let out='',inCode=false,list=null,inTable=false;
+ const closeBlocks=()=>{
+  if(list){out+='</'+list+'>';list=null;}
+  if(inTable){out+='</table>';inTable=false;}
+ };
+ for(const ln of src.split('\n')){
+  if(/^\s*```/.test(ln)){closeBlocks();out+=inCode?'</code></pre>':'<pre><code>';inCode=!inCode;continue;}
+  if(inCode){out+=esc(ln)+'\n';continue;}
+  if(/^\s*\|.*\|\s*$/.test(ln)){
+   if(list){out+='</'+list+'>';list=null;}
+   if(/^\s*\|[\s:|-]+\|\s*$/.test(ln))continue;               // header separator row
+   const cells=ln.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>inline(c.trim()));
+   const tag=inTable?'td':'th';
+   if(!inTable){out+='<table>';inTable=true;}
+   out+='<tr><'+tag+'>'+cells.join('</'+tag+'><'+tag+'>')+'</'+tag+'></tr>';
+   continue;
+  }
+  if(inTable){out+='</table>';inTable=false;}
+  const h=ln.match(/^(#{1,6})\s+(.*)/);
+  if(h){closeBlocks();out+='<h'+h[1].length+'>'+inline(h[2])+'</h'+h[1].length+'>';continue;}
+  if(/^\s*[-*+]\s+/.test(ln)){
+   if(list!=='ul'){closeBlocks();out+='<ul>';list='ul';}
+   out+='<li>'+inline(ln.replace(/^\s*[-*+]\s+/,''))+'</li>';continue;}
+  if(/^\s*\d+\.\s+/.test(ln)){
+   if(list!=='ol'){closeBlocks();out+='<ol>';list='ol';}
+   out+='<li>'+inline(ln.replace(/^\s*\d+\.\s+/,''))+'</li>';continue;}
+  if(/^\s*>\s?/.test(ln)){closeBlocks();out+='<blockquote>'+inline(ln.replace(/^\s*>\s?/,''))+'</blockquote>';continue;}
+  if(/^\s*([-_*])\s*(\1\s*){2,}$/.test(ln)){closeBlocks();out+='<hr>';continue;}
+  if(!ln.trim()){closeBlocks();continue;}
+  closeBlocks();out+='<p>'+inline(ln)+'</p>';
+ }
+ if(inCode)out+='</code></pre>';
+ closeBlocks();
+ return out;
+}
+
+async function hydrateMd(el){
+ try{
+  const r=await fetch(el.dataset.src);
+  if(!r.ok){el.textContent='could not load '+el.dataset.src;return;}
+  el.innerHTML=mdToHtml(await r.text());
+ }catch(e){el.textContent='could not load attachment';}
+ el.removeAttribute('data-src');
 }
 
 function render(m){
@@ -1215,6 +1293,7 @@ function render(m){
     +'</div>')
   +(m.subject?'<div class="subj">'+esc(m.subject)+'</div>':'')
   +'<div class="body">'+esc(m.body)+'</div>'+attHtml(m.attachments)+'</div>';
+ for(const el of row.querySelectorAll('.mdview[data-src]'))hydrateMd(el);
  row.style.display=matches(m)?'':'none';
  row.addEventListener('click',e=>{
   if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click
