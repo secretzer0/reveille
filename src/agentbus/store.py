@@ -8,6 +8,7 @@ is trivially testable, and it is transport-agnostic (stdio or HTTP, same core).
 Model
 -----
 agents     one row per joined session (name <-> session tag, last-seen heartbeat).
+           room = the key the session presented; rooms are isolated message spaces.
 messages   append-only. recipient = an agent name, or '*' for broadcast.
            thread_id = the root message's id; parent_id = the direct reply target.
 reads      (message_id, agent) -- an agent has consumed a message.
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS agents (
     name      TEXT PRIMARY KEY,
     tag       TEXT,
     url       TEXT,
+    room      TEXT NOT NULL DEFAULT '',
     joined_ns INTEGER NOT NULL,
     seen_ns   INTEGER NOT NULL
 );
@@ -49,6 +51,7 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient TEXT NOT NULL,
     subject   TEXT NOT NULL DEFAULT '',
     body      TEXT NOT NULL,
+    room      TEXT NOT NULL DEFAULT '',
     ts_ns     INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reads (
@@ -66,6 +69,17 @@ CREATE TABLE IF NOT EXISTS links (
     child_id  INTEGER NOT NULL REFERENCES messages(id),
     PRIMARY KEY (parent_id, child_id)
 );
+-- 1-n file attachments per message. The bytes live on disk under the broker's
+-- files/ dir (served at /files/<url basename>); rows carry only the reference.
+CREATE TABLE IF NOT EXISTS attachments (
+    id         INTEGER PRIMARY KEY,
+    message_id INTEGER NOT NULL REFERENCES messages(id),
+    url        TEXT NOT NULL,
+    name       TEXT,
+    bytes      INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_att_message  ON attachments(message_id);
+CREATE INDEX IF NOT EXISTS idx_msg_room     ON messages(room);
 CREATE INDEX IF NOT EXISTS idx_msg_recipient ON messages(recipient);
 CREATE INDEX IF NOT EXISTS idx_msg_thread    ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_links_child   ON links(child_id);
@@ -91,6 +105,11 @@ def connect(db_path):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
+    for tbl in ("agents", "messages"):  # pre-room DBs: add the column BEFORE the
+        try:                            # schema script, whose room index needs it
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN room TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass                        # fresh db (no table yet) or already migrated
     conn.executescript(_SCHEMA)
     return conn
 
@@ -105,19 +124,22 @@ def _row(conn, name):
 
 # ---- presence ----------------------------------------------------------------
 
-def join(conn, name, tag, fresh=False, url=None):
-    """Sign up under `name`. Fails if a *live* agent holds it under a different tag.
-    `url` records where the agent lives (its broker base URL), for cross-machine.
-    Replays only the last CATCHUP_NS of backlog; fresh=True skips it entirely."""
+def join(conn, name, tag, fresh=False, url=None, room=""):
+    """Sign up under `name` in `room` (the key the session presented; rooms are
+    isolated message spaces). Fails if a *live* agent holds the name under a
+    different tag. ponytail: names are globally unique across rooms -- a live
+    'architect' in one room blocks the name in another; per-room names if it bites.
+    Replays only the last CATCHUP_NS of the room's backlog; fresh=True skips it."""
     valid_name(name)
     now = time.time_ns()
     cur = _row(conn, name)
     if cur and cur["tag"] != tag and _is_live(cur["seen_ns"], now):
         raise BusError(f"name {name!r} is held by a live agent (tag {cur['tag']}). pick another.")
     conn.execute(
-        "INSERT INTO agents(name, tag, url, joined_ns, seen_ns) VALUES(?,?,?,?,?) "
-        "ON CONFLICT(name) DO UPDATE SET tag=excluded.tag, url=excluded.url, seen_ns=excluded.seen_ns",
-        (name, tag, url, now, now),
+        "INSERT INTO agents(name, tag, url, room, joined_ns, seen_ns) VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(name) DO UPDATE SET tag=excluded.tag, url=excluded.url, "
+        "room=excluded.room, seen_ns=excluded.seen_ns",
+        (name, tag, url, room, now, now),
     )
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
@@ -153,13 +175,13 @@ def whoami(conn, tag):
     return r["name"] if r else None
 
 
-def presence(conn):
+def presence(conn, room=""):
     now = time.time_ns()
     return [
         {"name": r["name"], "tag": r["tag"], "url": r["url"],
          "live": _is_live(r["seen_ns"], now),
          "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"]}
-        for r in conn.execute("SELECT * FROM agents ORDER BY name")
+        for r in conn.execute("SELECT * FROM agents WHERE room=? ORDER BY name", (room,))
     ]
 
 
@@ -174,15 +196,16 @@ def prune(conn):
 
 # ---- messages ----------------------------------------------------------------
 
-def _wake_targets(conn, sender, recipient):
+def _wake_targets(conn, sender, recipient, room=""):
     if recipient != BROADCAST:
         return [recipient]
     now = time.time_ns()
-    return [r["name"] for r in conn.execute("SELECT name, seen_ns FROM agents")
+    return [r["name"] for r in conn.execute(
+                "SELECT name, seen_ns FROM agents WHERE room=?", (room,))
             if r["name"] != sender and _is_live(r["seen_ns"], now)]
 
 
-def send(conn, sender, recipient, body, subject="", reply_to=None):
+def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=None, room=""):
     """Insert a message. recipient='*' broadcasts.
 
     reply_to threads this under a parent. Pass one id for a normal reply, or a
@@ -190,29 +213,33 @@ def send(conn, sender, recipient, body, subject="", reply_to=None):
     The first id is the PRIMARY parent: it sets parent_id and which thread this
     joins. Every id becomes an edge in `links`, so the full fork/merge web is kept.
 
+    attachments: optional list of {"url", "name", "bytes"} dicts (1-n per message);
+    the file bytes themselves live on disk under the broker's files/ dir.
+
     Returns {id, thread_id, parents, wake:[names]}.
     """
     valid_name(sender)
     if recipient != BROADCAST:
         valid_name(recipient)
-        if not _row(conn, recipient):
-            raise BusError(f"no such agent: {recipient!r} (is it joined?)")
+        r = _row(conn, recipient)
+        if not r or r["room"] != room:
+            raise BusError(f"no such agent in this room: {recipient!r} (is it joined?)")
     parents = [] if reply_to is None else ([reply_to] if isinstance(reply_to, int) else list(reply_to))
     thread_id, parent_id = None, None
     if parents:
         ph = ",".join("?" * len(parents))
         found = {r["id"]: r for r in conn.execute(
-            f"SELECT id, thread_id FROM messages WHERE id IN ({ph})", parents)}
+            f"SELECT id, thread_id, room FROM messages WHERE id IN ({ph})", parents)}
         for p in parents:
-            if p not in found:
-                raise BusError(f"reply_to {p}: no such message")
+            if p not in found or found[p]["room"] != room:
+                raise BusError(f"reply_to {p}: no such message in this room")
         parent_id = parents[0]                  # primary parent
         thread_id = found[parents[0]]["thread_id"]  # joins the primary parent's thread
     now = time.time_ns()
     cur = conn.execute(
-        "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, body, ts_ns) "
-        "VALUES(?,?,?,?,?,?,?)",
-        (thread_id, parent_id, sender, recipient, subject, body, now),
+        "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, body, room, ts_ns) "
+        "VALUES(?,?,?,?,?,?,?,?)",
+        (thread_id, parent_id, sender, recipient, subject, body, room, now),
     )
     mid = cur.lastrowid
     if thread_id is None:  # new thread roots on its own id
@@ -220,8 +247,11 @@ def send(conn, sender, recipient, body, subject="", reply_to=None):
         thread_id = mid
     for p in parents:
         conn.execute("INSERT OR IGNORE INTO links(parent_id, child_id) VALUES(?,?)", (p, mid))
+    for a in attachments or []:
+        conn.execute("INSERT INTO attachments(message_id, url, name, bytes) VALUES(?,?,?,?)",
+                     (mid, a["url"], a.get("name"), a.get("bytes")))
     return {"id": mid, "thread_id": thread_id, "parents": parents,
-            "wake": _wake_targets(conn, sender, recipient)}
+            "wake": _wake_targets(conn, sender, recipient, room)}
 
 
 def _msg(r):
@@ -230,29 +260,66 @@ def _msg(r):
             "body": r["body"], "ts_ns": r["ts_ns"]}
 
 
-def inbox(conn, agent):
-    """Unread messages addressed to `agent` (direct or broadcast), oldest first."""
+def _with_attachments(conn, msgs):
+    """Stamp each message dict with its attachments list (batch, one query)."""
+    if not msgs:
+        return msgs
+    ids = [m["id"] for m in msgs]
+    ph = ",".join("?" * len(ids))
+    by = {}
+    for r in conn.execute(
+            f"SELECT message_id, url, name, bytes FROM attachments "
+            f"WHERE message_id IN ({ph}) ORDER BY id", ids):
+        by.setdefault(r["message_id"], []).append(
+            {"url": r["url"], "name": r["name"], "bytes": r["bytes"]})
+    for m in msgs:
+        m["attachments"] = by.get(m["id"], [])
+    return msgs
+
+
+def inbox(conn, agent, room=""):
+    """Unread messages addressed to `agent` in `room` (direct or broadcast), oldest first."""
     valid_name(agent)
     rows = conn.execute(
         "SELECT * FROM messages m "
-        "WHERE (m.recipient=? OR m.recipient=?) AND m.sender!=? "
+        "WHERE m.room=? AND (m.recipient=? OR m.recipient=?) AND m.sender!=? "
         "AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id=m.id AND r.agent=?) "
         "ORDER BY m.id",
-        (agent, BROADCAST, agent, agent),
+        (room, agent, BROADCAST, agent, agent),
     ).fetchall()
-    return [_msg(r) for r in rows]
+    return _with_attachments(conn, [_msg(r) for r in rows])
 
 
-def thread(conn, thread_id):
-    """Every message in a thread, oldest first (read or not). Linear view."""
+def thread(conn, thread_id, room=""):
+    """Every message in a thread in `room`, oldest first (read or not). Linear view."""
     rows = conn.execute(
-        "SELECT * FROM messages WHERE thread_id=? ORDER BY id", (thread_id,)
+        "SELECT * FROM messages WHERE thread_id=? AND room=? ORDER BY id", (thread_id, room)
     ).fetchall()
-    return [_msg(r) for r in rows]
+    return _with_attachments(conn, [_msg(r) for r in rows])
+
+
+def known(conn, name):
+    """True if `name` has ever joined the bus."""
+    return conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone() is not None
+
+
+def tail(conn, since_id=0, limit=200, room=""):
+    """Feed backlog for `room`: messages with id > since_id, oldest-first (or the most
+    recent `limit` when since_id=0). The web feed uses this to fill reconnect gaps."""
+    limit = max(1, min(int(limit), 1000))
+    if since_id:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE room=? AND id>? ORDER BY id LIMIT ?",
+            (room, since_id, limit)).fetchall()
+        return _with_attachments(conn, [_msg(r) for r in rows])
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE room=? ORDER BY id DESC LIMIT ?", (room, limit)
+    ).fetchall()
+    return _with_attachments(conn, [_msg(r) for r in reversed(rows)])
 
 
 def search(conn, *, keywords=None, since_ns=None, until_ns=None,
-           involves=None, mine_agent=None, thread_id=None, limit=200):
+           involves=None, mine_agent=None, thread_id=None, limit=200, room=""):
     """Search the whole message log (read or not). Every filter ANDs together:
       keywords   list of words; a message matches if ANY word appears as a
                  case-insensitive substring, any position, in subject OR body
@@ -266,7 +333,7 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
     hits, ties oldest-first. Each carries thread_id so the caller can expand the DAG
     with thread()/graph()/trace().
     """
-    where, args = [], []
+    where, args = ["room=?"], [room]
     if keywords:
         ors = " OR ".join(["(subject LIKE ? OR body LIKE ?)"] * len(keywords))
         where.append(f"({ors})")
@@ -292,7 +359,7 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
     rows = conn.execute(
         f"SELECT * FROM messages{clause} ORDER BY id DESC LIMIT ?", args + [limit]
     ).fetchall()
-    msgs = [_msg(r) for r in reversed(rows)]
+    msgs = _with_attachments(conn, [_msg(r) for r in reversed(rows)])
     if keywords:
         # ponytail: rank the most recent <=limit matches, not the whole log; raise
         # limit if a search needs deeper reach. SQLite LIKE is ASCII-case-insensitive,
@@ -327,15 +394,17 @@ def _subgraph(conn, ids):
         m = _msg(r)
         m["parents"] = parents.get(r["id"], [])
         msgs.append(m)
-    return {"messages": msgs, "edges": edges}
+    return {"messages": _with_attachments(conn, msgs), "edges": edges}
 
 
-def trace(conn, message_id):
+def trace(conn, message_id, room=""):
     """Ancestor sub-DAG: every message that led to `message_id`, with the edges
     among them -- so you can track back exactly how we got here, including any
-    forks and re-links upstream. Includes the node itself."""
-    if not conn.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone():
-        raise BusError(f"no such message: {message_id}")
+    forks and re-links upstream. Includes the node itself. Replies never cross
+    rooms (send() enforces it), so checking the entry node scopes the whole walk."""
+    if not conn.execute("SELECT 1 FROM messages WHERE id=? AND room=?",
+                        (message_id, room)).fetchone():
+        raise BusError(f"no such message in this room: {message_id}")
     seen, frontier = set(), [message_id]
     while frontier:
         nid = frontier.pop()
@@ -347,11 +416,12 @@ def trace(conn, message_id):
     return _subgraph(conn, seen)
 
 
-def graph(conn, thread_id):
-    """The whole web of a thread: every message in it plus all fork/merge edges.
-    Use this to render or walk the full conversation tree."""
+def graph(conn, thread_id, room=""):
+    """The whole web of a thread in `room`: every message in it plus all fork/merge
+    edges. Use this to render or walk the full conversation tree."""
     ids = [r["id"] for r in
-           conn.execute("SELECT id FROM messages WHERE thread_id=?", (thread_id,))]
+           conn.execute("SELECT id FROM messages WHERE thread_id=? AND room=?",
+                        (thread_id, room))]
     return _subgraph(conn, set(ids))
 
 

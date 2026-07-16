@@ -16,6 +16,7 @@ broker closed, caller reconnects; exit 1 = error / rejected).
 """
 import argparse
 import asyncio
+import os
 import json
 import sys
 
@@ -24,21 +25,40 @@ import websockets
 from agentbus import __version__
 
 
+HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))  # presence heartbeat cadence
+
+
+async def _heartbeat(ws):
+    # Lets the broker keep this agent LIVE while parked: the held socket carries a
+    # tiny "hb" every few minutes and the broker touches presence on each one.
+    while True:
+        await asyncio.sleep(HB_SECONDS)
+        await ws.send("hb")
+
+
 async def _watch(url, name, token, once=False):
     sep = "&" if "?" in url else "?"
     uri = f"{url}{sep}name={name}" + (f"&token={token}" if token else "")
     async with websockets.connect(uri) as ws:
-        async for frame in ws:
-            try:
-                obj = json.loads(frame)
-            except (ValueError, TypeError):
-                obj = None
-            if isinstance(obj, dict) and obj.get("error"):  # daemon rejected the connection
-                print(f"wake rejected: {obj['error']} ({obj.get('detail', '')})", file=sys.stderr)
-                return 1
-            print(frame, flush=True)  # one line per ring
-            if once:
-                return 0  # task completion = the wake; the agent re-arms
+        hb = asyncio.create_task(_heartbeat(ws))
+        try:
+            return await _recv_loop(ws, once)
+        finally:
+            hb.cancel()
+
+
+async def _recv_loop(ws, once):
+    async for frame in ws:
+        try:
+            obj = json.loads(frame)
+        except (ValueError, TypeError):
+            obj = None
+        if isinstance(obj, dict) and obj.get("error"):  # daemon rejected the connection
+            print(f"wake rejected: {obj['error']} ({obj.get('detail', '')})", file=sys.stderr)
+            return 1
+        print(frame, flush=True)  # one line per ring
+        if once:
+            return 0  # task completion = the wake; the agent re-arms
     return 0  # broker closed the connection -- caller reconnects
 
 

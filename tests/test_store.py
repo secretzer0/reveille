@@ -113,6 +113,52 @@ def test_search_explicit_window():
     assert [m["body"] for m in got] == ["mid"]
 
 
+def test_rooms_isolate_everything():
+    c = db()
+    store.join(c, "a", "TA", room="K1"); store.join(c, "b", "TB", room="K1")
+    store.join(c, "z", "TZ", room="K2")
+    store.send(c, "a", "b", "room one traffic", room="K1")
+    # presence, inbox, tail, search are all scoped to the presented key
+    assert [x["name"] for x in store.presence(c, room="K1")] == ["a", "b"]
+    assert [x["name"] for x in store.presence(c, room="K2")] == ["z"]
+    assert len(store.inbox(c, "b", room="K1")) == 1
+    assert store.tail(c, room="K2") == []
+    assert store.search(c, keywords=["traffic"], room="K2") == []
+    assert len(store.search(c, keywords=["traffic"], room="K1")) == 1
+    # cross-room unicast fails: recipient is not in the sender's room
+    try:
+        store.send(c, "a", "z", "wrong room", room="K1")
+        assert False, "should raise"
+    except store.BusError:
+        pass
+
+
+def test_attachments_round_trip():
+    c = db()
+    store.join(c, "a", "TA"); store.join(c, "b", "TB")
+    att = [{"url": "/files/1-x.png", "name": "x.png", "bytes": 209},
+           {"url": "/files/2-y.pdf", "name": "y.pdf", "bytes": 1024}]
+    m = store.send(c, "a", "b", "see attached", attachments=att)
+    box = store.inbox(c, "b")
+    assert box[0]["attachments"] == att, "inbox must carry the 1-n attachment list"
+    assert store.search(c, keywords=["attached"])[0]["attachments"] == att
+    assert store.tail(c, limit=1)[0]["attachments"] == att
+    assert store.thread(c, m["thread_id"])[0]["attachments"] == att
+    # a plain message has an empty list, never a missing key
+    store.send(c, "a", "b", "no files")
+    assert store.tail(c, limit=1)[0]["attachments"] == []
+
+
+def test_tail_recent_and_since_id():
+    c = db()
+    store.join(c, "a", "TA"); store.join(c, "b", "TB")
+    ids = [store.send(c, "a", "b", f"m{i}")["id"] for i in range(5)]
+    assert [m["body"] for m in store.tail(c, limit=2)] == ["m3", "m4"]
+    after = store.tail(c, since_id=ids[2])
+    assert [m["body"] for m in after] == ["m3", "m4"]
+    assert store.known(c, "a") and not store.known(c, "ghost")
+
+
 def test_threading_reply_inherits_thread_and_parent():
     c = db()
     store.join(c, "alice", "TAG_a")

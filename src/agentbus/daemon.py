@@ -12,7 +12,8 @@ or remote -- talks to this one broker.
 
 Identity: each agent's MCP registration sends a static `X-Agent: <name>` header;
 tools resolve "me" from it. Auth: an optional shared `AGENTBUS_TOKEN` (Bearer on
-HTTP, ?token= on the WS). Unset = open mode, fine for a fully trusted LAN.
+HTTP, ?token= on the WS). The key names an isolated ROOM -- same key, same room;
+possession of a key is access. Unset/blank = the open room.
 
 Wake: each agent arms `wake --once` as a harness background task -- a tiny WS client
 that connects with the agent's name and holds the socket (0 tokens). The daemon pushes
@@ -30,14 +31,13 @@ import pty
 import re
 import struct
 import termios
+import threading
 import time
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
 from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -56,7 +56,8 @@ behavior changes -- re-read after any broker version bump (info() or GET /versio
 
 ENV (set by the launching pane; never hardcode or prompt):
   $AGENT_ROLE      your bus name (the X-Agent header). Unset -> you are "unset-agent".
-  $AGENTBUS_TOKEN  the bus secret.
+  $AGENTBUS_TOKEN  your ROOM KEY. Sessions presenting the same key share one isolated
+                   room (messages, presence, wake). A different key = a different room.
 
 USE:
 1. Startup: join(url="http://<broker-host>:8765"). Join replays only the last 15 min of
@@ -115,6 +116,28 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.1.4  Wake heartbeat: an armed waiter now sends "hb" over its held socket every 5
+       min (WAKE_HB to tune) and the broker touches presence on each -- an idle
+       agent with an armed waiter stays LIVE indefinitely.
+0.1.4  Graceful restarts: the broker pushes a final wake frame {"reason":"shutdown"}
+       to every attached waiter before going down. On it: do NOT reply and do not
+       investigate -- just re-arm your waiter; the broker returns within seconds.
+0.1.4  ROOMS: your token is now a room key. Sessions presenting the same key share
+       one isolated room (messages, presence, wake, feed); a different key is a
+       different room. Pre-room history landed in the fleet key's room. Agents:
+       nothing to do -- your $AGENTBUS_TOKEN already places you with your fleet.
+0.1.4  Web chat at GET /ui: live color-coded feed of ALL bus traffic, composer
+       (send as any name), and a history mode searching the entire log (keywords,
+       UTC date range, agent, thread drill-down via a message's #id). Old terminal
+       page moved to /terminal. New API, token-gated like /wake: GET /messages
+       ?since_id=&limit=, GET /search?keywords=&since=&until=&agent=&thread_id=,
+       GET /presence, POST /send {from,to,subject,body,reply_to}, WS /feed (one
+       JSON frame per message). Attachments (1-n per message, first-class): POST
+       /upload?name=<file> (raw bytes body) -> {"url": "/files/..."}; pass
+       [{"url","name","bytes"}] as `attachments` on send (MCP tool or POST /send).
+       Messages carry an "attachments" list everywhere (inbox/history/thread).
+       Agents: need the content -> fetch <broker><url> with your Bearer token;
+       otherwise ignore it. Nothing else changes for you.
 0.1.3  Native wake: the tmux keystroke sidecar is GONE. Arm `wake --once` yourself as a
        harness background task (Bash run_in_background=true); its completion notification
        is the ring -- inbox(), ack(), re-arm. A Stop hook blocks ending a turn with the
@@ -155,10 +178,35 @@ def _poke_ok(name):
 mcp = FastMCP("agentbus", stateless_http=True, json_response=True)
 
 
-def _notify(names):
+def _notify(room, names):
     for n in names:
-        for q in list(_waiters.get(n, ())):
+        for q in list(_waiters.get((room, n), ())):
             q.put_nowait(None)
+
+
+_SHUTDOWN = {"shutdown": True}
+
+
+def _push_shutdown():
+    """Tell every attached waiter the broker is going down (pre-exit courtesy frame):
+    do not reply, just re-arm; the broker will be back."""
+    n = 0
+    for bucket in list(_waiters.values()):
+        for q in list(bucket):
+            q.put_nowait(_SHUTDOWN)
+            n += 1
+    log.info("shutdown notice pushed to %s waiter(s)", n)
+
+
+# Live feed tap for the web UI: every message in a room is pushed to each /feed
+# WebSocket watching that room. Passive observers -- no poke gate, no read receipts.
+_feed: dict = {}  # queue -> room
+
+
+def _feed_push(room, msg):
+    for q, r in list(_feed.items()):
+        if r == room:
+            q.put_nowait(msg)
 
 
 def _me(ctx: Context) -> str:
@@ -167,6 +215,21 @@ def _me(ctx: Context) -> str:
     if not name:
         raise ValueError("missing X-Agent header (set it in your MCP registration)")
     return name
+
+
+def _room_of(request) -> str:
+    """The room key this request presented: Bearer token or ?token=. '' = open room.
+    A key is a capability -- possession IS access; unknown keys open fresh rooms."""
+    if request is None:
+        return ""
+    auth = request.headers.get("authorization") or ""
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return request.query_params.get("token") or ""
+
+
+def _room(ctx: Context) -> str:
+    return _room_of(ctx.request_context.request)
 
 
 def _seen(name):
@@ -186,8 +249,9 @@ async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context 
     me = _me(ctx)
     if name and name != me:
         raise ValueError(f"join name {name!r} must match your X-Agent header {me!r}")
-    store.join(_conn, me, tag=me, fresh=fresh, url=url or None)
-    unread = len(store.inbox(_conn, me))
+    room = _room(ctx)
+    store.join(_conn, me, tag=me, fresh=fresh, url=url or None, room=room)
+    unread = len(store.inbox(_conn, me, room=room))
     log.info("%s join url=%s unread=%s", me, url or "-", unread)
     return {"name": me, "wake_url": _wake_url_from(url), "unread": unread}
 
@@ -212,26 +276,35 @@ async def info(ctx: Context = None) -> str:
     """Reveille status banner: tool version, your bus name, and whether your wake waiter
     is attached right now. Call it on boot to confirm the bus works end to end."""
     me = _me(ctx)
-    attached = bool(_waiters.get(me))
+    attached = bool(_waiters.get((_room(ctx), me)))
     return (f"Reveille v{__version__} -- you are '{me}' -- "
             f"wake waiter: {'ATTACHED (real-time wake)' if attached else 'NOT ARMED (no real-time wake -- arm wake --once)'}")
 
 
 @mcp.tool()
 async def send(to: str, body: str, subject: str = "",
-               reply_to: int | list[int] | None = None, ctx: Context = None) -> dict:
+               reply_to: int | list[int] | None = None,
+               attachments: list | None = None, ctx: Context = None) -> dict:
     """Send a message. to='*' broadcasts; else unicast to one agent. reply_to is a
-    message id (or list, to merge branches). Unicast pushes the recipient awake over
-    WS; broadcasts queue silently and are read on each recipient's next turn.
-    Returns {id, thread_id, parents, delivered_to}."""
+    message id (or list, to merge branches). attachments: optional list of
+    {"url","name","bytes"} dicts referencing files uploaded via POST /upload.
+    Unicast pushes the recipient awake over WS; broadcasts queue silently and are
+    read on each recipient's next turn. Returns {id, thread_id, parents, delivered_to}."""
     me = _me(ctx)
     _seen(me)
-    res = store.send(_conn, me, to, body, subject=subject, reply_to=reply_to)
-    if to != store.BROADCAST:  # broadcasts never wake: delivery != wakeup, kills N^2 storms
-        _notify(res["wake"])
-    log.info("%s send -> %s thread=%s id=%s%s -> woke %s",
+    room = _room(ctx)
+    res = store.send(_conn, me, to, body, subject=subject, reply_to=reply_to,
+                     attachments=attachments, room=room)
+    # broadcasts never wake: delivery != wakeup, kills N^2 storms. Log the woke list
+    # honestly -- res["wake"] is the DELIVERY list; only unicast actually pokes it.
+    woke = res["wake"] if to != store.BROADCAST else []
+    _notify(room, woke)
+    _feed_push(room, {"id": res["id"], "thread_id": res["thread_id"],
+                "parents": res["parents"], "from": me, "to": to, "subject": subject,
+                "body": body, "attachments": attachments or [], "ts_ns": time.time_ns()})
+    log.info("%s send -> %s thread=%s id=%s%s delivered=%s woke=%s",
              me, to, res["thread_id"], res["id"],
-             f" reply_to={reply_to}" if reply_to is not None else "", res["wake"])
+             f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
     return {"id": res["id"], "thread_id": res["thread_id"],
             "parents": res["parents"], "delivered_to": res["wake"]}
 
@@ -242,8 +315,9 @@ async def inbox(ctx: Context = None) -> dict:
     Non-destructive: ack(message_ids) when processed."""
     me = _me(ctx)
     _seen(me)
-    _poke_pending.pop(me, None)  # the wake poll: acks the outstanding poke, re-arming the gate
-    msgs = store.inbox(_conn, me)
+    room = _room(ctx)
+    _poke_pending.pop((room, me), None)  # the wake poll: acks the poke, re-arms the gate
+    msgs = store.inbox(_conn, me, room=room)
     log.info("%s inbox -> %s unread", me, len(msgs))
     return {"messages": msgs}
 
@@ -261,7 +335,7 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
 async def thread(thread_id: int, ctx: Context = None) -> dict:
     """Every message in a thread, oldest first, as {"messages": [...]}. Linear view."""
     _me(ctx)
-    return {"messages": store.thread(_conn, thread_id)}
+    return {"messages": store.thread(_conn, thread_id, room=_room(ctx))}
 
 
 @mcp.tool()
@@ -269,14 +343,14 @@ async def trace(message_id: int, ctx: Context = None) -> dict:
     """Track back how we got to a message: its ancestor sub-DAG as
     {"messages": [...], "edges": [[parent, child], ...]}, forks and re-links included."""
     _me(ctx)
-    return store.trace(_conn, message_id)
+    return store.trace(_conn, message_id, room=_room(ctx))
 
 
 @mcp.tool()
 async def graph(thread_id: int, ctx: Context = None) -> dict:
     """The whole web of a thread as {"messages": [...], "edges": [[parent, child], ...]}."""
     _me(ctx)
-    return store.graph(_conn, thread_id)
+    return store.graph(_conn, thread_id, room=_room(ctx))
 
 
 _DUR_RE = re.compile(r"\s*(\d+)\s*([smhd])\s*")
@@ -331,7 +405,7 @@ async def history(keywords: str = "", since: str = "", until: str = "",
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
         involves=with_agent or None, mine_agent=(me if mine else None),
-        thread_id=thread_id or None, limit=limit)
+        thread_id=thread_id or None, limit=limit, room=_room(ctx))
     log.info("%s history kw=%r since=%r until=%r with=%r mine=%s -> %s", me, keywords,
              since, until, with_agent, mine, len(msgs))
     return {"messages": msgs, "count": len(msgs)}
@@ -342,9 +416,9 @@ async def presence(ctx: Context = None) -> dict:
     """Everyone on the bus as {"agents": [...]} -- each with its url, live (recent
     heartbeat), and connected (a wake.py is attached right now)."""
     _me(ctx)
-    agents = store.presence(_conn)
+    agents = store.presence(_conn, room=_room(ctx))
     for a in agents:
-        a["connected"] = bool(_waiters.get(a["name"]))
+        a["connected"] = bool(_waiters.get((_room(ctx), a["name"])))
     return {"agents": agents}
 
 
@@ -380,12 +454,7 @@ async def wake_ws(ws: WebSocket):
     # a readable {"error": ...} frame the client (wake.py) prints, so an operator can
     # tell a bad token from a missing name.
     await ws.accept()
-    token = ws.query_params.get("token")
-    if TOKEN and token != TOKEN:
-        await ws.send_json({"error": "bad_token", "detail": "token missing or wrong"})
-        await ws.close(code=4401)
-        log.warning("wake rejected: bad_token (name=%s)", ws.query_params.get("name") or "-")
-        return
+    room = _room_of(ws)
     name = ws.query_params.get("name")
     if not name:
         await ws.send_json({"error": "missing_name", "detail": "?name=<agent> is required"})
@@ -395,16 +464,17 @@ async def wake_ws(ws: WebSocket):
     _seen(name)
     log.info("%s wake connected", name)
     q: asyncio.Queue = asyncio.Queue()
-    _waiters.setdefault(name, set()).add(q)
+    _waiters.setdefault((room, name), set()).add(q)
     try:
         # Ring once if DIRECT mail is already waiting at connect, so a just-attached
         # client does not miss it. Broadcasts never ring (here or on arrival) -- they
         # drain on the agent's next natural turn; ringing them at reconnect made every
         # daemon restart storm the whole fleet. We do NOT re-ring on still-unacked
         # backlog -- only on new arrivals.
-        backlog = [m for m in store.inbox(_conn, name) if m["to"] != store.BROADCAST]
-        if backlog and _poke_ok(name):
-            _poke_pending[name] = time.time_ns()
+        backlog = [m for m in store.inbox(_conn, name, room=room)
+                   if m["to"] != store.BROADCAST]
+        if backlog and _poke_ok((room, name)):
+            _poke_pending[(room, name)] = time.time_ns()
             await ws.send_json({"wake": True, "reason": "backlog", "unread": len(backlog)})
             log.info("%s wake ring (backlog %s)", name, len(backlog))
         # Then stay connected and push one frame per new message until the client drops.
@@ -419,41 +489,46 @@ async def wake_ws(ws: WebSocket):
                 t.cancel()
             # Retrieve each task's result/exception so none is "never retrieved": a client
             # that drops while parked makes recv raise WebSocketDisconnect inside its task.
+            gone = False
             for t in (recv, woke):
-                with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect):
-                    await t
-            if recv in done:  # client went away
+                try:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await t
+                except WebSocketDisconnect:
+                    gone = True
+            if gone:
                 break
+            if recv in done:  # client data = its heartbeat; keep the agent LIVE
+                _seen(name)
+                continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
             # has an untyped prompt pending; its next inbox() pulls this mail anyway).
+            vals = [woke.result()] if woke in done and not woke.cancelled() else []
             while not q.empty():
-                q.get_nowait()
-            if not _poke_ok(name):
+                vals.append(q.get_nowait())
+            if any(v is _SHUTDOWN for v in vals):
+                await ws.send_json({"wake": False, "reason": "shutdown",
+                    "note": "broker restarting -- do not reply, just re-arm your "
+                            "waiter; the broker will be back shortly"})
+                break
+            if not _poke_ok((room, name)):
                 continue
-            _poke_pending[name] = time.time_ns()
-            n = len(store.inbox(_conn, name))
+            _poke_pending[(room, name)] = time.time_ns()
+            n = len(store.inbox(_conn, name, room=room))
             await ws.send_json({"wake": True, "reason": "message", "unread": n})
             log.info("%s wake ring (%s unread)", name, n)
     except WebSocketDisconnect:
         pass
     finally:
-        bucket = _waiters.get(name)
+        bucket = _waiters.get((room, name))
         if bucket:
             bucket.discard(q)
             if not bucket:
-                _waiters.pop(name, None)
+                _waiters.pop((room, name), None)
 
 
 # ---- app + auth + run --------------------------------------------------------
-
-class BearerAuth(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        if TOKEN and request.url.path.startswith("/mcp"):
-            if request.headers.get("authorization") != f"Bearer {TOKEN}":
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
-
 
 async def health(_request):
     return PlainTextResponse("ok")
@@ -465,6 +540,778 @@ async def version_http(_request):
 
 async def usage_http(_request):
     return PlainTextResponse(USAGE + CHANGES)
+
+
+# ---- web API: the chat UI (and any script) drives the bus over plain HTTP ----------
+# The presented key (?token= or Bearer) names the ROOM; every endpoint is scoped to it.
+
+async def messages_http(request):
+    """GET /messages?since_id=N&limit=M -> {"messages": [...]} oldest-first.
+    since_id=0 (default) returns the most recent `limit`; the UI uses since_id to
+    fill the gap after a feed reconnect."""
+    since_id = int(request.query_params.get("since_id") or 0)
+    limit = int(request.query_params.get("limit") or 200)
+    return JSONResponse({"messages": store.tail(_conn, since_id=since_id, limit=limit,
+                                                room=_room_of(request))})
+
+
+async def presence_http(request):
+    """GET /presence -> same view as the presence() tool, for the UI header."""
+    room = _room_of(request)
+    me = request.query_params.get("me") or ""
+    if me:  # the poll doubles as the web identity's heartbeat, so it shows live
+        with contextlib.suppress(store.BusError):
+            if store.known(_conn, me):
+                store.touch(_conn, me)
+            else:
+                store.join(_conn, me, tag=f"web:{me}", room=room, fresh=True)
+    agents = store.presence(_conn, room=room)
+    for a in agents:
+        a["connected"] = bool(_waiters.get((room, a["name"])))
+    return JSONResponse({"agents": agents})
+
+
+async def send_http(request):
+    """POST /send {from?, to, subject?, body, reply_to?} -> send a message from the web.
+    Same semantics as the MCP send tool: unicast rings (gate applies), broadcast queues.
+    Unknown senders are auto-joined; an existing agent's name is used as-is (trusted LAN)."""
+    try:
+        d = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    room = _room_of(request)
+    sender = (d.get("from") or "human-web").strip()
+    to = (d.get("to") or store.BROADCAST).strip()
+    body = d.get("body") or ""
+    if not body:
+        return JSONResponse({"error": "empty body"}, status_code=400)
+    try:
+        if not store.known(_conn, sender):
+            store.join(_conn, sender, tag=f"web:{sender}", room=room)
+        res = store.send(_conn, sender, to, body,
+                         subject=d.get("subject") or "", reply_to=d.get("reply_to"),
+                         attachments=d.get("attachments"), room=room)
+    except store.BusError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    woke = res["wake"] if to != store.BROADCAST else []
+    _notify(room, woke)
+    _feed_push(room, {"id": res["id"], "thread_id": res["thread_id"],
+                "parents": res["parents"], "from": sender, "to": to,
+                "subject": d.get("subject") or "", "body": body,
+                "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
+    log.info("%s send(web) -> %s thread=%s id=%s delivered=%s woke=%s",
+             sender, to, res["thread_id"], res["id"], res["wake"], woke)
+    return JSONResponse({"id": res["id"], "thread_id": res["thread_id"],
+                         "delivered_to": res["wake"]})
+
+
+_files_dir = None  # set in main(): <db dir>/files -- attachments live next to the broker db
+_FNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+MAX_UPLOAD = 25 * 1024 * 1024
+
+
+async def upload_http(request):
+    """POST /upload?name=<filename> with the raw file bytes as the body. Stores it under
+    a unique name and returns {"url": "/files/<stored>", "name": <original>}. The web UI
+    (or any script) then references it in a message body as: [file: /files/<stored> <name>]
+    Agents ingest on demand: curl -H 'Authorization: Bearer $AGENTBUS_TOKEN' <broker><url>"""
+    name = _FNAME_RE.sub("_", request.query_params.get("name") or "file.bin")[-80:]
+    data = await request.body()
+    if not data:
+        return JSONResponse({"error": "empty body"}, status_code=400)
+    if len(data) > MAX_UPLOAD:
+        return JSONResponse({"error": f"too large (cap {MAX_UPLOAD >> 20}MB)"}, status_code=413)
+    stored = f"{time.time_ns() // 1_000_000}-{name}"
+    (_files_dir / stored).write_bytes(data)
+    log.info("upload %s (%s bytes) -> /files/%s", name, len(data), stored)
+    return JSONResponse({"url": f"/files/{stored}", "name": name, "bytes": len(data)})
+
+
+async def files_http(request):
+    """GET /files/<stored> -> the attachment bytes (content-type guessed from the name)."""
+    fname = _FNAME_RE.sub("_", request.path_params["fname"])
+    path = _files_dir / fname
+    if not path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path)
+
+
+async def search_http(request):
+    """GET /search?keywords=&since=&until=&agent=&thread_id=&limit= -> the whole log,
+    same semantics as the history() tool (keywords ranked; naive ISO = UTC)."""
+    q = request.query_params
+    try:
+        msgs = store.search(
+            _conn,
+            keywords=(q.get("keywords") or "").split() or None,
+            since_ns=_when_ns(q.get("since") or ""),
+            until_ns=_when_ns(q.get("until") or ""),
+            involves=q.get("agent") or None,
+            thread_id=int(q.get("thread_id") or 0) or None,
+            limit=int(q.get("limit") or 500), room=_room_of(request))
+    except (store.BusError, ValueError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"messages": msgs, "count": len(msgs)})
+
+
+async def feed_ws(ws: WebSocket):
+    """WS /feed: pushes every bus message as one JSON frame -- the UI's live wire."""
+    await ws.accept()
+    q: asyncio.Queue = asyncio.Queue()
+    _feed[q] = _room_of(ws)
+    log.info("feed connected (%s watching)", len(_feed))
+    try:
+        # ponytail: a dropped browser parked on q.get() is only reaped when the next
+        # message's send fails -- bounded leak, self-cleaning, fine for a LAN UI.
+        while True:
+            await ws.send_json(await q.get())
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        _feed.pop(q, None)
+        log.info("feed disconnected (%s watching)", len(_feed))
+
+
+# ---- web chat: live color-coded feed of all bus traffic + composer ----------------
+
+WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille bus</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ :root{
+  color-scheme:dark;
+  --bg:#0e1116;--rail:#0a0d12;--card:#151a21;--line:#242c37;--hover:#1a212b;
+  --fg:#dce3ec;--dim:#8b95a3;--faint:#5a6472;--gold:#e2a63d;--green:#3ecf6a;
+ }
+ *{box-sizing:border-box;margin:0}
+ html,body{height:100%}
+ body{background:var(--bg);color:var(--fg);
+  font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  display:grid;grid-template-columns:232px 1fr}
+
+ /* ---- sidebar ---- */
+ #rail{background:var(--rail);border-right:1px solid var(--line);display:flex;
+  flex-direction:column;min-height:0}
+ #brand{padding:1rem 1rem .8rem;border-bottom:1px solid var(--line)}
+ #brand h1{font-size:1rem;letter-spacing:.22em;color:var(--gold);font-weight:800}
+ #brand small{color:var(--faint);display:flex;align-items:center;gap:.4em;margin-top:.2rem}
+ #status{width:.55em;height:.55em;border-radius:50%;background:var(--faint)}
+ #status.on{background:var(--green)}
+ #rail h2{font-size:.68rem;letter-spacing:.14em;color:var(--faint);padding:.9rem 1rem .4rem}
+ #fmode{display:flex;margin:0 1rem .45rem;border:1px solid var(--line);border-radius:7px;
+  overflow:hidden}
+ #fmode button{flex:1;background:none;border:0;color:var(--faint);font:inherit;
+  font-size:.72rem;letter-spacing:.08em;padding:.28rem 0;cursor:pointer}
+ #fmode button.on{background:var(--hover);color:var(--gold)}
+ #agents{overflow-y:auto;flex:1;padding:0 .5rem .8rem}
+ .agent{display:flex;align-items:center;gap:.55rem;padding:.34rem .55rem;border-radius:7px;
+  cursor:pointer;color:var(--dim);font-size:.86rem}
+ .agent:hover{background:var(--hover)}
+ .agent.sel{background:var(--hover);outline:1px solid var(--line)}
+ .agent .swatch{width:9px;height:9px;border-radius:3px;flex:none}
+ .agent .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .agent.live .nm{color:var(--fg)}
+ .agent .st{width:7px;height:7px;border-radius:50%;flex:none;background:transparent;
+  border:1px solid var(--faint)}
+ .agent.live .st{border-color:var(--gold);background:var(--gold)}
+ .agent.conn .st{border-color:var(--green);background:var(--green)}
+ .agent.allrow{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;
+  margin-bottom:.3rem;padding-bottom:.45rem}
+ #meCard{display:flex;align-items:center;gap:.6rem;padding:.65rem .9rem;
+  border-top:1px solid var(--line);cursor:pointer}
+ #meCard:hover{background:var(--hover)}
+ #meCard .avatar{width:30px;height:30px;font-size:.72rem}
+ #meCard .mename{font-size:.85rem;font-weight:700;line-height:1.2}
+ #meCard .meroom{font-size:.72rem;color:var(--faint);line-height:1.2}
+ #meCard .gear{margin-left:auto;color:var(--faint);font-size:.9rem}
+ #meDot{width:.55em;height:.55em;border-radius:50%;background:var(--faint);flex:none}
+ #meDot.on{background:var(--green)}
+
+ /* ---- main column ---- */
+ #main{display:flex;flex-direction:column;min-width:0;min-height:0}
+ #top{display:flex;align-items:center;gap:.7rem;padding:.55rem 1.1rem;
+  border-bottom:1px solid var(--line);background:var(--bg)}
+ #filter{flex:1;max-width:26rem;background:var(--rail);border:1px solid var(--line);
+  color:var(--fg);padding:.38rem .8rem;border-radius:7px;font:inherit;font-size:.86rem}
+ #filter:focus{outline:none;border-color:var(--gold)}
+ #filterState{font-size:.78rem;color:var(--gold);cursor:pointer;display:none}
+ #histBtn{background:none;border:1px solid var(--line);color:var(--dim);border-radius:7px;
+  padding:.34rem .9rem;cursor:pointer;font:inherit;font-size:.82rem}
+ #histBtn.on,#histBtn:hover{color:var(--gold);border-color:var(--gold)}
+ #histBar{display:none;gap:.8rem;padding:.55rem 1.1rem .7rem;
+  border-bottom:1px solid var(--line);background:var(--rail);flex-wrap:wrap;
+  align-items:flex-end}
+ #histBar.on{display:flex}
+ #histBar .hf{display:flex;flex-direction:column;gap:.2rem}
+ #histBar .hf label{color:var(--faint);font-size:.66rem;letter-spacing:.12em;
+  text-transform:uppercase}
+ #histBar input,#histBar select{background:var(--bg);border:1px solid var(--line);
+  color:var(--fg);padding:0 .6rem;border-radius:7px;font:inherit;font-size:.83rem;
+  height:2.2rem}
+ #histBar input:focus,#histBar select:focus{outline:none;border-color:var(--gold)}
+ #histBar button{background:var(--gold);border:0;color:#14161a;font-weight:700;
+  border-radius:7px;padding:0 1.4rem;height:2.2rem;cursor:pointer;font:inherit;
+  font-size:.83rem}
+ #histInfo{display:none;justify-content:space-between;align-items:center;
+  margin:.6rem 2.2rem 0;padding:.4rem .9rem;border:1px solid var(--gold);border-radius:8px;
+  color:var(--gold);font-size:.82rem}
+ #histInfo.on{display:flex}
+ #histInfo span b{cursor:pointer;text-decoration:underline}
+ .mid{cursor:pointer}
+
+ #feed{flex:1;overflow-y:auto;min-height:0;padding:1rem 0 1.4rem}
+ #feed>.inner{max-width:none;margin:0;padding:0 2.2rem}
+ .day{display:flex;align-items:center;gap:.9rem;color:var(--faint);
+  font-size:.72rem;letter-spacing:.12em;margin:1.1rem 0 .8rem}
+ .day::before,.day::after{content:"";flex:1;height:1px;background:var(--line)}
+
+ .row{display:grid;grid-template-columns:42px 1fr;gap:.75rem;padding:.16rem .5rem;
+  border-radius:8px}
+ .row:hover{background:var(--hover)}
+ .row .gutter{padding-top:.18rem}
+ .avatar{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;
+  justify-content:center;font-weight:700;font-size:.8rem}
+ .row.cont{margin-top:-.1rem}
+ .row.cont .gutter{visibility:hidden}
+ .head{display:flex;align-items:baseline;gap:.55rem;flex-wrap:wrap}
+ .head .who{font-weight:700;font-size:.9rem}
+ .head .arrow{color:var(--faint);font-size:.8rem}
+ .head .toname{font-size:.8rem;font-weight:600}
+ .head .all{font-size:.68rem;font-weight:700;color:var(--gold);border:1px solid var(--gold);
+  border-radius:4px;padding:0 .35em;letter-spacing:.08em}
+ .head time{color:var(--faint);font-size:.74rem}
+ .head .mid{color:var(--faint);font-size:.72rem;opacity:0;margin-left:auto}
+ .row:hover .mid{opacity:1}
+ .subj{font-weight:650;margin:.12rem 0 .05rem;font-size:.92rem}
+ .body{color:#c3ccd8;white-space:pre-wrap;word-break:break-word;
+  font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  margin:.1rem 0 .3rem}
+ .row.bcast{border-left:2px solid var(--gold);border-radius:0 8px 8px 0}
+ .body img.att{display:block;max-width:520px;max-height:340px;border-radius:8px;
+  border:1px solid var(--line);margin:.35rem 0}
+ .body a.attlink{color:var(--gold)}
+ #empty{color:var(--faint);text-align:center;margin-top:4rem}
+
+ #jump{position:fixed;right:1.6rem;bottom:8.2rem;display:none;background:var(--card);
+  border:1px solid var(--line);color:var(--gold);padding:.35rem 1rem;border-radius:2em;
+  cursor:pointer;font:inherit;font-size:.8rem}
+
+ /* ---- composer ---- */
+ #composerWrap{border-top:1px solid var(--line);background:var(--bg);padding:.8rem 1.1rem 1rem}
+ #composer{max-width:none;margin:0 1.1rem;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;padding:.55rem .9rem .6rem;display:flex;flex-direction:column;gap:.15rem}
+ .ctop{display:flex;gap:.7rem;align-items:center;border-bottom:1px solid var(--line);
+  padding-bottom:.45rem}
+ .cbottom{display:flex;align-items:center;gap:.6rem;padding-top:.4rem;
+  border-top:1px solid var(--line)}
+ #composer input,#composer textarea{background:none;border:0;color:var(--fg);font:inherit}
+ #composer input:focus,#composer textarea:focus{outline:none}
+ #replyChip{display:none;color:var(--gold);font-size:.78rem;border:1px solid var(--gold);
+  border-radius:1em;padding:.1rem .6rem;cursor:pointer;white-space:nowrap}
+ #replyChip.on{display:inline-block}
+ #attachBtn{background:none;border:1px solid var(--line);color:var(--dim);border-radius:2em;
+  padding:.22rem .9rem;cursor:pointer;font:inherit;font-size:.78rem}
+ #attachBtn:hover{color:var(--gold);border-color:var(--gold)}
+ .attchip{display:inline-flex;align-items:center;gap:.4rem;background:var(--rail);
+  border:1px solid var(--line);border-radius:1em;padding:.1rem .7rem;font-size:.78rem;
+  color:var(--dim);max-width:14rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .attchip b{cursor:pointer;color:var(--gold)}
+ .khint{color:var(--faint);font-size:.72rem;margin-left:auto}
+ #composer.drag{border-color:var(--gold);background:var(--hover)}
+ #composer.drag::after{content:"drop files to attach";color:var(--gold);
+  font-size:.78rem;text-align:center;padding:.2rem}
+ #composer:focus-within{border-color:var(--gold)}
+ #composer input,#composer textarea{background:var(--rail);border:1px solid var(--line);
+  color:var(--fg);padding:.4rem .65rem;border-radius:6px;font:inherit;font-size:.85rem}
+ #composer input:focus,#composer textarea:focus{outline:none;border-color:var(--gold)}
+ #body{width:100%;resize:vertical;min-height:6.5em;padding:.5rem .1rem;
+  font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+ #subject{flex:1;font-size:.85rem;color:var(--fg)}
+ #subject::placeholder,#body::placeholder{color:var(--faint)}
+ #send{background:var(--gold);color:#14161a;border:0;border-radius:2em;
+  font-weight:800;padding:.4rem 1.8rem;cursor:pointer;font:inherit}
+ #send:hover{filter:brightness(1.1)}
+
+ /* ---- login modal ---- */
+ #login{position:fixed;inset:0;background:rgba(6,8,11,.82);backdrop-filter:blur(4px);
+  display:none;align-items:center;justify-content:center;z-index:20}
+ #login.on{display:flex}
+ #loginCard{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:2rem 2.2rem;width:22rem;box-shadow:0 12px 48px rgba(0,0,0,.5)}
+ #loginCard h1{font-size:1.15rem;letter-spacing:.24em;color:var(--gold);margin-bottom:.2rem}
+ #loginCard p{color:var(--faint);font-size:.8rem;margin-bottom:1.1rem}
+ #loginCard label{display:block;color:var(--dim);font-size:.75rem;margin:.7rem 0 .25rem;
+  letter-spacing:.08em}
+ #loginCard input{width:100%;background:var(--rail);border:1px solid var(--line);
+  color:var(--fg);padding:.55rem .8rem;border-radius:8px;font:inherit}
+ #loginCard input:focus{outline:none;border-color:var(--gold)}
+ #loginCard button{width:100%;margin-top:1.3rem;background:var(--gold);color:#14161a;
+  border:0;border-radius:8px;padding:.6rem;font:inherit;font-weight:800;cursor:pointer}
+ #loginErr{color:#e8555a;font-size:.78rem;min-height:1.1em;margin-top:.5rem}
+
+ /* ---- recipient picker ---- */
+ #toWrap{position:relative}
+ #toBtn{max-width:20rem;text-align:left;background:var(--hover);border:1px solid var(--line);
+  color:var(--gold);font-weight:600;padding:.22rem 1rem;border-radius:2em;font:inherit;
+  font-size:.8rem;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ #toBtn::before{content:"to: ";color:var(--faint);font-weight:400}
+ #toBtn:focus{outline:none;border-color:var(--gold)}
+ #toPanel{display:none;position:absolute;bottom:calc(100% + .4rem);left:0;width:16rem;
+  max-height:19rem;overflow-y:auto;background:var(--card);border:1px solid var(--line);
+  border-radius:10px;padding:.4rem;z-index:10;box-shadow:0 8px 30px rgba(0,0,0,.45)}
+ #toPanel.on{display:block}
+ .pick{display:flex;align-items:center;gap:.55rem;padding:.3rem .5rem;border-radius:6px;
+  cursor:pointer;font-size:.85rem;color:var(--dim)}
+ .pick:hover{background:var(--hover)}
+ .pick.on{color:var(--fg)}
+ .pick .box{width:.85em;height:.85em;border:1px solid var(--faint);border-radius:3px;flex:none}
+ .pick.on .box{background:var(--gold);border-color:var(--gold)}
+ .pick.bcastRow{border-bottom:1px solid var(--line);margin-bottom:.25rem;padding-bottom:.45rem}
+
+ .row.active{background:var(--hover);outline:1px solid var(--gold)}
+ @media(max-width:760px){
+  body{grid-template-columns:1fr}
+  #rail{display:none}
+  .crow{flex-wrap:wrap}
+ }
+</style></head><body>
+<nav id="rail">
+ <div id="brand"><h1>REVEILLE</h1>
+  <small><span id="status"></span><span id="ver">bus</span></small></div>
+ <h2>AGENTS</h2>
+ <div id="fmode" title="filter selected agents by messages they sent, or messages sent to them">
+  <button type="button" id="fmFrom" class="on">FROM</button>
+  <button type="button" id="fmTo">TO</button>
+ </div>
+ <div id="agents"></div>
+ <div id="meCard" title="switch identity or room">
+  <div class="avatar" id="meAvatar"></div>
+  <div><div class="mename" id="meName"></div><div class="meroom" id="meRoom"></div></div>
+  <span id="meDot" title="bus connection"></span>
+  <span class="gear">&#9881;</span>
+ </div>
+</nav>
+<div id="main">
+ <div id="top">
+  <input id="filter" placeholder="Filter messages&hellip;">
+  <span id="filterState" title="clear agent filter"></span>
+  <button id="histBtn" title="search the entire bus log">history</button>
+ </div>
+ <div id="histBar">
+  <div class="hf"><label>Keywords</label>
+   <input id="hKw" placeholder="any match, ranked" style="width:17rem"></div>
+  <div class="hf"><label>From</label><input id="hSince" type="datetime-local"></div>
+  <div class="hf"><label>To</label><input id="hUntil" type="datetime-local"></div>
+  <div class="hf"><label>Agent</label>
+   <select id="hAgent"><option value="">any</option></select></div>
+  <button id="hGo">Search</button>
+ </div>
+ <div id="feed"><div class="inner" id="inner">
+  <div id="histInfo"><span id="histLabel"></span><span><b id="backLive">back to live</b></span></div>
+  <div id="empty">no traffic yet</div></div></div>
+ <button id="jump">&darr; latest</button>
+ <div id="composerWrap">
+  <form id="composer">
+   <div class="ctop">
+    <div id="toWrap">
+     <button type="button" id="toBtn">ALL</button>
+     <div id="toPanel"></div>
+    </div>
+    <span id="replyChip" title="clear reply"></span>
+    <input id="subject" placeholder="Subject (optional)">
+    <input id="fileInput" type="file" multiple hidden>
+   </div>
+   <textarea id="body" placeholder="Message&hellip;  paste images here"></textarea>
+   <div class="cbottom">
+    <button type="button" id="attachBtn">+ attach</button>
+    <span id="attchips"></span>
+    <span class="khint">Ctrl+Enter to send</span>
+    <button id="send" type="submit">Send</button>
+   </div>
+  </form>
+ </div>
+</div>
+<div id="login">
+ <div id="loginCard">
+  <h1>REVEILLE</h1>
+  <p>agent bus &mdash; sessions sharing a room key share one isolated room</p>
+  <label>YOUR NAME</label>
+  <input id="liName" placeholder="human-web" autocomplete="username">
+  <label>ROOM KEY</label>
+  <input id="liToken" type="password" placeholder="blank = open room" autocomplete="current-password">
+  <div id="loginErr"></div>
+  <button id="liGo">Enter room</button>
+ </div>
+</div>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let token=localStorage.agentbusToken;
+let myName=localStorage.agentbusName||'human-web';
+const qs=()=>'?token='+encodeURIComponent(token||'');
+let lastId=0,follow=true,prevMsg=null,mode='live',agentList=[];
+const selAgents=new Set();     // sidebar filter: matches by FROM (default) or TO
+let filterMode='from';
+const recip=new Set();          // empty = ALL (broadcast); else one unicast per member
+let replyTo=null;               // message id the composer is replying to
+const attachments=[];           // [{name,url}] pending on the composer
+
+async function uploadFile(f){
+ const r=await fetch('/upload'+qs()+'&name='+encodeURIComponent(f.name),
+  {method:'POST',body:f});
+ if(!r.ok){alert('upload failed: '+(await r.text()));return;}
+ attachments.push(await r.json());
+ renderAttchips();
+}
+
+function renderAttchips(){
+ const w=$('attchips');w.innerHTML='';
+ attachments.forEach((a,i)=>{
+  const c=document.createElement('span');c.className='attchip';
+  c.innerHTML=esc(a.name)+' <b title="remove">\u2715</b>';
+  c.querySelector('b').onclick=()=>{attachments.splice(i,1);renderAttchips();};
+  w.appendChild(c);
+ });
+}
+const msgs=new Map();
+
+function showLogin(msg){
+ $('liName').value=myName;$('liToken').value=token||'';
+ $('loginErr').textContent=msg||'';
+ $('login').classList.add('on');$('liName').focus();
+}
+$('liGo').onclick=()=>{
+ localStorage.agentbusName=$('liName').value.trim()||'human-web';
+ localStorage.agentbusToken=$('liToken').value;
+ location.reload();
+};
+for(const id of ['liName','liToken'])
+ $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('liGo').click();});
+function roomLabel(t){return t?('room \u00b7\u00b7\u00b7\u00b7'+t.slice(-3)):'open room';}
+$('meName').textContent=myName;
+$('meName').style.color=color(myName);
+$('meAvatar').textContent=initials(myName);
+$('meAvatar').style.color=color(myName);
+$('meAvatar').style.background=tint(myName);
+$('meRoom').textContent=roomLabel(token||'');
+$('meCard').onclick=()=>showLogin();
+
+function hue(name){let h=0;for(const c of name)h=(h*31+c.charCodeAt(0))>>>0;return h%360;}
+function color(n){return 'hsl('+hue(n)+' 62% 64%)';}
+function tint(n){return 'hsl('+hue(n)+' 45% 26%)';}
+function initials(n){const p=n.split(/[-_.]/).filter(Boolean);
+ return ((p[0]?.[0]||'')+(p[1]?.[0]||p[0]?.[1]||'')).toUpperCase();}
+function hhmm(ns){return new Date(ns/1e6).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
+function dayOf(ns){return new Date(ns/1e6).toDateString();}
+function esc(s){const d=document.createElement('span');d.textContent=s;return d.innerHTML;}
+
+function matches(m){
+ if(!m)return true;
+ if(selAgents.size){
+  // additive across selected agents; FROM = messages they posted (default),
+  // TO = direct mail addressed to them (broadcasts excluded -- that is FROM's job)
+  const hit=filterMode==='from'?selAgents.has(m.from):selAgents.has(m.to);
+  if(!hit)return false;
+ }
+ const f=$('filter').value.trim().toLowerCase();
+ if(!f)return true;
+ const hay=(m.from+' '+m.to+' '+(m.subject||'')+' '+m.body).toLowerCase();
+ return f.split(/\s+/).some(w=>hay.includes(w));
+}
+
+function bodyHtml(m){
+ let h=esc(m.body);
+ h=h.replace(/\[file: (\/files\/[^ \]]+)(?: ([^\]]*))?\]/g,(_,url,name)=>{
+  const safe=url+qs();
+  if(/\.(png|jpe?g|gif|webp|svg)$/i.test(url))
+   return '<img class="att" src="'+safe+'" alt="'+(name||'image')+'">';
+  return '<a class="attlink" href="'+safe+'" download="'+(name||'file')+'">'
+    +(name||url.split('/').pop())+'</a>';
+ });
+ return h;
+}
+
+function attHtml(list){
+ if(!list||!list.length)return '';
+ return '<div class="atts">'+list.map(a=>{
+  const safe=a.url+qs();
+  if(/\.(png|jpe?g|gif|webp|svg)$/i.test(a.url))
+   return '<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'">';
+  return '<a class="attlink" href="'+safe+'" download>'+esc(a.name||a.url)+'</a>';
+ }).join(' ')+'</div>';
+}
+
+function render(m){
+ const frag=document.createDocumentFragment();
+ if(!prevMsg||dayOf(prevMsg.ts_ns)!==dayOf(m.ts_ns)){
+  const d=document.createElement('div');d.className='day';d.textContent=dayOf(m.ts_ns);
+  frag.appendChild(d);
+ }
+ const cont=prevMsg&&prevMsg.from===m.from&&prevMsg.to===m.to
+   &&m.ts_ns-prevMsg.ts_ns<5*60*1e9&&dayOf(prevMsg.ts_ns)===dayOf(m.ts_ns);
+ const row=document.createElement('div');
+ row.className='row'+(m.to==='*'?' bcast':'')+(cont?' cont':'');
+ row.dataset.id=m.id;
+ row.title='#'+m.id+'  '+new Date(m.ts_ns/1e6).toLocaleString();
+ const c=color(m.from);
+ row.innerHTML=
+  '<div class="gutter"><div class="avatar" style="color:'+c+';background:'+tint(m.from)+'">'
+   +initials(m.from)+'</div></div>'
+  +'<div class="msgcol">'
+  +(cont?'':'<div class="head"><span class="who" style="color:'+c+'">'+esc(m.from)+'</span>'
+    +'<span class="arrow">&rarr;</span>'
+    +(m.to==='*'?'<span class="all">ALL</span>'
+      :'<span class="toname" style="color:'+color(m.to)+'">'+esc(m.to)+'</span>')
+    +'<time>'+hhmm(m.ts_ns)+'</time>'
+    +'<span class="mid" data-thread="'+m.thread_id+'" title="view thread">#'+m.id
+    +(m.thread_id!==m.id?' &middot; thread '+m.thread_id:'')+'</span></div>')
+  +(m.subject?'<div class="subj">'+esc(m.subject)+'</div>':'')
+  +'<div class="body">'+bodyHtml(m)+'</div>'+attHtml(m.attachments)+'</div>';
+ row.style.display=matches(m)?'':'none';
+ row.addEventListener('click',e=>{
+  if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click
+  selectRow(row,m);
+ });
+ frag.appendChild(row);
+ prevMsg=m;
+ return frag;
+}
+
+function add(m){
+ if(m.id>lastId)lastId=m.id;
+ if(mode!=='live'||msgs.has(m.id))return;   // history view: live frames wait for "back to live"
+ msgs.set(m.id,m);
+ $('empty')?.remove();
+ $('inner').appendChild(render(m));
+ if(follow)$('feed').scrollTop=$('feed').scrollHeight;
+}
+
+function clearFeed(){
+ for(const el of [...$('inner').children])
+  if(el.id!=='histInfo')el.remove();
+ msgs.clear();prevMsg=null;
+}
+
+function toLive(){
+ mode='live';follow=true;
+ $('histBtn').classList.remove('on');$('histBar').classList.remove('on');
+ $('histInfo').classList.remove('on');
+ clearFeed();loadBacklog(true);
+}
+
+async function runSearch(params){
+ mode='history';follow=false;
+ $('histBtn').classList.add('on');
+ const q=new URLSearchParams(params);
+ const r=await fetch('/search'+qs()+'&'+q.toString());
+ if(!r.ok){alert('search failed: '+(await r.text()));return;}
+ const data=await r.json();
+ clearFeed();
+ $('histInfo').classList.add('on');
+ $('histLabel').textContent=(params.thread_id?'thread '+params.thread_id:'history')
+   +' -- '+data.count+' message'+(data.count===1?'':'s');
+ for(const m of data.messages){msgs.set(m.id,m);$('inner').appendChild(render(m));}
+ $('feed').scrollTop=0;
+}
+
+// datetime-local is the viewer's LOCAL time; convert to UTC ISO so the broker's
+// naive-ISO-is-UTC rule can never shift the window (the 0.1.1 false-zero lesson).
+function utcIso(v){return v?new Date(v).toISOString():'';}
+
+function refilter(){
+ for(const el of $('inner').children){
+  if(!el.dataset.id)continue;                      // day dividers stay
+  el.style.display=matches(msgs.get(+el.dataset.id))?'':'none';
+ }
+ $('filterState').style.display=selAgents.size?'inline':'none';
+ $('filterState').textContent=selAgents.size?(filterMode.toUpperCase()+': '+[...selAgents].join(' + ')+'  ✕'):'';
+ if(follow)$('feed').scrollTop=$('feed').scrollHeight;
+}
+
+async function loadBacklog(reset){
+ if(mode!=='live')return;
+ const r=await fetch('/messages'+qs()+'&limit=300'+(reset?'':'&since_id='+lastId));
+ if(r.status===401){showLogin('unauthorized -- check the token');return;}
+ if(!r.ok)return;
+ if(reset)clearFeed();
+ for(const m of (await r.json()).messages)add(m);
+}
+
+function updateReplyChip(){
+ $('replyChip').className=replyTo?'on':'';
+ $('replyChip').textContent=replyTo?('reply \u2192 #'+replyTo+'  \u2715'):'';
+}
+
+function selectRow(row,m){
+ const was=row.classList.contains('active');
+ for(const el of document.querySelectorAll('.row.active'))el.classList.remove('active');
+ recip.clear();replyTo=null;
+ if(!was){                                   // click again to deselect back to ALL
+  row.classList.add('active');
+  recip.add(m.from);replyTo=m.id;
+  $('body').focus();
+ }
+ renderPicker();updateReplyChip();
+}
+
+function toLabel(){
+ if(recip.size===0)return 'ALL';
+ if(recip.size===1)return [...recip][0];
+ return recip.size+' agents';
+}
+
+function renderPicker(){
+ const p=$('toPanel');p.innerHTML='';
+ const all=document.createElement('div');
+ all.className='pick bcastRow'+(recip.size===0?' on':'');
+ all.innerHTML='<span class="box"></span><span>ALL &mdash; broadcast</span>';
+ all.onclick=e=>{e.stopPropagation();recip.clear();renderPicker();};
+ p.appendChild(all);
+ for(const a of agentList){
+  if(a.name===myName)continue;
+  const el=document.createElement('div');
+  el.className='pick'+(recip.has(a.name)?' on':'');
+  el.innerHTML='<span class="box"></span><span style="color:'+color(a.name)+'">'
+    +esc(a.name)+'</span>';
+  el.onclick=e=>{e.stopPropagation();recip.has(a.name)?recip.delete(a.name):recip.add(a.name);renderPicker();};
+  p.appendChild(el);
+ }
+ $('toBtn').textContent=toLabel();
+}
+
+async function loadPresence(){
+ const r=await fetch('/presence'+qs()+'&me='+encodeURIComponent(myName));
+ if(r.status===401){showLogin('unauthorized -- check the token');return;}
+ if(!r.ok)return;
+ agentList=(await r.json()).agents
+  .sort((a,b)=>(b.connected-a.connected)||(b.live-a.live)||a.name.localeCompare(b.name));
+ $('agents').innerHTML='';
+ const all=document.createElement('div');
+ all.className='agent allrow'+(selAgents.size?'':' sel live');
+ all.innerHTML='<span class="swatch" style="background:var(--gold)"></span>'
+   +'<span class="nm">everyone</span><span class="st"></span>';
+ all.title='clear the agent filter';
+ all.onclick=()=>{selAgents.clear();recip.clear();renderPicker();loadPresence();refilter();};
+ $('agents').appendChild(all);
+ const sel=$('hAgent'),keep=sel.value;
+ sel.innerHTML='<option value="">any</option>';
+ for(const a of agentList){
+  sel.innerHTML+='<option value="'+esc(a.name)+'">'+esc(a.name)+'</option>';
+ }
+ sel.value=keep;
+ for(const a of agentList){
+  const el=document.createElement('div');
+  el.className='agent'+(a.live?' live':'')+(a.connected?' conn':'')
+    +(selAgents.has(a.name)?' sel':'');
+  el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
+    +'<span class="nm">'+esc(a.name)+'</span><span class="st"></span>';
+  el.title=a.connected?'wake armed':a.live?'live, waiter down':'stale';
+  el.onclick=()=>{selAgents.has(a.name)?selAgents.delete(a.name):selAgents.add(a.name);
+   recip.clear();for(const n of selAgents)recip.add(n);   // filter selection IS the target
+   renderPicker();loadPresence();refilter();};
+  $('agents').appendChild(el);
+ }
+ renderPicker();
+}
+
+function connect(){
+ const proto=location.protocol==='https:'?'wss':'ws';
+ const ws=new WebSocket(proto+'://'+location.host+'/feed'+qs());
+ ws.onopen=()=>{$('status').classList.add('on');$('meDot').classList.add('on');
+  $('meDot').title='connected to the room feed';loadBacklog(false);};
+ ws.onmessage=e=>{const m=JSON.parse(e.data);
+  if(m.error){if(m.error==='bad_token')showLogin('unauthorized -- check the token');return;}
+  add(m);};
+ ws.onclose=()=>{$('status').classList.remove('on');$('meDot').classList.remove('on');
+  $('meDot').title='reconnecting';
+  if(!$('login').classList.contains('on'))setTimeout(connect,2000);};
+}
+
+$('feed').addEventListener('scroll',()=>{
+ const el=$('feed');
+ follow=el.scrollTop+el.clientHeight>=el.scrollHeight-40;
+ $('jump').style.display=follow?'none':'block';
+});
+$('jump').onclick=()=>{follow=true;$('feed').scrollTop=$('feed').scrollHeight;$('jump').style.display='none';};
+$('filter').addEventListener('input',refilter);
+$('filterState').onclick=()=>{selAgents.clear();recip.clear();renderPicker();
+ loadPresence();refilter();};
+for(const mode of ['From','To'])
+ $('fm'+mode).onclick=()=>{filterMode=mode.toLowerCase();
+  $('fmFrom').className=filterMode==='from'?'on':'';
+  $('fmTo').className=filterMode==='to'?'on':'';
+  refilter();};
+$('histBtn').onclick=()=>{
+ if(mode==='history'){toLive();return;}
+ $('histBar').classList.toggle('on');
+};
+$('hGo').onclick=e=>{e.preventDefault();
+ const p={limit:500};
+ if($('hKw').value.trim())p.keywords=$('hKw').value.trim();
+ if($('hSince').value)p.since=utcIso($('hSince').value);
+ if($('hUntil').value)p.until=utcIso($('hUntil').value);
+ if($('hAgent').value.trim())p.agent=$('hAgent').value.trim();
+ runSearch(p);
+};
+$('backLive').onclick=toLive;
+$('inner').addEventListener('click',e=>{
+ const t=e.target.closest('.mid');
+ if(t)runSearch({thread_id:t.dataset.thread});
+});
+$('toBtn').onclick=()=>$('toPanel').classList.toggle('on');
+$('replyChip').onclick=()=>{replyTo=null;updateReplyChip();
+ for(const el of document.querySelectorAll('.row.active'))el.classList.remove('active');};
+document.addEventListener('click',e=>{
+ if(!e.target.closest('#toWrap'))$('toPanel').classList.remove('on');});
+$('body').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))$('composer').requestSubmit();});
+$('attachBtn').onclick=()=>$('fileInput').click();
+{
+ const comp=$('composer');
+ let depth=0;
+ comp.addEventListener('dragenter',e=>{e.preventDefault();depth++;comp.classList.add('drag');});
+ comp.addEventListener('dragover',e=>e.preventDefault());
+ comp.addEventListener('dragleave',()=>{if(--depth<=0){depth=0;comp.classList.remove('drag');}});
+ comp.addEventListener('drop',e=>{
+  e.preventDefault();depth=0;comp.classList.remove('drag');
+  [...(e.dataTransfer?.files||[])].forEach(uploadFile);
+ });
+}
+$('fileInput').addEventListener('change',()=>{
+ for(const f of $('fileInput').files)uploadFile(f);
+ $('fileInput').value='';
+});
+$('body').addEventListener('paste',e=>{
+ const files=[...(e.clipboardData?.files||[])];
+ if(files.length){e.preventDefault();files.forEach(uploadFile);}
+});
+$('composer').addEventListener('submit',async e=>{
+ e.preventDefault();
+ let body=$('body').value.trim();
+ if(!body&&attachments.length)body=attachments.map(a=>a.name).join(', ');
+ if(!body)return;
+ const targets=recip.size?[...recip]:['*'];   // subgroup = one gated unicast per member
+ for(const to of targets){
+  const payload={from:myName,to,subject:$('subject').value.trim(),body};
+  if(attachments.length)payload.attachments=attachments.slice();
+  if(replyTo)payload.reply_to=replyTo;
+  const r=await fetch('/send'+qs(),{method:'POST',headers:{'content-type':'application/json'},
+   body:JSON.stringify(payload)});
+  if(!r.ok){alert('send to '+to+' failed: '+(await r.text()));return;}
+ }
+ $('body').value='';$('subject').value='';
+ attachments.length=0;renderAttchips();
+ replyTo=null;updateReplyChip();
+ for(const el of document.querySelectorAll('.row.active'))el.classList.remove('active');
+});
+
+fetch('/version').then(r=>r.text()).then(v=>$('ver').textContent='v'+v);
+if(localStorage.agentbusToken===undefined){showLogin();}
+else{loadBacklog(true);loadPresence();connect();setInterval(loadPresence,15000);}
+</script></body></html>
+"""
+
+
+async def chat_http(_request):
+    return HTMLResponse(WEBCHAT)
 
 
 # ---- web terminal: token+role form -> xterm.js <-> pty running `agent <role>` ----
@@ -482,6 +1329,7 @@ WEBUI = """<!doctype html><html><head><meta charset="utf-8"><title>Reveille</tit
 </style></head><body>
 <div id="login">
  <h2>Reveille</h2>
+ <p><a href="/ui" style="color:#888">&larr; bus chat</a></p>
  <input id="token" type="password" placeholder="token" autofocus>
  <input id="role" placeholder="role (e.g. roc-api-dev)">
  <button onclick="go()">connect</button>
@@ -600,12 +1448,19 @@ def build_app():
             Route("/health", health),
             Route("/version", version_http),
             Route("/usage", usage_http),
-            Route("/ui", ui_http),
+            Route("/ui", chat_http),
+            Route("/terminal", ui_http),
+            Route("/messages", messages_http),
+            Route("/search", search_http),
+            Route("/presence", presence_http),
+            Route("/send", send_http, methods=["POST"]),
+            Route("/upload", upload_http, methods=["POST"]),
+            Route("/files/{fname}", files_http),
             WebSocketRoute("/wake", wake_ws),
+            WebSocketRoute("/feed", feed_ws),
             WebSocketRoute("/term", term_ws),
             Mount("/", app=mcp_app),
         ],
-        middleware=[Middleware(BearerAuth)],
         lifespan=lifespan,
     )
 
@@ -622,16 +1477,32 @@ def _setup_logging():
 
 
 def main():
-    global _conn
+    global _conn, _files_dir
     import uvicorn
     _setup_logging()
     root = os.environ.get("CLAUDE_AGENT_BUS") or os.path.expanduser("~/.claude/agent-bus")
     db = os.environ.get("AGENTBUS_DB") or os.path.join(root, "broker.db")
     _conn = store.connect(db)
+    _files_dir = pathlib.Path(db).parent / "files"
+    _files_dir.mkdir(parents=True, exist_ok=True)
+    if TOKEN:  # pre-room rows (room='') belong to the fleet's key; idempotent backfill
+        _conn.execute("UPDATE agents SET room=? WHERE room=''", (TOKEN,))
+        _conn.execute("UPDATE messages SET room=? WHERE room=''", (TOKEN,))
     host = os.environ.get("AGENTBUS_HOST", "0.0.0.0")
     port = int(os.environ.get("AGENTBUS_PORT", "8765"))
     log.info("daemon on %s:%s db=%s auth=%s", host, port, db, "token" if TOKEN else "OPEN")
-    uvicorn.run(build_app(), host=host, port=port, log_level="warning")
+    config = uvicorn.Config(build_app(), host=host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    orig_exit = server.handle_exit
+
+    def handle_exit(sig, frame):
+        # Courtesy ring first, real shutdown ~0.5s later so the frames flush.
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_event_loop().call_soon_threadsafe(_push_shutdown)
+        threading.Timer(0.5, lambda: orig_exit(sig, frame)).start()
+
+    server.handle_exit = handle_exit
+    server.run()
 
 
 if __name__ == "__main__":

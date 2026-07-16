@@ -47,12 +47,14 @@ def test_when_ns_relative_iso_and_bad():
 
 def test_poke_gate_one_outstanding_until_ttl():
     import time
+    key = ("room1", "x")
     daemon._poke_pending.clear()
-    assert daemon._poke_ok("x")                                   # nothing outstanding
-    daemon._poke_pending["x"] = time.time_ns()
-    assert not daemon._poke_ok("x")                               # poked, unacked -> gated
-    daemon._poke_pending["x"] = time.time_ns() - daemon.POKE_TTL_NS - 1
-    assert daemon._poke_ok("x")                                   # TTL expired -> resumes
+    assert daemon._poke_ok(key)                                   # nothing outstanding
+    daemon._poke_pending[key] = time.time_ns()
+    assert not daemon._poke_ok(key)                               # poked, unacked -> gated
+    assert daemon._poke_ok(("room2", "x"))                        # same name, other room
+    daemon._poke_pending[key] = time.time_ns() - daemon.POKE_TTL_NS - 1
+    assert daemon._poke_ok(key)                                   # TTL expired -> resumes
     daemon._poke_pending.clear()
 
 
@@ -61,10 +63,10 @@ def test_notify_only_targets_waiters():
     import asyncio
     q_a, q_b = asyncio.Queue(), asyncio.Queue()
     daemon._waiters.clear()
-    daemon._waiters["alice"] = {q_a}
-    daemon._waiters["bob"] = {q_b}
+    daemon._waiters[("r", "alice")] = {q_a}
+    daemon._waiters[("r", "bob")] = {q_b}
     try:
-        daemon._notify(["alice"])
+        daemon._notify("r", ["alice"])
         assert q_a.qsize() == 1 and q_b.qsize() == 0
     finally:
         daemon._waiters.clear()

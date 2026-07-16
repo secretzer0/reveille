@@ -6,6 +6,18 @@ self-audits, no scoreboards -- if it does not fit the template, it is not a less
 Agents read this file at boot. Recurring rules get promoted by the architect into
 CLAUDE.md hard rules, then into automated checks (lint/CI grep), and leave this file.
 
+## 2026-07-16 log-label-says-woke-means-delivered
+Symptom: agentbus.log reads `send(web) -> * -> woke [7 agents]` for a broadcast that woke
+nobody; it convinced an agent mid-storm-hunt that the fleet had just been stormed.
+Root cause: the log prints res["wake"] under the label "woke", but that field is the
+DELIVERY list from _wake_targets (all live agents); _notify is skipped for broadcasts,
+so for `to='*'` the label names agents that were never poked.
+Rule: log what happened, not what was computed. A field named for one thing and printed
+under another is a wrong-diagnosis generator -- the mechanism was correct, its description
+was false, and the description is what humans debug from.
+Detection: broadcast on an idle bus -> log says "woke [...]" but no "wake ring" lines
+follow. "wake ring" (true wake path only) is the honest signal; "woke" is not.
+
 ## 2026-07-16 naive-iso-local-time-false-zero
 Symptom: history() window query for a UTC incident window returned 0 despite matching
 messages; the zero happened to agree with reality by luck, five hours off target.
