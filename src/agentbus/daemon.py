@@ -135,6 +135,20 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.1  join() now returns `version` -- the broker's. Compare it to the last one you saw
+       and re-read usage() when it moves. The broker will NEVER announce a restart or an
+       upgrade on the bus: a version is state, not an event, and a message announcing it
+       would outlive the fact, land in every room, and still miss whoever booted later.
+       A restart already drops your WS, so your waiter exits and you inbox() anyway.
+0.2.1  A human can now BLAST: one broadcast posted into EVERY room they hold, web-only.
+       It is N separate messages, one per room -- not a cross-room thread. If your token
+       holds 2 rooms you get 2 inbox items with 2 thread ids. Ack both; they are the same
+       words, so answer the one you are named in and stay silent in the other. Nothing
+       about the reply protocol changes: reply in the room the message came from.
+0.2.1  Rooms can be renamed by their owner (web). A room's NAME is a label -- the id is
+       what routes, what messages carry, and what tokens hold. So a rename moves nothing:
+       your room= arg was always an id, and a name in that arg was always refused. Names
+       you cached in prose may go stale; call rooms() rather than trusting them.
 0.2.0  LESSONS.md moved onto the bus: lessons() at boot, lesson_add() to record one.
        The file only ever worked because every agent shared a filesystem; containerised
        agents each have their own. room_id NULL = a global lesson; otherwise it is scoped
@@ -381,7 +395,11 @@ async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context 
     from $REVEILLE_AGENT_ROLE); pass `name` only to assert it matches. You join every
     room your token holds. Replays only the last
     15 min of backlog (use history(since=...) to recall further back, only when
-    explicitly asked); fresh=True skips the backlog. Returns {name, wake_url, unread}."""
+    explicitly asked); fresh=True skips the backlog.
+    Returns {name, wake_url, rooms, unread, version}. `version` is the BROKER's version,
+    reported here because boot is where you already ask -- the broker never announces
+    itself on the bus. Differs from the last one you saw? Re-read usage(): its CHANGES
+    section says what moved."""
     p = _me(ctx.request_context.request)
     if name and name != p.name:
         raise ValueError(f"join name {name!r} must match your X-Agent header {p.name!r}")
@@ -392,7 +410,7 @@ async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context 
     rooms = [{"id": r, "name": n} for r, n in p.rooms.items()]
     log.info("%s join url=%s rooms=%s unread=%s", p.name, url or "-", len(rooms), unread)
     return {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
-            "unread": unread}
+            "unread": unread, "version": __version__}
 
 
 @mcp.tool()
@@ -829,9 +847,11 @@ async def presence_http(request):
 
 @_guard
 async def send_http(request):
-    """POST /send {from?, to, subject?, body, reply_to?, attachments?, room?, shout?}.
+    """POST /send[?room=] {from?, to, subject?, body, reply_to?, attachments?, room?, shout?}.
     Same semantics as the MCP send tool: unicast rings (gate applies), broadcast queues,
-    a reply's room comes from its parent. shout=true with to='*' is the HUMAN page-all:
+    a reply's room comes from its parent. ?room= scopes the send like every other web
+    endpoint -- the composer sends into the room the browser is looking at, so a user
+    with 2+ rooms is not asked room_required for a room they already picked. shout=true with to='*' is the HUMAN page-all:
     the broadcast also RINGS every live agent in THAT ONE room, once, through the poke
     gate. Deliberately web-only -- the MCP send tool has no shout, so agents cannot emit
     one. A shout pages one room, never every room you can see: cross-room paging is the
@@ -847,7 +867,7 @@ async def send_http(request):
     body = d.get("body") or ""
     if not body:
         return JSONResponse({"error": "empty body"}, status_code=400)
-    rid = store.resolve_send_room(p.rooms, room=d.get("room") or None,
+    rid = store.resolve_send_room(_scope(request, p), room=d.get("room") or None,
                                   parent_room=_parent_room(d.get("reply_to")))
     if not store.known(_conn, sender, [rid]):
         store.join(_conn, sender, tag=f"web:{sender}", room_id=rid)
@@ -1319,6 +1339,17 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   font-size:.78rem;cursor:pointer;user-select:none;white-space:nowrap}
  #shoutWrap input{accent-color:var(--gold)}
  #shoutWrap:has(input:checked){color:var(--gold);font-weight:700}
+ /* Room scope of a broadcast. Off = the room you are reading (the safe default, and
+    what every other control here means). Armed = every room you hold, one message
+    each -- the Send button restyles itself so the blast cannot be sent by muscle. */
+ #blast{background:var(--hover);border:1px solid var(--line);color:var(--faint);
+  border-radius:2em;padding:.22rem .7rem;font:inherit;font-size:.72rem;font-weight:700;
+  cursor:pointer;white-space:nowrap;letter-spacing:.02em}
+ #blast:hover{color:var(--dim)}
+ #blast.armed{color:#14161a;background:var(--gold);border-color:var(--gold);
+  animation:blastPulse 1.1s ease-in-out infinite}
+ @keyframes blastPulse{50%{filter:brightness(.72)}}
+ #send.blasting{background:#e8555a;color:#fff}
  #toPanel{display:none;position:absolute;bottom:calc(100% + .4rem);left:0;width:16rem;
   max-height:19rem;overflow-y:auto;background:var(--card);border:1px solid var(--line);
   border-radius:10px;padding:.4rem;z-index:10;box-shadow:0 8px 30px rgba(0,0,0,.45)}
@@ -1392,6 +1423,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
     <span id="replyChip" title="clear reply"></span>
     <label id="shoutWrap" title="SHOUT: wake every agent in the room immediately (human page-all)">
      <input type="checkbox" id="shout">SHOUT</label>
+    <button type="button" id="blast" hidden></button>
     <input id="subject" placeholder="Subject (optional)">
     <input id="fileInput" type="file" multiple hidden>
    </div>
@@ -1475,7 +1507,9 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')$('dlg').classList.r
 let me=null;               // {name,is_admin,rooms,owned,public} from GET /me
 let myName='';
 let room=localStorage.revRoom||'';
-const qs=()=>'?room='+encodeURIComponent(room||'');
+const qsFor=r=>'?room='+encodeURIComponent(r||'');
+const qs=()=>qsFor(room);
+let blast=false;           // broadcast scope: false = this room only, true = every room I hold
 let lastId=0,follow=true,prevMsg=null,mode='live',agentList=[];
 const selAgents=new Set();     // sidebar filter: matches by FROM (default) or TO
 let filterMode='from';
@@ -1761,6 +1795,26 @@ function busy(on){$('spin').classList.toggle('on',!!on);}
 function updateReplyChip(){
  $('replyChip').className=replyTo?'on':'';
  $('replyChip').textContent=replyTo?('reply \u2192 #'+replyTo+'  \u2715'):'';
+ updateBlast();
+}
+
+// The blast chip only offers a choice that exists: 2+ rooms, a broadcast (a unicast has
+// one home), and a NEW thread -- a reply lands in its parent's room by definition, so
+// blasting one would be a contradiction, not a feature.
+function updateBlast(){
+ const n=(me&&me.rooms||[]).length;
+ const can=n>1&&recip.size===0&&!replyTo;
+ if(!can)blast=false;
+ const b=$('blast');
+ b.hidden=!can;
+ b.className=blast?'armed':'';
+ b.textContent=blast?('\u26a1 ALL '+n+' ROOMS'):'this room';
+ b.title=blast
+  ? 'BLAST: one message into EACH of your '+n+' rooms. Rooms stay separate -- this is '
+    +n+' posts, not one shared thread.'
+  : 'Broadcast scope: this room only. Click to blast every room you hold.';
+ $('send').className=blast?'blasting':'';
+ $('send').textContent=blast?('BLAST '+n+' ROOMS'):'Send';
 }
 
 function selectRow(row,m){
@@ -1802,7 +1856,10 @@ function renderPicker(){
  }
  $('toBtn').textContent=toLabel();
  $('shoutWrap').style.display=recip.size===0?'flex':'none';
+ updateBlast();
 }
+
+$('blast').onclick=()=>{blast=!blast;updateBlast();};
 
 async function loadPresence(){
  const r=await fetch('/presence'+qs()+'&me='+encodeURIComponent(myName));
@@ -1953,15 +2010,21 @@ $('composer').addEventListener('submit',async e=>{
  if(!body&&attachments.length)body=attachments.map(a=>a.name).join(', ');
  if(!body)return;
  const targets=recip.size?[...recip]:['*'];   // subgroup = one gated unicast per member
- for(const to of targets){
+ // A blast is N separate posts, one per room, each scoped by its own ?room=. It is NOT a
+ // cross-room message: rooms stay isolated, so trace()/graph() still cannot walk between
+ // them and an agent only ever sees the copy that landed in its own room.
+ const rooms=blast?(me.rooms||[]).map(r=>r.id):[room];
+ for(const rid of rooms) for(const to of targets){
   const payload={from:myName,to,subject:$('subject').value.trim(),body};
   if(to==='*'&&$('shout').checked)payload.shout=true;
   if(attachments.length)payload.attachments=attachments.slice();
   if(replyTo)payload.reply_to=replyTo;
-  const r=await fetch('/send'+qs(),{method:'POST',headers:{'content-type':'application/json'},
+  const r=await fetch('/send'+qsFor(rid),{method:'POST',headers:{'content-type':'application/json'},
    body:JSON.stringify(payload)});
   if(!r.ok){toast('send to '+to+' failed: '+(await r.text()));return;}
  }
+ if(blast)toast('blasted '+rooms.length+' rooms');
+ blast=false;updateBlast();
  $('body').value='';$('subject').value='';$('shout').checked=false;
  attachments.length=0;renderAttchips();
  replyTo=null;updateReplyChip();
@@ -2012,9 +2075,14 @@ async function api(path,opts){
  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||e.error||r.status);}
  return r.json();
 }
-function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();
+// The presence poll is armed once, here or at boot -- whichever gets a room first. A
+// room-less first-run boots without it, so picking the first room must start it.
+let polling=false;
+function start(){if(polling)return;polling=true;setInterval(loadPresence,15000);}
+
+function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();
  closePanel();clearFeed();lastId=0;loadBacklog(true);loadPresence();
- if(ws)ws.close();connect();}
+ if(ws)ws.close();connect();start();}
 
 async function openRooms(){
  const d=await api('/me');me=d;paintMe();   // room set may have changed under us
@@ -2024,6 +2092,13 @@ async function openRooms(){
     'Deletes the room and every message in it. A snapshot is saved first, and that is the '+
     'only undo. Type the room name to confirm.',
     '<input id="cfIn" placeholder="'+esc(r.name)+'" autocomplete="off">');
+  // Rename is a plain row, not askRow: it renames a LABEL. The id is what agents send to,
+  // what messages carry, and what tokens are assigned -- none of it moves, so there is
+  // nothing here to warn about and nothing to undo but typing the old name back.
+  if(confirming&&confirming.kind==='rename'&&confirming.id===r.id)
+   return '<div class="pRow sel"><span class="rDot"></span>'+
+    '<input id="cfIn" value="'+esc(r.name)+'" autocomplete="off">'+
+    '<button id="cfGo">rename</button><button id="cfNo">cancel</button></div>';
   const sel=r.id===room;
   return '<div class="pRow'+(sel?' sel':'')+'">'+
    '<span class="rSel" data-pick="'+r.id+'" title="'+(sel?'you are viewing this room'
@@ -2031,6 +2106,7 @@ async function openRooms(){
    '<span class="rName">'+esc(r.name)+'</span>'+
    (sel?'<span class="rNow">VIEWING</span>':'')+'</span>'+
    '<span class="pDim">'+(r.public?'public':'private')+'</span>'+
+   '<button data-ren="'+r.id+'">rename</button>'+
    '<button data-pub="'+r.id+'" data-to="'+(r.public?0:1)+'">'+(r.public?'make private':'make public')+'</button>'+
    '<button class="danger" data-purge="'+r.id+'" data-name="'+esc(r.name)+'">purge</button></div>';
  }).join('')||'<div class="pDim">no rooms yet</div>';
@@ -2054,6 +2130,13 @@ async function openRooms(){
    openRooms();}catch(e){toast(e.message);}};
  $('newRoom').addEventListener('keydown',e=>{if(e.key==='Enter')$('mkRoom').click();});
  for(const b of document.querySelectorAll('[data-pick]'))b.onclick=()=>pickRoom(b.dataset.pick);
+ for(const b of document.querySelectorAll('[data-ren]'))b.onclick=()=>{
+  confirming={kind:'rename',id:b.dataset.ren};openRooms();};
+ if(confirming&&confirming.kind==='rename')wireAsk(async()=>{
+  const id=confirming.id,name=$('cfIn').value.trim();confirming=null;
+  try{await api('/rooms/'+id,{method:'PATCH',body:JSON.stringify({name})});}
+  catch(e){toast(e.message);}
+  openRooms();},openRooms);
  for(const b of document.querySelectorAll('[data-pub]'))b.onclick=async()=>{
   try{await api('/rooms/'+b.dataset.pub,{method:'PATCH',
    body:JSON.stringify({public:b.dataset.to==='1'})});openRooms();}catch(e){toast(e.message);}};
@@ -2210,10 +2293,14 @@ fetch('/version').then(r=>r.text()).then(v=>$('ver').textContent='v'+v);
  catch(e){setupMode=false;showLogin();return;}
  if(d.setup){setupMode=true;showLogin();return;}   // zero users: bootstrap the first admin
  me=d;myName=d.name;
- if(!d.rooms.length){showLogin('you have no rooms yet -- create one');return;}
+ // A brand-new user owns no room and no public one exists yet: that is a first-run state,
+ // NOT a failed sign-in. Bouncing them to the login card said "your password is wrong" and
+ // dead-ended them -- the only place to make a room is the panel behind that card. So: let
+ // them in, room-less, with Rooms already open. pickRoom() starts the feed once they have one.
+ if(!d.rooms.length){paintMe();openRooms();toast('create your first room to start');return;}
  if(!room||!d.rooms.some(r=>r.id===room))room=d.rooms[0].id;
  localStorage.revRoom=room;
- paintMe();loadBacklog(true);loadPresence();connect();setInterval(loadPresence,15000);
+ paintMe();updateBlast();loadBacklog(true);loadPresence();connect();start();
 })();
 </script></body></html>
 """

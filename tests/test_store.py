@@ -266,6 +266,54 @@ def test_room_outside_the_token_is_refused():
         pass
 
 
+def test_room_arg_is_an_id_so_a_name_can_never_route_a_send():
+    """A room NAME is a label for humans. Sends resolve by ID only, so an agent holding a
+    stale or wrong name gets a hard AccessError -- it can never land in the room that now
+    wears that name. This is what makes renaming a room safe."""
+    c, admin, room, tok = fixture()
+    rooms = rooms_of(c, tok)
+    try:
+        store.resolve_send_room(rooms, room=room["name"])
+        assert False, "a name must not resolve -- ids route, names label"
+    except store.AccessError:
+        pass
+
+
+def test_rename_moves_the_label_and_nothing_else():
+    """Rename must not disturb routing: same id, same token assignment, same messages."""
+    c, admin, room, tok = fixture()
+    store.join(c, "bot", tag="bot", room_id=room["id"], token_id=tok["id"])
+    sent = store.send(c, "bot", "*", "before the rename", room=room["id"])
+
+    store.rename_room(c, room["id"], admin["id"], "Renamed")
+
+    assert store.get_room(c, room["id"])["name"] == "Renamed"
+    # the token still resolves to the same id -- only the label it carries changed
+    assert list(rooms_of(c, tok)) == [room["id"]]
+    assert rooms_of(c, tok)[room["id"]] == "Renamed"
+    assert store.resolve_send_room(rooms_of(c, tok)) == room["id"]
+    # the message did not move, and it reads back under the new label
+    got = store.thread(c, sent["thread_id"], rooms_of(c, tok))
+    assert [m["body"] for m in got] == ["before the rename"]
+    assert got[0]["room"] == room["id"]
+
+
+def test_rename_is_owner_only_and_names_stay_unique_per_owner():
+    c, admin, room, tok = fixture()
+    other = store.create_user(c, "intruder", "pw-not-a-real-secret")
+    try:
+        store.rename_room(c, room["id"], other["id"], "Mine Now")
+        assert False, "expected AccessError -- only the owner renames"
+    except store.AccessError:
+        pass
+    store.create_room(c, admin["id"], "Taken")
+    try:
+        store.rename_room(c, room["id"], admin["id"], "Taken")
+        assert False, "expected BusError -- one owner, one room per name"
+    except store.BusError:
+        pass
+
+
 # ---- messages ----------------------------------------------------------------
 
 def test_unicast_inbox_and_ack():

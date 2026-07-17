@@ -28,7 +28,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from agentbus import store  # noqa: E402
+from agentbus import __version__, store  # noqa: E402
 
 
 def free_port():
@@ -77,6 +77,8 @@ async def run(port, secrets):
         j = data(await alice.call_tool("join", {"name": "alice", "url": base}))
         await bob.call_tool("join", {"name": "bob", "url": base})
         assert j["wake_url"] == f"ws://127.0.0.1:{port}/wake", j
+        # the broker never announces a restart on the bus -- boot is where you ask
+        assert j["version"] == __version__, j
         # the room came from the token, not from anything alice claimed
         assert [r["name"] for r in j["rooms"]] == ["smoke"], j
         print("join returns wake_url + token's rooms:", j["wake_url"],

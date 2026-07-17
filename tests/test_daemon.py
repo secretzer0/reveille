@@ -102,6 +102,32 @@ def test_notify_rings_named_agents_holding_that_room(tmp_path):
         conn.close()
 
 
+def test_send_room_comes_from_the_query_scope():
+    # The composer already picked a room (?room=, same as every other web endpoint).
+    # A 2-room web user must NOT get room_required for a room they are looking at,
+    # and the send -- shout included -- must land in THAT room only.
+    from types import SimpleNamespace
+    from agentbus import store
+    p = SimpleNamespace(rooms={"r1": "Private Talk", "r2": "Reveille"})
+
+    req = SimpleNamespace(query_params={"room": "r2"})
+    assert store.resolve_send_room(daemon._scope(req, p)) == "r2"
+
+    # no room picked -> still ambiguous rather than a guess
+    try:
+        store.resolve_send_room(daemon._scope(SimpleNamespace(query_params={}), p))
+        assert False, "should raise"
+    except store.AmbiguousRoom:
+        pass
+
+    # a room out of reach is a 403, not a silent fallback
+    try:
+        daemon._scope(SimpleNamespace(query_params={"room": "nope"}), p)
+        assert False, "should raise"
+    except store.AccessError:
+        pass
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
