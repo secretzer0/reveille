@@ -643,9 +643,9 @@ def test_lessons_global_and_room_scoped():
                      rule="do y", detection="grep y", room_id=room["id"])
     store.add_lesson(c, author="carol", slug="other-rule", symptom="s", root_cause="r",
                      rule="do z", detection="grep z", room_id=r2["id"])
-    got = {l["slug"] for l in store.lessons(c, [room["id"]])}
+    got = {les["slug"] for les in store.lessons(c, [room["id"]])}
     assert got == {"global-rule", "room-rule"}          # r2's lesson is not mine to see
-    assert {l["slug"] for l in store.lessons(c, [])} == {"global-rule"}
+    assert {les["slug"] for les in store.lessons(c, [])} == {"global-rule"}
 
 
 def test_lesson_slug_replaces_rather_than_appends():
