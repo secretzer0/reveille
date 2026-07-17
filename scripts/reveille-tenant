@@ -17,11 +17,26 @@ SC=${SYSTEMCTL:-systemctl}
 
 die() { echo "$*" >&2; exit 1; }
 
+# Labels that are NOT available to tenants, because a tenant name becomes a hostname in a
+# zone that already has other things in it. Public signup means a stranger picks this
+# string: without a reserve list, the first person to register "console" takes over
+# console.<domain>, and "www"/"mail"/"admin" are worth taking for the phishing alone.
+# Keep this list ahead of the zone, not behind it.
+RESERVED="www mail smtp imap admin api app console dashboard portal login auth signup
+account billing status docs blog cdn static assets ns ns1 ns2 dns mx ftp vpn git ci
+staging test dev prod beta demo support help internal root reveille"
+
 # The name lands in a path, a unit instance and a hostname -- three parsers with three
 # ideas about what is dangerous. Take the intersection and refuse the rest.
 valid() {
   [[ "$1" =~ ^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$ ]] \
     || die "bad tenant name '$1': [a-z0-9-], 3-32 chars, must not start or end with '-'"
+  # xn-- is punycode: a homograph label is a phishing kit with a valid certificate.
+  [[ "$1" == xn--* ]] && die "bad tenant name '$1': punycode labels are not available"
+  for r in $RESERVED; do
+    [ "$1" = "$r" ] && die "'$1' is reserved: it would take over $1.\$REVEILLE_DOMAIN"
+  done
+  return 0
 }
 
 cmd_new() {

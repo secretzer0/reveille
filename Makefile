@@ -108,7 +108,7 @@ unregister:
 # `claude mcp add` as `make register`. Nothing here may become required to reach the bus,
 # because standalone agents on a laptop must keep working exactly as they do today.
 agent-image:
-	docker build -t $(AGENT_IMAGE) docker
+	docker build -t $(AGENT_IMAGE) -f docker/Dockerfile .
 
 # One agent, one container, one role. State and workspace are SEPARATE mounts on purpose:
 #   reveille-<role>  (volume) -- what the agent KNOWS: its claude login + memory. Survives.

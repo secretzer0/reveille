@@ -46,6 +46,15 @@ WORKDIR /home/agent
 ARG UV_VERSION=0.9.28
 RUN curl -fsSL https://astral.sh/uv/${UV_VERSION}/install.sh | sh
 
+# The wake client. Without it a containerised agent has no waiter, so unicast rings never
+# arrive and it is deaf between turns -- it would only ever see mail by polling inbox() on
+# its next turn, which is the degraded mode, not the design. Shipped from THIS repo's
+# source (one source for the protocol, no second implementation to drift), which is why the
+# build context is the repo root, not docker/.
+COPY --chown=${UID}:${GID} pyproject.toml uv.lock README.md /tmp/agentbus/
+COPY --chown=${UID}:${GID} src /tmp/agentbus/src
+RUN uv tool install /tmp/agentbus && rm -rf /tmp/agentbus
+
 # Two mounts, different lifecycles: what the agent knows vs what it is working on.
 # Conflating them means you cannot throw away a bad checkout without burning the memory.
 # These MUST exist, owned by agent, BEFORE the VOLUME lines: docker seeds a fresh named
@@ -55,6 +64,6 @@ RUN mkdir -p /home/agent/.claude /home/agent/work
 VOLUME /home/agent/.claude
 VOLUME /home/agent/work
 
-COPY --chown=${UID}:${GID} entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=${UID}:${GID} docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["claude"]

@@ -1,0 +1,15 @@
+# The build context is the repo root so the image can install THIS repo's wake client.
+# Everything the agent does not need stays out -- and anything secret must never enter a
+# layer, because published layers are forever and `docker history` shows build args.
+.git
+.venv
+agentbus.log
+agentbus.pid
+*.db
+*.bak
+__pycache__
+.pytest_cache
+.ruff_cache
+.playwright-mcp
+tests
+deploy
