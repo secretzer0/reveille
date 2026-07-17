@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Tenant lifecycle on one box: new | list | rm | logs.
+#
+# A tenant is a directory, a systemd unit and a Caddy route. That is the whole model. No
+# tenant table: the filesystem is the registry, so `ls` cannot disagree with reality.
+#
+# Deliberately NOT here: signup (the broker already boots into setup mode and bootstraps
+# its own first admin -- the customer does that at their subdomain), billing, quotas, and
+# scale-to-zero. 1000 tenants x 57MB fits in RAM with room to spare; add socket activation
+# when that stops being true, not before.
+set -euo pipefail
+
+ROOT=${REVEILLE_ROOT:-/srv/reveille}
+DOMAIN=${REVEILLE_DOMAIN:-reveille.example}
+UNIT=reveille@
+SC=${SYSTEMCTL:-systemctl}
+
+die() { echo "$*" >&2; exit 1; }
+
+# The name lands in a path, a unit instance and a hostname -- three parsers with three
+# ideas about what is dangerous. Take the intersection and refuse the rest.
+valid() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$ ]] \
+    || die "bad tenant name '$1': [a-z0-9-], 3-32 chars, must not start or end with '-'"
+}
+
+cmd_new() {
+  local t=${1:?usage: reveille-tenant new <name>}
+  valid "$t"
+  [ -d "$ROOT/$t" ] && die "tenant '$t' already exists at $ROOT/$t"
+  install -d -m 0750 "$ROOT/$t" "$ROOT/$t/files"
+  $SC enable --now "${UNIT}${t}"
+  echo "tenant   : $t"
+  echo "dir      : $ROOT/$t"
+  echo "socket   : $ROOT/$t/broker.sock"
+  echo "url      : https://$t.$DOMAIN/ui"
+  echo
+  echo "The first visit to that URL bootstraps their admin account. Nothing is seeded"
+  echo "here on purpose: a tenant nobody has claimed has no owner to attribute."
+}
+
+cmd_list() {
+  printf '%-24s %-10s %-8s %s\n' TENANT STATE SIZE AGENTS
+  for d in "$ROOT"/*/; do
+    [ -d "$d" ] || continue
+    local t; t=$(basename "$d")
+    local state; state=$($SC is-active "${UNIT}${t}" 2>/dev/null || true)
+    local size; size=$(du -sh "$d" 2>/dev/null | cut -f1)
+    # Count agents straight from the tenant's own DB -- the metering unit, whenever
+    # billing shows up. One file per tenant means no cross-tenant query exists to leak.
+    local agents=-
+    [ -f "$d/broker.db" ] && agents=$(sqlite3 "$d/broker.db" \
+      "select count(distinct name) from members where tag not like 'web:%'" 2>/dev/null || echo '?')
+    printf '%-24s %-10s %-8s %s\n' "$t" "${state:-dead}" "${size:--}" "$agents"
+  done
+}
+
+# Stop and archive. NOT delete: a tenant's data is the thing they would come back for, and
+# the one irreversible mistake on this box is erasing a customer who was only late paying.
+cmd_rm() {
+  local t=${1:?usage: reveille-tenant rm <name>}
+  valid "$t"
+  [ -d "$ROOT/$t" ] || die "no such tenant: $t"
+  $SC disable --now "${UNIT}${t}" 2>/dev/null || true
+  local stamp; stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  mv "$ROOT/$t" "$ROOT/.archived-$t-$stamp"
+  echo "archived: $ROOT/.archived-$t-$stamp   (their data is a file -- hand it back or rm it yourself)"
+}
+
+cmd_logs() { journalctl -u "${UNIT}${1:?usage: reveille-tenant logs <name>}" -f; }
+
+case "${1:-}" in
+  new)  shift; cmd_new "$@" ;;
+  list) shift; cmd_list "$@" ;;
+  rm)   shift; cmd_rm "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
+  *) cat >&2 <<EOF
+usage: reveille-tenant <command>
+
+  new <name>    create + start a tenant   (dir, unit, socket)
+  list          every tenant, state, disk, agent count
+  rm <name>     stop + ARCHIVE a tenant   (never deletes)
+  logs <name>   follow one tenant's broker
+
+env: REVEILLE_ROOT=$ROOT  REVEILLE_DOMAIN=$DOMAIN
+EOF
+    exit 2 ;;
+esac

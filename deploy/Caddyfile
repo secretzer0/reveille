@@ -1,0 +1,48 @@
+# Ingress for every tenant, in one block.
+#
+# THE WILDCARD IS NOT A STYLE CHOICE. Per-subdomain certs hit Let's Encrypt's rate limit
+# (~50 certs/week per registered domain) and you wedge at roughly customer 50 -- with the
+# failure landing on new signups, the one thing that must never break. A wildcard is ONE
+# cert for every tenant, issued over DNS-01, which also means no tenant subdomain has to
+# be publicly resolvable before it exists.
+#
+# Set the DNS provider credential for your registrar (this uses Cloudflare) and build
+# caddy with that DNS module: xcaddy build --with github.com/caddy-dns/cloudflare
+#
+# Ingress itself is a Cloudflare Tunnel: pve0 sits behind a residential NAT with a dynamic
+# IP and an ISP whose terms frown on serving. The tunnel keeps the home IP off the
+# internet and needs no port forward.
+
+*.reveille.example {
+	tls {
+		dns cloudflare {env.CF_API_TOKEN}
+	}
+
+	# tenant.reveille.example -> /srv/reveille/<tenant>/broker.sock
+	# The label IS the routing key, so provisioning adds no config here: a new tenant is a
+	# directory, and this block already knows how to reach it.
+	map {labels.2} {tenant} {
+		default ""
+	}
+	@known not path /_health
+	reverse_proxy @known unix//srv/reveille/{labels.2}/broker.sock {
+		# The bus is WebSockets (wake + feed) held open for hours. A proxy that times them
+		# out turns "my agent went deaf" into a support ticket you cannot reproduce.
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+		header_up X-Forwarded-Host {host}
+	}
+
+	# A dead or missing tenant must not read as a broken bus. 502 with a plain sentence
+	# beats Caddy's default page in a support conversation.
+	handle_errors {
+		respond "no such tenant, or its broker is down: {labels.2}" 502
+	}
+}
+
+# Free tier lives on pve0; the moment someone pays, their tenant belongs in real cloud.
+# A tenant is one file plus one unit: stop, rsync, start, repoint DNS. That portability is
+# only free while the file stays the boundary -- it is the reason not to centralise into
+# one shared database the day a customer asks for an SLA.

@@ -1,0 +1,44 @@
+# One broker per tenant. `systemctl enable --now reveille@acme` runs the tenant "acme".
+#
+# A tenant IS a directory: /srv/reveille/<name>/{broker.db,files/,broker.sock}. There is no
+# tenant table and no port registry -- the filesystem already knows who exists, and losing
+# a registry that duplicates the filesystem is how tenants get orphaned.
+#
+# The DB file is the isolation boundary. That is what lets `room_id IS NULL` keep meaning
+# "global to THIS customer": there is no query that could reach another tenant, because
+# there is no other tenant in this database. Buying that back with a tenant_id column in a
+# shared schema means one missed WHERE is a cross-customer leak.
+[Unit]
+Description=Reveille broker for tenant %i
+After=network.target
+
+[Service]
+Type=exec
+User=reveille
+Group=reveille
+WorkingDirectory=/srv/reveille/%i
+Environment=REVEILLE_DB=/srv/reveille/%i/broker.db
+Environment=REVEILLE_UDS=/srv/reveille/%i/broker.sock
+ExecStart=/opt/reveille/.venv/bin/agentbus-daemon
+Restart=on-failure
+RestartSec=2
+
+# 1000 tenants x agents holding WS waiters will find the default (1024) long before
+# anything else breaks.
+LimitNOFILE=65536
+
+# The broker needs its own directory and nothing else on the box. A free tier open to
+# public signup is a stranger's code path into this process.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/reveille/%i
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

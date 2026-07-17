@@ -2698,9 +2698,23 @@ def main():
     _files_dir.mkdir(parents=True, exist_ok=True)
     host = os.environ.get("REVEILLE_HOST", "0.0.0.0")
     port = int(os.environ.get("REVEILLE_PORT", "8765"))
-    log.info("daemon on %s:%s db=%s schema=v%s users=%s", host, port, _db_path, v,
+    # REVEILLE_UDS binds a unix socket instead of a TCP port. One broker per tenant means
+    # a port each -- an allocation table to keep, leak and collide on. A socket is named
+    # by the tenant's own directory, so the filesystem is the registry and nothing has to
+    # remember which number belongs to whom. Empty = TCP, exactly as before.
+    uds = os.environ.get("REVEILLE_UDS") or ""
+    # The kernel caps a unix socket path at ~108 bytes (sun_path) and reports the overrun
+    # as a bare `OSError: AF_UNIX path too long` from inside uvicorn's startup -- after the
+    # "daemon on ..." line has already claimed success. Say it here, in the units of the
+    # thing the operator actually set.
+    if uds and len(os.fsencode(uds)) > 100:
+        raise SystemExit(f"REVEILLE_UDS is {len(os.fsencode(uds))} bytes; the kernel's "
+                         f"limit is ~108. Use a shorter path (e.g. /srv/reveille/<tenant>/"
+                         f"broker.sock):\n  {uds}")
+    log.info("daemon on %s db=%s schema=v%s users=%s", uds or f"{host}:{port}", _db_path, v,
              "yes" if store.any_users(_conn) else "NONE -- open /ui to create the first admin")
-    config = uvicorn.Config(build_app(), host=host, port=port, log_level="warning")
+    config = (uvicorn.Config(build_app(), uds=uds, log_level="warning") if uds
+              else uvicorn.Config(build_app(), host=host, port=port, log_level="warning"))
     server = uvicorn.Server(config)
     orig_exit = server.handle_exit
 
