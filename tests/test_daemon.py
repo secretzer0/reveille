@@ -102,6 +102,28 @@ def test_notify_rings_named_agents_holding_that_room(tmp_path):
         conn.close()
 
 
+def test_upload_limits_and_quota():
+    MB = 1 << 20
+    prev = daemon.QUOTA_BYTES
+    try:
+        # Homebrew default: no quota. Nobody self-hosting inherits a hosted tier's limit.
+        daemon.QUOTA_BYTES = 0
+        assert daemon._upload_refusal(999 * MB, 1 * MB) is None       # used is irrelevant
+        assert "too large" in daemon._upload_refusal(0, 26 * MB)      # per-file cap still applies
+
+        # Hosted tier: a quota set in the unit file.
+        daemon.QUOTA_BYTES = 100 * MB
+        assert daemon._upload_refusal(0, 10 * MB) is None
+        assert daemon._upload_refusal(90 * MB, 10 * MB) is None       # exactly full still fits
+        assert "storage full" in daemon._upload_refusal(90 * MB, 11 * MB)
+        assert "storage full" in daemon._upload_refusal(100 * MB, 1)
+        # The per-file cap wins even with room to spare: one caller must not be able to
+        # park 25MB+ in a single write just because the tenant is empty.
+        assert "too large" in daemon._upload_refusal(0, 26 * MB)
+    finally:
+        daemon.QUOTA_BYTES = prev
+
+
 def test_send_room_comes_from_the_query_scope():
     # The composer already picked a room (?room=, same as every other web endpoint).
     # A 2-room web user must NOT get room_required for a room they are looking at,

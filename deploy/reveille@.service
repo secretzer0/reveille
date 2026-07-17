@@ -19,6 +19,13 @@ Group=reveille
 WorkingDirectory=/srv/reveille/%i
 Environment=REVEILLE_DB=/srv/reveille/%i/broker.db
 Environment=REVEILLE_UDS=/srv/reveille/%i/broker.sock
+# Free-tier attachment quota. The business rule lives HERE, not in the code: a homebrew
+# install defaults to unlimited and must never inherit a hosted tier's limit.
+# The app-level cap exists to fail with a legible 413. It is not the guarantee -- back it
+# with a real one on the filesystem, or a bug in this process is a full pool:
+#   zfs create -o quota=2G Pool0/reveille/<tenant>
+# ENOSPC on the DB is a far worse day than a refused upload.
+Environment=REVEILLE_QUOTA_BYTES=1073741824
 ExecStart=/opt/reveille/.venv/bin/agentbus-daemon
 Restart=on-failure
 RestartSec=2

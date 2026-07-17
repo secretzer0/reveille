@@ -135,6 +135,12 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.4  /upload can answer 413 for two different reasons and they need different fixes:
+       "too large" is ONE file over the 25MB cap -- split it or link it instead. "storage
+       full" is the whole broker's attachment quota, so retrying is pointless and deleting
+       something (or asking the operator to raise it) is the only way through. Both are
+       refusals BEFORE the bytes are stored, so a 413 never leaves a partial file behind.
+       A self-hosted broker has no quota unless its operator sets one.
 0.2.3  presence()'s `connected` now means REACHABLE RIGHT NOW, whatever the transport:
        an agent with its wake waiter attached, or a human with a browser tab holding
        that room's feed. It used to mean "a wake.py is attached", full stop -- so every
@@ -917,12 +923,45 @@ _files_dir = None  # set in main(): <db dir>/files -- attachments live next to t
 _FNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 MAX_UPLOAD = 25 * 1024 * 1024
 
+# Total bytes of attachments this broker will hold. 0 = unlimited, because a homebrew box
+# must not surprise its owner with a cap he never asked for. A hosted free tier sets it per
+# tenant in the unit file, which is where a business rule belongs -- not in the code every
+# self-hoster runs.
+# This counts UPLOADS, not the database: messages are ~5KB and bounded by retention, while
+# /upload is the only place a single caller can write gigabytes.
+QUOTA_BYTES = int(os.environ.get("REVEILLE_QUOTA_BYTES", "0"))
+
+
+def _files_used():
+    """Bytes currently stored. Read from the filesystem rather than a counter: a counter
+    drifts the first time a file is removed by anything that did not decrement it, and it
+    drifts silently -- the failure would be a tenant locked out of uploading with space to
+    spare, which reads as a broker bug."""
+    with os.scandir(_files_dir) as it:
+        return sum(f.stat().st_size for f in it if f.is_file())
+
+
+def _upload_refusal(used, size):
+    """Why this upload cannot be stored, or None. Pure, so the limits are testable without
+    a socket -- and so the two callers below cannot drift apart on the arithmetic."""
+    if size > MAX_UPLOAD:
+        return f"too large ({size >> 20}MB, cap {MAX_UPLOAD >> 20}MB)"
+    if QUOTA_BYTES and used + size > QUOTA_BYTES:
+        return (f"storage full ({used >> 20}MB of {QUOTA_BYTES >> 20}MB used). "
+                f"Delete attachments or raise the tenant's quota.")
+    return None
+
 
 @_guard
 async def upload_http(request):
     """POST /upload?name=<filename>[&room=] with the raw file bytes as the body. Stores it
     under a unique name, records which room it belongs to, and returns
     {"url": "/files/<stored>", "name": <original>, "bytes": n}.
+
+    413 comes in two flavours and they want different reactions: "too large" is this ONE
+    file over the 25MB cap (split it, or link it); "storage full" is the broker's whole
+    attachment quota, where retrying achieves nothing. Both refuse before storing, so a
+    413 never leaves half a file behind. Unlimited unless the operator sets a quota.
 
     Pass the returned dict in the `attachments` list on send. The attachments FIELD is
     the only form -- never write "[file: ...]" markers into a body; they are plain text
@@ -931,11 +970,25 @@ async def upload_http(request):
     p = _principal(request)
     rid = store.resolve_send_room(p.rooms, room=request.query_params.get("room") or None)
     name = _FNAME_RE.sub("_", request.query_params.get("name") or "file.bin")[-80:]
-    data = await request.body()
+    used = _files_used() if QUOTA_BYTES else 0
+
+    # Content-Length is a CLAIM. Believing it is how you refuse a 5GB body politely after
+    # reading all 5GB of it -- the old code did exactly that: request.body() buffered the
+    # whole thing before the cap was consulted, so the cap protected nothing and the tenant
+    # was OOM-killed (MemoryMax=512M) before it could answer 413. So: refuse the honest
+    # liar up front, then keep counting while the bytes actually arrive, because a chunked
+    # body carries no length at all.
+    declared = int(request.headers.get("content-length") or 0)
+    if (why := _upload_refusal(used, declared)):
+        return JSONResponse({"error": why}, status_code=413)
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if (why := _upload_refusal(used, len(buf))):
+            return JSONResponse({"error": why}, status_code=413)   # hangs up mid-stream
+    data = bytes(buf)
     if not data:
         return JSONResponse({"error": "empty body"}, status_code=400)
-    if len(data) > MAX_UPLOAD:
-        return JSONResponse({"error": f"too large (cap {MAX_UPLOAD >> 20}MB)"}, status_code=413)
     stored = f"{time.time_ns() // 1_000_000}-{name}"
     (_files_dir / stored).write_bytes(data)
     store.record_file(_conn, stored, rid, p.name)
