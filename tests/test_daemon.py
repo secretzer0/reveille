@@ -45,31 +45,61 @@ def test_when_ns_relative_iso_and_bad():
         pass
 
 
-def test_poke_gate_one_outstanding_until_ttl():
+def test_poke_gate_one_outstanding_per_agent_until_ttl():
+    # The gate is keyed (token_id, name) -- per AGENT, not per agent-room. A 3-room
+    # agent must take ONE ring per turn, not three; inbox() unions its rooms anyway.
     import time
-    key = ("room1", "x")
+    key = ("tok-a", "x")
     daemon._poke_pending.clear()
     assert daemon._poke_ok(key)                                   # nothing outstanding
     daemon._poke_pending[key] = time.time_ns()
     assert not daemon._poke_ok(key)                               # poked, unacked -> gated
-    assert daemon._poke_ok(("room2", "x"))                        # same name, other room
+    assert daemon._poke_ok(("tok-b", "x"))                        # same name, other token
     daemon._poke_pending[key] = time.time_ns() - daemon.POKE_TTL_NS - 1
     assert daemon._poke_ok(key)                                   # TTL expired -> resumes
     daemon._poke_pending.clear()
 
 
-def test_notify_only_targets_waiters():
-    # _notify pokes only queues registered for the named agents
+def test_notify_rings_named_agents_holding_that_room(tmp_path):
+    # _notify(room, names) rings a waiter only when BOTH hold: the agent is named, and
+    # its TOKEN carries that room. The room side is looked up per call, which is what
+    # makes an unassign take effect without the waiter reconnecting.
     import asyncio
-    q_a, q_b = asyncio.Queue(), asyncio.Queue()
+    from agentbus import store
+    db = str(tmp_path / "notify.db")
+    conn = store.connect(db)
+    store.migrate(conn, db)
+    u = store.create_user(conn, "owner", "pw-not-a-real-secret")
+    r1 = store.create_room(conn, u["id"], "r1")
+    r2 = store.create_room(conn, u["id"], "r2")
+    t_alice = store.create_token(conn, u["id"], "alice")
+    t_bob = store.create_token(conn, u["id"], "bob")
+    t_carol = store.create_token(conn, u["id"], "carol")
+    store.assign_room(conn, t_alice["id"], r1["id"], u["id"])
+    store.assign_room(conn, t_bob["id"], r1["id"], u["id"])
+    store.assign_room(conn, t_carol["id"], r2["id"], u["id"])   # carol is NOT in r1
+
+    q_alice, q_bob, q_carol = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
     daemon._waiters.clear()
-    daemon._waiters[("r", "alice")] = {q_a}
-    daemon._waiters[("r", "bob")] = {q_b}
+    daemon._waiters[(t_alice["id"], "alice")] = {q_alice}
+    daemon._waiters[(t_bob["id"], "bob")] = {q_bob}
+    daemon._waiters[(t_carol["id"], "carol")] = {q_carol}
+    prev = daemon._conn
+    daemon._conn = conn
     try:
-        daemon._notify("r", ["alice"])
-        assert q_a.qsize() == 1 and q_b.qsize() == 0
+        daemon._notify(r1["id"], ["alice", "carol"])
+        assert q_alice.qsize() == 1     # named, and its token holds r1
+        assert q_bob.qsize() == 0       # holds r1 but was not named
+        assert q_carol.qsize() == 0     # named, but its token has no r1
+
+        # unassign r1 from alice -> the very next _notify must not ring her
+        store.unassign_room(conn, t_alice["id"], r1["id"], u["id"])
+        daemon._notify(r1["id"], ["alice"])
+        assert q_alice.qsize() == 1     # still the one from before: no new ring
     finally:
         daemon._waiters.clear()
+        daemon._conn = prev
+        conn.close()
 
 
 if __name__ == "__main__":

@@ -183,11 +183,8 @@ The daemon (HTTP-MCP + WS wake + users/tokens/rooms), the cross-OS wake client, 
 DAG message model are built, and the fleet runs on them: each agent joins from its own
 pane, holds a waiter, and coordinates over rooms.
 
-`make build` is currently RED, and the gap is the harness, not the broker:
-
-- `tests/smoke_ws.py` still spawns an **open-mode** daemon and joins with no credential.
-  0.2.0 deleted open mode, so `join` 401s. The smoke needs to seed a user, a room and a
-  token (`store.create_user` / `create_room` / `create_token` / `assign_room`) before
-  spawning, and hand each agent its own secret.
-- `tests/test_daemon.py::test_notify_only_targets_waiters` fails with
-  `AttributeError: 'NoneType' object has no attribute 'execute'` (`daemon.py:261`).
+The unit suite is green. `make build` is still RED at the smoke leg, and the gap is the
+harness, not the broker: `tests/smoke_ws.py` spawns an **open-mode** daemon and joins
+with no credential, but 0.2.0 deleted open mode, so `join` 401s. It needs to seed a
+user, a room and a token (`store.create_user` / `create_room` / `create_token` /
+`assign_room`) before spawning, and hand each agent its own secret.
