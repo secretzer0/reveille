@@ -135,6 +135,12 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.3  presence()'s `connected` now means REACHABLE RIGHT NOW, whatever the transport:
+       an agent with its wake waiter attached, or a human with a browser tab holding
+       that room's feed. It used to mean "a wake.py is attached", full stop -- so every
+       web user read as unreachable forever, because a person is never going to run one.
+       Unchanged for you: a peer with connected=true takes a unicast ring; connected=false
+       with live=true means mail queues for their next turn.
 0.2.1  join() now returns `version` -- the broker's. Compare it to the last one you saw
        and re-read usage() when it moves. The broker will NEVER announce a restart or an
        upgrade on the bus: a version is state, not an event, and a message announcing it
@@ -296,13 +302,28 @@ def _push_shutdown():
 
 # Live feed tap for the web UI: every message in a room is pushed to each /feed
 # WebSocket watching that room. Passive observers -- no poke gate, no read receipts.
-_feed: dict = {}  # queue -> room
+# The watcher's name rides along so presence can answer "reachable right now?" for a
+# human, who has a tab where an agent has a wake waiter.
+_feed: dict = {}  # queue -> (room, name)
 
 
 def _feed_push(room, msg):
-    for q, r in list(_feed.items()):
+    for q, (r, _n) in list(_feed.items()):
         if r == room:
             q.put_nowait(msg)
+
+
+def _reachable(entry):
+    """Is this member reachable in real time RIGHT NOW, in this room?
+
+    An agent is reachable when its wake waiter is attached; a HUMAN is reachable when a
+    browser tab holds this room's feed. Two transports, one meaning. This used to ask only
+    about the waiter, so a web user -- who never has one and never will -- was pinned to
+    "live, waiter down" forever: the UI asking a person whether they are running wake.py.
+    """
+    if _waiters.get((entry["token_id"], entry["name"])):
+        return True
+    return (entry["room"], entry["name"]) in set(_feed.values())
 
 
 @dataclass(frozen=True)
@@ -637,12 +658,14 @@ async def history(keywords: str = "", since: str = "", until: str = "",
 @mcp.tool()
 async def presence(ctx: Context = None) -> dict:
     """Everyone across your rooms as {"agents": [...]} -- each with its url, room,
-    live (recent heartbeat), and connected (a wake.py is attached right now). Names are
+    live (recent heartbeat), and connected (reachable in real time right now: a wake.py
+    attached, or -- for a human -- a browser tab holding this room's feed). Names are
     per-room, so each entry carries the room it is in."""
     p = _me(ctx.request_context.request)
     agents = store.presence(_conn, p.rooms)
     for a in agents:
-        a["connected"] = bool(_waiters.get((a.pop("token_id"), a["name"])))
+        a["connected"] = _reachable(a)
+        a.pop("token_id")
     return {"agents": agents}
 
 
@@ -841,7 +864,8 @@ async def presence_http(request):
                 store.join(_conn, me, tag=f"web:{me}", room_id=rid, fresh=True)
     agents = store.presence(_conn, rooms)
     for a in agents:
-        a["connected"] = bool(_waiters.get((a.pop("token_id"), a["name"])))
+        a["connected"] = _reachable(a)
+        a.pop("token_id")
     return JSONResponse({"agents": agents})
 
 
@@ -985,8 +1009,9 @@ async def feed_ws(ws: WebSocket):
         return
     q: asyncio.Queue = asyncio.Queue()
     room = ws.query_params.get("room") or ""
-    _feed[q] = room if room in p.rooms else (next(iter(p.rooms)) if p.rooms else "")
-    log.info("feed connected (%s watching)", len(_feed))
+    _feed[q] = (room if room in p.rooms else (next(iter(p.rooms)) if p.rooms else ""),
+                p.name)
+    log.info("%s feed connected (%s watching)", p.name, len(_feed))
     try:
         # ponytail: a dropped browser parked on q.get() is only reaped when the next
         # message's send fails -- bounded leak, self-cleaning, fine for a LAN UI.
@@ -1037,12 +1062,28 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  .agent .swatch{width:9px;height:9px;border-radius:3px;flex:none}
  .agent .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .agent.live .nm{color:var(--fg)}
+ /* Three states, read at a glance without a legend: hollow ring = stale, filled gold =
+    live but not reachable in real time, filled green + halo = reachable now.
+    Deliberately NOT pulsing. Green means "fine, nothing needed"; motion means "look at
+    me" -- and a rail of six agents all breathing is ambient anxiety that trains the eye
+    to ignore the very dot it is meant to draw. The halo makes green read as LIT while
+    staying still, and the one thing here that does pulse (an armed BLAST) keeps meaning
+    what motion should mean. */
  .agent .st{width:7px;height:7px;border-radius:50%;flex:none;background:transparent;
   border:1px solid var(--faint)}
  .agent.live .st{border-color:var(--gold);background:var(--gold)}
- .agent.conn .st{border-color:var(--green);background:var(--green)}
+ .agent.conn .st{border-color:var(--green);background:var(--green);
+  box-shadow:0 0 0 2px rgba(62,207,106,.2)}
  .agent.allrow{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;
   margin-bottom:.3rem;padding-bottom:.45rem}
+ .agent.allrow .nm{color:var(--fg)}
+ /* The scope row says which filter is ON in words, not in a dot: gold name = you are
+    seeing everyone. Its right slot carries the agent count -- the fact worth knowing
+    there, and it cannot be mistaken for a status light. */
+ .agent.allrow.sel .nm{color:var(--gold);font-weight:700}
+ .agent .cnt{font-size:.68rem;color:var(--faint);flex:none;
+  font-variant-numeric:tabular-nums}
+ .agent.allrow.sel .cnt{color:var(--gold)}
  /* The card is the only thing anchored to the bottom of the rail, so its menu opens
     upward from it -- same popup shape as the composer's recipient picker. */
  #meWrap{position:relative;margin-top:auto}
@@ -1892,11 +1933,17 @@ async function loadPresence(){
  agentList=(await r.json()).agents
   .sort((a,b)=>(b.connected-a.connected)||(b.live-a.live)||a.name.localeCompare(b.name));
  $('agents').innerHTML='';
+ // "everyone" is a FILTER SCOPE, not a being: it has no presence, so it gets no presence
+ // dot. It wore one because the row reused .live to mean "selected" -- the same gold dot
+ // that means "live but unreachable" one row below. One channel, two meanings, so the
+ // scope read as an agent having a bad day. Selection is the row highlight (what it means
+ // on every other row); the count is the thing worth saying here.
  const all=document.createElement('div');
- all.className='agent allrow'+(selAgents.size?'':' sel live');
+ all.className='agent allrow'+(selAgents.size?'':' sel');
  all.innerHTML='<span class="swatch" style="background:var(--gold)"></span>'
-   +'<span class="nm">everyone</span><span class="st"></span>';
- all.title='clear the agent filter';
+   +'<span class="nm">everyone</span>'
+   +'<span class="cnt">'+agentList.length+'</span>';
+ all.title=selAgents.size?'show every agent':'showing every agent';
  all.onclick=()=>{selAgents.clear();recip.clear();renderPicker();loadPresence();refilter();};
  $('agents').appendChild(all);
  const sel=$('hAgent'),keep=sel.value;
@@ -1911,7 +1958,12 @@ async function loadPresence(){
     +(selAgents.has(a.name)?' sel':'');
   el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
     +'<span class="nm">'+esc(a.name)+'</span><span class="st"></span>';
-  el.title=a.connected?'wake armed':a.live?'live, waiter down':'stale';
+  // Same three states, said in the vocabulary of what the row actually is: a person has
+  // a tab where an agent has a waiter, and telling a human their "waiter is down" is noise
+  // about a thing they were never going to run.
+  const web=(a.tag||'').startsWith('web:');
+  el.title=a.connected?(web?'here -- watching this room live':'wake armed -- rings on unicast')
+   :a.live?(web?'signed in, not watching this room':'live, waiter down -- mail queues'):'stale';
   el.onclick=()=>{selAgents.has(a.name)?selAgents.delete(a.name):selAgents.add(a.name);
    recip.clear();for(const n of selAgents)if(n!==myName)recip.add(n);   // filter selection IS the target, minus yourself
    renderPicker();loadPresence();refilter();};
