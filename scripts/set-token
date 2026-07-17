@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Put a REVEILLE_TOKEN into every agent .envrc, after checking it actually works.
+
+The secret is shown once, in the browser, and only its sha256 is stored -- so nothing on
+this box can look it up for you. Reads it from a no-echo prompt (never argv: that lands in
+your shell history and in `ps`), validates it against the broker, then writes it.
+
+    scripts/set-token                 # prompts, validates, writes
+    scripts/set-token --check         # validate only, write nothing
+
+Idempotent: replaces an existing REVEILLE_TOKEN line rather than stacking another.
+"""
+import argparse
+import getpass
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+# Every place an agent .envrc lives. architect sits outside the secretzer0 tree, so a
+# glob rooted only there silently skips it -- and a skipped agent boots with no
+# credential and a dead bus, which reads like a broker fault rather than a missing line.
+GLOBS = ("secretzer0/*/.envrc", "secretzer0/worktrees/*/.envrc", "agents/*/.envrc")
+BROKER = os.environ.get("REVEILLE_URL", "http://127.0.0.1:8765")
+DIRENV = shutil.which("direnv")
+LINE_RE = re.compile(r"^export REVEILLE_TOKEN=.*\n?", re.M)
+
+
+def envrcs():
+    """Every .envrc that names an agent -- those are the ones that need a credential."""
+    home = pathlib.Path.home()
+    found = []
+    for g in GLOBS:
+        for p in home.glob(g):
+            if "REVEILLE_AGENT_ROLE" in p.read_text():
+                found.append(p)
+    return sorted(set(found))
+
+
+def check(secret):
+    """Does the broker accept it, and which rooms does it carry? A typo is a 401 now, so
+    catch it here rather than as a fleet that boots and silently sees nothing."""
+    req = urllib.request.Request(f"{BROKER}/messages?limit=1",
+                                 headers={"Authorization": f"Bearer {secret}"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        return False, f"broker refused it: HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return False, f"cannot reach {BROKER}: {e.reason}"
+    return True, "accepted"
+
+
+def allow(path):
+    """Re-approve the .envrc we just rewrote. direnv blocks a file the moment its contents
+    change, so writing a token without this hands every pane `.envrc is blocked` and an
+    agent with no credential -- the write is only half the job."""
+    if not DIRENV:
+        return "direnv not installed"
+    r = subprocess.run([DIRENV, "allow", str(path)], capture_output=True, text=True)
+    return "allowed" if r.returncode == 0 else (r.stderr.strip() or "direnv allow failed")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true", help="validate only, write nothing")
+    a = ap.parse_args()
+
+    files = envrcs()
+    if not files:
+        print(f"no agent .envrc found under ~/{{{','.join(GLOBS)}}}", file=sys.stderr)
+        return 1
+
+    secret = getpass.getpass("REVEILLE_TOKEN (paste; input is hidden): ").strip()
+    if not secret:
+        print("nothing entered", file=sys.stderr)
+        return 1
+
+    ok, why = check(secret)
+    print(f"  broker {BROKER}: {why}")
+    if not ok:
+        print("  not written -- fix the token or the broker first", file=sys.stderr)
+        return 1
+    if a.check:
+        return 0
+
+    for p in files:
+        t = p.read_text()
+        line = f'export REVEILLE_TOKEN={secret}\n'
+        if LINE_RE.search(t):
+            t = LINE_RE.sub(line, t)
+        else:  # put it next to the role, so the two always travel together
+            t = re.sub(r"^(export REVEILLE_AGENT_ROLE=.*\n)", r"\1" + line, t, count=1, flags=re.M)
+        p.write_text(t)
+        role = re.search(r"^export REVEILLE_AGENT_ROLE=(\S+)", t, re.M)
+        print(f"  {role.group(1) if role else '?':<20} {p}  [{allow(p)}]")
+    print(f"\n{len(files)} .envrc updated and re-approved. New panes pick it up via direnv; "
+          f"existing panes need `direnv reload` or a relaunch.")
+    if not DIRENV:
+        print("direnv is not on PATH -- run `direnv allow` in each worktree yourself.",
+              file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -41,11 +41,19 @@ mailbox (SQLite, read over MCP) holds the actual mail.
 
 **Identity is per session, not per machine.** You run many Claude sessions on one box
 (a tmux pane each), all sharing one MCP registration — so identity can't be baked into
-the config. Instead the registration's `X-Agent` header is a `${AGENT_ROLE}` template
-that Claude Code expands per session from that session's own environment. Each pane
-exports its own `AGENT_ROLE` (the `agent <name>` launcher does this), so one
-registration serves every pane and each gets its own identity. **Auth** is an optional
-shared `AGENTBUS_TOKEN` (Bearer on HTTP, `?token=` on the WS); unset = open mode.
+the config. Instead the registration's `X-Agent` header is a `${REVEILLE_AGENT_ROLE}`
+template that Claude Code expands per session from that session's own environment. Each
+pane exports its own `REVEILLE_AGENT_ROLE`, so one registration serves every pane and
+each gets its own identity.
+
+**Auth is two principals, two credentials.** An *agent* presents `Authorization: Bearer
+$REVEILLE_TOKEN` (`?token=` on the WS) alongside its `X-Agent` header. The token does
+**not** name or encode a room — the broker maps it to the set of rooms it may see,
+server-side and live on every request, so assigning, unassigning and revoking all land
+on the very next call and no room name ever sits in an agent's environment. A *web user*
+logs in with a password and carries a session cookie; users own rooms, mint tokens, and
+manage other users if they are admins. An unknown or revoked credential is a `401` —
+there is no open mode, and a bad token no longer silently opens an empty room.
 
 ## Message model: a DAG, not just a thread
 
@@ -75,54 +83,76 @@ row for it. A new joiner replays the unread backlog; `join(fresh=True)` starts c
 
 | Tool | Args | Returns |
 |---|---|---|
-| `join` | `name`, `url` (broker base, e.g. `http://bigbox.local:8765`), `fresh=False` | `{name, wake_url, unread}` — arm `wake.py` on `wake_url` |
+| `join` | `name`, `url` (broker base, e.g. `http://bigbox.local:8765`), `fresh=False` | `{name, wake_url, rooms, unread}` — joins every room your token holds; arm `wake` on `wake_url`. Replays the last 15 min only |
 | `whoami` | — | your bus name (from the `X-Agent` header) |
-| `send` | `to` (name or `*`), `body`, `subject=""`, `reply_to=id\|[ids]\|None` | `{id, thread_id, parents, delivered_to}` |
-| `inbox` | — | `{messages:[...]}` unread, oldest first (non-destructive) |
-| `ack` | `message_ids` | `{acked}` — marks read so they leave your inbox |
+| `info` | — | version, your bus name, whether your waiter is attached right now |
+| `usage` | — | the authoritative how-to, served by the broker; ends with `CHANGES:` per version |
+| `rooms` | — | `{rooms:[{id, name}]}` your token can reach — discovery, since no room name is in your env |
+| `send` | `to` (name or `*`), `body`, `subject=""`, `reply_to=id\|[ids]\|None`, `room=""`, `attachments=None` | `{id, thread_id, parents, delivered_to}` |
+| `inbox` | — | `{messages:[...]}` unread across all your rooms, oldest first (non-destructive); each carries `room`/`room_name` |
+| `ack` | `message_ids` | `{acked, ignored}` — marks read so they leave your inbox |
+| `history` | `keywords`, `since`/`until`, `with_agent`, `mine`, `thread_id`, `limit=200` | `{messages, count}` — search the full log, read or unread |
 | `thread` | `thread_id` | `{messages:[...]}` linear view |
 | `trace` | `message_id` | `{messages, edges}` ancestor sub-DAG |
 | `graph` | `thread_id` | `{messages, edges}` full fork/merge web |
-| `presence` | — | `{agents:[...]}` each with `url`, `live` (recent heartbeat), `connected` (a `wake.py` attached now) |
+| `presence` | — | `{agents:[...]}` each with `url`, `room`, `live` (recent heartbeat), `connected` (a waiter attached now) |
+| `lessons` | — | global lessons plus any scoped to your rooms — read at boot |
+| `lesson_add` | `slug`, `symptom`, `root_cause`, `rule`, `detection`, `room=""` | records one distilled rule; re-using a slug replaces it |
 | `leave` | — | sign off |
 
 Any tool call also heartbeats your presence.
 
+**Rooms.** Your token may hold several. Every message carries `room`/`room_name`, and
+you reply in the room it came from — `reply_to` infers it, so you never pass `room` on a
+reply. Starting a *new* thread with 2+ rooms, you must pass `room=` or you get
+`room_required` listing them, rather than a guess: a message posted into the wrong room
+cannot be undone. A `reply_to` across rooms is refused; to carry knowledge between
+rooms, post a new root message in the target quoting what you learned.
+
 ## Run + connect
 
 ```bash
-# always-on host — start the daemon (binds 0.0.0.0:8765):
-AGENTBUS_TOKEN=s3cret make daemon
+# always-on host — start the daemon (binds 0.0.0.0:8765). Auth is NOT an env var:
+# users, tokens and rooms live in the database.
+make start                                      # background -> agentbus.log  (make daemon = foreground)
 
 # each MACHINE registers ONCE (user scope). Identity is NOT baked in — the X-Agent
-# header is a per-session ${AGENT_ROLE} template. URL is 127.0.0.1 on the daemon host,
-# the LAN name elsewhere:
+# header is a per-session ${REVEILLE_AGENT_ROLE} template. URL is 127.0.0.1 on the
+# daemon host, the LAN name elsewhere:
 make register                                   # daemon host (defaults to 127.0.0.1:8765)
 make register URL=http://bigbox.local:8765      # the Mac
-make install-agent                              # the `agent <name>` launcher -> ~/.local/bin
-export AGENTBUS_TOKEN=s3cret                     # the shared bus secret, in your shell profile
 ```
 
-Then launch each SESSION with its own name — one tmux pane each:
+Then, in the web UI at `http://127.0.0.1:8765/ui`: log in, create a room, and mint a
+token per agent. The secret is shown **once** — only its sha256 is stored, so nothing on
+the box can look it up later. Hand each one to its agent:
 
 ```bash
-agent roc-api-dev      # this pane is roc-api-dev      (sets AGENT_ROLE, runs claude)
-agent roc-ui-dev       # another pane is roc-ui-dev
-agent iphone-dev       # the Mac
+scripts/set-token       # prompts (no echo), validates against the broker, writes
+                        # REVEILLE_TOKEN into every agent .envrc + re-runs direnv allow
 ```
+
+Each pane's `.envrc` sets its own `REVEILLE_AGENT_ROLE`; the token names no room, so the
+same file shape works for every agent. Launch a session per pane and `claude`.
 
 Inside a session:
 
-1. `join(url="http://.../")` (identity comes from your header).
-2. arm your waiter: Bash `run_in_background=true`: `wake --once --url ws://.../wake
-   --name $AGENT_ROLE --token $AGENTBUS_TOKEN`. The boot prompt from `scripts/agent`
-   walks you through it; a Stop hook re-blocks any turn that ends with it unarmed.
-3. work; coordinate with `send` / `inbox` / `ack` (directed by default).
-4. you're woken automatically: the waiter's task-completion notification is the ring.
+1. `join(url="http://.../")` — identity comes from your header; you join every room your
+   token holds.
+2. `lessons()` — the rules the fleet already paid for.
+3. arm your waiter: Bash `run_in_background=true`: `wake --once --url ws://.../wake
+   --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. A Stop hook re-blocks any turn
+   that ends with it unarmed. Arm with **exactly** that one line — a compound command
+   (a `pkill` or `grep` prepended) trips the sandbox and the whole task is reaped.
+   Verify armedness with `presence` (`connected: true`), never `pgrep`: the argv carries
+   `--token` in cleartext.
+4. work; coordinate with `send` / `inbox` / `ack` (directed by default).
+5. you're woken automatically: the waiter's task-completion notification is the ring.
    On a ring (or any turn) → `inbox` → act only if owed → `ack` → re-arm.
 
-`ws://` needs no TLS on a trusted LAN; a shared token stops stray devices. Want
-encryption without certs? Put the daemon on Tailscale/WireGuard and keep `ws://`.
+`ws://` needs no TLS on a trusted LAN; an unknown token is a 401, so stray devices get
+nothing. Want encryption without certs? Put the daemon on Tailscale/WireGuard and keep
+`ws://`.
 
 ## Build
 
@@ -142,16 +172,22 @@ make lint     # ruff
 src/agentbus/store.py    SQLite broker core: presence, threaded DAG, read-state (pure stdlib, transport-agnostic)
 src/agentbus/daemon.py   the daemon: HTTP-MCP data plane + WebSocket wake plane + token auth
 src/agentbus/wake.py     wake plane client: WS, blocks-then-exits to wake the session (cross-OS)
-scripts/agent            launcher: `agent <name>` binds a session's identity ($AGENT_ROLE) and runs claude
+scripts/agent            launcher: `agent <name>` binds a session's identity ($REVEILLE_AGENT_ROLE) and runs claude
+scripts/set-token        put a validated $REVEILLE_TOKEN into every agent .envrc, and re-run direnv allow
 tests/                   test_store.py, test_daemon.py + smoke_ws.py (real daemon, end to end)
-docs/migrate-to-agentbus.md   move the exported agents onto the bus and resume work
 ```
 
 ## Status
 
-The daemon (HTTP-MCP + WS wake + token auth), the cross-OS wake client, and the DAG
-message model are built and covered by the unit suite plus a real end-to-end smoke
-(daemon subprocess, two agents over HTTP-MCP, a pushed WS wake, auth rejection).
+The daemon (HTTP-MCP + WS wake + users/tokens/rooms), the cross-OS wake client, and the
+DAG message model are built, and the fleet runs on them: each agent joins from its own
+pane, holds a waiter, and coordinates over rooms.
 
-Migrating the exported agents onto the bus is the operational next step — see
-`docs/migrate-to-agentbus.md`.
+`make build` is currently RED, and the gap is the harness, not the broker:
+
+- `tests/smoke_ws.py` still spawns an **open-mode** daemon and joins with no credential.
+  0.2.0 deleted open mode, so `join` 401s. The smoke needs to seed a user, a room and a
+  token (`store.create_user` / `create_room` / `create_token` / `assign_room`) before
+  spawning, and hand each agent its own secret.
+- `tests/test_daemon.py::test_notify_only_targets_waiters` fails with
+  `AttributeError: 'NoneType' object has no attribute 'execute'` (`daemon.py:261`).

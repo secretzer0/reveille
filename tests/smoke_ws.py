@@ -122,8 +122,8 @@ async def check_auth(port, token):
 
 def spawn_daemon(token=None):
     port = free_port()
-    env = dict(os.environ, AGENTBUS_DB=os.path.join(tempfile.mkdtemp(), "broker.db"),
-               AGENTBUS_PORT=str(port), AGENTBUS_HOST="127.0.0.1")
+    env = dict(os.environ, REVEILLE_DB=os.path.join(tempfile.mkdtemp(), "broker.db"),
+               REVEILLE_PORT=str(port), REVEILLE_HOST="127.0.0.1")
     if token:
         env["AGENTBUS_TOKEN"] = token
     else:
