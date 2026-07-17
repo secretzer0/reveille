@@ -183,8 +183,7 @@ The daemon (HTTP-MCP + WS wake + users/tokens/rooms), the cross-OS wake client, 
 DAG message model are built, and the fleet runs on them: each agent joins from its own
 pane, holds a waiter, and coordinates over rooms.
 
-The unit suite is green. `make build` is still RED at the smoke leg, and the gap is the
-harness, not the broker: `tests/smoke_ws.py` spawns an **open-mode** daemon and joins
-with no credential, but 0.2.0 deleted open mode, so `join` 401s. It needs to seed a
-user, a room and a token (`store.create_user` / `create_room` / `create_token` /
-`assign_room`) before spawning, and hand each agent its own secret.
+`make build` is green: the unit suite plus a real end-to-end smoke that seeds a user, a
+room and a token per agent, then drives two agents over HTTP-MCP, a pushed WS ring, the
+`wake --once` binary on the live-push path, and every surface's auth rejection (REST
+401, MCP `isError`, WS `bad_token` / `missing_name`).
