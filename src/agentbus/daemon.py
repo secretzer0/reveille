@@ -1897,11 +1897,28 @@ async function loadPresence(){
 }
 
 let ws=null;
+// This page is served as one string by the daemon, so an upgraded broker leaves every open
+// tab running the OLD interface until someone reloads. The daemon does not push a "reload"
+// frame: a restart already drops the feed, so the reconnect IS the signal, and asking on
+// the way back up also catches a tab that was asleep through the whole thing.
+let bootVer=null;
+async function checkVersion(){
+ let v;
+ try{v=await (await fetch('/version')).text();}catch(e){return;}   // offline: the next open retries
+ if(!bootVer){bootVer=v;return;}
+ if(v===bootVer)return;
+ // Never reload out from under someone mid-sentence -- a draft is unrecoverable and this
+ // is cosmetic until they act. Composer busy: tell them, let them pick the moment.
+ if($('body').value.trim()||attachments.length){
+  toast('v'+v+' is live -- reload when you have sent this');return;}
+ location.reload();
+}
+
 function connect(){
  const proto=location.protocol==='https:'?'wss':'ws';
  ws=new WebSocket(proto+'://'+location.host+'/feed'+qs());
  ws.onopen=()=>{$('status').classList.add('on');$('meDot').classList.add('on');
-  $('meDot').title='connected to the room feed';loadBacklog(false);};
+  $('meDot').title='connected to the room feed';loadBacklog(false);checkVersion();};
  ws.onmessage=e=>{const m=JSON.parse(e.data);
   if(m.error){if(m.error==='bad_token')showLogin('session expired -- sign in again');return;}
   if(m.deleted){
@@ -2286,7 +2303,7 @@ function pruneAgent(name){
   ()=>{confirming=null;closePanel();});
 }
 
-fetch('/version').then(r=>r.text()).then(v=>$('ver').textContent='v'+v);
+fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+v;});
 (async function boot(){
  let d;
  try{d=await api('/me');}
