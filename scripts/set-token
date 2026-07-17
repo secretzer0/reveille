@@ -41,6 +41,26 @@ def envrcs():
     return sorted(set(found))
 
 
+def place(text, secret):
+    """Put the token line into one .envrc's text. Returns (new_text, placed).
+
+    placed=False means there was nothing to anchor to -- no existing token line and no
+    role line. The caller must NOT write that back: it would be a no-op that prints like
+    a success, which is how an agent ends up booting with no credential while the rollout
+    reports every file done.
+
+    The replacement is passed as a function, never a template string: a secret containing
+    \\1 or \\g would otherwise be read as a group reference and silently corrupted.
+    """
+    line = f'export REVEILLE_TOKEN={secret}\n'
+    if LINE_RE.search(text):
+        return LINE_RE.sub(lambda _: line, text), True
+    # put it next to the role, so the two always travel together
+    text, n = re.subn(r"^export REVEILLE_AGENT_ROLE=.*\n",
+                      lambda m: m.group(0) + line, text, count=1, flags=re.M)
+    return text, bool(n)
+
+
 def check(secret):
     """Does the broker accept it, and which rooms does it carry? A typo is a 401 now, so
     catch it here rather than as a fleet that boots and silently sees nothing."""
@@ -89,18 +109,24 @@ def main():
     if a.check:
         return 0
 
+    stuck = []
     for p in files:
-        t = p.read_text()
-        line = f'export REVEILLE_TOKEN={secret}\n'
-        if LINE_RE.search(t):
-            t = LINE_RE.sub(line, t)
-        else:  # put it next to the role, so the two always travel together
-            t = re.sub(r"^(export REVEILLE_AGENT_ROLE=.*\n)", r"\1" + line, t, count=1, flags=re.M)
+        t, placed = place(p.read_text(), secret)
+        if not placed:
+            stuck.append(p)
+            continue
         p.write_text(t)
         role = re.search(r"^export REVEILLE_AGENT_ROLE=(\S+)", t, re.M)
         print(f"  {role.group(1) if role else '?':<20} {p}  [{allow(p)}]")
-    print(f"\n{len(files)} .envrc updated and re-approved. New panes pick it up via direnv; "
-          f"existing panes need `direnv reload` or a relaunch.")
+
+    for p in stuck:
+        print(f"  NOT WRITTEN: {p}\n"
+              f"    no REVEILLE_TOKEN or REVEILLE_AGENT_ROLE line to anchor to. Add\n"
+              f"    `export REVEILLE_AGENT_ROLE=<role>` and re-run.", file=sys.stderr)
+    print(f"\n{len(files) - len(stuck)}/{len(files)} .envrc updated and re-approved. New panes "
+          f"pick it up via direnv; existing panes need `direnv reload` or a relaunch.")
+    if stuck:
+        return 1
     if not DIRENV:
         print("direnv is not on PATH -- run `direnv allow` in each worktree yourself.",
               file=sys.stderr)
