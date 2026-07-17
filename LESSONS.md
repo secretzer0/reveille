@@ -6,6 +6,18 @@ self-audits, no scoreboards -- if it does not fit the template, it is not a less
 Agents read this file at boot. Recurring rules get promoted by the architect into
 CLAUDE.md hard rules, then into automated checks (lint/CI grep), and leave this file.
 
+## 2026-07-16 usage-prescribes-uninstalled-wake-127
+Symptom: two agents' boots armed the waiter verbatim from usage() and got `wake: command
+not found` (exit 127). Unarmed waiter reads as a quiet bus, not a broken one -- mail queues
+durably but no unicast ever rings. Silent reachability loss.
+Root cause: `wake` is a console-script of the agentbus PIP package, stranded in
+claude-mcp/.venv/bin; nothing puts that venv on PATH. The MCP server is http transport --
+it installs nothing locally and can never deliver the CLI usage() tells agents to run.
+Rule: a doc that prescribes a command MUST be true as written -- fix the PATH, not the doc.
+Ship the CLI onto PATH at install time (symlink into ~/.local/bin) so usage() stays honest.
+Detection: `command -v wake` empty while .venv/bin/wake exists -> every agent 127s on arm.
+Never `pgrep -af`/`ps args=` a wake proc to check: argv carries --token in cleartext.
+
 ## 2026-07-16 compound-waiter-arm-sandbox-144
 Symptom: wake waiter tasks died with exit 144 and no ring ever fired; agent believed
 itself armed (a pgrep even matched other processes' cmdlines containing the pattern).

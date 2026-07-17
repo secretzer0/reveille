@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Seed LESSONS.md into the bus as GLOBAL lessons.
+
+The file worked only while every agent shared one filesystem. Containerised agents each
+have their own, so the shared-lessons pattern has to live on the wire: lessons() at boot,
+lesson_add() to record one.
+
+Idempotent: a lesson is keyed by (room, slug) and re-running REPLACES rather than appends,
+so this can be run again after editing the file.
+
+    scripts/seed-lessons [--db PATH] [--file LESSONS.md] [--dry-run]
+"""
+import argparse
+import os
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from agentbus import store  # noqa: E402
+
+HEAD_RE = re.compile(r"^##\s+(\S+)\s+(\S+)\s*$")          # "## <date> <slug>"
+FIELDS = {"Symptom": "symptom", "Root cause": "root_cause",
+          "Rule": "rule", "Detection": "detection"}
+
+
+def parse(text):
+    """LESSONS.md -> [{slug, date, symptom, root_cause, rule, detection}]. Continuation
+    lines fold into the field above them, which is how the file is actually written."""
+    out, cur, field = [], None, None
+    for line in text.splitlines():
+        m = HEAD_RE.match(line)
+        if m:
+            cur = {"date": m.group(1), "slug": m.group(2)}
+            out.append(cur)
+            field = None
+            continue
+        if cur is None:
+            continue                                       # preamble above the first entry
+        hit = next((f for f in FIELDS if line.startswith(f + ":")), None)
+        if hit:
+            field = FIELDS[hit]
+            cur[field] = line[len(hit) + 1:].strip()
+        elif field and line.strip():
+            cur[field] += " " + line.strip()               # wrapped line
+        elif not line.strip():
+            field = None
+    return [e for e in out if all(f in e for f in FIELDS.values())]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    root = os.environ.get("CLAUDE_AGENT_BUS") or os.path.expanduser("~/.claude/agent-bus")
+    ap.add_argument("--db", default=os.environ.get("REVEILLE_DB") or
+                    os.path.join(root, "broker.db"))
+    ap.add_argument("--file", default=str(pathlib.Path(__file__).resolve().parents[1] /
+                                          "LESSONS.md"))
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+
+    entries = parse(pathlib.Path(a.file).read_text())
+    if not entries:
+        print(f"no lessons parsed from {a.file}", file=sys.stderr)
+        return 1
+    if a.dry_run:
+        for e in entries:
+            print(f"  {e['date']}  {e['slug']}\n      rule: {e['rule'][:78]}")
+        print(f"\n{len(entries)} lesson(s) would be seeded as GLOBAL from {a.file}")
+        return 0
+
+    conn = store.connect(a.db)
+    if store._version(conn) != store.SCHEMA_VERSION:
+        print(f"db is at schema v{store._version(conn)}, need v{store.SCHEMA_VERSION} -- "
+              f"run the daemon once to migrate, or call store.migrate()", file=sys.stderr)
+        return 1
+    for e in entries:
+        store.add_lesson(conn, author="architect", slug=e["slug"], symptom=e["symptom"],
+                         root_cause=e["root_cause"], rule=e["rule"],
+                         detection=e["detection"], room_id=None)   # None = global
+        print(f"  seeded {e['slug']}")
+    print(f"\n{len(entries)} global lesson(s) in {a.db}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

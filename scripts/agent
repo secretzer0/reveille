@@ -3,15 +3,17 @@
 #
 #   agent roc-api-dev                 # role positional
 #   agent --role roc-api-dev          # role flag
-#   AGENT_ROLE=roc-api-dev agent      # role from env
+#   REVEILLE_AGENT_ROLE=roc-api-dev agent   # role from env
 #   agent roc-api-dev --model opus    # extra args after the role go to claude
 #
 # Config resolves as  CLI flag > environment > default:
-#   role  : --role  | $AGENT_ROLE
-#   token : --token | $AGENTBUS_TOKEN
-#   url   : --url   | $AGENTBUS_URL  | http://127.0.0.1:8765
+#   role  : --role  | $REVEILLE_AGENT_ROLE
+#   token : --token | $REVEILLE_TOKEN
+#   url   : --url   | $REVEILLE_URL  | http://127.0.0.1:8765
 #
-# Sets $AGENT_ROLE (-> the MCP X-Agent header) and $AGENTBUS_TOKEN for the session. Wake is
+# Sets $REVEILLE_AGENT_ROLE (-> the MCP X-Agent header) and $REVEILLE_TOKEN for the session.
+# The token is a credential, NOT a room: the broker maps it to the rooms this agent may see,
+# so no room name is ever passed here. Wake is
 # native: the boot prompt tells the agent to arm `wake --once` as a harness background task;
 # its completion notification IS the ring -- no keystroke injection, nothing ever types into
 # a human's half-written prompt. The Stop hook that blocks ending a turn with the waiter
@@ -19,9 +21,9 @@
 # re-launches inside a tmux session first (persistence/attach/web terminal, not waking).
 set -euo pipefail
 
-ROLE="${AGENT_ROLE:-}"
-TOKEN="${AGENTBUS_TOKEN:-}"
-URL="${AGENTBUS_URL:-http://127.0.0.1:8765}"
+ROLE="${REVEILLE_AGENT_ROLE:-}"
+TOKEN="${REVEILLE_TOKEN:-}"
+URL="${REVEILLE_URL:-http://127.0.0.1:8765}"
 
 claude_args=()
 role_pos=0
@@ -40,13 +42,13 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$ROLE" ]; then
-    echo "agent: no role -- pass one (agent <role> | --role X) or set AGENT_ROLE" >&2
+    echo "agent: no role -- pass one (agent <role> | --role X) or set REVEILLE_AGENT_ROLE" >&2
     exit 1
 fi
 
-export AGENT_ROLE="$ROLE"
-export AGENTBUS_TOKEN="$TOKEN"
-export AGENTBUS_URL="$URL"
+export REVEILLE_AGENT_ROLE="$ROLE"
+export REVEILLE_TOKEN="$TOKEN"
+export REVEILLE_URL="$URL"
 
 # Not in tmux: re-launch inside a fresh tmux session (persistence / attach / web terminal).
 # Re-pass resolved config as flags so a pre-existing tmux server's stale env can't drop it.
@@ -73,9 +75,9 @@ SERVER_V="$(curl -fsS "$URL/version" 2>/dev/null || echo 'unreachable')"
 mm=""
 [ "$SERVER_V" != "$CLIENT_V" ] && [ "$SERVER_V" != "unreachable" ] && mm=" (VERSION MISMATCH -- update)"
 arm_cmd="$WAKE_BIN --once --url $WAKE_URL --name $ROLE"
-[ -n "$TOKEN" ] && arm_cmd="$arm_cmd --token \$AGENTBUS_TOKEN"
+[ -n "$TOKEN" ] && arm_cmd="$arm_cmd --token \$REVEILLE_TOKEN"
 BOOT="Reveille boot v$SERVER_V$mm. Do now, in order:
-1. join(url=\"$URL\") then info() to confirm the bus.
+1. join(url=\"$URL\") then info() to confirm the bus and see which rooms your token holds.
 2. Arm your wake waiter -- Bash with run_in_background=true: $arm_cmd
    Its task-completion notification IS a bus ring: inbox(), ack() everything, act only if
    a message names you / blocks you / asks you directly, then RE-ARM the same command.

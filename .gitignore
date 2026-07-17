@@ -10,3 +10,6 @@ agentbus.pid
 dist/
 build/
 *.egg-info/
+
+# playwright MCP scratch output (snapshots, console logs)
+.playwright-mcp/

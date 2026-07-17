@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install the wake-waiter Stop hook into ~/.claude/settings.json (user scope, all
 sessions on this machine). Idempotent: skips if any Stop hook already points at
-agent-stop-hook. The hook fails open for sessions without $AGENT_ROLE, so it is
+agent-stop-hook. The hook fails open for sessions without $REVEILLE_AGENT_ROLE, so it is
 inert outside bus-connected agents. Run via `make register`."""
 import json
 import pathlib

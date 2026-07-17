@@ -11,12 +11,12 @@ help:
 	@echo "make smoke          end-to-end smoke: real daemon, HTTP-MCP + WS wake + auth"
 	@echo "make build          sync + test + smoke"
 	@echo "make daemon         run the broker in the FOREGROUND (Ctrl-C to stop)"
-	@echo "make start          start the broker in the background -> agentbus.log. Env: AGENTBUS_TOKEN, AGENTBUS_PORT"
+	@echo "make start          start the broker in the background -> agentbus.log. Env: REVEILLE_PORT, REVEILLE_DB"
 	@echo "make stop           stop the background broker"
 	@echo "make restart        stop + start"
 	@echo "make status         is the background broker running?"
 	@echo "make logs           tail -f agentbus.log"
-	@echo "make register [URL=] register agentbus once (user scope); identity = per-session \$$AGENT_ROLE"
+	@echo "make register [URL=] register agentbus once (user scope); identity = per-session \$$REVEILLE_AGENT_ROLE"
 	@echo "make install-agent  install the 'agent <name>' launcher into $(PREFIX)"
 	@echo "make unregister      remove the agentbus MCP registration"
 	@echo "make lint           ruff check"
@@ -35,12 +35,13 @@ smoke:
 
 # The broker daemon. One process on an always-on host serves every agent (local at
 # 127.0.0.1, remote at the LAN name) over the same SQLite -> one bus. Set
-# AGENTBUS_TOKEN to require auth; AGENTBUS_PORT to change the port (default 8765).
+# REVEILLE_PORT to change the port (default 8765); REVEILLE_DB to move the database.
+# Auth is no longer an env var: users and tokens live in the database (see /ui).
 daemon:
 	uv run agentbus-daemon
 
 # Background lifecycle. Logs go to agentbus.log next to this Makefile; PID in
-# agentbus.pid. Pass env through make, e.g.:  AGENTBUS_TOKEN=s3cret make start
+# agentbus.pid. Pass env through make, e.g.:  REVEILLE_PORT=9000 make start
 start: sync
 	@if [ -f "$(PID)" ] && kill -0 `cat "$(PID)"` 2>/dev/null; then \
 	  echo "agentbus already running (pid `cat $(PID)`)"; \
@@ -77,15 +78,15 @@ logs:
 # Register the daemon ONCE per machine (user scope). Identity is NOT baked in here --
 # the X-Agent header and the bearer token are ${VAR} templates that Claude Code expands
 # per session from that session's own env. So one registration serves every tmux pane;
-# each pane just exports its own $AGENT_ROLE (see `agent` launcher / install-agent).
+# each pane just exports its own $REVEILLE_AGENT_ROLE (see `agent` launcher / install-agent).
 # URL is 127.0.0.1 on the daemon host, the LAN name elsewhere (override: URL=...).
 register:
 	-claude mcp remove agentbus --scope user 2>/dev/null
 	claude mcp add --transport http --scope user agentbus "$(or $(URL),http://127.0.0.1:8765)/mcp" \
-	  --header 'Authorization: Bearer $${AGENTBUS_TOKEN:-}' \
-	  --header 'X-Agent: $${AGENT_ROLE:-unset-agent}'
+	  --header 'Authorization: Bearer $${REVEILLE_TOKEN:-}' \
+	  --header 'X-Agent: $${REVEILLE_AGENT_ROLE:-unset-agent}'
 	python3 scripts/install-hook
-	@echo "registered. each session: export AGENT_ROLE=<dev> (and AGENTBUS_TOKEN) before 'claude',"
+	@echo "registered. each session: export REVEILLE_AGENT_ROLE=<dev> (and REVEILLE_TOKEN) before 'claude',"
 	@echo "or use: agent <dev>   (see make install-agent)"
 
 # Install the 'agent <name>' launcher so a pane is one command: `agent roc-api-dev`.

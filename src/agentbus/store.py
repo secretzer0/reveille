@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite broker core: presence, threaded messages, per-agent read state.
+"""SQLite broker core: users, tokens, rooms, presence, threaded messages, read state.
 
 Pure stdlib. This is the data plane -- no MCP, no wake, no identity magic; those
 live in daemon.py. Everything here is a function over a sqlite3 connection so it
@@ -7,22 +7,41 @@ is trivially testable, and it is transport-agnostic (stdio or HTTP, same core).
 
 Model
 -----
-agents     one row per joined session (name <-> session tag, last-seen heartbeat).
-           room = the key the session presented; rooms are isolated message spaces.
+users      web principals (user/pass). role: 'admin' can manage users; 'user' cannot.
+sessions   web login state; the cookie carries a secret, only its hash is stored.
+rooms      an isolated message space: uuid + a human name, owned by a user. Names
+           are unique PER OWNER, not globally -- the UI shows them as "owner -> room".
+tokens     an agent credential (REVEILLE_TOKEN). The secret is never stored, only
+           its sha256. A token encodes NOTHING about rooms.
+token_rooms  which rooms a token may see. Resolved live on every request, so a
+           revoke or a flip-to-private takes effect on the next call -- no reissue.
+members    one row per (room, agent name): an agent's membership of a room. An
+           agent can be a member of several rooms under one token.
 messages   append-only. recipient = an agent name, or '*' for broadcast.
            thread_id = the root message's id; parent_id = the direct reply target.
 reads      (message_id, agent) -- an agent has consumed a message.
+files      an uploaded blob's room, so /files cannot be read across rooms.
 
 A message is UNREAD for agent A when A is a recipient (direct or '*'), A is not
 the sender, and no reads row exists for (message, A). Catch-up falls out of this
 for free: join() pre-inserts reads rows for everything older than CATCHUP_NS, so
 a joiner replays only recent traffic (--fresh pre-inserts for the whole backlog,
 starting clean). Older mail stays queryable via history().
+
+Rooms are a hard boundary: a reply never crosses one (send() refuses), and every
+read path filters on the caller's room set. Carrying knowledge between rooms is a
+NEW root message in the target room, never a threaded reply -- that edge would be
+the leak.
 """
+import contextlib
+import hashlib
+import hmac
 import os
 import re
+import secrets
 import sqlite3
 import time
+import uuid
 
 # LIVE = heartbeat within this window. Exceeds the standup silence window (30m
 # default) so an idle-but-alive agent that only wakes on its heartbeat stays LIVE.
@@ -31,17 +50,71 @@ LIVE_TTL_NS = 40 * 60 * 1_000_000_000
 # mail is auto-marked read. Explicit recall of any period stays available via
 # history(since=...).
 CATCHUP_NS = 15 * 60 * 1_000_000_000
+SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
+SCHEMA_VERSION = 4
+
+# scrypt cost. 128 * n * r = 16 MB per hash; maxmem must clear that or it raises.
+_SCRYPT = dict(n=2**14, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024)
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS agents (
-    name      TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS users (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    pw_hash    TEXT NOT NULL,
+    role       TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+    created_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id_hash    TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    created_ns INTEGER NOT NULL,
+    expires_ns INTEGER NOT NULL
+);
+-- A room name is unique per owner, not globally: two users may each own a
+-- "Reveille". The UI disambiguates by showing "owner -> room", which is exactly
+-- what the UNIQUE below makes safe.
+CREATE TABLE IF NOT EXISTS rooms (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    owner_id     TEXT REFERENCES users(id),
+    public       INTEGER NOT NULL DEFAULT 0,
+    retention_ns INTEGER,
+    created_ns   INTEGER NOT NULL,
+    UNIQUE (owner_id, name)
+);
+-- The secret is shown once at creation and never stored; secret_hash is a plain
+-- sha256 because token_urlsafe(32) is already 256 bits of entropy -- a KDF buys
+-- nothing against a brute force that is already infeasible. Passwords are the
+-- opposite case and get scrypt.
+CREATE TABLE IF NOT EXISTS tokens (
+    id           TEXT PRIMARY KEY,
+    secret_hash  TEXT NOT NULL UNIQUE,
+    owner_id     TEXT NOT NULL REFERENCES users(id),
+    label        TEXT NOT NULL DEFAULT '',
+    created_ns   INTEGER NOT NULL,
+    last_used_ns INTEGER
+);
+-- The token->rooms mapping lives here, NOT in the token. Read on every request so
+-- assign/unassign/revoke/flip-to-private are all instant.
+CREATE TABLE IF NOT EXISTS token_rooms (
+    token_id TEXT NOT NULL REFERENCES tokens(id) ON DELETE CASCADE,
+    room_id  TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    PRIMARY KEY (token_id, room_id)
+);
+-- One row per (room, agent). Names are unique WITHIN a room -- that is all bus
+-- routing needs, and it lets one agent hold the same name in several rooms.
+CREATE TABLE IF NOT EXISTS members (
+    room_id   TEXT NOT NULL REFERENCES rooms(id),
+    name      TEXT NOT NULL,
     tag       TEXT,
     url       TEXT,
-    room      TEXT NOT NULL DEFAULT '',
+    token_id  TEXT REFERENCES tokens(id),
     joined_ns INTEGER NOT NULL,
-    seen_ns   INTEGER NOT NULL
+    seen_ns   INTEGER NOT NULL,
+    PRIMARY KEY (room_id, name)
 );
 CREATE TABLE IF NOT EXISTS messages (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +124,7 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient TEXT NOT NULL,
     subject   TEXT NOT NULL DEFAULT '',
     body      TEXT NOT NULL,
-    room      TEXT NOT NULL DEFAULT '',
+    room      TEXT NOT NULL REFERENCES rooms(id),
     ts_ns     INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reads (
@@ -78,17 +151,68 @@ CREATE TABLE IF NOT EXISTS attachments (
     name       TEXT,
     bytes      INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_att_message  ON attachments(message_id);
-CREATE INDEX IF NOT EXISTS idx_msg_room     ON messages(room);
+-- An upload's room, recorded at upload time so GET /files/<stored> can be refused
+-- to a principal outside that room. Without this the blob store is world-readable
+-- to anyone who learns a filename.
+CREATE TABLE IF NOT EXISTS files (
+    stored      TEXT PRIMARY KEY,
+    room_id     TEXT NOT NULL REFERENCES rooms(id),
+    uploaded_by TEXT NOT NULL,
+    ts_ns       INTEGER NOT NULL
+);
+-- Defect post-mortems, distilled. This was LESSONS.md at each repo root, which worked
+-- only while every agent shared one filesystem; containerised agents each have their own,
+-- so the shared-lessons pattern has to live on the wire. room_id NULL = a GLOBAL lesson
+-- everyone reads; otherwise it is scoped to one room. One table, not two: the columns are
+-- identical, and two would make every read a UNION and every write pick a side.
+-- The old "hard cap 10 lines" was an honour system; these columns enforce the shape.
+CREATE TABLE IF NOT EXISTS lessons (
+    id         TEXT PRIMARY KEY,
+    room_id    TEXT REFERENCES rooms(id) ON DELETE CASCADE,
+    slug       TEXT NOT NULL,
+    symptom    TEXT NOT NULL,
+    root_cause TEXT NOT NULL,
+    rule       TEXT NOT NULL,
+    detection  TEXT NOT NULL,
+    author     TEXT NOT NULL,
+    created_ns INTEGER NOT NULL,
+    UNIQUE (room_id, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_room  ON lessons(room_id);
+CREATE INDEX IF NOT EXISTS idx_att_message   ON attachments(message_id);
+CREATE INDEX IF NOT EXISTS idx_msg_room      ON messages(room);
 CREATE INDEX IF NOT EXISTS idx_msg_recipient ON messages(recipient);
 CREATE INDEX IF NOT EXISTS idx_msg_thread    ON messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_msg_sender    ON messages(sender);
+CREATE INDEX IF NOT EXISTS idx_msg_parent    ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS idx_links_child   ON links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent  ON links(parent_id);
+CREATE INDEX IF NOT EXISTS idx_reads_agent   ON reads(agent);
+CREATE INDEX IF NOT EXISTS idx_troom_room    ON token_rooms(room_id);
+CREATE INDEX IF NOT EXISTS idx_members_name  ON members(name);
 """
 
 
 class BusError(Exception):
     """Caller-facing error (bad name, name collision, unknown agent)."""
+
+
+class AuthError(Exception):
+    """No/!valid credential. The transport turns this into a 401."""
+
+
+class AccessError(Exception):
+    """Valid principal, but not for this room/resource. The transport 403s it."""
+
+
+class AmbiguousRoom(Exception):
+    """2+ rooms in reach and the caller named none. The transport 400s it with
+    the room list -- a guess here would post into the wrong room, which is not
+    recoverable, while an error is."""
+
+    def __init__(self, rooms):
+        self.rooms = rooms
+        super().__init__("room_required")
 
 
 def valid_name(name):
@@ -98,6 +222,44 @@ def valid_name(name):
         )
 
 
+def valid_room_name(name):
+    if not ROOM_NAME_RE.fullmatch(name or ""):
+        raise BusError(f"invalid room name {name!r}: 1-64 chars of [A-Za-z0-9 _.-]")
+
+
+def _uuid():
+    return uuid.uuid4().hex
+
+
+def _exec_script(conn, script):
+    """Run a multi-statement DDL script one statement at a time.
+
+    NOT executescript(): that issues an implicit COMMIT on any pending transaction,
+    which would silently end the migration's transaction halfway through and leave a
+    half-migrated DB with no rollback.
+
+    Comments are stripped before splitting -- a prose semicolon inside a `--` comment
+    would otherwise cut a statement in half. No string literal here contains `--`.
+    """
+    bare = "\n".join(line.split("--")[0] for line in script.splitlines())
+    for stmt in bare.split(";"):
+        if stmt.strip():
+            conn.execute(stmt)
+
+
+@contextlib.contextmanager
+def tx(conn):
+    """One explicit transaction. The connection is autocommit (isolation_level=None),
+    so any multi-statement mutation MUST run inside this or it can half-apply."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+
+
 def connect(db_path):
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=10, isolation_level=None)  # autocommit
@@ -105,107 +267,695 @@ def connect(db_path):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA foreign_keys=ON")
-    for tbl in ("agents", "messages"):  # pre-room DBs: add the column BEFORE the
-        try:                            # schema script, whose room index needs it
-            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN room TEXT NOT NULL DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass                        # fresh db (no table yet) or already migrated
-    conn.executescript(_SCHEMA)
     return conn
+
+
+def _table_exists(conn, name):
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def _version(conn):
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def migrate(conn, db_path):
+    """Bring the DB to SCHEMA_VERSION. Explicit and versioned -- the old blind
+    try/except ALTER could not tell "no such table" from "already migrated" from a
+    real failure, and swallowed all three."""
+    v = _version(conn)
+    if v > SCHEMA_VERSION:
+        raise BusError(f"db is newer than this build (user_version={v})")
+    if v == SCHEMA_VERSION:
+        return v
+    if not _table_exists(conn, "messages"):        # fresh db: just lay the schema down
+        _exec_script(conn, _SCHEMA)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        return SCHEMA_VERSION
+    # Branch on the version we FOUND, not the one we are at mid-chain: _upgrade_v0 lays
+    # down the current schema, so it lands straight at SCHEMA_VERSION and must not then be
+    # handed to v3's step (which looks for a revoked_ns column v0 never grows).
+    if v == 0:
+        _upgrade_v0(conn, db_path)
+    elif v == 2:
+        _upgrade_v2(conn, db_path)
+        _upgrade_v3(conn, db_path)
+    elif v == 3:
+        _upgrade_v3(conn, db_path)
+    return SCHEMA_VERSION
+
+
+def _upgrade_v2(conn, db_path):
+    """v2 -> v3: tokens.revoked_ns is gone. Revoke deletes the row now, so a tombstone
+    column would only ever hold NULL -- a legacy field kept for nothing."""
+    snapshot(conn, f"{db_path}.from-v2-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    with tx(conn):
+        conn.execute("DELETE FROM token_rooms WHERE token_id IN "
+                     "(SELECT id FROM tokens WHERE revoked_ns IS NOT NULL)")
+        conn.execute("UPDATE members SET token_id=NULL WHERE token_id IN "
+                     "(SELECT id FROM tokens WHERE revoked_ns IS NOT NULL)")
+        conn.execute("DELETE FROM tokens WHERE revoked_ns IS NOT NULL")  # already dead
+        conn.execute("ALTER TABLE tokens DROP COLUMN revoked_ns")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v3(conn, db_path):
+    """v3 -> v4: back-fill the files table from existing attachments.
+
+    /files/<stored> is room-scoped now and refuses anything with no files row -- so every
+    attachment that predates that table 404s, and its bytes are stranded on disk. The room
+    is recoverable: an attachment belongs to a message, and the message names the room.
+    """
+    with tx(conn):
+        n = conn.execute(
+            "INSERT OR IGNORE INTO files(stored, room_id, uploaded_by, ts_ns) "
+            "SELECT replace(a.url, rtrim(a.url, replace(a.url, '/', '')), ''), "
+            "       m.room, m.sender, m.ts_ns "
+            "  FROM attachments a JOIN messages m ON m.id = a.message_id").rowcount
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    return n
+
+
+def _upgrade_v0(conn, db_path):
+    """v0 (room = the shared secret, stored as a string on every row) -> v2 (rooms are
+    uuid rows owned by a user). Ownerless rooms are claimed by the first admin at
+    /setup -- no user exists yet, so there is nobody to own them here."""
+    snapshot(conn, f"{db_path}.from-v0-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    # AUTOINCREMENT lives in sqlite_sequence; DROP+RENAME resets it to max(id) of the
+    # copied rows. Retract (delete_if_unseen) can leave max(id) BELOW the high-water
+    # mark, so without restoring this the bus re-issues an id that already went out
+    # on the wire. Capture before anything drops.
+    row = conn.execute("SELECT seq FROM sqlite_sequence WHERE name='messages'").fetchone()
+    seq = row["seq"] if row else 0
+    conn.execute("PRAGMA foreign_keys=OFF")   # a no-op inside a tx, so it goes here
+    try:
+        with tx(conn):
+            _exec_script(conn, _SCHEMA)        # adds the new tables; messages untouched
+            now = time.time_ns()
+            legacy = [r["room"] for r in conn.execute(
+                "SELECT room FROM messages UNION SELECT room FROM agents")]
+            room_map = {k: _uuid() for k in legacy}
+            conn.executemany(
+                "INSERT INTO rooms(id, name, owner_id, public, retention_ns, created_ns) "
+                "VALUES(?,?,NULL,0,NULL,?)",
+                [(rid, k or "open", now) for k, rid in room_map.items()])
+            conn.execute("CREATE TEMP TABLE room_map(legacy TEXT PRIMARY KEY, room_id TEXT)")
+            conn.executemany("INSERT INTO room_map VALUES(?,?)", list(room_map.items()))
+            _exec_script(conn, """
+                CREATE TABLE messages_new (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id INTEGER,
+                    parent_id INTEGER REFERENCES messages(id),
+                    sender    TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    subject   TEXT NOT NULL DEFAULT '',
+                    body      TEXT NOT NULL,
+                    room      TEXT NOT NULL REFERENCES rooms(id),
+                    ts_ns     INTEGER NOT NULL
+                );
+                INSERT INTO messages_new(id, thread_id, parent_id, sender, recipient,
+                                         subject, body, room, ts_ns)
+                  SELECT m.id, m.thread_id, m.parent_id, m.sender, m.recipient,
+                         m.subject, m.body, rm.room_id, m.ts_ns
+                    FROM messages m JOIN room_map rm ON rm.legacy = m.room;
+                DROP TABLE messages;
+                ALTER TABLE messages_new RENAME TO messages;
+            """)
+            conn.execute("UPDATE sqlite_sequence SET seq=? WHERE name='messages'", (seq,))
+            # Presence is a 40-minute heartbeat cache, not a record: every agent
+            # re-joins on its next turn and messages already carry the authorship.
+            # Dropping beats porting -- and it discards the live corruption where
+            # join()'s ON CONFLICT(name) yanked human-web out of its first room.
+            conn.execute("DROP TABLE agents")
+            _exec_script(conn, _SCHEMA)        # re-add indexes lost with the old table
+            bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if bad:
+                raise BusError(f"migration left {len(bad)} FK violations")
+            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def snapshot(conn, path):
+    """Consistent copy of the whole DB. Cheap insurance in front of every
+    destructive op; with no audit log, this snapshot IS the undo."""
+    conn.execute("VACUUM INTO ?", (path,))
+    return path
 
 
 def _is_live(seen_ns, now=None):
     return (now or time.time_ns()) - seen_ns < LIVE_TTL_NS
 
 
-def _row(conn, name):
-    return conn.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+def _ph(items):
+    return ",".join("?" * len(items))
 
 
-# ---- presence ----------------------------------------------------------------
+# ---- passwords, tokens, sessions ---------------------------------------------
 
-def join(conn, name, tag, fresh=False, url=None, room=""):
-    """Sign up under `name` in `room` (the key the session presented; rooms are
-    isolated message spaces). Fails if a *live* agent holds the name under a
-    different tag. ponytail: names are globally unique across rooms -- a live
-    'architect' in one room blocks the name in another; per-room names if it bites.
-    Replays only the last CATCHUP_NS of the room's backlog; fresh=True skips it."""
+def hash_password(pw):
+    if not pw or len(pw) < 8:
+        raise BusError("password must be at least 8 characters")
+    salt = secrets.token_bytes(16)
+    h = hashlib.scrypt(pw.encode(), salt=salt, **_SCRYPT)
+    return f"scrypt${salt.hex()}${h.hex()}"
+
+
+def verify_password(pw, stored):
+    try:
+        algo, salt_hex, hash_hex = (stored or "").split("$")
+    except ValueError:
+        return False
+    if algo != "scrypt":
+        return False
+    h = hashlib.scrypt((pw or "").encode(), salt=bytes.fromhex(salt_hex), **_SCRYPT)
+    return hmac.compare_digest(h.hex(), hash_hex)
+
+
+def _sha(secret):
+    return hashlib.sha256((secret or "").encode()).hexdigest()
+
+
+# ---- users -------------------------------------------------------------------
+
+def any_users(conn):
+    """False only before first-run setup. Gates the bootstrap screen."""
+    return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
+
+
+def create_user(conn, name, password, role="user"):
+    valid_name(name)
+    if role not in ("admin", "user"):
+        raise BusError(f"bad role {role!r}")
+    pw_hash = hash_password(password)
+    uid, now = _uuid(), time.time_ns()
+    try:
+        conn.execute(
+            "INSERT INTO users(id, name, pw_hash, role, created_ns) VALUES(?,?,?,?,?)",
+            (uid, name, pw_hash, role, now))
+    except sqlite3.IntegrityError:
+        raise BusError(f"user {name!r} already exists")
+    return {"id": uid, "name": name, "role": role, "created_ns": now}
+
+
+def setup_first_admin(conn, name, password):
+    """First-run bootstrap: only ever succeeds while there are zero users, and
+    adopts every ownerless room the migration left behind."""
+    with tx(conn):
+        if any_users(conn):
+            raise BusError("setup already done")
+        u = create_user(conn, name, password, role="admin")
+        conn.execute("UPDATE rooms SET owner_id=? WHERE owner_id IS NULL", (u["id"],))
+    return u
+
+
+def authenticate(conn, name, password):
+    r = conn.execute("SELECT * FROM users WHERE name=?", (name,)).fetchone()
+    if not r or not verify_password(password, r["pw_hash"]):
+        return None
+    return {"id": r["id"], "name": r["name"], "role": r["role"]}
+
+
+def set_password(conn, user_id, password):
+    """Admin reset: no old password required -- that is the whole point of a reset, since
+    the user has lost it. Every session of theirs dies, or a stolen session outlives the
+    reset that was meant to end it."""
+    pw_hash = hash_password(password)
+    with tx(conn):
+        n = conn.execute("UPDATE users SET pw_hash=? WHERE id=?", (pw_hash, user_id)).rowcount
+        if not n:
+            raise BusError("no such user")
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
+
+def change_password(conn, user_id, old_password, new_password):
+    """Self-service change. Verifying the OLD password is what stops a borrowed unlocked
+    browser from taking the account outright. All sessions die; the caller gets a fresh
+    one, so a change actually evicts anyone riding a stolen cookie."""
+    r = conn.execute("SELECT pw_hash FROM users WHERE id=?", (user_id,)).fetchone()
+    if not r:
+        raise BusError("no such user")
+    if not verify_password(old_password, r["pw_hash"]):
+        raise AuthError("current password is wrong")
+    pw_hash = hash_password(new_password)
+    with tx(conn):
+        conn.execute("UPDATE users SET pw_hash=? WHERE id=?", (pw_hash, user_id))
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+
+
+def list_users(conn):
+    return [{"id": r["id"], "name": r["name"], "role": r["role"],
+             "created_ns": r["created_ns"]}
+            for r in conn.execute("SELECT * FROM users ORDER BY name")]
+
+
+def set_role(conn, user_id, role):
+    if role not in ("admin", "user"):
+        raise BusError(f"bad role {role!r}")
+    # Guard INSIDE the transaction: BEGIN IMMEDIATE takes the write lock first, so two
+    # concurrent demotions cannot both read "2 admins" and both proceed to zero.
+    with tx(conn):
+        if role == "user" and _admin_count(conn) == 1 and _is_admin(conn, user_id):
+            raise BusError("cannot demote the last admin")
+        conn.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
+
+
+def _admin_count(conn):
+    return conn.execute("SELECT count(*) c FROM users WHERE role='admin'").fetchone()["c"]
+
+
+def _is_admin(conn, user_id):
+    r = conn.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
+    return bool(r and r["role"] == "admin")
+
+
+def delete_user(conn, user_id):
+    """Drop a user, their sessions and tokens. Their ROOMS survive as ownerless --
+    deleting a user must not silently take a room's whole message history with it;
+    purge_room is the explicit way to do that."""
+    with tx(conn):
+        # Guard INSIDE the transaction. Read outside it and two admins deleting each
+        # other at once both see "2 admins", both proceed, and the database is left with
+        # ZERO admins -- unrecoverable, since only an admin can make an admin.
+        # BEGIN IMMEDIATE serializes them: the loser re-reads 1 and is refused.
+        if _is_admin(conn, user_id) and _admin_count(conn) == 1:
+            raise BusError("cannot delete the last admin")
+        conn.execute(
+            "DELETE FROM token_rooms WHERE token_id IN (SELECT id FROM tokens WHERE owner_id=?)",
+            (user_id,))
+        # members.token_id REFERENCES tokens(id): orphan the memberships BEFORE dropping
+        # the tokens, or any agent still joined under one makes this a FK violation and
+        # the user can never be deleted at all. The membership row itself is presence and
+        # reaps on its own; only the credential link dies here.
+        conn.execute(
+            "UPDATE members SET token_id=NULL WHERE token_id IN "
+            "(SELECT id FROM tokens WHERE owner_id=?)", (user_id,))
+        conn.execute("DELETE FROM tokens WHERE owner_id=?", (user_id,))
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        conn.execute("UPDATE rooms SET owner_id=NULL WHERE owner_id=?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+
+
+# ---- sessions ----------------------------------------------------------------
+
+def create_session(conn, user_id):
+    secret = secrets.token_urlsafe(32)
+    now = time.time_ns()
+    conn.execute(
+        "INSERT INTO sessions(id_hash, user_id, created_ns, expires_ns) VALUES(?,?,?,?)",
+        (_sha(secret), user_id, now, now + SESSION_TTL_NS))
+    return secret
+
+
+def resolve_session(conn, secret):
+    if not secret:
+        return None
+    r = conn.execute(
+        "SELECT s.expires_ns, u.id, u.name, u.role FROM sessions s "
+        "JOIN users u ON u.id=s.user_id WHERE s.id_hash=?", (_sha(secret),)).fetchone()
+    if not r:
+        return None
+    if r["expires_ns"] < time.time_ns():
+        conn.execute("DELETE FROM sessions WHERE id_hash=?", (_sha(secret),))
+        return None
+    return {"id": r["id"], "name": r["name"], "role": r["role"]}
+
+
+def delete_session(conn, secret):
+    conn.execute("DELETE FROM sessions WHERE id_hash=?", (_sha(secret),))
+
+
+# ---- tokens ------------------------------------------------------------------
+
+def create_token(conn, owner_id, label=""):
+    """Mint a token. The secret is returned ONCE and never stored -- only its hash.
+    Rooms are assigned afterwards (assign_room), never baked into the secret."""
+    secret = secrets.token_urlsafe(32)
+    tid, now = _uuid(), time.time_ns()
+    conn.execute(
+        "INSERT INTO tokens(id, secret_hash, owner_id, label, created_ns) VALUES(?,?,?,?,?)",
+        (tid, _sha(secret), owner_id, label, now))
+    return {"id": tid, "secret": secret, "label": label, "created_ns": now}
+
+
+def resolve_token(conn, secret):
+    """Token row for a presented secret, or None. A revoked token is DELETED, so it
+    resolves to None here -- which is what makes revocation instant."""
+    if not secret:
+        return None
+    r = conn.execute("SELECT * FROM tokens WHERE secret_hash=?",
+                     (_sha(secret),)).fetchone()
+    if not r:
+        return None
+    conn.execute("UPDATE tokens SET last_used_ns=? WHERE id=?", (time.time_ns(), r["id"]))
+    return {"id": r["id"], "owner_id": r["owner_id"], "label": r["label"]}
+
+
+def list_tokens(conn, owner_id):
+    out = []
+    for r in conn.execute(
+            "SELECT * FROM tokens WHERE owner_id=? ORDER BY created_ns", (owner_id,)):
+        out.append({"id": r["id"], "label": r["label"], "created_ns": r["created_ns"],
+                    "last_used_ns": r["last_used_ns"],
+                    "rooms": rooms_for_token(conn, r["id"])})
+    return out
+
+
+def revoke_token(conn, token_id, owner_id):
+    """Revoke = DELETE the token, not tombstone it.
+
+    A soft-revoke would need an audit log to be worth anything, and there isn't one by
+    design; the secret is already unrecoverable, so a revoked row carries no information
+    and just accumulates forever -- the exact sprawl purge exists to kill. resolve_token()
+    returns None for a missing row just as it did for a revoked one, so revocation stays
+    instant either way.
+    """
+    with tx(conn):
+        r = conn.execute("SELECT owner_id FROM tokens WHERE id=?", (token_id,)).fetchone()
+        if not r:
+            raise BusError("no such token")
+        if r["owner_id"] != owner_id:
+            raise AccessError("not your token")
+        # members.token_id REFERENCES tokens(id): orphan the memberships first or any
+        # agent still joined under this token turns the delete into a FK violation.
+        conn.execute("UPDATE members SET token_id=NULL WHERE token_id=?", (token_id,))
+        conn.execute("DELETE FROM token_rooms WHERE token_id=?", (token_id,))
+        conn.execute("DELETE FROM tokens WHERE id=?", (token_id,))
+
+
+def assign_room(conn, token_id, room_id, actor_id):
+    """Put a room on a token. Allowed if the actor owns the room, or the room is
+    public. Public is what lets other users' tokens join it."""
+    room = conn.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not room:
+        raise BusError("no such room")
+    tok = conn.execute("SELECT owner_id FROM tokens WHERE id=?", (token_id,)).fetchone()
+    if not tok or tok["owner_id"] != actor_id:
+        raise AccessError("not your token")
+    if room["owner_id"] != actor_id and not room["public"]:
+        raise AccessError("room is private")
+    conn.execute("INSERT OR IGNORE INTO token_rooms(token_id, room_id) VALUES(?,?)",
+                 (token_id, room_id))
+
+
+def unassign_room(conn, token_id, room_id, actor_id):
+    tok = conn.execute("SELECT owner_id FROM tokens WHERE id=?", (token_id,)).fetchone()
+    if not tok or tok["owner_id"] != actor_id:
+        raise AccessError("not your token")
+    conn.execute("DELETE FROM token_rooms WHERE token_id=? AND room_id=?", (token_id, room_id))
+
+
+def rooms_for_token(conn, token_id):
+    """{room_id: room_name} for a token. Read per request -- never cached, so a
+    revoke or flip-to-private lands on the very next call."""
+    return {r["id"]: r["name"] for r in conn.execute(
+        "SELECT ro.id, ro.name FROM token_rooms tr JOIN rooms ro ON ro.id=tr.room_id "
+        "WHERE tr.token_id=? ORDER BY ro.name", (token_id,))}
+
+
+# ---- rooms -------------------------------------------------------------------
+
+def create_room(conn, owner_id, name, public=False):
+    valid_room_name(name)
+    rid, now = _uuid(), time.time_ns()
+    try:
+        conn.execute(
+            "INSERT INTO rooms(id, name, owner_id, public, created_ns) VALUES(?,?,?,?,?)",
+            (rid, name, owner_id, 1 if public else 0, now))
+    except sqlite3.IntegrityError:
+        raise BusError(f"you already own a room named {name!r}")
+    return {"id": rid, "name": name, "owner_id": owner_id, "public": bool(public),
+            "retention_ns": None, "created_ns": now}
+
+
+def _room_dict(r, owner_name=None):
+    return {"id": r["id"], "name": r["name"], "owner_id": r["owner_id"],
+            "owner": owner_name, "public": bool(r["public"]),
+            "retention_ns": r["retention_ns"], "created_ns": r["created_ns"]}
+
+
+def get_room(conn, room_id):
+    r = conn.execute(
+        "SELECT ro.*, u.name AS owner_name FROM rooms ro "
+        "LEFT JOIN users u ON u.id=ro.owner_id WHERE ro.id=?", (room_id,)).fetchone()
+    return _room_dict(r, r["owner_name"]) if r else None
+
+
+def list_rooms(conn, owner_id):
+    return [_room_dict(r, r["owner_name"]) for r in conn.execute(
+        "SELECT ro.*, u.name AS owner_name FROM rooms ro "
+        "LEFT JOIN users u ON u.id=ro.owner_id WHERE ro.owner_id=? ORDER BY ro.name",
+        (owner_id,))]
+
+
+def public_rooms(conn, exclude_owner=None):
+    """Public rooms for the picker. Each carries its owner so the UI can render the
+    "owner -> room" pairing that makes per-owner room names unambiguous."""
+    rows = conn.execute(
+        "SELECT ro.*, u.name AS owner_name FROM rooms ro "
+        "LEFT JOIN users u ON u.id=ro.owner_id WHERE ro.public=1 "
+        "ORDER BY u.name, ro.name")
+    return [_room_dict(r, r["owner_name"]) for r in rows
+            if not exclude_owner or r["owner_id"] != exclude_owner]
+
+
+def rename_room(conn, room_id, owner_id, name):
+    valid_room_name(name)
+    r = conn.execute("SELECT owner_id FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise BusError("no such room")
+    if r["owner_id"] != owner_id:
+        raise AccessError("not your room")
+    try:
+        conn.execute("UPDATE rooms SET name=? WHERE id=?", (name, room_id))
+    except sqlite3.IntegrityError:
+        raise BusError(f"you already own a room named {name!r}")
+
+
+def set_public(conn, room_id, owner_id, public):
+    """Flip a room's visibility. Going private REVOKES it from every other user's
+    tokens; the owner's own keep it. Their past MESSAGES stay -- authorship is
+    history, and deleting it would silently rewrite threads others are reading."""
+    r = conn.execute("SELECT owner_id FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise BusError("no such room")
+    if r["owner_id"] != owner_id:
+        raise AccessError("not your room")
+    with tx(conn):
+        conn.execute("UPDATE rooms SET public=? WHERE id=?", (1 if public else 0, room_id))
+        if not public:
+            conn.execute(
+                "DELETE FROM token_rooms WHERE room_id=? AND token_id IN "
+                "(SELECT id FROM tokens WHERE owner_id != ?)", (room_id, owner_id))
+
+
+def set_retention(conn, room_id, owner_id, retention_ns):
+    """Per-room TTL. NULL = keep forever (the default)."""
+    r = conn.execute("SELECT owner_id FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise BusError("no such room")
+    if r["owner_id"] != owner_id:
+        raise AccessError("not your room")
+    conn.execute("UPDATE rooms SET retention_ns=? WHERE id=?", (retention_ns, room_id))
+
+
+def _delete_messages(conn, ids):
+    """Drop messages and everything referencing them. Caller holds the transaction."""
+    if not ids:
+        return
+    ids = list(ids)
+    ph = _ph(ids)
+    conn.execute(f"DELETE FROM attachments WHERE message_id IN ({ph})", ids)
+    conn.execute(f"DELETE FROM reads WHERE message_id IN ({ph})", ids)
+    conn.execute(f"DELETE FROM links WHERE parent_id IN ({ph}) OR child_id IN ({ph})", ids + ids)
+    conn.execute(f"DELETE FROM messages WHERE id IN ({ph})", ids)
+
+
+def purge_room(conn, room_id, owner_id):
+    """Erase a room and everything in it. Snapshot first -- there is no undo."""
+    r = conn.execute("SELECT owner_id FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise BusError("no such room")
+    if r["owner_id"] != owner_id:
+        raise AccessError("not your room")
+    with tx(conn):
+        ids = [x["id"] for x in conn.execute("SELECT id FROM messages WHERE room=?", (room_id,))]
+        _delete_messages(conn, ids)
+        conn.execute("DELETE FROM files WHERE room_id=?", (room_id,))
+        conn.execute("DELETE FROM members WHERE room_id=?", (room_id,))
+        conn.execute("DELETE FROM token_rooms WHERE room_id=?", (room_id,))
+        conn.execute("DELETE FROM rooms WHERE id=?", (room_id,))
+    return len(ids)
+
+
+def sweep_retention(conn):
+    """Drop whole THREADS past their room's TTL. Rooms with retention_ns NULL (the
+    default) keep everything forever.
+
+    Threads, not messages: retention must not shred a live conversation (a thread
+    active yesterday keeps its month-old root), and per-message deletion would strand
+    surviving replies pointing at a deleted parent. A thread expires when its NEWEST
+    message is past the cutoff.
+    """
+    now, dropped = time.time_ns(), 0
+    for r in conn.execute("SELECT id, retention_ns FROM rooms WHERE retention_ns IS NOT NULL"):
+        cutoff = now - r["retention_ns"]
+        ids = [x["id"] for x in conn.execute(
+            "SELECT id FROM messages WHERE room=? AND thread_id IN ("
+            "  SELECT thread_id FROM messages WHERE room=? "
+            "  GROUP BY thread_id HAVING MAX(ts_ns) < ?)",
+            (r["id"], r["id"], cutoff))]
+        if ids:
+            with tx(conn):
+                _delete_messages(conn, ids)
+            dropped += len(ids)
+    return dropped
+
+
+def sweep_sessions(conn):
+    """Drop expired web sessions."""
+    return conn.execute("DELETE FROM sessions WHERE expires_ns < ?",
+                        (time.time_ns(),)).rowcount
+
+
+# ---- membership / presence ---------------------------------------------------
+
+def _member(conn, room_id, name):
+    return conn.execute("SELECT * FROM members WHERE room_id=? AND name=?",
+                        (room_id, name)).fetchone()
+
+
+def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None):
+    """Sign up under `name` in one room. Fails if a *live* agent holds that name in
+    THIS room under a different tag -- names are per-room now, so the same name in
+    another room is not a collision. Replays only the last CATCHUP_NS of the room's
+    backlog; fresh=True skips it."""
     valid_name(name)
     now = time.time_ns()
-    cur = _row(conn, name)
+    cur = _member(conn, room_id, name)
     if cur and cur["tag"] != tag and _is_live(cur["seen_ns"], now):
         raise BusError(f"name {name!r} is held by a live agent (tag {cur['tag']}). pick another.")
     conn.execute(
-        "INSERT INTO agents(name, tag, url, room, joined_ns, seen_ns) VALUES(?,?,?,?,?,?) "
-        "ON CONFLICT(name) DO UPDATE SET tag=excluded.tag, url=excluded.url, "
-        "room=excluded.room, seen_ns=excluded.seen_ns",
-        (name, tag, url, room, now, now),
-    )
+        "INSERT INTO members(room_id, name, tag, url, token_id, joined_ns, seen_ns) "
+        "VALUES(?,?,?,?,?,?,?) "
+        "ON CONFLICT(room_id, name) DO UPDATE SET tag=excluded.tag, url=excluded.url, "
+        "token_id=excluded.token_id, seen_ns=excluded.seen_ns",
+        (room_id, name, tag, url, token_id, now, now))
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
     cutoff = now if fresh else now - CATCHUP_NS
     conn.execute(
         "INSERT OR IGNORE INTO reads(message_id, agent, read_ns) "
         "SELECT id, ?, ? FROM messages WHERE sender != ? AND ts_ns < ? AND room = ?",
-        (name, now, name, cutoff, room),
-    )
+        (name, now, name, cutoff, room_id))
     return name
 
 
-def touch(conn, name):
-    """Heartbeat. Called once per loop turn so the agent stays LIVE."""
+def touch(conn, name, rooms):
+    """Heartbeat across every room the agent is a member of."""
     valid_name(name)
-    n = conn.execute(
-        "UPDATE agents SET seen_ns=? WHERE name=?", (time.time_ns(), name)
-    ).rowcount
-    if not n:
-        raise BusError(f"not joined: {name}")
+    if not rooms:
+        return
+    rooms = list(rooms)
+    conn.execute(
+        f"UPDATE members SET seen_ns=? WHERE name=? AND room_id IN ({_ph(rooms)})",
+        [time.time_ns(), name] + rooms)
 
 
-def leave(conn, name):
-    conn.execute("DELETE FROM agents WHERE name=?", (name,))
+def leave(conn, name, rooms):
+    """Sign off. Membership only -- messages are never touched."""
+    if not rooms:
+        return
+    rooms = list(rooms)
+    conn.execute(f"DELETE FROM members WHERE name=? AND room_id IN ({_ph(rooms)})",
+                 [name] + rooms)
 
 
 def whoami(conn, tag):
     if not tag:
         return None
     r = conn.execute(
-        "SELECT name FROM agents WHERE tag=? ORDER BY seen_ns DESC LIMIT 1", (tag,)
+        "SELECT name FROM members WHERE tag=? ORDER BY seen_ns DESC LIMIT 1", (tag,)
     ).fetchone()
     return r["name"] if r else None
 
 
-def presence(conn, room=""):
+def presence(conn, rooms):
+    """Everyone across the caller's rooms. Each entry carries its room: names are
+    per-room now, so a flat list would be ambiguous."""
+    if not rooms:
+        return []
+    rooms = list(rooms)
     now = time.time_ns()
     return [
-        {"name": r["name"], "tag": r["tag"], "url": r["url"],
+        {"name": r["name"], "tag": r["tag"], "url": r["url"], "room": r["room_id"],
+         "room_name": r["room_name"], "token_id": r["token_id"],
          "live": _is_live(r["seen_ns"], now),
          "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"]}
-        for r in conn.execute("SELECT * FROM agents WHERE room=? ORDER BY name", (room,))
+        for r in conn.execute(
+            f"SELECT m.*, ro.name AS room_name FROM members m JOIN rooms ro ON ro.id=m.room_id "
+            f"WHERE m.room_id IN ({_ph(rooms)}) ORDER BY m.name", rooms)
     ]
 
 
-def prune(conn):
+def reap_stale(conn):
+    """Drop members whose heartbeat has gone stale. Named away from prune_agent on
+    purpose: this reaps presence, that erases a trace. Two very different verbs."""
     now = time.time_ns()
-    dead = [r["name"] for r in conn.execute("SELECT name, seen_ns FROM agents")
+    dead = [(r["room_id"], r["name"]) for r in
+            conn.execute("SELECT room_id, name, seen_ns FROM members")
             if not _is_live(r["seen_ns"], now)]
-    for name in dead:
-        conn.execute("DELETE FROM agents WHERE name=?", (name,))
-    return dead
+    for room_id, name in dead:
+        conn.execute("DELETE FROM members WHERE room_id=? AND name=?", (room_id, name))
+    return [n for _, n in dead]
+
+
+def known(conn, name, rooms):
+    if not rooms:
+        return False
+    rooms = list(rooms)
+    return conn.execute(
+        f"SELECT 1 FROM members WHERE name=? AND room_id IN ({_ph(rooms)})",
+        [name] + rooms).fetchone() is not None
 
 
 # ---- messages ----------------------------------------------------------------
 
-def _wake_targets(conn, sender, recipient, room=""):
+def _wake_targets(conn, sender, recipient, room_id):
     if recipient != BROADCAST:
         return [recipient]
     now = time.time_ns()
     return [r["name"] for r in conn.execute(
-                "SELECT name, seen_ns FROM agents WHERE room=?", (room,))
+                "SELECT name, seen_ns FROM members WHERE room_id=?", (room_id,))
             if r["name"] != sender and _is_live(r["seen_ns"], now)]
 
 
-def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=None, room=""):
+def resolve_send_room(rooms, room=None, parent_room=None):
+    """Which room a send lands in.
+
+    A reply always lands in its parent's room -- inferred, never taken from the
+    caller, so a stale token cannot re-route a reply into a room it has lost.
+    For a new thread: one room in reach is used implicitly (the common case stays
+    friction-free); 2+ and no explicit room raises rather than guessing, because a
+    wrong guess discloses the message to the wrong room and cannot be undone.
+    """
+    if parent_room is not None:
+        if room and room != parent_room:
+            raise BusError("a reply lands in its parent's room; drop the room argument")
+        return parent_room
+    if room:
+        if room not in rooms:
+            raise AccessError(f"no access to room {room}")
+        return room
+    if len(rooms) == 1:
+        return next(iter(rooms))
+    if not rooms:
+        raise AccessError("this token has no rooms")
+    raise AmbiguousRoom([{"id": r, "name": n} for r, n in rooms.items()])
+
+
+def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=None,
+         room=None):
     """Insert a message. recipient='*' broadcasts.
 
     reply_to threads this under a parent. Pass one id for a normal reply, or a
@@ -213,51 +963,61 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
     The first id is the PRIMARY parent: it sets parent_id and which thread this
     joins. Every id becomes an edge in `links`, so the full fork/merge web is kept.
 
+    Every parent must live in the same room. Cross-room replies are refused: that
+    edge would let trace()/graph() carry one room's content into another. Moving
+    knowledge between rooms is a NEW root message in the target room.
+
     attachments: optional list of {"url", "name", "bytes"} dicts (1-n per message);
     the file bytes themselves live on disk under the broker's files/ dir.
 
     Returns {id, thread_id, parents, wake:[names]}.
     """
     valid_name(sender)
+    if not room:
+        raise BusError("room is required")
     if recipient != BROADCAST:
         valid_name(recipient)
-        r = _row(conn, recipient)
-        if not r or r["room"] != room:
+        if not _member(conn, room, recipient):
             raise BusError(f"no such agent in this room: {recipient!r} (is it joined?)")
     parents = [] if reply_to is None else ([reply_to] if isinstance(reply_to, int) else list(reply_to))
     thread_id, parent_id = None, None
     if parents:
-        ph = ",".join("?" * len(parents))
         found = {r["id"]: r for r in conn.execute(
-            f"SELECT id, thread_id, room FROM messages WHERE id IN ({ph})", parents)}
+            f"SELECT id, thread_id, room FROM messages WHERE id IN ({_ph(parents)})", parents)}
         for p in parents:
             if p not in found or found[p]["room"] != room:
                 raise BusError(f"reply_to {p}: no such message in this room")
-        parent_id = parents[0]                  # primary parent
+        parent_id = parents[0]                      # primary parent
         thread_id = found[parents[0]]["thread_id"]  # joins the primary parent's thread
     now = time.time_ns()
-    cur = conn.execute(
-        "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, body, room, ts_ns) "
-        "VALUES(?,?,?,?,?,?,?,?)",
-        (thread_id, parent_id, sender, recipient, subject, body, room, now),
-    )
-    mid = cur.lastrowid
-    if thread_id is None:  # new thread roots on its own id
-        conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
-        thread_id = mid
-    for p in parents:
-        conn.execute("INSERT OR IGNORE INTO links(parent_id, child_id) VALUES(?,?)", (p, mid))
-    for a in attachments or []:
-        conn.execute("INSERT INTO attachments(message_id, url, name, bytes) VALUES(?,?,?,?)",
-                     (mid, a["url"], a.get("name"), a.get("bytes")))
+    with tx(conn):
+        cur = conn.execute(
+            "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, body, room, ts_ns) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (thread_id, parent_id, sender, recipient, subject, body, room, now))
+        mid = cur.lastrowid
+        if thread_id is None:  # new thread roots on its own id
+            conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
+            thread_id = mid
+        for p in parents:
+            conn.execute("INSERT OR IGNORE INTO links(parent_id, child_id) VALUES(?,?)", (p, mid))
+        for a in attachments or []:
+            conn.execute("INSERT INTO attachments(message_id, url, name, bytes) VALUES(?,?,?,?)",
+                         (mid, a["url"], a.get("name"), a.get("bytes")))
     return {"id": mid, "thread_id": thread_id, "parents": parents,
             "wake": _wake_targets(conn, sender, recipient, room)}
 
 
 def _msg(r):
-    return {"id": r["id"], "thread_id": r["thread_id"], "parent_id": r["parent_id"],
-            "from": r["sender"], "to": r["recipient"], "subject": r["subject"],
-            "body": r["body"], "ts_ns": r["ts_ns"]}
+    m = {"id": r["id"], "thread_id": r["thread_id"], "parent_id": r["parent_id"],
+         "from": r["sender"], "to": r["recipient"], "subject": r["subject"],
+         "body": r["body"], "room": r["room"], "ts_ns": r["ts_ns"]}
+    with contextlib.suppress(IndexError, KeyError):
+        m["room_name"] = r["room_name"]
+    return m
+
+
+_SEL = "SELECT m.*, ro.name AS room_name FROM messages m JOIN rooms ro ON ro.id=m.room"
 
 
 def _with_attachments(conn, msgs):
@@ -265,11 +1025,10 @@ def _with_attachments(conn, msgs):
     if not msgs:
         return msgs
     ids = [m["id"] for m in msgs]
-    ph = ",".join("?" * len(ids))
     by = {}
     for r in conn.execute(
             f"SELECT message_id, url, name, bytes FROM attachments "
-            f"WHERE message_id IN ({ph}) ORDER BY id", ids):
+            f"WHERE message_id IN ({_ph(ids)}) ORDER BY id", ids):
         by.setdefault(r["message_id"], []).append(
             {"url": r["url"], "name": r["name"], "bytes": r["bytes"]})
     for m in msgs:
@@ -277,50 +1036,55 @@ def _with_attachments(conn, msgs):
     return msgs
 
 
-def inbox(conn, agent, room=""):
-    """Unread messages addressed to `agent` in `room` (direct or broadcast), oldest first."""
+def inbox(conn, agent, rooms):
+    """Unread messages addressed to `agent` (direct or broadcast) across ALL of the
+    caller's rooms, oldest first. Each message carries its room, which is what lets
+    an agent reply into the room a message came from."""
     valid_name(agent)
+    if not rooms:
+        return []
+    rooms = list(rooms)
     rows = conn.execute(
-        "SELECT * FROM messages m "
-        "WHERE m.room=? AND (m.recipient=? OR m.recipient=?) AND m.sender!=? "
-        "AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id=m.id AND r.agent=?) "
-        "ORDER BY m.id",
-        (room, agent, BROADCAST, agent, agent),
-    ).fetchall()
+        f"{_SEL} WHERE m.room IN ({_ph(rooms)}) AND (m.recipient=? OR m.recipient=?) "
+        f"AND m.sender!=? "
+        f"AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id=m.id AND r.agent=?) "
+        f"ORDER BY m.id",
+        rooms + [agent, BROADCAST, agent, agent]).fetchall()
     return _with_attachments(conn, [_msg(r) for r in rows])
 
 
-def thread(conn, thread_id, room=""):
-    """Every message in a thread in `room`, oldest first (read or not). Linear view."""
+def thread(conn, thread_id, rooms):
+    if not rooms:
+        return []
+    rooms = list(rooms)
     rows = conn.execute(
-        "SELECT * FROM messages WHERE thread_id=? AND room=? ORDER BY id", (thread_id, room)
-    ).fetchall()
+        f"{_SEL} WHERE m.thread_id=? AND m.room IN ({_ph(rooms)}) ORDER BY m.id",
+        [thread_id] + rooms).fetchall()
     return _with_attachments(conn, [_msg(r) for r in rows])
 
 
-def known(conn, name):
-    """True if `name` has ever joined the bus."""
-    return conn.execute("SELECT 1 FROM agents WHERE name=?", (name,)).fetchone() is not None
-
-
-def tail(conn, since_id=0, limit=200, room=""):
-    """Feed backlog for `room`: messages with id > since_id, oldest-first (or the most
-    recent `limit` when since_id=0). The web feed uses this to fill reconnect gaps."""
+def tail(conn, since_id=0, limit=200, rooms=()):
+    """Feed backlog: messages with id > since_id, oldest-first (or the most recent
+    `limit` when since_id=0). The web feed uses this to fill reconnect gaps."""
+    if not rooms:
+        return []
+    rooms = list(rooms)
     limit = max(1, min(int(limit), 1000))
     if since_id:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE room=? AND id>? ORDER BY id LIMIT ?",
-            (room, since_id, limit)).fetchall()
+            f"{_SEL} WHERE m.room IN ({_ph(rooms)}) AND m.id>? ORDER BY m.id LIMIT ?",
+            rooms + [since_id, limit]).fetchall()
         return _with_attachments(conn, [_msg(r) for r in rows])
     rows = conn.execute(
-        "SELECT * FROM messages WHERE room=? ORDER BY id DESC LIMIT ?", (room, limit)
-    ).fetchall()
+        f"{_SEL} WHERE m.room IN ({_ph(rooms)}) ORDER BY m.id DESC LIMIT ?",
+        rooms + [limit]).fetchall()
     return _with_attachments(conn, [_msg(r) for r in reversed(rows)])
 
 
 def search(conn, *, keywords=None, since_ns=None, until_ns=None,
-           involves=None, mine_agent=None, thread_id=None, limit=200, room=""):
-    """Search the whole message log (read or not). Every filter ANDs together:
+           involves=None, mine_agent=None, thread_id=None, limit=200, rooms=()):
+    """Search the message log (read or not) across the caller's rooms. Every filter
+    ANDs together:
       keywords   list of words; a message matches if ANY word appears as a
                  case-insensitive substring, any position, in subject OR body
       since_ns   ts_ns >= since_ns        until_ns  ts_ns <= until_ns
@@ -333,32 +1097,34 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
     hits, ties oldest-first. Each carries thread_id so the caller can expand the DAG
     with thread()/graph()/trace().
     """
-    where, args = ["room=?"], [room]
+    if not rooms:
+        return []
+    rooms = list(rooms)
+    where, args = [f"m.room IN ({_ph(rooms)})"], list(rooms)
     if keywords:
-        ors = " OR ".join(["(subject LIKE ? OR body LIKE ?)"] * len(keywords))
+        ors = " OR ".join(["(m.subject LIKE ? OR m.body LIKE ?)"] * len(keywords))
         where.append(f"({ors})")
         for k in keywords:
             args += [f"%{k}%", f"%{k}%"]
     if since_ns is not None:
-        where.append("ts_ns >= ?")
+        where.append("m.ts_ns >= ?")
         args.append(since_ns)
     if until_ns is not None:
-        where.append("ts_ns <= ?")
+        where.append("m.ts_ns <= ?")
         args.append(until_ns)
     if involves:
-        where.append("(sender=? OR recipient=?)")
+        where.append("(m.sender=? OR m.recipient=?)")
         args += [involves, involves]
     if mine_agent:
-        where.append("(sender=? OR recipient=?)")
+        where.append("(m.sender=? OR m.recipient=?)")
         args += [mine_agent, mine_agent]
     if thread_id:
-        where.append("thread_id=?")
+        where.append("m.thread_id=?")
         args.append(thread_id)
-    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    clause = " WHERE " + " AND ".join(where)
     limit = max(1, min(int(limit), 1000))
     rows = conn.execute(
-        f"SELECT * FROM messages{clause} ORDER BY id DESC LIMIT ?", args + [limit]
-    ).fetchall()
+        f"{_SEL}{clause} ORDER BY m.id DESC LIMIT ?", args + [limit]).fetchall()
     msgs = _with_attachments(conn, [_msg(r) for r in reversed(rows)])
     if keywords:
         # ponytail: rank the most recent <=limit matches, not the whole log; raise
@@ -375,35 +1141,46 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
     return msgs
 
 
-def _subgraph(conn, ids):
+def _subgraph(conn, ids, rooms):
     """{messages, edges} for a set of message ids -- edges = links with both
-    endpoints inside the set. messages sorted by id; each carries its parents."""
-    if not ids:
+    endpoints inside the set. messages sorted by id; each carries its parents.
+    Filtered to `rooms`: the walk never leaves the caller's rooms even if a
+    cross-room edge somehow exists."""
+    if not ids or not rooms:
         return {"messages": [], "edges": []}
-    ids = list(ids)
-    ph = ",".join("?" * len(ids))
+    ids, rooms = list(ids), list(rooms)
+    iph, rph = _ph(ids), _ph(rooms)
     edges = [[r["parent_id"], r["child_id"]] for r in conn.execute(
-        f"SELECT parent_id, child_id FROM links "
-        f"WHERE parent_id IN ({ph}) AND child_id IN ({ph}) ORDER BY child_id, parent_id",
-        ids + ids)]
+        f"SELECT l.parent_id, l.child_id FROM links l "
+        f"JOIN messages p ON p.id=l.parent_id JOIN messages c ON c.id=l.child_id "
+        f"WHERE l.parent_id IN ({iph}) AND l.child_id IN ({iph}) "
+        f"AND p.room IN ({rph}) AND c.room IN ({rph}) ORDER BY l.child_id, l.parent_id",
+        ids + ids + rooms + rooms)]
     parents = {}
     for p, c in edges:
         parents.setdefault(c, []).append(p)
     msgs = []
-    for r in conn.execute(f"SELECT * FROM messages WHERE id IN ({ph}) ORDER BY id", ids):
+    for r in conn.execute(
+            f"{_SEL} WHERE m.id IN ({iph}) AND m.room IN ({rph}) ORDER BY m.id",
+            ids + rooms):
         m = _msg(r)
         m["parents"] = parents.get(r["id"], [])
         msgs.append(m)
     return {"messages": _with_attachments(conn, msgs), "edges": edges}
 
 
-def trace(conn, message_id, room=""):
+def trace(conn, message_id, rooms):
     """Ancestor sub-DAG: every message that led to `message_id`, with the edges
     among them -- so you can track back exactly how we got here, including any
-    forks and re-links upstream. Includes the node itself. Replies never cross
-    rooms (send() enforces it), so checking the entry node scopes the whole walk."""
-    if not conn.execute("SELECT 1 FROM messages WHERE id=? AND room=?",
-                        (message_id, room)).fetchone():
+    forks and re-links upstream. Includes the node itself. Every hop is filtered to
+    the caller's rooms: send() refuses cross-room replies, but this walk does not
+    depend on that invariant holding elsewhere."""
+    if not rooms:
+        raise BusError(f"no such message in this room: {message_id}")
+    rooms = list(rooms)
+    if not conn.execute(
+            f"SELECT 1 FROM messages WHERE id=? AND room IN ({_ph(rooms)})",
+            [message_id] + rooms).fetchone():
         raise BusError(f"no such message in this room: {message_id}")
     seen, frontier = set(), [message_id]
     while frontier:
@@ -411,18 +1188,23 @@ def trace(conn, message_id, room=""):
         if nid in seen:
             continue
         seen.add(nid)
-        for r in conn.execute("SELECT parent_id FROM links WHERE child_id=?", (nid,)):
+        for r in conn.execute(
+                f"SELECT l.parent_id FROM links l JOIN messages p ON p.id=l.parent_id "
+                f"WHERE l.child_id=? AND p.room IN ({_ph(rooms)})", [nid] + rooms):
             frontier.append(r["parent_id"])
-    return _subgraph(conn, seen)
+    return _subgraph(conn, seen, rooms)
 
 
-def graph(conn, thread_id, room=""):
-    """The whole web of a thread in `room`: every message in it plus all fork/merge
-    edges. Use this to render or walk the full conversation tree."""
-    ids = [r["id"] for r in
-           conn.execute("SELECT id FROM messages WHERE thread_id=? AND room=?",
-                        (thread_id, room))]
-    return _subgraph(conn, set(ids))
+def graph(conn, thread_id, rooms):
+    """The whole web of a thread: every message in it plus all fork/merge edges.
+    Use this to render or walk the full conversation tree."""
+    if not rooms:
+        return {"messages": [], "edges": []}
+    rooms = list(rooms)
+    ids = [r["id"] for r in conn.execute(
+        f"SELECT id FROM messages WHERE thread_id=? AND room IN ({_ph(rooms)})",
+        [thread_id] + rooms)]
+    return _subgraph(conn, set(ids), rooms)
 
 
 def readers(conn, message_id, exclude=None):
@@ -433,33 +1215,174 @@ def readers(conn, message_id, exclude=None):
         (message_id, exclude or "")))
 
 
-def delete_if_unseen(conn, message_id, sender, room=""):
+def delete_if_unseen(conn, message_id, sender, rooms):
     """Retract a message nobody has consumed yet: sender-only, and refused the moment
     any reads row or reply edge references it. Used by the web UI to pull back a
     mistaken broadcast before anyone has read it."""
-    r = conn.execute("SELECT sender FROM messages WHERE id=? AND room=?",
-                     (message_id, room)).fetchone()
-    if not r:
+    if not rooms:
         raise BusError(f"no such message in this room: {message_id}")
-    if r["sender"] != sender:
-        raise BusError("not your message")
-    if conn.execute("SELECT 1 FROM reads WHERE message_id=? AND agent!=?",
-                    (message_id, sender)).fetchone():
-        raise BusError("already read by someone -- cannot retract")
-    if conn.execute("SELECT 1 FROM links WHERE parent_id=?", (message_id,)).fetchone():
-        raise BusError("already replied to -- cannot retract")
-    conn.execute("DELETE FROM attachments WHERE message_id=?", (message_id,))
-    conn.execute("DELETE FROM links WHERE child_id=?", (message_id,))
-    conn.execute("DELETE FROM reads WHERE message_id=?", (message_id,))  # sender's own only
-    conn.execute("DELETE FROM messages WHERE id=?", (message_id,))
+    rooms = list(rooms)
+    with tx(conn):
+        r = conn.execute(
+            f"SELECT sender FROM messages WHERE id=? AND room IN ({_ph(rooms)})",
+            [message_id] + rooms).fetchone()
+        if not r:
+            raise BusError(f"no such message in this room: {message_id}")
+        if r["sender"] != sender:
+            raise BusError("not your message")
+        if conn.execute("SELECT 1 FROM reads WHERE message_id=? AND agent!=?",
+                        (message_id, sender)).fetchone():
+            raise BusError("already read by someone -- cannot retract")
+        if conn.execute("SELECT 1 FROM links WHERE parent_id=?", (message_id,)).fetchone():
+            raise BusError("already replied to -- cannot retract")
+        _delete_messages(conn, [message_id])
 
 
-def ack(conn, agent, message_ids):
-    """Mark messages read for `agent`. Idempotent."""
+def ack(conn, agent, message_ids, rooms):
+    """Mark messages read for `agent`. Idempotent. Ids outside the caller's rooms,
+    or not addressed to it, are IGNORED rather than raising -- an ack is a batch and
+    one stale id must not fail the rest. Returns {acked, ignored}."""
     valid_name(agent)
+    ids = [int(m) for m in message_ids]
+    if not ids or not rooms:
+        return {"acked": 0, "ignored": ids}
+    rooms = list(rooms)
+    ok = {r["id"] for r in conn.execute(
+        f"SELECT id FROM messages WHERE id IN ({_ph(ids)}) AND room IN ({_ph(rooms)}) "
+        f"AND (recipient=? OR recipient=?)",
+        ids + rooms + [agent, BROADCAST])}
     now = time.time_ns()
     conn.executemany(
         "INSERT OR IGNORE INTO reads(message_id, agent, read_ns) VALUES(?,?,?)",
-        [(int(mid), agent, now) for mid in message_ids],
-    )
-    return len(message_ids)
+        [(mid, agent, now) for mid in ok])
+    return {"acked": len(ok), "ignored": [i for i in ids if i not in ok]}
+
+
+# ---- prune an agent ----------------------------------------------------------
+
+def _rethread(conn, root_id):
+    """Stamp thread_id=root_id on root_id and every PRIMARY-parent descendant.
+
+    Walks parent_id, NOT links. thread_id is inherited from the primary parent only,
+    so the primary-parent relation is the thread spine -- and being a forest, this
+    terminates. links is the full DAG and its non-primary edges legitimately cross
+    threads (108 do in the live DB); walking those would re-thread whole unrelated
+    conversations. Needs idx_msg_parent to stay cheap.
+    """
+    seen, frontier = set(), [root_id]
+    while frontier:
+        n = frontier.pop()
+        if n in seen:
+            continue
+        seen.add(n)
+        conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (root_id, n))
+        frontier += [r["id"] for r in
+                     conn.execute("SELECT id FROM messages WHERE parent_id=?", (n,))]
+
+
+def prune_agent(conn, name, room_id):
+    """Erase an agent from a room: its membership and every message to or from it.
+
+    Survivors that replied to a deleted message are REPARENTED to their thread root
+    rather than cascade-deleted, so other agents' work is not collateral. Both the
+    `links` edge and the denormalized `parent_id` are rewritten -- trace()/graph()
+    read `links` exclusively, so fixing only parent_id would leave the walks
+    pointing at a deleted node. If the thread root was itself the pruned agent's,
+    the survivor becomes a new root and its descendants' thread_id is re-stamped
+    (thread_id is copied at insert, never derived, so it does not follow on its own).
+    """
+    valid_name(name)
+    with tx(conn):
+        # recipient=name matches literally, never '*' (NAME_RE forbids it), so
+        # broadcasts he RECEIVED survive -- deleting those would erase everyone's mail.
+        # Broadcasts he SENT go, via sender=name: those are his trace.
+        doomed = [r["id"] for r in conn.execute(
+            "SELECT id FROM messages WHERE room=? AND (sender=? OR recipient=?)",
+            (room_id, name, name))]
+        dset, new_roots = set(doomed), []
+        if doomed:
+            # Survivors whose PRIMARY parent dies. Repair BEFORE the delete.
+            for s in conn.execute(
+                    f"SELECT id, thread_id FROM messages "
+                    f"WHERE parent_id IN ({_ph(doomed)}) AND id NOT IN ({_ph(doomed)})",
+                    doomed + doomed).fetchall():
+                root = s["thread_id"]
+                if root in dset or root == s["id"]:
+                    # The root went with him: this survivor becomes its own root.
+                    conn.execute("UPDATE messages SET parent_id=NULL, thread_id=? WHERE id=?",
+                                 (s["id"], s["id"]))
+                    new_roots.append(s["id"])   # re-thread AFTER the delete
+                else:
+                    # thread_id is untouched: a thread's root is by definition in that
+                    # thread, so reparent-to-root cannot cross threads. That is exactly
+                    # why root, and not grandparent, is the right target.
+                    conn.execute("UPDATE messages SET parent_id=? WHERE id=?", (root, s["id"]))
+                    conn.execute(
+                        "INSERT OR IGNORE INTO links(parent_id, child_id) VALUES(?,?)",
+                        (root, s["id"]))
+            _delete_messages(conn, doomed)
+        # After the delete: walking sooner could cross a doomed node into a subtree
+        # belonging to a different repair and stamp it with the wrong thread_id.
+        for r in new_roots:
+            _rethread(conn, r)
+        conn.execute("DELETE FROM reads WHERE agent=?", (name,))
+        conn.execute("DELETE FROM members WHERE room_id=? AND name=?", (room_id, name))
+    return {"messages": len(doomed), "reparented": len(new_roots)}
+
+
+# ---- files -------------------------------------------------------------------
+
+def add_lesson(conn, *, author, slug, symptom, root_cause, rule, detection, room_id=None):
+    """Record one lesson. room_id=None makes it global. Re-using a slug in the same scope
+    REPLACES it: a lesson is a distilled rule, not an append-only log."""
+    valid_name(slug)
+    lid, now = _uuid(), time.time_ns()
+    conn.execute(
+        "INSERT INTO lessons(id, room_id, slug, symptom, root_cause, rule, detection, "
+        "author, created_ns) VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(room_id, slug) DO UPDATE SET symptom=excluded.symptom, "
+        "root_cause=excluded.root_cause, rule=excluded.rule, detection=excluded.detection, "
+        "author=excluded.author, created_ns=excluded.created_ns",
+        (lid, room_id, slug, symptom, root_cause, rule, detection, author, now))
+    return {"id": lid, "slug": slug, "room": room_id}
+
+
+def _lesson(r):
+    return {"slug": r["slug"], "room": r["room_id"], "symptom": r["symptom"],
+            "root_cause": r["root_cause"], "rule": r["rule"], "detection": r["detection"],
+            "author": r["author"], "created_ns": r["created_ns"],
+            "scope": "global" if r["room_id"] is None else "room"}
+
+
+def lessons(conn, rooms=()):
+    """Every global lesson, plus the ones scoped to the caller's rooms. Newest first.
+    This is what an agent reads at boot instead of a file it can no longer share."""
+    rooms = list(rooms or [])
+    if rooms:
+        rows = conn.execute(
+            f"SELECT * FROM lessons WHERE room_id IS NULL OR room_id IN ({_ph(rooms)}) "
+            f"ORDER BY created_ns DESC", rooms)
+    else:
+        rows = conn.execute("SELECT * FROM lessons WHERE room_id IS NULL "
+                            "ORDER BY created_ns DESC")
+    return [_lesson(r) for r in rows]
+
+
+def promote_lesson(conn, slug, room_id):
+    """Room lesson -> global. The architect's judgement call, per CLAUDE.md: a rule that
+    generalises stops being one room's business."""
+    n = conn.execute("UPDATE lessons SET room_id=NULL WHERE slug=? AND room_id=?",
+                     (slug, room_id)).rowcount
+    if not n:
+        raise BusError(f"no such lesson in this room: {slug}")
+
+
+def record_file(conn, stored, room_id, uploaded_by):
+    conn.execute(
+        "INSERT OR REPLACE INTO files(stored, room_id, uploaded_by, ts_ns) VALUES(?,?,?,?)",
+        (stored, room_id, uploaded_by, time.time_ns()))
+
+
+def file_room(conn, stored):
+    r = conn.execute("SELECT room_id FROM files WHERE stored=?", (stored,)).fetchone()
+    return r["room_id"] if r else None

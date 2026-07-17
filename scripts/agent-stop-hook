@@ -8,9 +8,9 @@ set -u
 input="$(cat)"
 case "$input" in *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;; esac
 
-role="${AGENT_ROLE:-}"
+role="${REVEILLE_AGENT_ROLE:-}"
 [ -n "$role" ] || exit 0
-url="${AGENTBUS_URL:-http://127.0.0.1:8765}"
+url="${REVEILLE_URL:-http://127.0.0.1:8765}"
 curl -fsS --max-time 2 "$url/version" >/dev/null 2>&1 || exit 0
 pgrep -f "wake --once.*--name $role( |\$)" >/dev/null 2>&1 && exit 0
 
@@ -19,6 +19,6 @@ scheme=ws; [ "${url%%://*}" = "https" ] && scheme=wss
 repo="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 wake_bin="$repo/.venv/bin/wake"; [ -x "$wake_bin" ] || wake_bin="uv run --project $repo wake"
 cmd="$wake_bin --once --url $scheme://$hostport/wake --name $role"
-[ -n "${AGENTBUS_TOKEN:-}" ] && cmd="$cmd --token \$AGENTBUS_TOKEN"
+[ -n "${REVEILLE_TOKEN:-}" ] && cmd="$cmd --token \$REVEILLE_TOKEN"
 printf '{"decision":"block","reason":"Wake waiter not armed -- you are deaf to bus rings. Arm it now with Bash run_in_background=true: %s . Its task completion is a ring: inbox(), ack(), act only if owed, then re-arm."}\n' "$cmd"
 exit 0

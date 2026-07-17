@@ -2,6 +2,7 @@
 """Assert-based checks for the SQLite broker core. Run: uv run python tests/test_store.py
 (or uv run pytest). No fixtures -- each test makes its own in-temp db."""
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -11,309 +12,796 @@ from agentbus import store  # noqa: E402
 
 
 def db():
-    return store.connect(os.path.join(tempfile.mkdtemp(), "broker.db"))
+    path = os.path.join(tempfile.mkdtemp(), "broker.db")
+    c = store.connect(path)
+    store.migrate(c, path)
+    return c
 
 
-def _age(conn, name, seconds_ago):
+def fixture():
+    """A db with one admin, one room, one token holding it. The common shape."""
+    c = db()
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    room = store.create_room(c, admin["id"], "Reveille")
+    tok = store.create_token(c, admin["id"], "fleet")
+    store.assign_room(c, tok["id"], room["id"], admin["id"])
+    return c, admin, room, tok
+
+
+def rooms_of(c, tok):
+    return store.rooms_for_token(c, tok["id"])
+
+
+def _age(conn, room_id, name, seconds_ago):
     past = time.time_ns() - int(seconds_ago * 1e9)
-    conn.execute("UPDATE agents SET seen_ns=? WHERE name=?", (past, name))
+    conn.execute("UPDATE members SET seen_ns=? WHERE room_id=? AND name=?",
+                 (past, room_id, name))
 
 
-def test_join_presence_and_whoami():
-    c = db()
-    store.join(c, "alice", "TAG_a")
-    assert store.whoami(c, "TAG_a") == "alice"
-    p = store.presence(c)
-    assert len(p) == 1 and p[0]["name"] == "alice" and p[0]["live"]
+# ---- passwords, tokens, sessions ---------------------------------------------
+
+def test_password_roundtrip():
+    h = store.hash_password("correct horse battery")
+    assert store.verify_password("correct horse battery", h)
+    assert not store.verify_password("wrong horse battery", h)
+    assert store.hash_password("correct horse battery") != h  # salted: never equal
 
 
-def test_invalid_name_rejected():
-    c = db()
+def test_short_password_refused():
     try:
-        store.join(c, "has space", "T")
-        assert False, "should have raised"
+        store.hash_password("short")
+        assert False, "expected BusError"
     except store.BusError:
         pass
 
 
-def test_unicast_inbox_then_ack():
+def test_token_secret_never_stored_plaintext():
+    c, admin, room, tok = fixture()
+    rows = c.execute("SELECT secret_hash FROM tokens").fetchall()
+    assert rows[0]["secret_hash"] != tok["secret"]
+    assert store.resolve_token(c, tok["secret"])["id"] == tok["id"]
+    assert store.resolve_token(c, "not-the-secret") is None
+
+
+def test_revoke_is_instant():
+    c, admin, room, tok = fixture()
+    assert store.resolve_token(c, tok["secret"])
+    store.revoke_token(c, tok["id"], admin["id"])
+    assert store.resolve_token(c, tok["secret"]) is None  # no reissue, no cache
+
+
+def test_session_roundtrip_and_expiry():
+    c, admin, room, tok = fixture()
+    s = store.create_session(c, admin["id"])
+    assert store.resolve_session(c, s)["name"] == "travis"
+    c.execute("UPDATE sessions SET expires_ns=? WHERE id_hash=?",
+              (time.time_ns() - 1, store._sha(s)))
+    assert store.resolve_session(c, s) is None
+    assert store.resolve_session(c, "garbage") is None
+
+
+# ---- users -------------------------------------------------------------------
+
+def test_first_admin_bootstrap_is_once_only():
     c = db()
-    store.join(c, "alice", "TAG_a")
-    store.join(c, "bob", "TAG_b")
-    store.send(c, "bob", "alice", "yo", subject="hi")
-    box = store.inbox(c, "alice")
-    assert len(box) == 1 and box[0]["from"] == "bob" and box[0]["body"] == "yo"
-    store.ack(c, "alice", [box[0]["id"]])
-    assert store.inbox(c, "alice") == []
-
-
-def test_broadcast_seen_by_others_not_sender():
-    c = db()
-    store.join(c, "alice", "TAG_a")
-    store.join(c, "bob", "TAG_b")
-    store.send(c, "alice", store.BROADCAST, "hello all")
-    assert len(store.inbox(c, "bob")) == 1
-    assert store.inbox(c, "alice") == []  # sender never gets own broadcast
-    bid = store.inbox(c, "bob")[0]["id"]
-    store.ack(c, "bob", [bid])
-    assert store.inbox(c, "bob") == []
-
-
-def test_replay_on_join_then_fresh_skips():
-    c = db()
-    store.join(c, "alice", "TAG_a")
-    store.send(c, "alice", store.BROADCAST, "old news")
-    # a normal late joiner replays the recent unread backlog...
-    store.join(c, "late", "TAG_l")
-    assert len(store.inbox(c, "late")) == 1
-    # ...a --fresh joiner starts clean
-    store.join(c, "fresh", "TAG_f", fresh=True)
-    assert store.inbox(c, "fresh") == []
-
-
-def test_join_catchup_window_skips_old_mail():
-    c = db()
-    store.join(c, "alice", "TAG_a")
-    old = store.send(c, "alice", store.BROADCAST, "ancient history")
-    past = time.time_ns() - store.CATCHUP_NS - int(1e9)
-    c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (past, old["id"]))
-    store.send(c, "alice", store.BROADCAST, "recent news")
-    # a joiner replays only mail inside the catch-up window; older is auto-read
-    store.join(c, "late", "TAG_l")
-    box = store.inbox(c, "late")
-    assert len(box) == 1 and box[0]["body"] == "recent news"
-    # the old message is still in the log for explicit recall
-    assert any(m["body"] == "ancient history" for m in store.thread(c, old["thread_id"]))
-
-
-def test_search_keywords_case_insensitive_ranked():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    store.send(c, "a", "b", "we should REBOOT the box")            # 1 word, 1 hit
-    store.send(c, "a", "b", "reboot reboot reboot")                # 1 word, 3 hits
-    store.send(c, "a", "b", "deploy failed, deploy after reboot")  # 2 words, 3 hits
-    store.send(c, "a", "b", "nothing relevant")                    # no match
-    got = store.search(c, keywords=["reboot", "deploy", "UpgraDe"])
-    bodies = [m["body"] for m in got]
-    assert bodies == ["deploy failed, deploy after reboot",  # multi-word beats repeats
-                      "reboot reboot reboot",                # repeats beat single hit
-                      "we should REBOOT the box"]
-
-
-def test_search_explicit_window():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    early = store.send(c, "a", "b", "early")
-    mid = store.send(c, "a", "b", "mid")
-    late = store.send(c, "a", "b", "late")
-    base = time.time_ns()
-    for i, m in enumerate([early, mid, late]):
-        c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (base + i * 1000, m["id"]))
-    got = store.search(c, since_ns=base + 1000, until_ns=base + 1000)
-    assert [m["body"] for m in got] == ["mid"]
-
-
-def test_rooms_isolate_everything():
-    c = db()
-    store.join(c, "a", "TA", room="K1"); store.join(c, "b", "TB", room="K1")
-    store.join(c, "z", "TZ", room="K2")
-    store.send(c, "a", "b", "room one traffic", room="K1")
-    # presence, inbox, tail, search are all scoped to the presented key
-    assert [x["name"] for x in store.presence(c, room="K1")] == ["a", "b"]
-    assert [x["name"] for x in store.presence(c, room="K2")] == ["z"]
-    assert len(store.inbox(c, "b", room="K1")) == 1
-    assert store.tail(c, room="K2") == []
-    assert store.search(c, keywords=["traffic"], room="K2") == []
-    assert len(store.search(c, keywords=["traffic"], room="K1")) == 1
-    # cross-room unicast fails: recipient is not in the sender's room
+    assert not store.any_users(c)
+    a = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    assert a["role"] == "admin" and store.any_users(c)
     try:
-        store.send(c, "a", "z", "wrong room", room="K1")
-        assert False, "should raise"
+        store.setup_first_admin(c, "someone", "hunter2hunter2")
+        assert False, "expected BusError -- setup must not be reusable"
     except store.BusError:
         pass
-    # a joiner's catch-up read-marks stay INSIDE its room: joining K2 must not
-    # phantom-read K1 mail (it would block K1 retractions with a fake reader)
-    import time as _t
-    old = store.send(c, "a", store.BROADCAST, "k1 oldie", room="K1")
+
+
+def test_first_admin_claims_ownerless_rooms():
+    """The migration leaves rooms with no owner (no user exists yet). The first
+    admin adopts them -- otherwise the fleet's history is unreachable forever."""
+    c = db()
+    c.execute("INSERT INTO rooms(id,name,owner_id,public,created_ns) VALUES(?,?,NULL,0,?)",
+              ("orphan", "Reveille", time.time_ns()))
+    a = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    assert store.get_room(c, "orphan")["owner_id"] == a["id"]
+
+
+def test_last_admin_protected():
+    c, admin, room, tok = fixture()
+    for fn in (lambda: store.delete_user(c, admin["id"]),
+               lambda: store.set_role(c, admin["id"], "user")):
+        try:
+            fn()
+            assert False, "expected BusError"
+        except store.BusError:
+            pass
+
+
+def test_delete_user_keeps_rooms_ownerless_not_deleted():
+    c, admin, room, tok = fixture()
+    store.create_user(c, "second", "hunter2hunter2", role="admin")
+    store.delete_user(c, admin["id"])
+    assert store.get_room(c, room["id"]) is not None          # history survives
+    assert store.get_room(c, room["id"])["owner_id"] is None
+    assert store.resolve_token(c, tok["secret"]) is None      # token went with him
+
+
+# ---- rooms -------------------------------------------------------------------
+
+def test_room_names_unique_per_owner_not_globally():
+    c, admin, room, tok = fixture()
+    other = store.create_user(c, "dana", "hunter2hunter2")
+    store.create_room(c, other["id"], "Reveille")             # same name, other owner: fine
+    try:
+        store.create_room(c, admin["id"], "Reveille")         # same name, same owner: no
+        assert False, "expected BusError"
+    except store.BusError:
+        pass
+
+
+def test_public_room_assignable_by_others_private_is_not():
+    c, admin, room, tok = fixture()
+    dana = store.create_user(c, "dana", "hunter2hunter2")
+    dtok = store.create_token(c, dana["id"], "dana-fleet")
+    try:
+        store.assign_room(c, dtok["id"], room["id"], dana["id"])
+        assert False, "expected AccessError on a private room"
+    except store.AccessError:
+        pass
+    store.set_public(c, room["id"], admin["id"], True)
+    store.assign_room(c, dtok["id"], room["id"], dana["id"])
+    assert room["id"] in rooms_of(c, dtok)
+
+
+def test_flip_private_revokes_others_but_keeps_history():
+    """User's call: going private removes ACCESS from other users' tokens; their
+    past messages stay, because authorship is history."""
+    c, admin, room, tok = fixture()
+    store.set_public(c, room["id"], admin["id"], True)
+    dana = store.create_user(c, "dana", "hunter2hunter2")
+    dtok = store.create_token(c, dana["id"], "dana-fleet")
+    store.assign_room(c, dtok["id"], room["id"], dana["id"])
+    store.join(c, "dana-bot", "TAG_d", room["id"], dtok["id"])
+    store.send(c, "dana-bot", store.BROADCAST, "hello from dana", room=room["id"])
+
+    store.set_public(c, room["id"], admin["id"], False)
+    assert rooms_of(c, dtok) == {}                            # access gone, instantly
+    assert rooms_of(c, tok) == {room["id"]: "Reveille"}       # owner keeps it
+    bodies = [m["body"] for m in store.tail(c, rooms=[room["id"]])]
+    assert "hello from dana" in bodies                        # history stays
+
+
+def test_public_rooms_carry_owner_for_the_picker():
+    c, admin, room, tok = fixture()
+    store.set_public(c, room["id"], admin["id"], True)
+    pub = store.public_rooms(c)
+    assert pub[0]["owner"] == "travis" and pub[0]["name"] == "Reveille"
+
+
+def test_rename_room():
+    c, admin, room, tok = fixture()
+    store.rename_room(c, room["id"], admin["id"], "Fleet")
+    assert store.get_room(c, room["id"])["name"] == "Fleet"
+
+
+# ---- membership --------------------------------------------------------------
+
+def test_same_name_in_two_rooms_is_not_a_collision():
+    """The old global agents.name PK made this impossible -- and silently corrupted
+    the live DB (human-web got yanked out of its first room by ON CONFLICT)."""
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    store.join(c, "architect", "TAG_a", room["id"], tok["id"])
+    store.join(c, "architect", "TAG_a", r2["id"], tok["id"])
+    names = {(p["room"], p["name"]) for p in store.presence(c, [room["id"], r2["id"]])}
+    assert names == {(room["id"], "architect"), (r2["id"], "architect")}
+
+
+def test_live_name_collision_within_a_room():
+    c, admin, room, tok = fixture()
+    store.join(c, "architect", "TAG_a", room["id"], tok["id"])
+    try:
+        store.join(c, "architect", "TAG_b", room["id"], tok["id"])
+        assert False, "expected BusError"
+    except store.BusError:
+        pass
+    _age(c, room["id"], "architect", 3600)                    # stale -> reclaimable
+    assert store.join(c, "architect", "TAG_b", room["id"], tok["id"]) == "architect"
+
+
+def test_presence_and_reap_stale():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TAG_a", room["id"], tok["id"])
+    p = store.presence(c, [room["id"]])
+    assert len(p) == 1 and p[0]["live"] and p[0]["room_name"] == "Reveille"
+    _age(c, room["id"], "alice", 3600)
+    assert store.reap_stale(c) == ["alice"]
+    assert store.presence(c, [room["id"]]) == []
+
+
+def test_leave_only_named_rooms():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    store.join(c, "bot", "T", room["id"], tok["id"])
+    store.join(c, "bot", "T", r2["id"], tok["id"])
+    store.leave(c, "bot", [r2["id"]])
+    assert store.known(c, "bot", [room["id"]]) and not store.known(c, "bot", [r2["id"]])
+
+
+# ---- room resolution ---------------------------------------------------------
+
+def test_single_room_token_never_names_a_room():
+    """Friction-free: the common case stays exactly as it was."""
+    c, admin, room, tok = fixture()
+    assert store.resolve_send_room(rooms_of(c, tok)) == room["id"]
+
+
+def test_two_rooms_and_no_room_arg_raises_rather_than_guessing():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    try:
+        store.resolve_send_room(rooms_of(c, tok))
+        assert False, "expected AmbiguousRoom -- a guess would post to the wrong room"
+    except store.AmbiguousRoom as e:
+        assert len(e.rooms) == 2
+
+
+def test_reply_room_is_inferred_from_parent_not_the_caller():
+    c, admin, room, tok = fixture()
+    assert store.resolve_send_room({"a": "A", "b": "B"}, parent_room="a") == "a"
+    try:
+        store.resolve_send_room({"a": "A"}, room="a", parent_room="b")
+        assert False, "expected BusError on a disagreeing room arg"
+    except store.BusError:
+        pass
+
+
+def test_room_outside_the_token_is_refused():
+    c, admin, room, tok = fixture()
+    try:
+        store.resolve_send_room(rooms_of(c, tok), room="somewhere-else")
+        assert False, "expected AccessError"
+    except store.AccessError:
+        pass
+
+
+# ---- messages ----------------------------------------------------------------
+
+def test_unicast_inbox_and_ack():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    store.send(c, "alice", "bob", "ping", room=room["id"])
+    inb = store.inbox(c, "bob", [room["id"]])
+    assert len(inb) == 1 and inb[0]["body"] == "ping"
+    assert inb[0]["room"] == room["id"] and inb[0]["room_name"] == "Reveille"
+    assert store.ack(c, "bob", [inb[0]["id"]], [room["id"]])["acked"] == 1
+    assert store.inbox(c, "bob", [room["id"]]) == []
+
+
+def test_inbox_unions_across_rooms_and_tags_each_message():
+    """A multi-room agent must see which room a message came from -- that is the
+    whole basis of 'reply in the room it came from'."""
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    for r in (room, r2):
+        store.join(c, "alice", "TA", r["id"], tok["id"])
+        store.join(c, "bob", "TB", r["id"], tok["id"])
+        store.send(c, "alice", "bob", f"from {r['name']}", room=r["id"])
+    inb = store.inbox(c, "bob", [room["id"], r2["id"]])
+    assert {m["room_name"] for m in inb} == {"Reveille", "Second"}
+
+
+def test_broadcast_not_to_self():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    store.send(c, "alice", store.BROADCAST, "all hands", room=room["id"])
+    assert len(store.inbox(c, "bob", [room["id"]])) == 1
+    assert store.inbox(c, "alice", [room["id"]]) == []
+
+
+def test_room_isolation():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    store.join(c, "carol", "TC", r2["id"], tok["id"])
+    store.send(c, "alice", store.BROADCAST, "room one only", room=room["id"])
+    assert store.inbox(c, "carol", [r2["id"]]) == []
+    assert store.tail(c, rooms=[r2["id"]]) == []
+
+
+def test_send_to_agent_in_another_room_refused():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "carol", "TC", r2["id"], tok["id"])
+    try:
+        store.send(c, "alice", "carol", "psst", room=room["id"])
+        assert False, "expected BusError"
+    except store.BusError:
+        pass
+
+
+def test_cross_room_reply_refused():
+    """The invariant trace()/graph() lean on. Allowing this edge is the leak."""
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "alice", "TA", r2["id"], tok["id"])
+    m = store.send(c, "alice", store.BROADCAST, "root", room=room["id"])
+    try:
+        store.send(c, "alice", store.BROADCAST, "reply", reply_to=m["id"], room=r2["id"])
+        assert False, "expected BusError -- replies never cross rooms"
+    except store.BusError:
+        pass
+
+
+def test_ack_is_room_scoped():
+    """Was a real hole: any agent could ack any id in any room."""
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    store.join(c, "carol", "TC", r2["id"], tok["id"])
+    m = store.send(c, "alice", "bob", "private to room one", room=room["id"])
+    out = store.ack(c, "carol", [m["id"]], [r2["id"]])
+    assert out["acked"] == 0 and out["ignored"] == [m["id"]]
+    assert store.readers(c, m["id"]) == []                    # carol left no trace
+    assert len(store.inbox(c, "bob", [room["id"]])) == 1      # bob's mail untouched
+
+
+def test_ack_ignores_foreign_ids_without_failing_the_batch():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    m = store.send(c, "alice", "bob", "real", room=room["id"])
+    out = store.ack(c, "bob", [m["id"], 999999], [room["id"]])
+    assert out["acked"] == 1 and out["ignored"] == [999999]
+
+
+def test_catchup_window_and_fresh():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    old = store.send(c, "alice", store.BROADCAST, "ancient", room=room["id"])
     c.execute("UPDATE messages SET ts_ns=? WHERE id=?",
-              (_t.time_ns() - store.CATCHUP_NS - int(1e9), old["id"]))
-    store.join(c, "newcomer", "TN", room="K2")
-    assert store.readers(c, old["id"]) == []
-    store.delete_if_unseen(c, old["id"], "a", room="K1")  # still retractable
+              (time.time_ns() - 2 * store.CATCHUP_NS, old["id"]))
+    store.send(c, "alice", store.BROADCAST, "recent", room=room["id"])
+    store.join(c, "carol", "TC", room["id"], tok["id"])
+    assert [m["body"] for m in store.inbox(c, "carol", [room["id"]])] == ["recent"]
+    store.join(c, "dave", "TD", room["id"], tok["id"], fresh=True)
+    assert store.inbox(c, "dave", [room["id"]]) == []
 
 
-def test_retract_if_unseen():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    m = store.send(c, "a", store.BROADCAST, "oops, mistaken")
-    store.ack(c, "a", [m["id"]])                 # sender's own read never counts
-    store.delete_if_unseen(c, m["id"], "a")
-    assert store.tail(c, limit=5) == []
-    m2 = store.send(c, "a", "b", "hello")
-    store.ack(c, "b", [m2["id"]])                # a real reader blocks retraction
+def test_search_scoped_and_ranked():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "carol", "TC", r2["id"], tok["id"])
+    store.send(c, "alice", store.BROADCAST, "widget widget widget", room=room["id"])
+    store.send(c, "alice", store.BROADCAST, "widget once", room=room["id"])
+    store.send(c, "carol", store.BROADCAST, "widget in another room", room=r2["id"])
+    hits = store.search(c, keywords=["widget"], rooms=[room["id"]])
+    assert len(hits) == 2                                     # r2 excluded
+    assert hits[0]["body"] == "widget widget widget"          # ranked by hits
+
+
+def test_threading_and_graph():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    root = store.send(c, "alice", store.BROADCAST, "root", room=room["id"])
+    kid = store.send(c, "alice", store.BROADCAST, "kid", reply_to=root["id"], room=room["id"])
+    assert kid["thread_id"] == root["id"]
+    g = store.graph(c, root["id"], [room["id"]])
+    assert len(g["messages"]) == 2 and g["edges"] == [[root["id"], kid["id"]]]
+
+
+def test_trace_through_merge():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    a = store.send(c, "alice", store.BROADCAST, "a", room=room["id"])
+    b = store.send(c, "alice", store.BROADCAST, "b", room=room["id"])
+    m = store.send(c, "alice", store.BROADCAST, "merge",
+                   reply_to=[a["id"], b["id"]], room=room["id"])
+    t = store.trace(c, m["id"], [room["id"]])
+    assert {x["id"] for x in t["messages"]} == {a["id"], b["id"], m["id"]}
+
+
+def test_trace_refuses_a_message_outside_the_room():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    m = store.send(c, "alice", store.BROADCAST, "secret", room=room["id"])
     try:
-        store.delete_if_unseen(c, m2["id"], "a")
-        assert False, "should raise"
-    except store.BusError:
-        pass
-    assert store.readers(c, m2["id"], exclude="a") == ["b"]
-    try:
-        store.delete_if_unseen(c, m2["id"], "b")  # not the sender
-        assert False, "should raise"
-    except store.BusError:
-        pass
-
-
-def test_attachments_round_trip():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    att = [{"url": "/files/1-x.png", "name": "x.png", "bytes": 209},
-           {"url": "/files/2-y.pdf", "name": "y.pdf", "bytes": 1024}]
-    m = store.send(c, "a", "b", "see attached", attachments=att)
-    box = store.inbox(c, "b")
-    assert box[0]["attachments"] == att, "inbox must carry the 1-n attachment list"
-    assert store.search(c, keywords=["attached"])[0]["attachments"] == att
-    assert store.tail(c, limit=1)[0]["attachments"] == att
-    assert store.thread(c, m["thread_id"])[0]["attachments"] == att
-    # a plain message has an empty list, never a missing key
-    store.send(c, "a", "b", "no files")
-    assert store.tail(c, limit=1)[0]["attachments"] == []
-
-
-def test_tail_recent_and_since_id():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    ids = [store.send(c, "a", "b", f"m{i}")["id"] for i in range(5)]
-    assert [m["body"] for m in store.tail(c, limit=2)] == ["m3", "m4"]
-    after = store.tail(c, since_id=ids[2])
-    assert [m["body"] for m in after] == ["m3", "m4"]
-    assert store.known(c, "a") and not store.known(c, "ghost")
-
-
-def test_threading_reply_inherits_thread_and_parent():
-    c = db()
-    store.join(c, "alice", "TAG_a")
-    store.join(c, "bob", "TAG_b")
-    root = store.send(c, "alice", "bob", "question?")
-    reply = store.send(c, "bob", "alice", "answer.", reply_to=root["id"])
-    assert reply["thread_id"] == root["thread_id"], "reply must inherit the root thread"
-    t = store.thread(c, root["thread_id"])
-    assert [m["body"] for m in t] == ["question?", "answer."]
-    assert t[1]["parent_id"] == root["id"]
-
-
-def test_deep_thread_keeps_one_thread_id():
-    c = db()
-    store.join(c, "a", "TA")
-    store.join(c, "b", "TB")
-    m1 = store.send(c, "a", "b", "1")
-    m2 = store.send(c, "b", "a", "2", reply_to=m1["id"])
-    m3 = store.send(c, "a", "b", "3", reply_to=m2["id"])  # reply to a reply
-    assert m3["thread_id"] == m1["thread_id"]
-    assert len(store.thread(c, m1["thread_id"])) == 3
-
-
-def test_fork_one_parent_many_children():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    root = store.send(c, "a", "b", "topic")
-    b1 = store.send(c, "b", "a", "branch-1", reply_to=root["id"])
-    b2 = store.send(c, "b", "a", "branch-2", reply_to=root["id"])
-    g = store.graph(c, root["thread_id"])
-    assert {tuple(e) for e in g["edges"]} == {(root["id"], b1["id"]), (root["id"], b2["id"])}
-    # both branches name the same parent
-    by_id = {m["id"]: m for m in g["messages"]}
-    assert by_id[b1["id"]]["parents"] == [root["id"]]
-    assert by_id[b2["id"]]["parents"] == [root["id"]]
-
-
-def test_relink_merge_many_parents():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    root = store.send(c, "a", "b", "topic")
-    b1 = store.send(c, "b", "a", "branch-1", reply_to=root["id"])
-    b2 = store.send(c, "b", "a", "branch-2", reply_to=root["id"])
-    merge = store.send(c, "a", "b", "merge", reply_to=[b1["id"], b2["id"]])
-    assert merge["parents"] == [b1["id"], b2["id"]]
-    assert merge["thread_id"] == root["thread_id"]  # joins the primary parent's thread
-    g = store.graph(c, root["thread_id"])
-    by_id = {m["id"]: m for m in g["messages"]}
-    assert sorted(by_id[merge["id"]]["parents"]) == sorted([b1["id"], b2["id"]])
-
-
-def test_trace_back_through_fork_and_merge():
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    root = store.send(c, "a", "b", "topic")
-    b1 = store.send(c, "b", "a", "branch-1", reply_to=root["id"])
-    b2 = store.send(c, "b", "a", "branch-2", reply_to=root["id"])
-    merge = store.send(c, "a", "b", "merge", reply_to=[b1["id"], b2["id"]])
-    tr = store.trace(c, merge["id"])
-    ids = {m["id"] for m in tr["messages"]}
-    assert ids == {root["id"], b1["id"], b2["id"], merge["id"]}, "trace must reach every ancestor"
-    # the merge's two incoming edges are both present in the back-trace
-    assert [b1["id"], merge["id"]] in tr["edges"]
-    assert [b2["id"], merge["id"]] in tr["edges"]
-
-
-def test_trace_excludes_unrelated_siblings():
-    # A sibling branch you did NOT descend from must not appear in your back-trace.
-    c = db()
-    store.join(c, "a", "TA"); store.join(c, "b", "TB")
-    root = store.send(c, "a", "b", "topic")
-    mine = store.send(c, "b", "a", "mine", reply_to=root["id"])
-    _other = store.send(c, "b", "a", "other", reply_to=root["id"])
-    ids = {m["id"] for m in store.trace(c, mine["id"])["messages"]}
-    assert ids == {root["id"], mine["id"]}, "unrelated sibling leaked into trace"
-
-
-def test_live_name_collision_blocks_stale_reclaims():
-    c = db()
-    store.join(c, "carol", "TAG_a")
-    try:
-        store.join(c, "carol", "TAG_other")  # live holder, different tag
-        assert False, "collision should raise"
-    except store.BusError:
-        pass
-    _age(c, "carol", 60 * 60)  # 1h > 40m TTL -> stale
-    store.join(c, "carol", "TAG_other")  # reclaim ok
-    assert store.whoami(c, "TAG_other") == "carol"
-
-
-def test_touch_keeps_live_and_prune_drops_stale():
-    c = db()
-    store.join(c, "ann", "T")
-    _age(c, "ann", 60 * 60)
-    assert not store.presence(c)[0]["live"]
-    store.touch(c, "ann")
-    assert store.presence(c)[0]["live"]
-    _age(c, "ann", 60 * 60)
-    assert store.prune(c) == ["ann"]
-    assert store.presence(c) == []
-
-
-def test_send_to_unknown_agent_errors():
-    c = db()
-    store.join(c, "alice", "TAG_a")
-    try:
-        store.send(c, "alice", "ghost", "hi")
-        assert False, "should raise"
+        store.trace(c, m["id"], [r2["id"]])
+        assert False, "expected BusError"
     except store.BusError:
         pass
 
 
-def test_same_name_rejoin_same_tag_ok():
-    # A session that re-runs join (reload) keeps its name; no collision against itself.
+def test_attachments_roundtrip():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    store.send(c, "alice", "bob", "see attached", room=room["id"],
+               attachments=[{"url": "/files/x", "name": "x.md", "bytes": 12}])
+    inb = store.inbox(c, "bob", [room["id"]])
+    assert inb[0]["attachments"][0]["name"] == "x.md"
+
+
+def test_retract_only_while_unseen():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+    m = store.send(c, "alice", "bob", "oops", room=room["id"])
+    store.delete_if_unseen(c, m["id"], "alice", [room["id"]])
+    assert store.inbox(c, "bob", [room["id"]]) == []
+    m2 = store.send(c, "alice", "bob", "seen", room=room["id"])
+    store.ack(c, "bob", [m2["id"]], [room["id"]])
+    try:
+        store.delete_if_unseen(c, m2["id"], "alice", [room["id"]])
+        assert False, "expected BusError"
+    except store.BusError:
+        pass
+
+
+# ---- prune / purge / retention -----------------------------------------------
+
+def test_prune_agent_reparents_survivors_to_thread_root():
+    c, admin, room, tok = fixture()
+    for n in ("alice", "bob", "mallory"):
+        store.join(c, n, f"T{n}", room["id"], tok["id"])
+    root = store.send(c, "alice", store.BROADCAST, "root", room=room["id"])
+    mid = store.send(c, "mallory", store.BROADCAST, "middle", reply_to=root["id"],
+                     room=room["id"])
+    leaf = store.send(c, "bob", store.BROADCAST, "leaf", reply_to=mid["id"], room=room["id"])
+    out = store.prune_agent(c, "mallory", room["id"])
+    assert out["messages"] == 1
+    r = c.execute("SELECT parent_id, thread_id FROM messages WHERE id=?", (leaf["id"],)).fetchone()
+    assert r["parent_id"] == root["id"]          # reparented, not orphaned
+    assert r["thread_id"] == root["id"]          # root is in its own thread: no cascade
+    # The links edge must move too -- trace()/graph() read links, never parent_id.
+    edges = {(x["parent_id"], x["child_id"]) for x in c.execute("SELECT * FROM links")}
+    assert (root["id"], leaf["id"]) in edges
+    assert not any(p == mid["id"] for p, _ in edges)
+    t = store.trace(c, leaf["id"], [room["id"]])
+    assert {x["id"] for x in t["messages"]} == {root["id"], leaf["id"]}
+
+
+def test_prune_agent_when_the_root_itself_dies():
+    c, admin, room, tok = fixture()
+    for n in ("bob", "mallory"):
+        store.join(c, n, f"T{n}", room["id"], tok["id"])
+    root = store.send(c, "mallory", store.BROADCAST, "his root", room=room["id"])
+    kid = store.send(c, "bob", store.BROADCAST, "survivor", reply_to=root["id"],
+                     room=room["id"])
+    grand = store.send(c, "bob", store.BROADCAST, "grandkid", reply_to=kid["id"],
+                       room=room["id"])
+    store.prune_agent(c, "mallory", room["id"])
+    r = c.execute("SELECT parent_id, thread_id FROM messages WHERE id=?", (kid["id"],)).fetchone()
+    assert r["parent_id"] is None and r["thread_id"] == kid["id"]   # became a root
+    g = c.execute("SELECT thread_id FROM messages WHERE id=?", (grand["id"],)).fetchone()
+    assert g["thread_id"] == kid["id"]                              # cascade followed
+
+
+def test_rethread_walks_parent_id_not_links():
+    """The live DB has 108 link edges that cross threads. A cascade over `links`
+    would re-thread whole unrelated conversations; the primary-parent forest is the
+    only safe spine."""
+    c, admin, room, tok = fixture()
+    for n in ("bob", "mallory"):
+        store.join(c, n, f"T{n}", room["id"], tok["id"])
+    root = store.send(c, "mallory", store.BROADCAST, "his root", room=room["id"])
+    kid = store.send(c, "bob", store.BROADCAST, "survivor", reply_to=root["id"],
+                     room=room["id"])
+    # A separate thread, merged into kid by a NON-primary edge (kid stays primary).
+    other = store.send(c, "bob", store.BROADCAST, "other thread", room=room["id"])
+    merge = store.send(c, "bob", store.BROADCAST, "merge",
+                       reply_to=[kid["id"], other["id"]], room=room["id"])
+    before = c.execute("SELECT thread_id FROM messages WHERE id=?", (other["id"],)).fetchone()[0]
+    store.prune_agent(c, "mallory", room["id"])
+    after = c.execute("SELECT thread_id FROM messages WHERE id=?", (other["id"],)).fetchone()[0]
+    assert before == after == other["id"]        # untouched: reached only by a link edge
+    assert c.execute("SELECT thread_id FROM messages WHERE id=?",
+                     (merge["id"],)).fetchone()[0] == kid["id"]   # primary spine followed
+
+
+def test_prune_agent_keeps_broadcasts_he_only_received():
+    c, admin, room, tok = fixture()
+    for n in ("alice", "mallory"):
+        store.join(c, n, f"T{n}", room["id"], tok["id"])
+    m = store.send(c, "alice", store.BROADCAST, "all hands", room=room["id"])
+    store.prune_agent(c, "mallory", room["id"])
+    assert [x["id"] for x in store.tail(c, rooms=[room["id"]])] == [m["id"]]
+
+
+def test_purge_room_leaves_nothing():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.send(c, "alice", store.BROADCAST, "bye", room=room["id"],
+               attachments=[{"url": "/files/x", "name": "x", "bytes": 1}])
+    store.purge_room(c, room["id"], admin["id"])
+    assert store.get_room(c, room["id"]) is None
+    for t in ("messages", "reads", "links", "attachments", "members", "token_rooms"):
+        assert c.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0, t
+
+
+def test_purge_room_refused_to_non_owner():
+    c, admin, room, tok = fixture()
+    dana = store.create_user(c, "dana", "hunter2hunter2")
+    try:
+        store.purge_room(c, room["id"], dana["id"])
+        assert False, "expected AccessError"
+    except store.AccessError:
+        pass
+
+
+def test_retention_drops_whole_threads_and_defaults_to_infinite():
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    root = store.send(c, "alice", store.BROADCAST, "old root", room=room["id"])
+    kid = store.send(c, "alice", store.BROADCAST, "recent reply", reply_to=root["id"],
+                     room=room["id"])
+    old = time.time_ns() - 10 * 86400 * 1_000_000_000
+    c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (old, root["id"]))
+    assert store.sweep_retention(c) == 0                  # retention_ns NULL: infinite
+    store.set_retention(c, room["id"], admin["id"], 5 * 86400 * 1_000_000_000)
+    assert store.sweep_retention(c) == 0                  # thread is alive: kid is recent
+    c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (old, kid["id"]))
+    assert store.sweep_retention(c) == 2                  # whole thread, no orphan left
+    assert store.tail(c, rooms=[room["id"]]) == []
+
+
+# ---- migration ---------------------------------------------------------------
+
+def _v0_db():
+    """A pre-rooms database, exactly as 0.1.5 shipped it."""
+    path = os.path.join(tempfile.mkdtemp(), "broker.db")
+    c = sqlite3.connect(path, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.executescript("""
+        CREATE TABLE agents (name TEXT PRIMARY KEY, tag TEXT, url TEXT,
+            room TEXT NOT NULL DEFAULT '', joined_ns INTEGER, seen_ns INTEGER);
+        CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER,
+            parent_id INTEGER REFERENCES messages(id), sender TEXT NOT NULL,
+            recipient TEXT NOT NULL, subject TEXT DEFAULT '', body TEXT NOT NULL,
+            room TEXT NOT NULL DEFAULT '', ts_ns INTEGER NOT NULL);
+        CREATE TABLE reads (message_id INTEGER, agent TEXT, read_ns INTEGER,
+            PRIMARY KEY (message_id, agent));
+        CREATE TABLE links (parent_id INTEGER, child_id INTEGER,
+            PRIMARY KEY (parent_id, child_id));
+        CREATE TABLE attachments (id INTEGER PRIMARY KEY, message_id INTEGER,
+            url TEXT, name TEXT, bytes INTEGER);
+    """)
+    now = time.time_ns()
+    c.execute("INSERT INTO agents VALUES('alice','TA',NULL,'W4keUpN0w',?,?)", (now, now))
+    for i in (1, 2, 3):
+        c.execute("INSERT INTO messages(id,thread_id,sender,recipient,body,room,ts_ns) "
+                  "VALUES(?,?,'alice','*','m','W4keUpN0w',?)", (i, i, now))
+    c.execute("INSERT INTO messages(id,thread_id,sender,recipient,body,room,ts_ns) "
+              "VALUES(4,4,'alice','*','other','retract-test',?)", (now,))
+    c.close()
+    return path
+
+
+def test_migration_v0_preserves_data_and_maps_rooms():
+    path = _v0_db()
+    c = store.connect(path)
+    assert store._version(c) == 0
+    store.migrate(c, path)
+    assert store._version(c) == store.SCHEMA_VERSION
+    names = {r["name"] for r in c.execute("SELECT name FROM rooms")}
+    assert names == {"W4keUpN0w", "retract-test"}
+    assert all(r["owner_id"] is None for r in c.execute("SELECT owner_id FROM rooms"))
+    assert c.execute("SELECT count(*) FROM messages").fetchone()[0] == 4
+    assert not store._table_exists(c, "agents")          # presence is a cache, not a record
+    assert len(c.execute("PRAGMA foreign_key_check").fetchall()) == 0
+    assert store.migrate(c, path) == store.SCHEMA_VERSION  # idempotent
+
+
+def test_migration_preserves_the_autoincrement_high_water_mark():
+    """DROP+RENAME resets sqlite_sequence to max(id). With a retracted newest
+    message that is BELOW the high-water mark, so the bus would re-issue an id that
+    already went out on the wire."""
+    path = _v0_db()
+    c = sqlite3.connect(path, isolation_level=None)
+    c.execute("DELETE FROM messages WHERE id=4")        # retract the newest
+    seq_before = c.execute("SELECT seq FROM sqlite_sequence WHERE name='messages'").fetchone()[0]
+    c.close()
+    assert seq_before == 4
+    c = store.connect(path)
+    store.migrate(c, path)
+    seq_after = c.execute("SELECT seq FROM sqlite_sequence WHERE name='messages'").fetchone()[0]
+    assert seq_after == 4, f"id high-water mark lost: {seq_after}"
+
+
+def test_migrate_refuses_a_newer_db():
     c = db()
-    store.join(c, "alice", "TAG_a")
-    store.join(c, "alice", "TAG_a")  # idempotent
-    assert store.whoami(c, "TAG_a") == "alice"
+    c.execute(f"PRAGMA user_version={store.SCHEMA_VERSION + 1}")
+    try:
+        store.migrate(c, "/tmp/x")
+        assert False, "expected BusError"
+    except store.BusError:
+        pass
+
+
+# ---- lessons -----------------------------------------------------------------
+
+def test_lessons_global_and_room_scoped():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.add_lesson(c, author="architect", slug="global-rule", symptom="s",
+                     root_cause="r", rule="do x", detection="grep x", room_id=None)
+    store.add_lesson(c, author="alice", slug="room-rule", symptom="s", root_cause="r",
+                     rule="do y", detection="grep y", room_id=room["id"])
+    store.add_lesson(c, author="carol", slug="other-rule", symptom="s", root_cause="r",
+                     rule="do z", detection="grep z", room_id=r2["id"])
+    got = {l["slug"] for l in store.lessons(c, [room["id"]])}
+    assert got == {"global-rule", "room-rule"}          # r2's lesson is not mine to see
+    assert {l["slug"] for l in store.lessons(c, [])} == {"global-rule"}
+
+
+def test_lesson_slug_replaces_rather_than_appends():
+    c, admin, room, tok = fixture()
+    for rule in ("first take", "sharper take"):
+        store.add_lesson(c, author="alice", slug="same-slug", symptom="s", root_cause="r",
+                         rule=rule, detection="d", room_id=room["id"])
+    ls = store.lessons(c, [room["id"]])
+    assert len(ls) == 1 and ls[0]["rule"] == "sharper take"
+
+
+def test_promote_lesson_to_global():
+    c, admin, room, tok = fixture()
+    store.add_lesson(c, author="alice", slug="generalises", symptom="s", root_cause="r",
+                     rule="do x", detection="d", room_id=room["id"])
+    store.promote_lesson(c, "generalises", room["id"])
+    assert store.lessons(c, [])[0]["scope"] == "global"   # visible with no rooms at all
+
+
+def test_last_admin_guard_holds_inside_the_transaction():
+    """The guard must read the admin count INSIDE the write transaction. Read it outside
+    and two admins deleting each other concurrently both see "2 admins", both proceed, and
+    the db is left with ZERO admins -- which nothing can undo, since only an admin can
+    make an admin. Here: prove the invariant survives deleting down to the last one."""
+    c, admin, room, tok = fixture()
+    second = store.create_user(c, "dana", "hunter2hunter2", role="admin")
+    store.delete_user(c, admin["id"])                  # 2 admins -> 1: allowed
+    assert store._admin_count(c) == 1
+    try:
+        store.delete_user(c, second["id"])             # 1 -> 0: refused
+        assert False, "expected BusError"
+    except store.BusError:
+        pass
+    try:
+        store.set_role(c, second["id"], "user")        # demote to 0 admins: refused
+        assert False, "expected BusError"
+    except store.BusError:
+        pass
+    assert store._admin_count(c) == 1                  # never reaches zero
+
+
+def test_deleting_a_user_does_not_delete_their_rooms_history():
+    c, admin, room, tok = fixture()
+    store.join(c, "bot", "T", room["id"], tok["id"])
+    store.send(c, "bot", store.BROADCAST, "still here", room=room["id"])
+    store.create_user(c, "dana", "hunter2hunter2", role="admin")
+    store.delete_user(c, admin["id"])
+    assert [m["body"] for m in store.tail(c, rooms=[room["id"]])] == ["still here"]
+
+
+def test_revoke_deletes_the_token_rather_than_tombstoning_it():
+    """A revoked token used to linger in list_tokens forever as a dead 'revoked' row.
+    With no audit log by design, a tombstone carries no information -- it is just the
+    sprawl purge exists to kill."""
+    c, admin, room, tok = fixture()
+    assert len(store.list_tokens(c, admin["id"])) == 1
+    store.revoke_token(c, tok["id"], admin["id"])
+    assert store.list_tokens(c, admin["id"]) == []          # gone from the list
+    assert store.resolve_token(c, tok["secret"]) is None    # and still instantly dead
+    assert c.execute("SELECT count(*) FROM token_rooms WHERE token_id=?",
+                     (tok["id"],)).fetchone()[0] == 0       # grants went with it
+
+
+def test_revoke_works_while_an_agent_is_joined_under_it():
+    """members.token_id REFERENCES tokens(id): without orphaning the membership first
+    this is a FOREIGN KEY violation and the token can never be revoked at all."""
+    c, admin, room, tok = fixture()
+    store.join(c, "bot", "T", room["id"], tok["id"])
+    store.revoke_token(c, tok["id"], admin["id"])
+    assert store.list_tokens(c, admin["id"]) == []
+    assert store.presence(c, [room["id"]])[0]["name"] == "bot"   # membership survives
+    assert store.presence(c, [room["id"]])[0]["token_id"] is None
+
+
+def test_revoke_refused_to_non_owner():
+    c, admin, room, tok = fixture()
+    dana = store.create_user(c, "dana", "hunter2hunter2")
+    try:
+        store.revoke_token(c, tok["id"], dana["id"])
+        assert False, "expected AccessError"
+    except store.AccessError:
+        pass
+    assert len(store.list_tokens(c, admin["id"])) == 1
+
+
+def test_admin_reset_password_drops_that_users_sessions():
+    c, admin, room, tok = fixture()
+    dana = store.create_user(c, "dana", "hunter2hunter2")
+    sess = store.create_session(c, dana["id"])
+    assert store.resolve_session(c, sess)
+    store.set_password(c, dana["id"], "brand-new-password")
+    assert store.authenticate(c, "dana", "brand-new-password")
+    assert not store.authenticate(c, "dana", "hunter2hunter2")   # old one is dead
+    # A reset that left a stolen session alive would not be a reset.
+    assert store.resolve_session(c, sess) is None
+
+
+def test_change_password_requires_the_current_one():
+    c, admin, room, tok = fixture()
+    try:
+        store.change_password(c, admin["id"], "wrong-password", "brand-new-password")
+        assert False, "expected AuthError"
+    except store.AuthError:
+        pass
+    assert store.authenticate(c, "travis", "hunter2hunter2")     # unchanged
+
+
+def test_change_password_evicts_every_session():
+    c, admin, room, tok = fixture()
+    a, b = store.create_session(c, admin["id"]), store.create_session(c, admin["id"])
+    store.change_password(c, admin["id"], "hunter2hunter2", "brand-new-password")
+    assert store.resolve_session(c, a) is None and store.resolve_session(c, b) is None
+    assert store.authenticate(c, "travis", "brand-new-password")
+
+
+def test_password_rules_apply_to_reset_and_change():
+    c, admin, room, tok = fixture()
+    for fn in (lambda: store.set_password(c, admin["id"], "short"),
+               lambda: store.change_password(c, admin["id"], "hunter2hunter2", "short")):
+        try:
+            fn()
+            assert False, "expected BusError"
+        except store.BusError:
+            pass
+    assert store.authenticate(c, "travis", "hunter2hunter2")     # still the old one
+
+
+def test_files_are_room_scoped():
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.record_file(c, "123-secret.png", room["id"], "alice")
+    assert store.file_room(c, "123-secret.png") == room["id"]
+    assert store.file_room(c, "no-such-file") is None      # unknown -> 404, not a leak
+    # the daemon refuses when file_room is not in the caller's rooms; prove the binding
+    assert store.file_room(c, "123-secret.png") != r2["id"]
+
+
+def test_v3_backfills_file_rooms_from_attachments():
+    """/files is room-scoped and 404s anything without a files row -- so attachments that
+    predate that table would be permanently unreachable with their bytes stranded on
+    disk. The room is recoverable: the attachment's message names it."""
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.send(c, "alice", store.BROADCAST, "see attached", room=room["id"],
+               attachments=[{"url": "/files/99-old.png", "name": "old.png", "bytes": 4}])
+    c.execute("DELETE FROM files")                          # simulate a pre-v4 db
+    c.execute("PRAGMA user_version=3")
+    assert store.file_room(c, "99-old.png") is None         # would 404
+    store.migrate(c, ":memory-not-used:")
+    assert store._version(c) == store.SCHEMA_VERSION
+    assert store.file_room(c, "99-old.png") == room["id"]   # reachable again
 
 
 if __name__ == "__main__":
-    tests = [v for k, v in sorted(globals().items())
-             if k.startswith("test_") and callable(v)]
-    for fn in tests:
-        fn()
-        print(f"ok  {fn.__name__}")
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print(f"ok  {t.__name__}")
     print(f"\n{len(tests)} passed")

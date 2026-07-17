@@ -10,10 +10,15 @@ Why a daemon now: a Claude session on another machine (e.g. a Mac doing iOS work
 can't share a local file/SQLite. So the data lives here and every machine -- local
 or remote -- talks to this one broker.
 
-Identity: each agent's MCP registration sends a static `X-Agent: <name>` header;
-tools resolve "me" from it. Auth: an optional shared `AGENTBUS_TOKEN` (Bearer on
-HTTP, ?token= on the WS). The key names an isolated ROOM -- same key, same room;
-possession of a key is access. Unset/blank = the open room.
+Two principals, two credentials:
+  - an AGENT presents `Authorization: Bearer $REVEILLE_TOKEN` (?token= on a WS) and
+    `X-Agent: $REVEILLE_AGENT_ROLE`. The token does NOT name or encode a room: the
+    broker maps it, server-side and live on every request, to the set of rooms it may
+    see. So assigning, unassigning and revoking all land on the very next call.
+  - a WEB USER logs in with a password and carries a session cookie. Users own rooms,
+    mint tokens, and manage other users if they are admins.
+An unknown or revoked credential is a 401 -- there is no open room, and a bad token
+no longer silently opens an empty one.
 
 Wake: each agent arms `wake --once` as a harness background task -- a tiny WS client
 that connects with the agent's name and holds the socket (0 tokens). The daemon pushes
@@ -23,16 +28,13 @@ No keystroke injection anywhere. One held connection, one wake per gate cycle.
 """
 import asyncio
 import contextlib
-import fcntl
 import logging
 import os
 import pathlib
-import pty
 import re
-import struct
-import termios
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -43,32 +45,45 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from agentbus import __version__, store
 
-# scripts/agent in this repo -- the web terminal spawns it to launch a session in tmux.
-AGENT_BIN = str(pathlib.Path(__file__).resolve().parents[2] / "scripts" / "agent")
-
-TOKEN = os.environ.get("AGENTBUS_TOKEN") or None  # None = open (trusted LAN)
+COOKIE = "rev_session"
+SWEEP_SECS = 3600
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
-USAGE = """AGENTBUS usage. Source: usage() tool or GET /usage. Tool signatures are in your
+USAGE = """REVEILLE usage. Source: usage() tool or GET /usage. Tool signatures are in your
 MCP tool schemas; this is only what they don't cover. Ends with CHANGES: per-version
 behavior changes -- re-read after any broker version bump (info() or GET /version).
 
 ENV (set by the launching pane; never hardcode or prompt):
-  $AGENT_ROLE      your bus name (the X-Agent header). Unset -> you are "unset-agent".
-  $AGENTBUS_TOKEN  your ROOM KEY. Sessions presenting the same key share one isolated
-                   room (messages, presence, wake). A different key = a different room.
+  $REVEILLE_AGENT_ROLE  your bus name (the X-Agent header). Unset -> "unset-agent".
+  $REVEILLE_TOKEN       your bus credential. It does NOT name a room and no room name
+                        is ever in your env: the broker maps your token, server-side,
+                        to the set of rooms you may see. Assign/revoke lands on your
+                        very next call. An unknown or revoked token is a 401.
+
+ROOMS: you may be in several. Every message you receive carries `room` (its id) and
+`room_name`. The rules are short:
+  - Reply IN THE ROOM THE MESSAGE CAME FROM. reply_to infers it from the parent; you
+    never pass room on a reply.
+  - Starting a NEW thread: with one room you pass nothing (nothing changes for you).
+    With 2+ rooms you must pass room= -- you will get `room_required` listing them
+    rather than a guess, because a message posted into the wrong room cannot be undone.
+  - Carrying knowledge BETWEEN rooms (rare, and normally an orchestration request):
+    post a NEW root message in the target room quoting what you learned. A reply_to
+    across rooms is REFUSED -- that edge would drag one room's content into another.
 
 USE:
-1. Startup: join(url="http://<broker-host>:8765"). Join replays only the last 15 min of
-   backlog; recall further back ONLY when explicitly asked, via history(since=...).
+1. Startup: join(url="http://<broker-host>:8765"). You join every room your token holds;
+   join returns them. Join replays only the last 15 min of backlog; recall further back
+   ONLY when explicitly asked, via history(since=...).
 2. Reachability: arm a wake waiter as a harness background task (Bash with
    run_in_background=true): `wake --once --url ws://<broker-host>:8765/wake --name
-   $AGENT_ROLE --token $AGENTBUS_TOKEN`. It holds the socket at 0 tokens and exits on the
-   first ring, so its task-completion notification IS the ring -- no keystrokes, nothing
-   injected into anyone's prompt. On the notification: inbox(), ack(), act only if owed,
-   then RE-ARM the same command. A Stop hook (installed by scripts/agent) blocks ending a
-   turn while the waiter is unarmed. Only unicast rings; broadcasts queue silently.
+   $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. It holds the socket at 0 tokens and
+   exits on the first ring, so its task-completion notification IS the ring -- no
+   keystrokes, nothing injected into anyone's prompt. On the notification: inbox(),
+   ack(), act only if owed, then RE-ARM the same command. A Stop hook (installed by
+   scripts/agent) blocks ending a turn while the waiter is unarmed. One waiter covers
+   ALL your rooms. Only unicast rings; broadcasts queue silently.
    No waiter -> no real-time wake, but mail queues durably; inbox() each turn.
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
    Reply ONLY if: it names you in NEED:, blocks your work, or asks you a direct question.
@@ -82,40 +97,82 @@ USE:
    peers are actively building on the bad pattern.
    Anything else -> FINISH YOUR CURRENT TASK FIRST, then unicast the owner. A defect
    report is not an invitation to audit; the owner fixes it.
-5. Lessons: when a defect teaches something, append ONE entry to LESSONS.md at the root
-   of the repo you work in (create it from the template below). Never post lessons,
-   confessionals, or self-audits to the bus. Read your LESSONS.md at boot.
-
---- LESSONS.md entry template (hard cap 10 lines per entry) ---
-## <date> <slug>
-Symptom: what shipped or almost shipped broken
-Root cause: one sentence
-Rule: what to do differently, imperative
-Detection: grep/lint/test that catches recurrence
+5. Lessons: call lessons() AT BOOT -- global rules plus any scoped to your rooms. They
+   are defects the fleet already paid for. When a defect teaches you something, record it
+   with lesson_add(slug, symptom, root_cause, rule, detection): one distilled rule, not a
+   confessional, not a self-audit, not a scoreboard. Re-using a slug replaces it. Lessons
+   are a TOOL CALL, never a message -- they must never become bus traffic. An admin
+   promotes a room lesson to global when it generalises.
+   (This replaced the per-repo LESSONS.md, which only worked while every agent shared one
+   filesystem. Containerised agents do not.)
 
 --- CLAUDE.md block (replace any old agentbus section) ---
 ## Agent bus
-Identity/token from env, never hardcode: $AGENT_ROLE = my bus name, $AGENTBUS_TOKEN = secret.
-Startup: join(url="http://<broker-host>:8765") -- replays last 15 min only; older mail via
-history(since=...) ONLY when explicitly asked. Read LESSONS.md at repo root, if present.
+Identity/token from env, never hardcode: $REVEILLE_AGENT_ROLE = my bus name,
+$REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps it to my
+rooms server-side, so no room name ever goes in my env.
+Startup: join(url="http://<broker-host>:8765") -- I join every room my token holds; replays
+last 15 min only; older mail via history(since=...) ONLY when explicitly asked. Then
+lessons() -- rules the fleet already paid for.
 Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
-ws://<broker-host>:8765/wake --name $AGENT_ROLE --token $AGENTBUS_TOKEN`. Its task-completion
-notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. Unicast rings;
-broadcasts queue until my next turn. Waiter down -> mail still queues; inbox() each turn.
+ws://<broker-host>:8765/wake --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. Its
+task-completion notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. One
+waiter covers all my rooms. Unicast rings; broadcasts queue until my next turn. Waiter down
+-> mail still queues; inbox() each turn.
+Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
+infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
+refused -- to carry knowledge across, I post a new root message in the target room.
 Protocol: inbox(), ack() everything. Reply ONLY if named in NEED:, blocked, or asked
 directly. FYI/retraction/method-lesson -> ack + own notes, no reply. Broadcast ONLY if a
 shared contract changed or I block multiple peers. Nothing owed -> silence is a valid turn.
 reply_to to thread. DIRECTIVE:LEAVE to me -> leave().
 Defects: load-bearing (peers coding against it now) -> surface immediately (unicast owner
 NEED: + repro; broadcast only if several peers build on it). Anything else -> finish my
-current task first, then unicast the owner. Lessons -> one LESSONS.md entry (template via
-usage()), never bus traffic.
+current task first, then unicast the owner. Lessons -> lesson_add(), never bus traffic.
 Full reference: usage() or GET <broker>/usage. Broker version bumped -> re-read usage(),
 its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.0  LESSONS.md moved onto the bus: lessons() at boot, lesson_add() to record one.
+       The file only ever worked because every agent shared a filesystem; containerised
+       agents each have their own. room_id NULL = a global lesson; otherwise it is scoped
+       to one room. Still a tool call, never a message -- lessons are not bus traffic.
+0.2.0  BREAKING, fleet flag day. $AGENTBUS_TOKEN -> $REVEILLE_TOKEN and $AGENT_ROLE ->
+       $REVEILLE_AGENT_ROLE. Every machine re-runs `make register`; every .envrc is
+       rewritten. A stale $AGENTBUS_TOKEN now 401s, and `wake --once` correctly
+       refuses to retry a reject -- so an un-migrated agent goes quiet rather than
+       hot-looping. That is the intended failure mode: loud, not silent.
+0.2.0  Your token no longer NAMES a room -- it is a credential the broker maps to a
+       SET of rooms, server-side, read live on every request. Assigning a room,
+       unassigning it, revoking the token, or an owner flipping a room private all
+       take effect on your very next call. Nothing to re-issue, nothing to restart.
+0.2.0  Rooms are real: a uuid plus a human name, owned by a user. Names are unique per
+       OWNER, not globally, so the web shows them as "owner -> room". A room can be
+       public (other users may attach it to their tokens) or private.
+0.2.0  Messages carry `room` and `room_name` everywhere (inbox/history/thread/feed).
+       REPLY IN THE ROOM THE MESSAGE CAME FROM -- reply_to infers the room from the
+       parent and a room= that disagrees is refused. A NEW thread with 2+ rooms in
+       reach requires room=; you get `room_required` with the list instead of a guess,
+       because posting into the wrong room cannot be undone.
+0.2.0  Cross-room reply_to is REFUSED. To carry knowledge between rooms (rare, usually
+       an orchestration request) post a NEW root message in the target room quoting
+       what you learned. Knowledge crosses; the thread edge does not -- that edge is
+       what would leak one room's content into another via trace()/graph().
+0.2.0  ack() is room-scoped. It was not: any agent could mark any id in any room read.
+       Ids outside your rooms (or not addressed to you) are now IGNORED, not fatal --
+       ack stays a safe batch. It returns {acked, ignored} instead of the input count.
+0.2.0  Real 401s. A bad token used to open a fresh empty room, so a typo looked exactly
+       like a quiet bus. There is no open room any more.
+0.2.0  The web is user/pass with roles. First visit bootstraps the first admin; admins
+       add users. Rooms, tokens (generate/list/revoke, shown once), per-room retention
+       TTL (default infinite), prune-agent and purge-room all live there. Destructive
+       ops snapshot the DB first.
+0.2.0  /upload and /files are room-scoped. They took no room and no token at all: any
+       caller who learned a filename got the bytes.
+0.2.0  /terminal and /term are DELETED. They exec'd `agent <role>` on a pty gated only
+       on the shared secret, on a host binding 0.0.0.0. Use ssh + tmux attach.
 0.1.5  Retract-if-unseen: the web UI can DELETE /message/<id> for the sender's own
        message while nobody has read or replied to it (mistaken-broadcast eraser).
        Refused with 409 the moment any read or reply exists. Feed emits
@@ -174,30 +231,39 @@ log = logging.getLogger("agentbus")  # logs client name + thread id per op; leve
 
 _conn = None  # one connection, used only from the event-loop thread (async tools)
 
-# In-process wake registry: name -> set of asyncio.Queue, one per connected wake.py.
-# send() notifies; the WS handler awaiting the queue pushes a frame and the client
-# exits. This is the wake signal -- the message itself stays in SQLite, read over MCP.
-_waiters: dict[tuple, set] = {}  # (room, name) -> wake queues
+# In-process wake registry: (token_id, name) -> set of asyncio.Queue, one per connected
+# wake.py. send() notifies; the WS handler awaiting the queue pushes a frame and the
+# client exits. This is the wake signal -- the message itself stays in SQLite, read over
+# MCP. Keyed by TOKEN, not room: one agent = one token = one socket = one prompt, however
+# many rooms it holds.
+_waiters: dict[tuple, set] = {}  # (token_id, name) -> wake queues
 
-# Poke gate: one outstanding wake per agent. A pushed frame sets name -> ts here; no
-# further frames are pushed until the agent polls inbox() (its ack), so wake notifications
-# never stack up on a busy agent. The TTL is the escape hatch for a lost frame (waiter
-# died before the agent saw it): after it, waking resumes.
-_poke_pending: dict[str, int] = {}
+# Poke gate: one outstanding wake per AGENT (not per agent-room). A pushed frame sets
+# (token_id, name) -> ts here; no further frames are pushed until the agent polls inbox()
+# (its ack), so wake notifications never stack up on a busy agent. Keying this per room
+# would let a 3-room agent take 3 rings for one turn -- exactly the storm the gate exists
+# to prevent, and inbox() unions the rooms anyway so one ring covers them all. The TTL is
+# the escape hatch for a lost frame (waiter died before the agent saw it).
+_poke_pending: dict[tuple, int] = {}
 POKE_TTL_NS = 10 * 60 * 1_000_000_000
 
 
-def _poke_ok(name):
-    ts = _poke_pending.get(name)
+def _poke_ok(key):
+    ts = _poke_pending.get(key)
     return ts is None or time.time_ns() - ts > POKE_TTL_NS
 
 mcp = FastMCP("agentbus", stateless_http=True, json_response=True)
 
 
-def _notify(room, names):
+def _notify(room_id, names):
+    """Ring the waiters of every token that holds this room. The token_rooms lookup is
+    what makes a revoke instant: a revoked token stops ringing without reconnecting."""
+    toks = [r["token_id"] for r in _conn.execute(
+        "SELECT token_id FROM token_rooms WHERE room_id=?", (room_id,))]
     for n in names:
-        for q in list(_waiters.get((room, n), ())):
-            q.put_nowait(None)
+        for t in toks:
+            for q in list(_waiters.get((t, n), ())):
+                q.put_nowait(None)
 
 
 _SHUTDOWN = {"shutdown": True}
@@ -225,17 +291,23 @@ def _feed_push(room, msg):
             q.put_nowait(msg)
 
 
-def _me(ctx: Context) -> str:
-    req = ctx.request_context.request
-    name = req.headers.get("x-agent") if req else None
-    if not name:
-        raise ValueError("missing X-Agent header (set it in your MCP registration)")
-    return name
+@dataclass(frozen=True)
+class Principal:
+    """Who is calling. Either an agent (bearer token) or a web user (session cookie).
+
+    `rooms` is resolved LIVE on every request -- never cached -- which is what makes an
+    assign, an unassign, a revoke, or an owner flipping a room private land on the very
+    next call with nothing to re-issue.
+    """
+    kind: str                       # 'agent' | 'user'
+    name: str
+    user_id: str = ""
+    token_id: str = ""
+    is_admin: bool = False
+    rooms: dict = field(default_factory=dict)   # room_id -> room_name
 
 
-def _room_of(request) -> str:
-    """The room key this request presented: Bearer token or ?token=. '' = open room.
-    A key is a capability -- possession IS access; unknown keys open fresh rooms."""
+def _bearer(request):
     if request is None:
         return ""
     auth = request.headers.get("authorization") or ""
@@ -244,13 +316,60 @@ def _room_of(request) -> str:
     return request.query_params.get("token") or ""
 
 
-def _room(ctx: Context) -> str:
-    return _room_of(ctx.request_context.request)
+def _agent_principal(request):
+    """Resolve a bearer token to an agent principal, or raise AuthError -> 401.
+    There is no anonymous fallback and no open room: an unknown or revoked token is
+    rejected, not quietly given an empty room of its own.
+
+    X-Agent is NOT required here. The token proves which rooms you may read; a name is
+    only needed to act as somebody (send, ack, join), and _me() demands it there. A
+    plain `curl -H 'Authorization: Bearer ...' /messages` carries no X-Agent and must
+    still work.
+    """
+    secret = _bearer(request)
+    if not secret:
+        raise store.AuthError("missing token")
+    tok = store.resolve_token(_conn, secret)
+    if not tok:
+        raise store.AuthError("bad token")
+    name = (request.headers.get("x-agent") if request else "") or ""
+    return Principal(kind="agent", name=name, user_id=tok["owner_id"],
+                     token_id=tok["id"], rooms=store.rooms_for_token(_conn, tok["id"]))
 
 
-def _seen(name):
+def _user_principal(request):
+    """Resolve a session cookie to a web-user principal, or raise AuthError -> 401.
+    A user's rooms are the ones they own plus every public room -- the web plane is
+    people; tokens are the agent plane."""
+    u = store.resolve_session(_conn, request.cookies.get(COOKIE) if request else None)
+    if not u:
+        raise store.AuthError("no session")
+    rooms = {r["id"]: r["name"] for r in store.list_rooms(_conn, u["id"])}
+    rooms.update({r["id"]: r["name"] for r in store.public_rooms(_conn)})
+    return Principal(kind="user", name=u["name"], user_id=u["id"],
+                     is_admin=u["role"] == "admin", rooms=rooms)
+
+
+def _principal(request):
+    """Either credential. Used by the surfaces both planes share (feed, messages,
+    presence, send, upload, files)."""
+    if _bearer(request):
+        return _agent_principal(request)
+    return _user_principal(request)
+
+
+def _me(request) -> Principal:
+    """An agent that is about to ACT: the name is mandatory here, because everything
+    downstream (send, ack, join, leave) is attributed to it."""
+    p = _agent_principal(request)
+    if not p.name:
+        raise store.AuthError("missing X-Agent header (set it in your MCP registration)")
+    return p
+
+
+def _seen(name, rooms):
     with contextlib.suppress(store.BusError):
-        store.touch(_conn, name)  # heartbeat if joined; no-op otherwise
+        store.touch(_conn, name, rooms)  # heartbeat if joined; no-op otherwise
 
 
 # ---- MCP tools (async -> run on the loop thread, so one sqlite conn is safe) ----
@@ -259,23 +378,65 @@ def _seen(name):
 async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context = None) -> dict:
     """Join the bus, telling it where you reach the broker (`url`, e.g.
     http://bigbox.local:8765). Your identity is your X-Agent header (set per session
-    from $AGENT_ROLE); pass `name` only to assert it matches. Replays only the last
+    from $REVEILLE_AGENT_ROLE); pass `name` only to assert it matches. You join every
+    room your token holds. Replays only the last
     15 min of backlog (use history(since=...) to recall further back, only when
     explicitly asked); fresh=True skips the backlog. Returns {name, wake_url, unread}."""
-    me = _me(ctx)
-    if name and name != me:
-        raise ValueError(f"join name {name!r} must match your X-Agent header {me!r}")
-    room = _room(ctx)
-    store.join(_conn, me, tag=me, fresh=fresh, url=url or None, room=room)
-    unread = len(store.inbox(_conn, me, room=room))
-    log.info("%s join url=%s unread=%s", me, url or "-", unread)
-    return {"name": me, "wake_url": _wake_url_from(url), "unread": unread}
+    p = _me(ctx.request_context.request)
+    if name and name != p.name:
+        raise ValueError(f"join name {name!r} must match your X-Agent header {p.name!r}")
+    for rid in p.rooms:
+        store.join(_conn, p.name, tag=p.name, room_id=rid, token_id=p.token_id,
+                   fresh=fresh, url=url or None)
+    unread = len(store.inbox(_conn, p.name, p.rooms))
+    rooms = [{"id": r, "name": n} for r, n in p.rooms.items()]
+    log.info("%s join url=%s rooms=%s unread=%s", p.name, url or "-", len(rooms), unread)
+    return {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
+            "unread": unread}
+
+
+@mcp.tool()
+async def rooms(ctx: Context = None) -> dict:
+    """The rooms your token can reach, as {"rooms": [{id, name}]}. This is discovery:
+    no room name is ever in your env -- the broker maps your token to them."""
+    p = _me(ctx.request_context.request)
+    return {"rooms": [{"id": r, "name": n} for r, n in p.rooms.items()]}
+
+
+@mcp.tool()
+async def lessons(ctx: Context = None) -> dict:
+    """Distilled defect post-mortems: every GLOBAL lesson plus any scoped to your rooms,
+    newest first. Read these at boot -- they are rules the fleet already paid for.
+
+    This replaces the per-repo LESSONS.md, which only ever worked because every agent
+    shared one filesystem. Yours may not."""
+    p = _me(ctx.request_context.request)
+    return {"lessons": store.lessons(_conn, p.rooms)}
+
+
+@mcp.tool()
+async def lesson_add(slug: str, symptom: str, root_cause: str, rule: str,
+                     detection: str, room: str = "", ctx: Context = None) -> dict:
+    """Record ONE lesson when a defect taught something. Not a confessional, not a
+    self-audit, not a scoreboard: symptom, root cause, the imperative rule, and the
+    check that catches a recurrence. Re-using a slug replaces that lesson.
+
+    room= scopes it to one room (default: your only room). Lessons are a tool call, never
+    a message -- they must not become bus traffic. An admin promotes one to global when it
+    generalises."""
+    p = _me(ctx.request_context.request)
+    rid = store.resolve_send_room(p.rooms, room=room or None)
+    out = store.add_lesson(_conn, author=p.name, slug=slug, symptom=symptom,
+                           root_cause=root_cause, rule=rule, detection=detection,
+                           room_id=rid)
+    log.info("%s lesson %s (room=%s)", p.name, slug, p.rooms.get(rid))
+    return out
 
 
 @mcp.tool()
 async def whoami(ctx: Context = None) -> str:
     """Your bus name for this session (from the X-Agent header)."""
-    return _me(ctx)
+    return _me(ctx.request_context.request).name
 
 
 @mcp.tool()
@@ -291,82 +452,110 @@ async def usage(ctx: Context = None) -> str:
 async def info(ctx: Context = None) -> str:
     """Reveille status banner: tool version, your bus name, and whether your wake waiter
     is attached right now. Call it on boot to confirm the bus works end to end."""
-    me = _me(ctx)
-    attached = bool(_waiters.get((_room(ctx), me)))
-    return (f"Reveille v{__version__} -- you are '{me}' -- "
+    p = _me(ctx.request_context.request)
+    attached = bool(_waiters.get((p.token_id, p.name)))
+    rooms = ", ".join(p.rooms.values()) or "none"
+    return (f"Reveille v{__version__} -- you are '{p.name}' -- rooms: {rooms} -- "
             f"wake waiter: {'ATTACHED (real-time wake)' if attached else 'NOT ARMED (no real-time wake -- arm wake --once)'}")
+
+
+def _parent_room(reply_to):
+    """The room a reply lands in, taken from its parent. Never from the caller: a
+    stale token must not be able to re-route a reply into a room it has lost."""
+    if reply_to is None:
+        return None
+    first = reply_to if isinstance(reply_to, int) else list(reply_to)[0]
+    r = _conn.execute("SELECT room FROM messages WHERE id=?", (first,)).fetchone()
+    if not r:
+        raise store.BusError(f"reply_to {first}: no such message")
+    return r["room"]
 
 
 @mcp.tool()
 async def send(to: str, body: str, subject: str = "",
                reply_to: int | list[int] | None = None,
-               attachments: list | None = None, ctx: Context = None) -> dict:
+               attachments: list | None = None, room: str = "",
+               ctx: Context = None) -> dict:
     """Send a message. to='*' broadcasts; else unicast to one agent. reply_to is a
     message id (or list, to merge branches). attachments: optional list of
     {"url","name","bytes"} dicts referencing files uploaded via POST /upload.
+
+    room: leave it empty on a REPLY -- the room is inferred from the parent, and a
+    room that disagrees is refused. On a NEW thread, leave it empty when your token
+    holds exactly one room; with 2+ you must name one, or you get `room_required`
+    listing them (a guess could post into the wrong room, which cannot be undone).
+    Replies never cross rooms: to carry knowledge into another room, post a new root
+    message there.
+
     Unicast pushes the recipient awake over WS; broadcasts queue silently and are
     read on each recipient's next turn. Returns {id, thread_id, parents, delivered_to}."""
-    me = _me(ctx)
-    _seen(me)
-    room = _room(ctx)
-    res = store.send(_conn, me, to, body, subject=subject, reply_to=reply_to,
-                     attachments=attachments, room=room)
+    p = _me(ctx.request_context.request)
+    _seen(p.name, p.rooms)
+    rid = store.resolve_send_room(p.rooms, room=room or None,
+                                  parent_room=_parent_room(reply_to))
+    res = store.send(_conn, p.name, to, body, subject=subject, reply_to=reply_to,
+                     attachments=attachments, room=rid)
     # broadcasts never wake: delivery != wakeup, kills N^2 storms. Log the woke list
     # honestly -- res["wake"] is the DELIVERY list; only unicast actually pokes it.
     woke = res["wake"] if to != store.BROADCAST else []
-    _notify(room, woke)
-    _feed_push(room, {"id": res["id"], "thread_id": res["thread_id"],
-                "parents": res["parents"], "from": me, "to": to, "subject": subject,
-                "body": body, "attachments": attachments or [], "ts_ns": time.time_ns()})
-    log.info("%s send -> %s thread=%s id=%s%s delivered=%s woke=%s",
-             me, to, res["thread_id"], res["id"],
+    _notify(rid, woke)
+    _feed_push(rid, {"id": res["id"], "thread_id": res["thread_id"],
+                "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
+                "body": body, "room": rid, "room_name": p.rooms.get(rid),
+                "attachments": attachments or [], "ts_ns": time.time_ns()})
+    log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s woke=%s",
+             p.name, to, p.rooms.get(rid), res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
-    return {"id": res["id"], "thread_id": res["thread_id"],
+    return {"id": res["id"], "thread_id": res["thread_id"], "room": rid,
             "parents": res["parents"], "delivered_to": res["wake"]}
 
 
 @mcp.tool()
 async def inbox(ctx: Context = None) -> dict:
-    """Your unread messages (direct + broadcast), oldest first, as {"messages": [...]}.
-    Non-destructive: ack(message_ids) when processed."""
-    me = _me(ctx)
-    _seen(me)
-    room = _room(ctx)
-    _poke_pending.pop((room, me), None)  # the wake poll: acks the poke, re-arms the gate
-    msgs = store.inbox(_conn, me, room=room)
-    log.info("%s inbox -> %s unread", me, len(msgs))
+    """Your unread messages (direct + broadcast) across ALL your rooms, oldest first,
+    as {"messages": [...]}. Each carries `room`/`room_name` -- reply in the room it
+    came from. Non-destructive: ack(message_ids) when processed."""
+    p = _me(ctx.request_context.request)
+    _seen(p.name, p.rooms)
+    # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
+    # this one call covers every room, so one ring was the right number.
+    _poke_pending.pop((p.token_id, p.name), None)
+    msgs = store.inbox(_conn, p.name, p.rooms)
+    log.info("%s inbox -> %s unread across %s room(s)", p.name, len(msgs), len(p.rooms))
     return {"messages": msgs}
 
 
 @mcp.tool()
 async def ack(message_ids: list[int], ctx: Context = None) -> dict:
-    """Mark messages read so they leave your inbox. Idempotent."""
-    me = _me(ctx)
-    n = store.ack(_conn, me, message_ids)
-    log.info("%s ack %s", me, n)
-    return {"acked": n}
+    """Mark messages read so they leave your inbox. Idempotent. Ids outside your rooms
+    or not addressed to you are ignored, not fatal -- an ack is a batch and one stale
+    id must not fail the rest. Returns {acked, ignored}."""
+    p = _me(ctx.request_context.request)
+    out = store.ack(_conn, p.name, message_ids, p.rooms)
+    log.info("%s ack %s (ignored %s)", p.name, out["acked"], len(out["ignored"]))
+    return out
 
 
 @mcp.tool()
 async def thread(thread_id: int, ctx: Context = None) -> dict:
     """Every message in a thread, oldest first, as {"messages": [...]}. Linear view."""
-    _me(ctx)
-    return {"messages": store.thread(_conn, thread_id, room=_room(ctx))}
+    p = _me(ctx.request_context.request)
+    return {"messages": store.thread(_conn, thread_id, p.rooms)}
 
 
 @mcp.tool()
 async def trace(message_id: int, ctx: Context = None) -> dict:
     """Track back how we got to a message: its ancestor sub-DAG as
     {"messages": [...], "edges": [[parent, child], ...]}, forks and re-links included."""
-    _me(ctx)
-    return store.trace(_conn, message_id, room=_room(ctx))
+    p = _me(ctx.request_context.request)
+    return store.trace(_conn, message_id, p.rooms)
 
 
 @mcp.tool()
 async def graph(thread_id: int, ctx: Context = None) -> dict:
     """The whole web of a thread as {"messages": [...], "edges": [[parent, child], ...]}."""
-    _me(ctx)
-    return store.graph(_conn, thread_id, room=_room(ctx))
+    p = _me(ctx.request_context.request)
+    return store.graph(_conn, thread_id, p.rooms)
 
 
 _DUR_RE = re.compile(r"\s*(\d+)\s*([smhd])\s*")
@@ -415,36 +604,41 @@ async def history(keywords: str = "", since: str = "", until: str = "",
     Returns the most recent <=limit matches as {messages, count} (oldest-first when no
     keywords). Each message carries thread_id and parent_id -- pass thread_id to
     graph()/thread() or an id to trace() to expand the reply DAG."""
-    me = _me(ctx)
-    _seen(me)
+    p = _me(ctx.request_context.request)
+    _seen(p.name, p.rooms)
     msgs = store.search(
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
-        involves=with_agent or None, mine_agent=(me if mine else None),
-        thread_id=thread_id or None, limit=limit, room=_room(ctx))
-    log.info("%s history kw=%r since=%r until=%r with=%r mine=%s -> %s", me, keywords,
+        involves=with_agent or None, mine_agent=(p.name if mine else None),
+        thread_id=thread_id or None, limit=limit, rooms=p.rooms)
+    log.info("%s history kw=%r since=%r until=%r with=%r mine=%s -> %s", p.name, keywords,
              since, until, with_agent, mine, len(msgs))
     return {"messages": msgs, "count": len(msgs)}
 
 
 @mcp.tool()
 async def presence(ctx: Context = None) -> dict:
-    """Everyone on the bus as {"agents": [...]} -- each with its url, live (recent
-    heartbeat), and connected (a wake.py is attached right now)."""
-    _me(ctx)
-    agents = store.presence(_conn, room=_room(ctx))
+    """Everyone across your rooms as {"agents": [...]} -- each with its url, room,
+    live (recent heartbeat), and connected (a wake.py is attached right now). Names are
+    per-room, so each entry carries the room it is in."""
+    p = _me(ctx.request_context.request)
+    agents = store.presence(_conn, p.rooms)
     for a in agents:
-        a["connected"] = bool(_waiters.get((_room(ctx), a["name"])))
+        a["connected"] = bool(_waiters.get((a.pop("token_id"), a["name"])))
     return {"agents": agents}
 
 
 @mcp.tool()
-async def leave(ctx: Context = None) -> str:
-    """Sign off the bus for this session."""
-    me = _me(ctx)
-    store.leave(_conn, me)
-    log.info("%s left", me)
-    return f"left: {me}"
+async def leave(room: str = "", ctx: Context = None) -> str:
+    """Sign off the bus for this session -- every room by default, or just one with
+    room=. Membership only: your messages stay, because authorship is history."""
+    p = _me(ctx.request_context.request)
+    targets = [room] if room else list(p.rooms)
+    if room and room not in p.rooms:
+        raise store.AccessError(f"no access to room {room}")
+    store.leave(_conn, p.name, targets)
+    log.info("%s left %s room(s)", p.name, len(targets))
+    return f"left: {p.name}"
 
 
 # ---- wake plane (WebSocket) --------------------------------------------------
@@ -470,27 +664,36 @@ async def wake_ws(ws: WebSocket):
     # a readable {"error": ...} frame the client (wake.py) prints, so an operator can
     # tell a bad token from a missing name.
     await ws.accept()
-    room = _room_of(ws)
     name = ws.query_params.get("name")
     if not name:
         await ws.send_json({"error": "missing_name", "detail": "?name=<agent> is required"})
         await ws.close(code=4400)
         log.warning("wake rejected: missing_name")
         return
-    _seen(name)
-    log.info("%s wake connected", name)
+    # A revoked or unknown token is now a real reject. wake.py treats any {"error": ...}
+    # frame as fatal and does NOT retry, so a stale token exits instead of hot-looping.
+    tok = store.resolve_token(_conn, _bearer(ws))
+    if not tok:
+        await ws.send_json({"error": "bad_token", "detail": "unknown or revoked token"})
+        await ws.close(code=4401)
+        log.warning("%s wake rejected: bad_token", name)
+        return
+    rooms = store.rooms_for_token(_conn, tok["id"])
+    key = (tok["id"], name)
+    _seen(name, rooms)
+    log.info("%s wake connected (%s room(s))", name, len(rooms))
     q: asyncio.Queue = asyncio.Queue()
-    _waiters.setdefault((room, name), set()).add(q)
+    _waiters.setdefault(key, set()).add(q)
     try:
         # Ring once if DIRECT mail is already waiting at connect, so a just-attached
         # client does not miss it. Broadcasts never ring (here or on arrival) -- they
         # drain on the agent's next natural turn; ringing them at reconnect made every
         # daemon restart storm the whole fleet. We do NOT re-ring on still-unacked
         # backlog -- only on new arrivals.
-        backlog = [m for m in store.inbox(_conn, name, room=room)
+        backlog = [m for m in store.inbox(_conn, name, rooms)
                    if m["to"] != store.BROADCAST]
-        if backlog and _poke_ok((room, name)):
-            _poke_pending[(room, name)] = time.time_ns()
+        if backlog and _poke_ok(key):
+            _poke_pending[key] = time.time_ns()
             await ws.send_json({"wake": True, "reason": "backlog", "unread": len(backlog)})
             log.info("%s wake ring (backlog %s)", name, len(backlog))
         # Then stay connected and push one frame per new message until the client drops.
@@ -515,7 +718,7 @@ async def wake_ws(ws: WebSocket):
             if gone:
                 break
             if recv in done:  # client data = its heartbeat; keep the agent LIVE
-                _seen(name)
+                _seen(name, rooms)
                 continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
@@ -528,20 +731,20 @@ async def wake_ws(ws: WebSocket):
                     "note": "broker restarting -- do not reply, just re-arm your "
                             "waiter; the broker will be back shortly"})
                 break
-            if not _poke_ok((room, name)):
+            if not _poke_ok(key):
                 continue
-            _poke_pending[(room, name)] = time.time_ns()
-            n = len(store.inbox(_conn, name, room=room))
+            _poke_pending[key] = time.time_ns()
+            n = len(store.inbox(_conn, name, rooms))
             await ws.send_json({"wake": True, "reason": "message", "unread": n})
             log.info("%s wake ring (%s unread)", name, n)
     except WebSocketDisconnect:
         pass
     finally:
-        bucket = _waiters.get((room, name))
+        bucket = _waiters.get(key)
         if bucket:
             bucket.discard(q)
             if not bucket:
-                _waiters.pop((room, name), None)
+                _waiters.pop(key, None)
         log.info("%s wake disconnected", name)
 
 
@@ -560,70 +763,109 @@ async def usage_http(_request):
 
 
 # ---- web API: the chat UI (and any script) drives the bus over plain HTTP ----------
-# The presented key (?token= or Bearer) names the ROOM; every endpoint is scoped to it.
+# Every endpoint resolves a Principal (session cookie or bearer token) and scopes to the
+# rooms that principal actually holds. There is no open room and no anonymous access.
 
+def _guard(fn):
+    """Turn the store's auth vocabulary into HTTP status codes, in one place.
+    401 = no/!valid credential. 403 = valid principal, not for this room.
+    400 room_required = 2+ rooms and none named -- an ambiguity, NOT an authz failure,
+    so it must not train the UI to throw up a login card."""
+    async def wrapped(request):
+        try:
+            return await fn(request)
+        except store.AuthError as e:
+            return JSONResponse({"error": "unauthorized", "detail": str(e)}, status_code=401)
+        except store.AccessError as e:
+            return JSONResponse({"error": "forbidden", "detail": str(e)}, status_code=403)
+        except store.AmbiguousRoom as e:
+            return JSONResponse({"error": "room_required", "rooms": e.rooms}, status_code=400)
+        except store.BusError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    wrapped.__name__ = fn.__name__
+    return wrapped
+
+
+def _scope(request, p):
+    """The rooms this call touches: one named room (must be in reach), else all of them."""
+    room = request.query_params.get("room") or ""
+    if room:
+        if room not in p.rooms:
+            raise store.AccessError(f"no access to room {room}")
+        return {room: p.rooms[room]}
+    return p.rooms
+
+
+@_guard
 async def messages_http(request):
-    """GET /messages?since_id=N&limit=M -> {"messages": [...]} oldest-first.
+    """GET /messages?since_id=N&limit=M[&room=] -> {"messages": [...]} oldest-first.
     since_id=0 (default) returns the most recent `limit`; the UI uses since_id to
     fill the gap after a feed reconnect."""
+    p = _principal(request)
     since_id = int(request.query_params.get("since_id") or 0)
     limit = int(request.query_params.get("limit") or 200)
     return JSONResponse({"messages": store.tail(_conn, since_id=since_id, limit=limit,
-                                                room=_room_of(request))})
+                                                rooms=_scope(request, p))})
 
 
+@_guard
 async def presence_http(request):
-    """GET /presence -> same view as the presence() tool, for the UI header."""
-    room = _room_of(request)
+    """GET /presence[&room=] -> same view as the presence() tool, for the UI header."""
+    p = _principal(request)
+    rooms = _scope(request, p)
     me = request.query_params.get("me") or ""
-    if me:  # the poll doubles as the web identity's heartbeat, so it shows live
+    if me and rooms:  # the poll doubles as the web identity's heartbeat, so it shows live
         with contextlib.suppress(store.BusError):
-            if store.known(_conn, me):
-                store.touch(_conn, me)
+            rid = next(iter(rooms))
+            if store.known(_conn, me, [rid]):
+                store.touch(_conn, me, [rid])
             else:
-                store.join(_conn, me, tag=f"web:{me}", room=room, fresh=True)
-    agents = store.presence(_conn, room=room)
+                store.join(_conn, me, tag=f"web:{me}", room_id=rid, fresh=True)
+    agents = store.presence(_conn, rooms)
     for a in agents:
-        a["connected"] = bool(_waiters.get((room, a["name"])))
+        a["connected"] = bool(_waiters.get((a.pop("token_id"), a["name"])))
     return JSONResponse({"agents": agents})
 
 
+@_guard
 async def send_http(request):
-    """POST /send {from?, to, subject?, body, reply_to?, attachments?, shout?} -> send
-    a message from the web. Same semantics as the MCP send tool: unicast rings (gate
-    applies), broadcast queues. shout=true with to='*' is the HUMAN page-all: the
-    broadcast also RINGS every live agent in the room, once, through the poke gate.
-    Deliberately web-only -- the MCP send tool has no shout, so agents cannot emit it.
+    """POST /send {from?, to, subject?, body, reply_to?, attachments?, room?, shout?}.
+    Same semantics as the MCP send tool: unicast rings (gate applies), broadcast queues,
+    a reply's room comes from its parent. shout=true with to='*' is the HUMAN page-all:
+    the broadcast also RINGS every live agent in THAT ONE room, once, through the poke
+    gate. Deliberately web-only -- the MCP send tool has no shout, so agents cannot emit
+    one. A shout pages one room, never every room you can see: cross-room paging is the
+    rare orchestration case and must be deliberate.
     Unknown senders are auto-joined; an existing agent's name is used as-is."""
+    p = _principal(request)
     try:
         d = await request.json()
     except ValueError:
         return JSONResponse({"error": "bad json"}, status_code=400)
-    room = _room_of(request)
-    sender = (d.get("from") or "human-web").strip()
+    sender = (d.get("from") or p.name).strip()
     to = (d.get("to") or store.BROADCAST).strip()
     body = d.get("body") or ""
     if not body:
         return JSONResponse({"error": "empty body"}, status_code=400)
-    try:
-        if not store.known(_conn, sender):
-            store.join(_conn, sender, tag=f"web:{sender}", room=room)
-        res = store.send(_conn, sender, to, body,
-                         subject=d.get("subject") or "", reply_to=d.get("reply_to"),
-                         attachments=d.get("attachments"), room=room)
-    except store.BusError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+    rid = store.resolve_send_room(p.rooms, room=d.get("room") or None,
+                                  parent_room=_parent_room(d.get("reply_to")))
+    if not store.known(_conn, sender, [rid]):
+        store.join(_conn, sender, tag=f"web:{sender}", room_id=rid)
+    res = store.send(_conn, sender, to, body,
+                     subject=d.get("subject") or "", reply_to=d.get("reply_to"),
+                     attachments=d.get("attachments"), room=rid)
     shout = bool(d.get("shout")) and to == store.BROADCAST
     woke = res["wake"] if (to != store.BROADCAST or shout) else []
-    _notify(room, woke)
-    _feed_push(room, {"id": res["id"], "thread_id": res["thread_id"],
+    _notify(rid, woke)
+    _feed_push(rid, {"id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": sender, "to": to,
                 "subject": d.get("subject") or "", "body": body,
+                "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
-    log.info("%s send(web)%s -> %s thread=%s id=%s delivered=%s woke=%s",
-             sender, " SHOUT" if shout else "", to, res["thread_id"], res["id"],
-             res["wake"], woke)
-    return JSONResponse({"id": res["id"], "thread_id": res["thread_id"],
+    log.info("%s send(web)%s -> %s room=%s thread=%s id=%s delivered=%s woke=%s",
+             sender, " SHOUT" if shout else "", to, p.rooms.get(rid), res["thread_id"],
+             res["id"], res["wake"], woke)
+    return JSONResponse({"id": res["id"], "thread_id": res["thread_id"], "room": rid,
                          "delivered_to": res["wake"]})
 
 
@@ -632,11 +874,18 @@ _FNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 MAX_UPLOAD = 25 * 1024 * 1024
 
 
+@_guard
 async def upload_http(request):
-    """POST /upload?name=<filename> with the raw file bytes as the body. Stores it under
-    a unique name and returns {"url": "/files/<stored>", "name": <original>}. The web UI
-    (or any script) then references it in a message body as: [file: /files/<stored> <name>]
-    Agents ingest on demand: curl -H 'Authorization: Bearer $AGENTBUS_TOKEN' <broker><url>"""
+    """POST /upload?name=<filename>[&room=] with the raw file bytes as the body. Stores it
+    under a unique name, records which room it belongs to, and returns
+    {"url": "/files/<stored>", "name": <original>, "bytes": n}.
+
+    Pass the returned dict in the `attachments` list on send. The attachments FIELD is
+    the only form -- never write "[file: ...]" markers into a body; they are plain text
+    and no consumer parses them.
+    Agents ingest on demand: curl -H 'Authorization: Bearer $REVEILLE_TOKEN' <broker><url>"""
+    p = _principal(request)
+    rid = store.resolve_send_room(p.rooms, room=request.query_params.get("room") or None)
     name = _FNAME_RE.sub("_", request.query_params.get("name") or "file.bin")[-80:]
     data = await request.body()
     if not data:
@@ -645,22 +894,31 @@ async def upload_http(request):
         return JSONResponse({"error": f"too large (cap {MAX_UPLOAD >> 20}MB)"}, status_code=413)
     stored = f"{time.time_ns() // 1_000_000}-{name}"
     (_files_dir / stored).write_bytes(data)
-    log.info("upload %s (%s bytes) -> /files/%s", name, len(data), stored)
+    store.record_file(_conn, stored, rid, p.name)
+    log.info("%s upload %s (%s bytes) -> /files/%s", p.name, name, len(data), stored)
     return JSONResponse({"url": f"/files/{stored}", "name": name, "bytes": len(data)})
 
 
+@_guard
 async def files_http(request):
-    """GET /files/<stored> -> the attachment bytes (content-type guessed from the name)."""
+    """GET /files/<stored> -> the attachment bytes, if you are in its room. Without the
+    room check this is a world-readable blob store to anyone who learns a filename."""
+    p = _principal(request)
     fname = _FNAME_RE.sub("_", request.path_params["fname"])
+    rid = store.file_room(_conn, fname)
+    if rid is None or rid not in p.rooms:
+        return JSONResponse({"error": "not found"}, status_code=404)
     path = _files_dir / fname
     if not path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(path)
 
 
+@_guard
 async def search_http(request):
-    """GET /search?keywords=&since=&until=&agent=&thread_id=&limit= -> the whole log,
-    same semantics as the history() tool (keywords ranked; naive ISO = UTC)."""
+    """GET /search?keywords=&since=&until=&agent=&thread_id=&limit=[&room=] -> the whole
+    log, same semantics as the history() tool (keywords ranked; naive ISO = UTC)."""
+    p = _principal(request)
     q = request.query_params
     try:
         msgs = store.search(
@@ -670,34 +928,44 @@ async def search_http(request):
             until_ns=_when_ns(q.get("until") or ""),
             involves=q.get("agent") or None,
             thread_id=int(q.get("thread_id") or 0) or None,
-            limit=int(q.get("limit") or 500), room=_room_of(request))
-    except (store.BusError, ValueError) as e:
+            limit=int(q.get("limit") or 500), rooms=_scope(request, p))
+    except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return JSONResponse({"messages": msgs, "count": len(msgs)})
 
 
+@_guard
 async def delete_http(request):
     """DELETE /message/<mid>?from=<name> -- retract your own message if NOBODY has
     read or replied to it yet (the mistaken-broadcast eraser). Room-scoped."""
-    room = _room_of(request)
-    sender = request.query_params.get("from") or ""
+    p = _principal(request)
+    sender = request.query_params.get("from") or p.name
     mid = int(request.path_params["mid"])
     try:
-        store.delete_if_unseen(_conn, mid, sender, room=room)
+        store.delete_if_unseen(_conn, mid, sender, p.rooms)
     except store.BusError as e:
         return JSONResponse({"error": str(e),
                              "readers": store.readers(_conn, mid, exclude=sender)},
                             status_code=409)
-    _feed_push(room, {"deleted": mid})
+    for rid in p.rooms:
+        _feed_push(rid, {"deleted": mid})
     log.info("%s retracted message %s (unseen)", sender, mid)
     return JSONResponse({"deleted": mid})
 
 
 async def feed_ws(ws: WebSocket):
-    """WS /feed: pushes every bus message as one JSON frame -- the UI's live wire."""
+    """WS /feed: pushes every bus message as one JSON frame -- the UI's live wire.
+    Cookie rides the handshake automatically; a bad credential is rejected."""
     await ws.accept()
+    try:
+        p = _principal(ws)
+    except store.AuthError:
+        await ws.send_json({"error": "bad_token"})
+        await ws.close(code=4401)
+        return
     q: asyncio.Queue = asyncio.Queue()
-    _feed[q] = _room_of(ws)
+    room = ws.query_params.get("room") or ""
+    _feed[q] = room if room in p.rooms else (next(iter(p.rooms)) if p.rooms else "")
     log.info("feed connected (%s watching)", len(_feed))
     try:
         # ponytail: a dropped browser parked on q.get() is only reaped when the next
@@ -760,8 +1028,15 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  #meCard:hover{background:var(--hover)}
  #meCard .avatar{width:30px;height:30px;font-size:.72rem}
  #meCard .mename{font-size:.85rem;font-weight:700;line-height:1.2}
- #meCard .meroom{font-size:.72rem;color:var(--faint);line-height:1.2}
+ /* The room line is a CONTROL, not a label. It used to render in --faint -- the same
+    colour as dead metadata -- next to a gear that reads as "settings", so nothing on the
+    card said "this is how you change room". */
+ #meCard .meroom{font-size:.72rem;color:var(--dim);line-height:1.2;
+  display:flex;align-items:center;gap:.25rem}
+ #meCard:hover .meroom{color:var(--gold)}
+ #meCard .chev{font-size:.6rem;opacity:.8}
  #meCard .gear{margin-left:auto;color:var(--faint);font-size:.9rem}
+ #meCard:hover .gear{color:var(--fg)}
  #meDot{width:.55em;height:.55em;border-radius:50%;background:var(--faint);flex:none}
  #meDot.on{background:var(--green)}
 
@@ -941,6 +1216,67 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  #dlgTitle{font-size:.95rem;font-weight:800;color:#e8555a;letter-spacing:.04em;
   margin-bottom:.4rem}
  #dlgMsg{color:var(--dim);font-size:.82rem;line-height:1.5;margin-bottom:1rem}
+ /* Settings panel. Deliberately NOT the retract dialog: that one is an error surface
+    (red title, big confirm button) and borrowing it made every room look like a warning. */
+ #pan{position:fixed;inset:0;background:rgba(6,8,11,.82);backdrop-filter:blur(4px);
+  display:none;align-items:center;justify-content:center;z-index:26}
+ #pan.on{display:flex}
+ #panCard{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  width:32rem;max-width:94vw;box-shadow:0 12px 48px rgba(0,0,0,.5);overflow:hidden;
+  display:flex;flex-direction:column;max-height:82vh}
+ #panTabs{display:flex;align-items:center;gap:.15rem;padding:.5rem .6rem 0;
+  border-bottom:1px solid var(--line);flex:none}
+ .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
+  font:inherit;font-size:.78rem;font-weight:600;padding:.5rem .75rem;cursor:pointer;
+  margin-bottom:-1px}
+ .tab:hover{color:var(--fg)}
+ .tab.on{color:var(--gold);border-bottom-color:var(--gold)}
+ #panX{margin-left:auto;background:none;border:none;color:var(--faint);cursor:pointer;
+  font-size:1.1rem;line-height:1;padding:.3rem .5rem;border-radius:6px}
+ #panX:hover{color:var(--fg);background:var(--hover)}
+ #panBody{padding:.5rem 1.1rem 1.1rem;overflow-y:auto;text-align:left}
+ #panFoot{border-top:1px solid var(--line);padding:.5rem 1.1rem;display:flex;
+  align-items:center;gap:.5rem;font-size:.72rem;color:var(--faint);flex:none}
+ #panFoot .lnk{margin-left:auto;color:var(--dim);cursor:pointer}
+ #panFoot .lnk:hover{color:var(--fg);text-decoration:underline}
+ #dlgBody{text-align:left;max-height:60vh;overflow-y:auto}
+ .pSec{font-size:.62rem;letter-spacing:.12em;color:var(--faint);margin:.9rem 0 .35rem}
+ .pRow{display:flex;align-items:center;gap:.4rem;padding:.4rem 0;flex-wrap:wrap;
+  border-bottom:1px solid rgba(36,44,55,.5)}
+ .pRow:last-child{border-bottom:none}
+ .pRow b{flex:1;font-size:.82rem;font-weight:600;min-width:8rem}
+ .pRow .on{color:var(--green)}
+ .pDim{color:var(--faint);font-size:.72rem}
+ .pRow input{flex:1;min-width:7rem;background:var(--bg);border:1px solid var(--line);
+  border-radius:6px;color:var(--fg);padding:.3rem .5rem;font:inherit;font-size:.78rem}
+ .pRow button{background:var(--chip);border:1px solid var(--line);border-radius:6px;
+  color:var(--fg);padding:.25rem .55rem;font:inherit;font-size:.72rem;cursor:pointer}
+ .pRow button:hover{border-color:var(--accent)}
+ .pRow button.danger{color:#e8555a;border-color:#5a2b2d}
+ /* Inline confirm. Never window.prompt/confirm: they are unstyled, block the page, are
+    suppressible by the browser, and prompt() renders a typed PASSWORD in cleartext. */
+ /* A room list has exactly one current item -- that is a SELECTOR, not a row of buttons.
+    The old design used the word "open" for BOTH the state ("you are in it") and the action
+    ("go there"), on the same row. The indicator carries the state now, so the word is gone. */
+ .pRow.sel{background:rgba(226,166,61,.07)}
+ .pRow.sel b{color:var(--gold)}
+ .rSel{display:flex;align-items:center;gap:.5rem;flex:1;cursor:pointer;min-width:8rem;
+  padding:.15rem 0;border-radius:6px}
+ .rSel:hover .rName{color:var(--gold)}
+ .rDot{width:.62em;height:.62em;border-radius:50%;flex:none;border:1.5px solid var(--faint)}
+ .pRow.sel .rDot{background:var(--gold);border-color:var(--gold);
+  box-shadow:0 0 0 2px rgba(226,166,61,.25)}
+ .rName{font-size:.82rem;font-weight:600}
+ .rNow{font-size:.62rem;letter-spacing:.1em;color:var(--gold)}
+ .pRow.warn{background:rgba(232,85,90,.08);border-left:2px solid #e8555a;
+  padding-left:.5rem;margin:.2rem 0;border-bottom:none}
+ .pRow.warn b{color:#e8555a}
+ .pAsk{font-size:.72rem;color:var(--dim);padding:.1rem 0 .35rem .5rem}
+ .pChips{display:flex;flex-wrap:wrap;gap:.3rem;margin:0 0 .5rem}
+ .chip{display:flex;align-items:center;gap:.25rem;background:var(--chip);
+  border:1px solid var(--line);border-radius:999px;padding:.15rem .5rem;font-size:.7rem}
+ .tokOut{background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  padding:.6rem;font-size:.72rem;user-select:all;white-space:pre-wrap;word-break:break-all}
  #dlgWho{display:none;margin-bottom:1.1rem}
  #dlgWho.on{display:block}
  #dlgWho .lbl{color:var(--faint);font-size:.68rem;letter-spacing:.12em;
@@ -1074,20 +1410,34 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  <div id="dlgCard">
   <div id="dlgTitle"></div>
   <div id="dlgMsg"></div>
+  <div id="dlgBody"></div>
   <div id="dlgWho"><div class="lbl">Already seen by</div><div id="dlgReaders"></div></div>
   <button id="dlgOk">OK</button>
+ </div>
+</div>
+<div id="pan">
+ <div id="panCard">
+  <div id="panTabs">
+   <button class="tab" data-tab="rooms">Rooms</button>
+   <button class="tab" data-tab="tokens">Tokens</button>
+   <button class="tab" data-tab="users">Users</button>
+   <button class="tab" data-tab="account">Account</button>
+   <button id="panX" title="close">&#10005;</button>
+  </div>
+  <div id="panBody"></div>
+  <div id="panFoot"><span id="panWho"></span><span class="lnk" id="panOut">sign out</span></div>
  </div>
 </div>
 <div id="login">
  <div id="loginCard">
   <h1>REVEILLE</h1>
-  <p>agent bus &mdash; sessions sharing a room key share one isolated room</p>
-  <label>YOUR NAME</label>
-  <input id="liName" placeholder="human-web" autocomplete="username">
-  <label>ROOM KEY</label>
-  <input id="liToken" type="password" placeholder="blank = open room" autocomplete="current-password">
+  <p id="liBlurb">agent bus</p>
+  <label>USERNAME</label>
+  <input id="liName" placeholder="you" autocomplete="username">
+  <label>PASSWORD</label>
+  <input id="liPass" type="password" autocomplete="current-password">
   <div id="loginErr"></div>
-  <button id="liGo">Enter room</button>
+  <button id="liGo">Sign in</button>
  </div>
 </div>
 <script>
@@ -1103,6 +1453,7 @@ function toast(msg,info){
 }
 function showDialog(title,msg,readers){
  $('dlgTitle').textContent=title;
+ $('dlgBody').innerHTML='';
  $('dlgMsg').textContent=msg;
  const list=$('dlgReaders');list.innerHTML='';
  $('dlgWho').classList.toggle('on',!!(readers&&readers.length));
@@ -1117,9 +1468,14 @@ function showDialog(title,msg,readers){
 $('dlgOk').onclick=()=>$('dlg').classList.remove('on');
 $('dlg').onclick=e=>{if(e.target.id==='dlg')$('dlg').classList.remove('on');};
 document.addEventListener('keydown',e=>{if(e.key==='Escape')$('dlg').classList.remove('on');});
-let token=localStorage.agentbusToken;
-let myName=localStorage.agentbusName||'human-web';
-const qs=()=>'?token='+encodeURIComponent(token||'');
+// The session cookie authenticates every call -- browsers attach it to fetch(), to
+// <img src>, and to the WS handshake alike. The old ?token= existed ONLY because an
+// <img> cannot carry a header; cookies delete that constraint, so the credential stops
+// riding in URLs, referers and logs. qs() now carries the selected ROOM, never a secret.
+let me=null;               // {name,is_admin,rooms,owned,public} from GET /me
+let myName='';
+let room=localStorage.revRoom||'';
+const qs=()=>'?room='+encodeURIComponent(room||'');
 let lastId=0,follow=true,prevMsg=null,mode='live',agentList=[];
 const selAgents=new Set();     // sidebar filter: matches by FROM (default) or TO
 let filterMode='from';
@@ -1153,26 +1509,53 @@ function renderAttchips(){
 }
 const msgs=new Map();
 
+let setupMode=false;
 function showLogin(msg){
- $('liName').value=myName;$('liToken').value=token||'';
+ $('liBlurb').textContent=setupMode
+  ? 'first run -- create the admin account'
+  : 'agent bus';
+ $('liGo').textContent=setupMode?'Create admin':'Sign in';
  $('loginErr').textContent=msg||'';
  $('login').classList.add('on');$('liName').focus();
 }
-$('liGo').onclick=()=>{
- localStorage.agentbusName=$('liName').value.trim()||'human-web';
- localStorage.agentbusToken=$('liToken').value;
- location.reload();
+$('liGo').onclick=async()=>{
+ const body={name:$('liName').value.trim(),password:$('liPass').value};
+ let r=await fetch(setupMode?'/setup':'/login',
+  {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+ // 410 = somebody created the first admin after this tab decided it was in setup mode.
+ // The card latched that at load and would otherwise 410 forever with no way out: drop
+ // to a normal sign-in instead of stranding whoever is looking at it.
+ if(r.status===410){
+  setupMode=false;showLogin();
+  r=await fetch('/login',{method:'POST',headers:{'content-type':'application/json'},
+   body:JSON.stringify(body)});
+ }
+ if(!r.ok){const e=await r.json().catch(()=>({}));
+  $('loginErr').textContent=e.detail||e.error||'sign in failed';return;}
+ location.reload();   // the cookie is set; boot again as a real principal
 };
-for(const id of ['liName','liToken'])
+for(const id of ['liName','liPass'])
  $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('liGo').click();});
-function roomLabel(t){return t?('room \u00b7\u00b7\u00b7\u00b7'+t.slice(-3)):'open room';}
-$('meName').textContent=myName;
-$('meName').style.color=color(myName);
-$('meAvatar').textContent=initials(myName);
-$('meAvatar').style.color=color(myName);
-$('meAvatar').style.background=tint(myName);
-$('meRoom').textContent=roomLabel(token||'');
-$('meCard').onclick=()=>showLogin();
+
+// The room name is finally printable: it stopped being the credential, which is the
+// only reason it was ever masked to 'room ....N0w'.
+function paintMe(){
+ $('meName').textContent=myName;
+ $('meName').style.color=color(myName);
+ $('meAvatar').textContent=initials(myName);
+ $('meAvatar').style.color=color(myName);
+ $('meAvatar').style.background=tint(myName);
+ const rooms=(me&&me.rooms)||[];
+ const r=rooms.find(x=>x.id===room);
+ // Say how many rooms are switchable, and show a chevron when there is a choice to make.
+ // The name alone looked like a readout of where you are, not a way to go elsewhere.
+ $('meRoom').innerHTML=esc(r?r.name:'no room')+
+  (rooms.length>1?'<span class="chev">&#9660;</span>':'');
+ $('meCard').title=rooms.length>1
+  ? 'switch room ('+rooms.length+' available) / settings'
+  : 'rooms, tokens, account';
+}
+$('meCard').onclick=()=>openRooms();
 
 function hue(name){let h=0;for(const c of name)h=(h*31+c.charCodeAt(0))>>>0;return h%360;}
 function color(n){return 'hsl('+hue(n)+' 62% 64%)';}
@@ -1364,7 +1747,7 @@ async function loadBacklog(reset){
  if(reset)busy(true);
  try{
   const r=await fetch('/messages'+qs()+'&limit=300'+(reset?'':'&since_id='+lastId));
-  if(r.status===401){showLogin('unauthorized -- check the token');return;}
+  if(r.status===401){showLogin('session expired -- sign in again');return;}
   if(!r.ok)return;
   if(reset)clearFeed();
   for(const m of (await r.json()).messages)add(m);
@@ -1423,7 +1806,7 @@ function renderPicker(){
 
 async function loadPresence(){
  const r=await fetch('/presence'+qs()+'&me='+encodeURIComponent(myName));
- if(r.status===401){showLogin('unauthorized -- check the token');return;}
+ if(r.status===401){showLogin('session expired -- sign in again');return;}
  if(!r.ok)return;
  agentList=(await r.json()).agents
   .sort((a,b)=>(b.connected-a.connected)||(b.live-a.live)||a.name.localeCompare(b.name));
@@ -1456,13 +1839,14 @@ async function loadPresence(){
  renderPicker();
 }
 
+let ws=null;
 function connect(){
  const proto=location.protocol==='https:'?'wss':'ws';
- const ws=new WebSocket(proto+'://'+location.host+'/feed'+qs());
+ ws=new WebSocket(proto+'://'+location.host+'/feed'+qs());
  ws.onopen=()=>{$('status').classList.add('on');$('meDot').classList.add('on');
   $('meDot').title='connected to the room feed';loadBacklog(false);};
  ws.onmessage=e=>{const m=JSON.parse(e.data);
-  if(m.error){if(m.error==='bad_token')showLogin('unauthorized -- check the token');return;}
+  if(m.error){if(m.error==='bad_token')showLogin('session expired -- sign in again');return;}
   if(m.deleted){
    for(const el of [...$('inner').children])
     if(+el.dataset.id===m.deleted)el.remove();
@@ -1584,136 +1968,477 @@ $('composer').addEventListener('submit',async e=>{
  for(const el of document.querySelectorAll('.row.active'))el.classList.remove('active');
 });
 
+// ---- rooms / tokens / users: one panel, reusing the dialog ------------------
+// Inline confirm state. The panel re-renders from this, so a destructive action is
+// confirmed IN the panel -- styled, non-blocking, and able to mask a password field.
+let confirming=null;   // {kind, id, name}
+function askRow(title,msg,body){
+ return '<div class="pRow warn"><b>'+title+'</b></div>'+
+  (msg?'<div class="pAsk">'+msg+'</div>':'')+
+  '<div class="pRow">'+body+
+  '<button class="danger" id="cfGo">confirm</button><button id="cfNo">cancel</button></div>';
+}
+function wireAsk(onGo,reRender){
+ const no=$('cfNo'); if(!no)return;
+ no.onclick=()=>{confirming=null;reRender();};
+ $('cfGo').onclick=onGo;
+ const first=document.querySelector('#panBody input');
+ if(first){first.focus();
+  first.addEventListener('keydown',e=>{if(e.key==='Enter')$('cfGo').click();});}
+}
+let curTab='rooms';
+function panel(tab,html){
+ curTab=tab;
+ for(const b of document.querySelectorAll('.tab')){
+  b.classList.toggle('on',b.dataset.tab===tab);
+  // /users is admin-only server-side; showing the tab to a plain user would just
+  // hand them a 403. Don't offer what cannot work.
+  if(b.dataset.tab==='users')b.style.display=(me&&me.is_admin)?'':'none';
+ }
+ $('panBody').innerHTML=html;
+ $('panWho').textContent=myName+(me&&me.is_admin?' · admin':'');
+ $('pan').classList.add('on');
+}
+function closePanel(){$('pan').classList.remove('on');}
+$('panX').onclick=closePanel;
+$('pan').onclick=e=>{if(e.target.id==='pan')closePanel();};
+$('panOut').onclick=async()=>{await fetch('/logout',{method:'POST'});location.reload();};
+const TABS={rooms:()=>openRooms(),tokens:()=>openTokens(),users:()=>openUsers(),
+ account:()=>openAccount()};
+for(const b of document.querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.tab]();
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();});
+async function api(path,opts){
+ const r=await fetch(path,Object.assign({headers:{'content-type':'application/json'}},opts||{}));
+ if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||e.error||r.status);}
+ return r.json();
+}
+function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();
+ closePanel();clearFeed();lastId=0;loadBacklog(true);loadPresence();
+ if(ws)ws.close();connect();}
+
+async function openRooms(){
+ const d=await api('/me');me=d;paintMe();   // room set may have changed under us
+ const mine=(d.owned||[]).map(r=>{
+  if(confirming&&confirming.kind==='purge'&&confirming.id===r.id)
+   return askRow('Purge '+esc(r.name)+'?',
+    'Deletes the room and every message in it. A snapshot is saved first, and that is the '+
+    'only undo. Type the room name to confirm.',
+    '<input id="cfIn" placeholder="'+esc(r.name)+'" autocomplete="off">');
+  const sel=r.id===room;
+  return '<div class="pRow'+(sel?' sel':'')+'">'+
+   '<span class="rSel" data-pick="'+r.id+'" title="'+(sel?'you are viewing this room'
+     :'switch to this room')+'"><span class="rDot"></span>'+
+   '<span class="rName">'+esc(r.name)+'</span>'+
+   (sel?'<span class="rNow">VIEWING</span>':'')+'</span>'+
+   '<span class="pDim">'+(r.public?'public':'private')+'</span>'+
+   '<button data-pub="'+r.id+'" data-to="'+(r.public?0:1)+'">'+(r.public?'make private':'make public')+'</button>'+
+   '<button class="danger" data-purge="'+r.id+'" data-name="'+esc(r.name)+'">purge</button></div>';
+ }).join('')||'<div class="pDim">no rooms yet</div>';
+ // Public rooms are shown as "owner -> room": names are unique per OWNER, not globally,
+ // so the pairing is what makes them unambiguous.
+ // Everyone's public rooms: switchable here, and tickable on a token in the Tokens tab.
+ const pub=(d.public||[]).map(r=>{
+  const sel=r.id===room;
+  return '<div class="pRow'+(sel?' sel':'')+'">'+
+   '<span class="rSel" data-pick="'+r.id+'" title="'+(sel?'you are viewing this room'
+     :'switch to this room')+'"><span class="rDot"></span>'+
+   '<span class="rName">'+esc(r.owner||'?')+' \u2192 '+esc(r.name)+'</span>'+
+   (sel?'<span class="rNow">VIEWING</span>':'')+'</span></div>';
+ }).join('')||'<div class="pDim">none</div>';
+ panel('rooms',
+  '<div class="pSec">YOUR ROOMS</div>'+mine+
+  '<div class="pRow"><input id="newRoom" placeholder="new room name"><button id="mkRoom">create</button></div>'+
+  '<div class="pSec">PUBLIC &mdash; OWNER &rarr; ROOM</div>'+pub);
+ $('mkRoom').onclick=async()=>{
+  try{await api('/rooms',{method:'POST',body:JSON.stringify({name:$('newRoom').value.trim()})});
+   openRooms();}catch(e){toast(e.message);}};
+ $('newRoom').addEventListener('keydown',e=>{if(e.key==='Enter')$('mkRoom').click();});
+ for(const b of document.querySelectorAll('[data-pick]'))b.onclick=()=>pickRoom(b.dataset.pick);
+ for(const b of document.querySelectorAll('[data-pub]'))b.onclick=async()=>{
+  try{await api('/rooms/'+b.dataset.pub,{method:'PATCH',
+   body:JSON.stringify({public:b.dataset.to==='1'})});openRooms();}catch(e){toast(e.message);}};
+ // Typed-name confirm: purge is irreversible and the snapshot is the only undo.
+ for(const b of document.querySelectorAll('[data-purge]'))b.onclick=()=>{
+  confirming={kind:'purge',id:b.dataset.purge,name:b.dataset.name};openRooms();};
+ if(confirming&&confirming.kind==='purge')wireAsk(async()=>{
+  if($('cfIn').value!==confirming.name){toast('name does not match');return;}
+  const id=confirming.id;confirming=null;
+  try{const o=await api('/rooms/'+id,{method:'DELETE'});
+   toast('purged '+o.messages+' messages (snapshot saved)');
+   if(room===id){room='';localStorage.revRoom='';}
+   openRooms();}catch(e){toast(e.message);openRooms();}},openRooms);
+}
+
+async function openTokens(){
+ // Refresh /me rather than trusting the copy cached at boot: another user can make a room
+ // public at any moment, and a stale cache would silently hide it from the checkboxes.
+ me=await api('/me');
+ const d=await api('/tokens');
+ const rooms=(me.owned||[]).concat(me.public||[]);   // assignable = mine + everyone's public
+ const rows=d.tokens.map(t=>{
+  const chips=rooms.map(r=>'<label class="chip"><input type="checkbox" data-tok="'+t.id+'" '+
+   'data-room="'+r.id+'"'+(t.rooms[r.id]?' checked':'')+'> '+
+   esc(r.owner&&r.owner!==myName?r.owner+' \u2192 '+r.name:r.name)+'</label>').join('');
+  if(confirming&&confirming.kind==='revoke'&&confirming.id===t.id)
+   return askRow('Revoke '+esc(t.label||t.id.slice(0,8))+'?',
+    'The token is deleted. Every agent using it goes dark on its next call, and the '+
+    'secret cannot be recovered.','');
+  return '<div class="pRow"><b>'+esc(t.label||t.id.slice(0,8))+'</b>'+
+   '<button class="danger" data-rev="'+t.id+'">revoke</button>'+
+   '</div><div class="pChips">'+chips+'</div>';}).join('')||'<div class="pDim">no tokens</div>';
+ panel('tokens',
+  '<div class="pDim">A token is a credential and carries no room. Tick the rooms it may '+
+  'see -- the change lands on the agent\'s very next call.</div>'+rows+
+  '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)"><button id="mkTok">generate</button></div>');
+ $('mkTok').onclick=async()=>{
+  try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim()})});
+   // Shown once, deliberately: only the hash is stored, so there is no second chance.
+   panel('tokens',
+    '<div class="pSec">TOKEN CREATED</div>'+
+    '<div class="pDim">Copy it now. Only its hash is stored, so this is the only time it '+
+    'is ever shown. Put it in the agent\'s .envrc.</div>'+
+    '<pre class="tokOut">REVEILLE_TOKEN='+esc(t.secret)+'</pre>'+
+    '<div class="pRow"><button id="backTok">done</button></div>');
+   $('backTok').onclick=openTokens;}catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-rev]'))b.onclick=()=>{
+  confirming={kind:'revoke',id:b.dataset.rev};openTokens();};
+ if(confirming&&confirming.kind==='revoke')wireAsk(async()=>{
+  const id=confirming.id;confirming=null;
+  try{await api('/tokens/'+id,{method:'DELETE'});openTokens();}
+  catch(e){toast(e.message);openTokens();}},openTokens);
+ for(const c of document.querySelectorAll('[data-tok]'))c.onchange=async()=>{
+  try{await api('/tokens/'+c.dataset.tok,{method:'PATCH',
+   body:JSON.stringify({room:c.dataset.room,attach:c.checked})});}catch(e){toast(e.message);c.checked=!c.checked;}};
+}
+
+async function openUsers(){
+ const d=await api('/users');
+ // The server refuses to remove the last admin either way (guarded inside the
+ // transaction). Don't OFFER what can only fail: a button that always errors reads as a
+ // broken app, not a safety rail. Say why instead.
+ const admins=d.users.filter(u=>u.role==='admin').length;
+ const rows=d.users.map(u=>{
+  const isMe=u.name===myName, lastAdmin=u.role==='admin'&&admins===1;
+  if(confirming&&confirming.kind==='delUser'&&confirming.id===u.id)
+   return askRow('Delete '+esc(u.name)+'?',
+    isMe?'Your tokens die, your rooms survive as unowned, and you are signed out '+
+         'immediately. Another admin must let you back in.'
+        :'Their tokens die; their rooms survive as unowned. Their messages stay -- '+
+         'authorship is history.','');
+  if(confirming&&confirming.kind==='reset'&&confirming.id===u.id)
+   return askRow('Reset the password for '+esc(u.name)+'?',
+    'Signs them out of every session. Minimum 8 characters.',
+    '<input id="cfIn" type="password" placeholder="new password" autocomplete="new-password">');
+  let ctl='';
+  if(lastAdmin) ctl='<span class="pDim">last admin — protected</span>';
+  else ctl='<button data-role="'+u.id+'" data-to="'+(u.role==='admin'?'user':'admin')+'">make '+
+   (u.role==='admin'?'user':'admin')+'</button>'+
+   // NEVER offer reset on your OWN row. A reset takes no current password, so an admin
+   // resetting themselves here would walk straight around the Account tab's current-
+   // password check -- and that check is the only thing standing between a borrowed
+   // unlocked browser and the account. Your own password changes in Account.
+   (isMe?'':'<button data-pw="'+u.id+'" data-name="'+esc(u.name)+'">reset password</button>')+
+   '<button class="danger" data-del="'+u.id+'"'+(isMe?' data-self="1"':'')+'>delete</button>';
+  return '<div class="pRow"><b>'+esc(u.name)+(isMe?' <span class="pDim">(you)</span>':'')+'</b>'+
+   '<span class="pDim">'+u.role+'</span>'+ctl+'</div>';
+ }).join('');
+ panel('users',rows+
+  '<div class="pRow"><input id="nuName" placeholder="name"><input id="nuPass" type="password" placeholder="password"><button id="mkUser">add</button></div>');
+ $('mkUser').onclick=async()=>{
+  try{await api('/users',{method:'POST',body:JSON.stringify(
+   {name:$('nuName').value.trim(),password:$('nuPass').value})});openUsers();}
+  catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-role]'))b.onclick=async()=>{
+  try{await api('/users/'+b.dataset.role,{method:'PATCH',
+   body:JSON.stringify({role:b.dataset.to})});openUsers();}catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-pw]'))b.onclick=()=>{
+  confirming={kind:'reset',id:b.dataset.pw,name:b.dataset.name};openUsers();};
+ if(confirming&&confirming.kind==='reset')wireAsk(async()=>{
+  // A masked field, never prompt(): prompt renders a typed password in cleartext.
+  const pw=$('cfIn').value, name=confirming.name, id=confirming.id;
+  confirming=null;
+  try{await api('/users/'+id+'/password',{method:'POST',body:JSON.stringify({password:pw})});
+   toast('password reset for '+name);openUsers();}
+  catch(e){toast(e.message);openUsers();}},openUsers);
+ for(const b of document.querySelectorAll('[data-del]'))b.onclick=()=>{
+  confirming={kind:'delUser',id:b.dataset.del,self:!!b.dataset.self};openUsers();};
+ if(confirming&&confirming.kind==='delUser')wireAsk(async()=>{
+  const id=confirming.id, self=confirming.self;confirming=null;
+  try{await api('/users/'+id,{method:'DELETE'});
+   if(self){location.reload();return;}   // session died with the row; stop pretending
+   openUsers();}catch(e){toast(e.message);openUsers();}},openUsers);
+}
+
+function openAccount(){
+ panel('account',
+  '<div class="pSec">CHANGE YOUR PASSWORD</div>'+
+  '<div class="pDim">Your current password is required -- without it, a borrowed unlocked '+
+  'browser could take the account. Changing it signs out every other session.</div>'+
+  '<div class="pRow"><input id="pwOld" type="password" placeholder="current password"></div>'+
+  '<div class="pRow"><input id="pwNew" type="password" placeholder="new password (min 8)"></div>'+
+  '<div class="pRow"><input id="pwNew2" type="password" placeholder="repeat new password">'+
+  '<button id="pwGo">change</button></div>');
+ $('pwGo').onclick=async()=>{
+  if($('pwNew').value!==$('pwNew2').value){toast('the new passwords do not match');return;}
+  try{await api('/me/password',{method:'POST',
+    body:JSON.stringify({old:$('pwOld').value,new:$('pwNew').value})});
+   toast('password changed');openAccount();}catch(e){toast(e.message);}};
+ for(const id of ['pwOld','pwNew','pwNew2'])
+  $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('pwGo').click();});
+}
+
+function pruneAgent(name){
+ // Typed-name confirm, in-panel: erasing an agent is irreversible bar the snapshot.
+ confirming={kind:'prune',id:name,name:name};
+ panel('rooms',askRow('Erase '+esc(name)+'?',
+  'Deletes the agent and every message to or from it in this room. Replies from others '+
+  'are reparented to their thread root, not deleted. A snapshot is saved first. Type the '+
+  'agent name to confirm.','<input id="cfIn" placeholder="'+esc(name)+'" autocomplete="off">'));
+ wireAsk(async()=>{
+  if($('cfIn').value!==name){toast('name does not match');return;}
+  confirming=null;closePanel();
+  try{const o=await api('/agents/'+encodeURIComponent(name)+qs(),{method:'DELETE'});
+   toast('pruned '+o.messages+' messages, reparented '+o.reparented+' (snapshot saved)');
+   clearFeed();lastId=0;loadBacklog(true);loadPresence();}catch(e){toast(e.message);}},
+  ()=>{confirming=null;closePanel();});
+}
+
 fetch('/version').then(r=>r.text()).then(v=>$('ver').textContent='v'+v);
-if(localStorage.agentbusToken===undefined){showLogin();}
-else{loadBacklog(true);loadPresence();connect();setInterval(loadPresence,15000);}
+(async function boot(){
+ let d;
+ try{d=await api('/me');}
+ catch(e){setupMode=false;showLogin();return;}
+ if(d.setup){setupMode=true;showLogin();return;}   // zero users: bootstrap the first admin
+ me=d;myName=d.name;
+ if(!d.rooms.length){showLogin('you have no rooms yet -- create one');return;}
+ if(!room||!d.rooms.some(r=>r.id===room))room=d.rooms[0].id;
+ localStorage.revRoom=room;
+ paintMe();loadBacklog(true);loadPresence();connect();setInterval(loadPresence,15000);
+})();
 </script></body></html>
 """
+
+
+# ---- auth + management API (web users only) ----------------------------------
+
+def _admin(request):
+    p = _user_principal(request)
+    if not p.is_admin:
+        raise store.AccessError("admin only")
+    return p
+
+
+def _cookie(resp, secret, request):
+    # Secure only under https: this box serves plain http on the LAN, and an
+    # unconditional Secure flag would silently break every login.
+    resp.set_cookie(COOKIE, secret, httponly=True, samesite="lax", max_age=14 * 86400,
+                    path="/", secure=request.url.scheme == "https")
+    return resp
+
+
+@_guard
+async def setup_http(request):
+    """POST /setup {name, password} -- create the FIRST admin. Guarded by the users
+    table being empty, not by a flag: there is no second state to keep in sync, and
+    nothing to forget to disable. 410 forever after."""
+    if store.any_users(_conn):
+        return JSONResponse({"error": "already initialized"}, status_code=410)
+    d = await request.json()
+    u = store.setup_first_admin(_conn, (d.get("name") or "").strip(), d.get("password") or "")
+    log.info("first admin created: %s (claimed the migrated rooms)", u["name"])
+    return _cookie(JSONResponse(u), store.create_session(_conn, u["id"]), request)
+
+
+@_guard
+async def login_http(request):
+    d = await request.json()
+    u = store.authenticate(_conn, (d.get("name") or "").strip(), d.get("password") or "")
+    if not u:
+        log.warning("failed login for %r", d.get("name"))
+        return JSONResponse({"error": "bad credentials"}, status_code=401)
+    log.info("%s logged in", u["name"])
+    return _cookie(JSONResponse(u), store.create_session(_conn, u["id"]), request)
+
+
+@_guard
+async def logout_http(request):
+    store.delete_session(_conn, request.cookies.get(COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE, path="/")
+    return resp
+
+
+@_guard
+async def me_http(request):
+    """GET /me -> who the browser is, plus its rooms. Also the first-run probe:
+    {"setup": true} means no users exist yet and the UI shows the bootstrap card."""
+    if not store.any_users(_conn):
+        return JSONResponse({"setup": True})
+    p = _user_principal(request)
+    return JSONResponse({
+        "name": p.name, "is_admin": p.is_admin,
+        "rooms": [{"id": r, "name": n} for r, n in p.rooms.items()],
+        "owned": store.list_rooms(_conn, p.user_id),
+        "public": store.public_rooms(_conn, exclude_owner=p.user_id),
+    })
+
+
+@_guard
+async def users_http(request):
+    if request.method == "GET":
+        _admin(request)
+        return JSONResponse({"users": store.list_users(_conn)})
+    p = _admin(request)
+    d = await request.json()
+    u = store.create_user(_conn, (d.get("name") or "").strip(), d.get("password") or "",
+                          role=d.get("role") or "user")
+    log.info("%s created user %s (%s)", p.name, u["name"], u["role"])
+    return JSONResponse(u)
+
+
+@_guard
+async def user_http(request):
+    p = _admin(request)
+    uid = request.path_params["uid"]
+    if request.method == "DELETE":
+        store.delete_user(_conn, uid)
+        log.info("%s deleted user %s", p.name, uid)
+        return JSONResponse({"deleted": uid})
+    d = await request.json()
+    store.set_role(_conn, uid, d.get("role") or "user")
+    return JSONResponse({"ok": True})
+
+
+@_guard
+async def reset_password_http(request):
+    """POST /users/<uid>/password {password} -- admin reset. No old password: a reset
+    exists precisely because the user cannot supply one."""
+    p = _admin(request)
+    uid = request.path_params["uid"]
+    d = await request.json()
+    store.set_password(_conn, uid, d.get("password") or "")
+    log.info("%s reset the password for user %s (their sessions dropped)", p.name, uid)
+    return JSONResponse({"ok": True})
+
+
+@_guard
+async def my_password_http(request):
+    """POST /me/password {old, new} -- change your own. The old password is required so a
+    borrowed unlocked browser cannot take the account. Re-issues your cookie, since the
+    change deliberately kills every session including this one."""
+    p = _user_principal(request)
+    d = await request.json()
+    store.change_password(_conn, p.user_id, d.get("old") or "", d.get("new") or "")
+    log.info("%s changed their password (all sessions dropped)", p.name)
+    return _cookie(JSONResponse({"ok": True}), store.create_session(_conn, p.user_id),
+                   request)
+
+
+@_guard
+async def rooms_http(request):
+    p = _user_principal(request)
+    if request.method == "GET":
+        return JSONResponse({"owned": store.list_rooms(_conn, p.user_id),
+                             "public": store.public_rooms(_conn, exclude_owner=p.user_id)})
+    d = await request.json()
+    r = store.create_room(_conn, p.user_id, (d.get("name") or "").strip(),
+                          public=bool(d.get("public")))
+    log.info("%s created room %s", p.name, r["name"])
+    return JSONResponse(r)
+
+
+@_guard
+async def room_http(request):
+    """PATCH /rooms/<rid> {name?, public?, retention_ns?} -- owner only. Flipping public
+    to false also revokes the room from every other user's tokens, instantly."""
+    p = _user_principal(request)
+    rid = request.path_params["rid"]
+    d = await request.json()
+    if "name" in d:
+        store.rename_room(_conn, rid, p.user_id, (d.get("name") or "").strip())
+    if "public" in d:
+        store.set_public(_conn, rid, p.user_id, bool(d["public"]))
+        log.info("%s set room %s public=%s", p.name, rid, bool(d["public"]))
+    if "retention_ns" in d:
+        store.set_retention(_conn, rid, p.user_id, d["retention_ns"])
+    return JSONResponse(store.get_room(_conn, rid))
+
+
+@_guard
+async def purge_room_http(request):
+    """DELETE /rooms/<rid> -- erase a room and everything in it. Snapshots first; with
+    no audit log, that snapshot is the only undo."""
+    p = _user_principal(request)
+    rid = request.path_params["rid"]
+    snap = store.snapshot(_conn, _snap_path("purge-room"))
+    n = store.purge_room(_conn, rid, p.user_id)
+    log.info("%s purged room %s (%s messages) snapshot=%s", p.name, rid, n, snap)
+    return JSONResponse({"purged": rid, "messages": n, "snapshot": snap})
+
+
+@_guard
+async def prune_agent_http(request):
+    """DELETE /agents/<name>?room=<rid> -- erase an agent's trace from a room. Survivors
+    that replied to it are reparented to their thread root, never cascade-deleted."""
+    p = _user_principal(request)
+    name = request.path_params["name"]
+    rid = request.query_params.get("room") or ""
+    if rid not in p.rooms:
+        raise store.AccessError(f"no access to room {rid}")
+    snap = store.snapshot(_conn, _snap_path(f"prune-{name}"))
+    out = store.prune_agent(_conn, name, rid)
+    log.info("%s pruned %s from %s (%s messages, %s reparented) snapshot=%s",
+             p.name, name, rid, out["messages"], out["reparented"], snap)
+    return JSONResponse({**out, "snapshot": snap})
+
+
+@_guard
+async def tokens_http(request):
+    p = _user_principal(request)
+    if request.method == "GET":
+        return JSONResponse({"tokens": store.list_tokens(_conn, p.user_id)})
+    d = await request.json()
+    t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip())
+    log.info("%s minted token %s", p.name, t["id"])
+    # The secret is returned exactly once here; only its hash is stored.
+    return JSONResponse(t)
+
+
+@_guard
+async def token_http(request):
+    p = _user_principal(request)
+    tid = request.path_params["tid"]
+    if request.method == "DELETE":
+        store.revoke_token(_conn, tid, p.user_id)
+        log.info("%s revoked token %s", p.name, tid)
+        return JSONResponse({"revoked": tid})
+    d = await request.json()
+    rid = d.get("room") or ""
+    if d.get("attach"):
+        store.assign_room(_conn, tid, rid, p.user_id)
+    else:
+        store.unassign_room(_conn, tid, rid, p.user_id)
+    return JSONResponse({"rooms": store.rooms_for_token(_conn, tid)})
 
 
 async def chat_http(_request):
     return HTMLResponse(WEBCHAT)
 
 
-# ---- web terminal: token+role form -> xterm.js <-> pty running `agent <role>` ----
-
-WEBUI = """<!doctype html><html><head><meta charset="utf-8"><title>Reveille</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-<style>
- html,body{margin:0;height:100%;background:#000;color:#ddd;font-family:monospace}
- #login{padding:2rem;max-width:340px}
- h2{margin:.2rem 0 1rem}
- input{width:100%;box-sizing:border-box;padding:.5rem;margin:.3rem 0;background:#111;color:#ddd;border:1px solid #444;font-family:monospace}
- button{margin-top:.6rem;padding:.5rem 1.2rem;background:#2a2;color:#000;border:0;cursor:pointer;font-weight:bold}
- #err{color:#f66;min-height:1em}
- #term{position:fixed;inset:0;display:none;padding:4px}
-</style></head><body>
-<div id="login">
- <h2>Reveille</h2>
- <p><a href="/ui" style="color:#888">&larr; bus chat</a></p>
- <input id="token" type="password" placeholder="token" autofocus>
- <input id="role" placeholder="role (e.g. roc-api-dev)">
- <button onclick="go()">connect</button>
- <p id="err"></p>
-</div>
-<div id="term"></div>
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-<script>
-function go(){
- var token=document.getElementById('token').value;
- var role=document.getElementById('role').value.trim();
- if(!role){document.getElementById('err').textContent='role required';return;}
- var proto=location.protocol==='https:'?'wss':'ws';
- var ws=new WebSocket(proto+'://'+location.host+'/term?token='+encodeURIComponent(token)+'&role='+encodeURIComponent(role));
- ws.binaryType='arraybuffer';
- var term=new Terminal({cursorBlink:true,fontSize:14,fontFamily:'monospace'});
- var fit=new FitAddon.FitAddon();term.loadAddon(fit);
- ws.onopen=function(){
-   document.getElementById('login').style.display='none';
-   var el=document.getElementById('term');el.style.display='block';
-   term.open(el);fit.fit();
-   var sz=function(){ws.send('\\x00'+term.cols+'x'+term.rows);};
-   sz();window.addEventListener('resize',function(){fit.fit();sz();});
-   term.onData(function(d){ws.send(d);});
-   term.focus();
- };
- ws.onmessage=function(e){term.write(typeof e.data==='string'?e.data:new Uint8Array(e.data));};
- ws.onclose=function(e){term.write('\\r\\n[disconnected '+e.code+']\\r\\n');};
- ws.onerror=function(){document.getElementById('err').textContent='connection failed';};
-}
-document.getElementById('token').addEventListener('keydown',function(e){if(e.key==='Enter')document.getElementById('role').focus();});
-document.getElementById('role').addEventListener('keydown',function(e){if(e.key==='Enter')go();});
-</script></body></html>
-"""
-
-
-async def ui_http(_request):
-    return HTMLResponse(WEBUI)
-
-
-def _winsize(fd, cols, rows):
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-
-
-async def term_ws(ws: WebSocket):
-    """Browser terminal: spawn `agent <role>` on a pty and bridge it to xterm.js. The agent
-    runs in its own tmux session, so closing the tab detaches (session + claude keep running)
-    and reconnecting re-attaches (agent uses tmux new-session -A)."""
-    await ws.accept()
-    token = ws.query_params.get("token") or ""
-    role = re.sub(r"[^A-Za-z0-9_-]", "", ws.query_params.get("role") or "")[:64]
-    if TOKEN and token != TOKEN:
-        await ws.send_text("\r\nauth failed\r\n")
-        await ws.close()
-        return
-    if not role:
-        await ws.send_text("\r\nrole required\r\n")
-        await ws.close()
-        return
-
-    master, slave = pty.openpty()
-    env = {**os.environ, "AGENT_ROLE": role, "AGENTBUS_TOKEN": token,
-           "AGENTBUS_URL": f"http://127.0.0.1:{os.environ.get('AGENTBUS_PORT', '8765')}",
-           "TERM": "xterm-256color"}
-    proc = await asyncio.create_subprocess_exec(
-        AGENT_BIN, role, stdin=slave, stdout=slave, stderr=slave,
-        start_new_session=True, env=env)
-    os.close(slave)
-    loop = asyncio.get_event_loop()
-    log.info("term open role=%s pid=%s", role, proc.pid)
-
-    async def pump_out():  # pty -> browser, in order
+async def _sweeper():
+    """Retention, expired sessions, stale presence. On the event loop, not a thread:
+    _conn is used only from the loop thread, so a thread would need its own connection
+    and real locking. One bad sweep must never kill the task."""
+    while True:
+        await asyncio.sleep(SWEEP_SECS)
         try:
-            while True:
-                data = await loop.run_in_executor(None, os.read, master, 65536)
-                if not data:
-                    break
-                await ws.send_bytes(data)
+            dropped = store.sweep_retention(_conn)
+            store.sweep_sessions(_conn)
+            store.reap_stale(_conn)
+            if dropped:
+                log.info("retention swept %s message(s)", dropped)
         except Exception:
-            pass
-        with contextlib.suppress(Exception):
-            await ws.close()
-
-    out = asyncio.create_task(pump_out())
-    try:
-        while True:
-            msg = await ws.receive_text()
-            if msg[:1] == "\x00":                      # resize control: "\x00<cols>x<rows>"
-                with contextlib.suppress(ValueError):
-                    c, r = msg[1:].split("x")
-                    _winsize(master, int(c), int(r))
-            else:
-                os.write(master, msg.encode())
-    except Exception:
-        pass
-    finally:
-        out.cancel()
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()                           # detach the tmux client; session persists
-        with contextlib.suppress(OSError):
-            os.close(master)
-        log.info("term close role=%s", role)
+            log.exception("sweep failed")
 
 
 def build_app():
@@ -1722,7 +2447,11 @@ def build_app():
     @contextlib.asynccontextmanager
     async def lifespan(app):
         async with mcp_app.router.lifespan_context(app):
-            yield
+            task = asyncio.create_task(_sweeper())
+            try:
+                yield
+            finally:
+                task.cancel()
 
     return Starlette(
         routes=[
@@ -1730,7 +2459,20 @@ def build_app():
             Route("/version", version_http),
             Route("/usage", usage_http),
             Route("/ui", chat_http),
-            Route("/terminal", ui_http),
+            Route("/setup", setup_http, methods=["POST"]),
+            Route("/login", login_http, methods=["POST"]),
+            Route("/logout", logout_http, methods=["POST"]),
+            Route("/me", me_http),
+            Route("/users", users_http, methods=["GET", "POST"]),
+            Route("/users/{uid}", user_http, methods=["PATCH", "DELETE"]),
+            Route("/users/{uid}/password", reset_password_http, methods=["POST"]),
+            Route("/me/password", my_password_http, methods=["POST"]),
+            Route("/rooms", rooms_http, methods=["GET", "POST"]),
+            Route("/rooms/{rid}", room_http, methods=["PATCH"]),
+            Route("/rooms/{rid}", purge_room_http, methods=["DELETE"]),
+            Route("/agents/{name}", prune_agent_http, methods=["DELETE"]),
+            Route("/tokens", tokens_http, methods=["GET", "POST"]),
+            Route("/tokens/{tid}", token_http, methods=["PATCH", "DELETE"]),
             Route("/messages", messages_http),
             Route("/search", search_http),
             Route("/presence", presence_http),
@@ -1740,7 +2482,6 @@ def build_app():
             Route("/files/{fname}", files_http),
             WebSocketRoute("/wake", wake_ws),
             WebSocketRoute("/feed", feed_ws),
-            WebSocketRoute("/term", term_ws),
             Mount("/", app=mcp_app),
         ],
         lifespan=lifespan,
@@ -1758,21 +2499,27 @@ def _setup_logging():
     logging.getLogger("mcp").setLevel(logging.WARNING)  # drop per-request "Processing request" noise
 
 
+_db_path = None
+
+
+def _snap_path(reason):
+    return f"{_db_path}.{reason}-{time.strftime('%Y%m%dT%H%M%S')}.bak"
+
+
 def main():
-    global _conn, _files_dir
+    global _conn, _files_dir, _db_path
     import uvicorn
     _setup_logging()
     root = os.environ.get("CLAUDE_AGENT_BUS") or os.path.expanduser("~/.claude/agent-bus")
-    db = os.environ.get("AGENTBUS_DB") or os.path.join(root, "broker.db")
-    _conn = store.connect(db)
-    _files_dir = pathlib.Path(db).parent / "files"
+    _db_path = os.environ.get("REVEILLE_DB") or os.path.join(root, "broker.db")
+    _conn = store.connect(_db_path)
+    v = store.migrate(_conn, _db_path)   # versioned + transactional; snapshots itself
+    _files_dir = pathlib.Path(_db_path).parent / "files"
     _files_dir.mkdir(parents=True, exist_ok=True)
-    if TOKEN:  # pre-room rows (room='') belong to the fleet's key; idempotent backfill
-        _conn.execute("UPDATE agents SET room=? WHERE room=''", (TOKEN,))
-        _conn.execute("UPDATE messages SET room=? WHERE room=''", (TOKEN,))
-    host = os.environ.get("AGENTBUS_HOST", "0.0.0.0")
-    port = int(os.environ.get("AGENTBUS_PORT", "8765"))
-    log.info("daemon on %s:%s db=%s auth=%s", host, port, db, "token" if TOKEN else "OPEN")
+    host = os.environ.get("REVEILLE_HOST", "0.0.0.0")
+    port = int(os.environ.get("REVEILLE_PORT", "8765"))
+    log.info("daemon on %s:%s db=%s schema=v%s users=%s", host, port, _db_path, v,
+             "yes" if store.any_users(_conn) else "NONE -- open /ui to create the first admin")
     config = uvicorn.Config(build_app(), host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     orig_exit = server.handle_exit
