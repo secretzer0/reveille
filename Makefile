@@ -3,7 +3,9 @@ PREFIX ?= $(HOME)/.local/bin
 LOG  := $(REPO)/agentbus.log
 PID  := $(REPO)/agentbus.pid
 
-.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean
+AGENT_IMAGE ?= reveille-agent:0.1.0-base
+
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike
 
 help:
 	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
@@ -20,6 +22,9 @@ help:
 	@echo "make install-agent  install the 'agent <name>' launcher into $(PREFIX)"
 	@echo "make unregister      remove the agentbus MCP registration"
 	@echo "make lint           ruff check"
+	@echo "make agent-image    build the agent container image ($(AGENT_IMAGE))"
+	@echo "make agent-container ROLE=<name> [WORK=<dir>] [URL=]  run one agent in a container"
+	@echo "make agent-spike    prove a container keeps its knowledge: join from inside it"
 
 sync:
 	uv sync
@@ -97,6 +102,47 @@ install-agent:
 
 unregister:
 	claude mcp remove agentbus --scope user || true
+
+# ---- containerised agents ---------------------------------------------------------
+# A container is just another client: it sets the same two env vars and runs the same
+# `claude mcp add` as `make register`. Nothing here may become required to reach the bus,
+# because standalone agents on a laptop must keep working exactly as they do today.
+agent-image:
+	docker build -t $(AGENT_IMAGE) docker
+
+# One agent, one container, one role. State and workspace are SEPARATE mounts on purpose:
+#   reveille-<role>  (volume) -- what the agent KNOWS: its claude login + memory. Survives.
+#   $(WORK)          (dir)    -- what it is working ON. Throw away a bad checkout without
+#                               burning 200 memory files.
+# The token is passed by NAME so its value never lands in argv (ps, shell history).
+# --network host is the Linux answer to reaching a broker on 127.0.0.1; point URL at the
+# LAN name instead and this runs anywhere.
+# TTY= (empty) runs it without a terminal, for scripts and CI: `claude` wants -it, a
+# one-shot command cannot have it.
+WORK ?= $(HOME)/agents/$(ROLE)
+TTY  ?= -it
+agent-container:
+	@test -n "$(ROLE)" || { echo "usage: make agent-container ROLE=<name> [WORK=<dir>] [URL=]"; exit 2; }
+	@test -n "$$REVEILLE_TOKEN" || { echo "export REVEILLE_TOKEN first (the broker maps it to your rooms)"; exit 2; }
+	@mkdir -p "$(WORK)"
+	@docker volume create reveille-$(ROLE) >/dev/null
+	docker run --rm $(TTY) --network host --name reveille-$(ROLE) \
+	  -e REVEILLE_AGENT_ROLE=$(ROLE) \
+	  -e REVEILLE_TOKEN \
+	  -e REVEILLE_URL=$(or $(URL),http://127.0.0.1:8765) \
+	  -v reveille-$(ROLE):/home/agent/.claude \
+	  -v "$(WORK)":/home/agent/work \
+	  $(AGENT_IMAGE) $(or $(CMD),claude)
+
+# The claim under test: a containerised agent needs NO migration -- rooms, history and
+# lessons come from the token, server-side. Read-only but for a heartbeat.
+agent-spike:
+	@test -n "$$REVEILLE_TOKEN" || { echo "export REVEILLE_TOKEN and REVEILLE_AGENT_ROLE first"; exit 2; }
+	docker run --rm --network host \
+	  -e REVEILLE_AGENT_ROLE -e REVEILLE_TOKEN \
+	  -e REVEILLE_URL=$(or $(URL),http://127.0.0.1:8765) \
+	  -v "$(REPO)/docker/spike_join.py:/tmp/spike_join.py:ro" \
+	  --entrypoint bash $(AGENT_IMAGE) -c 'uv run --quiet --with mcp python /tmp/spike_join.py'
 
 lint:
 	uv run ruff check src tests
