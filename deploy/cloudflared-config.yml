@@ -1,0 +1,32 @@
+# /etc/cloudflared/config.yml
+#
+# The tunnel dials OUT from pve0 to Cloudflare and traffic comes back down that connection.
+# So: no port forward, no static IP, no inbound firewall hole, and the home IP never appears
+# in DNS. That matters beyond convenience -- pve0 is on a residential line whose terms
+# forbid serving, and whose address you do not want customers resolving.
+#
+# Install: cloudflared tunnel login && cloudflared tunnel create reveille
+# It writes ~/.cloudflared/<TUNNEL-ID>.json -- that file IS the credential. It never belongs
+# in this repo or in a container image.
+
+tunnel: reveille
+credentials-file: /etc/cloudflared/reveille.json
+
+# One rule for every tenant. cloudflared matches the hostname; Caddy picks the socket from
+# the label. Adding a customer touches neither file.
+ingress:
+  - hostname: "*.mythos.org"
+    service: http://127.0.0.1:8080
+    originRequest:
+      # wake + feed are long-lived WebSockets. The default idle reaper would silently kill
+      # an agent's real-time rings and leave it polling -- the degraded mode, arrived at by
+      # accident instead of by choice.
+      connectTimeout: 10s
+      noTLSVerify: false
+      disableChunkedEncoding: false
+
+  - hostname: mythos.org
+    service: http://127.0.0.1:8080
+
+  # cloudflared requires a terminating rule.
+  - service: http_status:404

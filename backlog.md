@@ -6,25 +6,29 @@ rewrite, Postgres, or a pricing model -- all three are settled with measurements
 
 ## Next, in the order it will bite (the platform path)
 
-1. **Ingress** -- pve0 is behind residential NAT; nothing is reachable from outside.
-   Cloudflare Tunnel: no port forward, no static IP, keeps the home IP off the internet.
-2. **Wildcard TLS via DNS-01** (`deploy/Caddyfile` assumes it). Per-subdomain certs hit
-   Let's Encrypt's ~50/week cap and wedge at ~customer 50 -- and the failure lands on new
-   signups, the one path that must never break.
-3. **litestream** -> rustfs (fast tier) AND an offsite tier (~$5/mo). rustfs alone shares a
+1. **Ingress + edge TLS: Cloudflare Tunnel on mythos.org.** Written in `deploy/`, NOT yet
+   run -- it needs the zone moved off ZoneEdit. The tunnel dials OUT, so no port forward,
+   no static IP, and the home address never appears in DNS (pve0 is on a residential line
+   whose terms forbid serving). Universal SSL covers `*.mythos.org` one label deep, which
+   is exactly what a tenant is -- so the box issues NO certificates and the Let's Encrypt
+   ~50/week wall, which would have wedged signups at roughly customer 50, never applies.
+   Open question to verify before building signup on it: whether a proxied WILDCARD DNS
+   record is allowed on the free plan. If not, `cloudflared tunnel route dns` per tenant
+   always works -- one API call in `reveille-tenant new`.
+2. **litestream** -> rustfs (fast tier) AND an offsite tier (~$5/mo). rustfs alone shares a
    failure domain with pve0: fire, theft, surge, LAN ransomware.
-4. **ZFS quota per tenant** -- `zfs create -o quota=2G Pool0/reveille/<tenant>`. The app cap
+3. **ZFS quota per tenant** -- `zfs create -o quota=2G Pool0/reveille/<tenant>`. The app cap
    (REVEILLE_QUOTA_BYTES) is legibility, not a guarantee; ENOSPC on the DB is worse than a
    refused upload.
-5. **Per-agent tokens, with the token bound to its agent name.** Today ONE token serves the
+4. **Per-agent tokens, with the token bound to its agent name.** Today ONE token serves the
    whole fleet and X-Agent is self-asserted: no attribution, and revoking one agent kills
    all of them. Security now, metering later (agents == tokens == one count(*)).
-6. **The distiller** -- the free 4th agent. Runs on the CUSTOMER's box with THEIR
+5. **The distiller** -- the free 4th agent. Runs on the CUSTOMER's box with THEIR
    credentials, compacts room history into scoped lessons, writes them back locally. No
    data leaves their machine. It is the token-savings thesis made visible, and it is what
    makes a retention limit humane: raw mail expires, distilled knowledge survives.
    Overlaps heavily with `recap` below.
-7. **Move the last 2 raw queries out of daemon.py** (`_notify`, `_parent_room`)
+6. **Move the last 2 raw queries out of daemon.py** (`_notify`, `_parent_room`)
    so `store.py` is the only file with SQL. ~15 min; makes any future engine swap one file.
 
 ## Threaded-history retrieval — make the DAG useful to Claude while coding
