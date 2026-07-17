@@ -25,16 +25,52 @@ ARE tested; see the commits. Do not treat this file as proven.
   on new signups: the one path that must never break.
 - **Free tier only.** Tunnel, DNS, and Universal SSL cost nothing at this scale.
 
-## 1. Move DNS to Cloudflare
+## 1. Move DNS to Cloudflare -- WITHOUT losing the mail
 
-`mythos.org` is on ZoneEdit and parked -- nothing is live, so there is nothing to break.
+Nothing is served on `mythos.org` (ZoneEdit parking page), so the web side is free to move.
+**The mail is not.** As of the move the zone is:
 
-1. Add `mythos.org` to Cloudflare (free plan). It imports existing records.
-2. Change the nameservers at the registrar to the two Cloudflare gives you.
-3. Wait for the zone to go active (minutes to hours).
+| record | value | what it is |
+|---|---|---|
+| MX | `0 mx-caprica.zoneedit.com` | ZoneEdit forwarding -> Gmail. This is the email. |
+| TXT | `v=spf1 -all` | nothing may send as mythos.org |
+| TXT `_dmarc` | `v=DMARC1; p=reject; fo=s` | reject on failure |
+| A / www | `64.68.200.54` / CNAME -> apex | parking |
 
-Why move: the tunnel and the wildcard both want the zone here, and one provider is one
-thing to know at 3am.
+registrar: GoDaddy (DNS delegated to ZoneEdit), so the nameserver change happens at GoDaddy.
+
+That forwarding is a ZoneEdit *service*, tied to ZoneEdit hosting the DNS. Move the
+nameservers and the MX still points at `mx-caprica.zoneedit.com`, but ZoneEdit has no
+reason to keep relaying for a domain that left. **Assume mail stops on cutover unless
+Cloudflare Email Routing lands in the same move.** Order matters:
+
+1. Cloudflare -> Add site -> `mythos.org` (free plan). It scans and imports.
+2. **Verify the import before touching nameservers**: MX, the SPF TXT, the DMARC TXT. The
+   scan is best-effort and a missed MX is silent mail loss -- the failure mode where
+   nothing looks wrong and mail simply stops arriving.
+3. **Email Routing -> Destination addresses -> your Gmail.** Click Google's confirmation
+   link. Do this while ZoneEdit still serves DNS: the destination must be verified BEFORE
+   the MX cutover or there is a window where mail bounces.
+4. Email Routing -> routes (an address, plus a catch-all). Cloudflare replaces the MX
+   records here; that is forwarding moving from ZoneEdit to Cloudflare.
+5. GoDaddy -> nameservers -> the two Cloudflare gives you. Minutes to hours.
+6. **Test:** mail `you@mythos.org` from an outside account, confirm it reaches Gmail. Do
+   not skip; step 2's silent failure surfaces here or in production.
+
+Cloudflare Email Routing is free and better than what it replaces: SRS (forwarded mail does
+not fail SPF at Gmail), catch-all, per-address rules.
+
+### The mail gotcha that bites at launch, not today
+
+`v=spf1 -all` + `DMARC p=reject` is a correct "we never send" posture for a parked domain,
+and **fatal the first time signup email leaves `noreply@mythos.org`**: your own policy
+rejects it. Email Routing is receive-only and gives no outbound path; Gmail's "Send mail
+as" needs a real SMTP relay. Sending needs a relay (Resend/SES/Postmark), an SPF that
+includes it, and a DKIM key -- with `p=reject` kept only once DKIM is right. Not today, but
+do not discover it during launch.
+
+Why move at all: the tunnel and the edge certificate both want the zone here, and one
+provider is one thing to know at 3am.
 
 ## 2. Create the tunnel
 
