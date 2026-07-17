@@ -1,6 +1,6 @@
 [project]
 name = "agentbus"
-version = "0.2.1"
+version = "0.2.2"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.14"

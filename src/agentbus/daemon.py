@@ -1043,6 +1043,16 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  .agent.conn .st{border-color:var(--green);background:var(--green)}
  .agent.allrow{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;
   margin-bottom:.3rem;padding-bottom:.45rem}
+ /* The card is the only thing anchored to the bottom of the rail, so its menu opens
+    upward from it -- same popup shape as the composer's recipient picker. */
+ #meWrap{position:relative;margin-top:auto}
+ #meMenu{display:none;position:absolute;bottom:calc(100% + .3rem);left:.6rem;right:.6rem;
+  background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.3rem;
+  z-index:10;box-shadow:0 8px 30px rgba(0,0,0,.45)}
+ #meMenu.on{display:block}
+ .mi{padding:.45rem .6rem;border-radius:6px;font-size:.82rem;color:var(--dim);cursor:pointer}
+ .mi:hover{background:var(--hover);color:var(--fg)}
+ #miLogout:hover{color:#e8555a}
  #meCard{display:flex;align-items:center;gap:.6rem;padding:.65rem .9rem;
   border-top:1px solid var(--line);cursor:pointer}
  #meCard:hover{background:var(--hover)}
@@ -1378,11 +1388,17 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   <button type="button" id="fmTo">TO</button>
  </div>
  <div id="agents"></div>
- <div id="meCard" title="switch identity or room">
-  <div class="avatar" id="meAvatar"></div>
-  <div><div class="mename" id="meName"></div><div class="meroom" id="meRoom"></div></div>
-  <span id="meDot" title="bus connection"></span>
-  <span class="gear">&#9881;</span>
+ <div id="meWrap">
+  <div id="meMenu">
+   <div class="mi" id="miSettings">Settings</div>
+   <div class="mi" id="miLogout">Logout</div>
+  </div>
+  <div id="meCard" title="settings, logout">
+   <div class="avatar" id="meAvatar"></div>
+   <div><div class="mename" id="meName"></div><div class="meroom" id="meRoom"></div></div>
+   <span id="meDot" title="bus connection"></span>
+   <span class="gear">&#9881;</span>
+  </div>
  </div>
 </nav>
 <div id="main">
@@ -1463,10 +1479,10 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
 <div id="login">
  <div id="loginCard">
   <h1>REVEILLE</h1>
-  <p id="liBlurb">agent bus</p>
-  <label>USERNAME</label>
-  <input id="liName" placeholder="you" autocomplete="username">
-  <label>PASSWORD</label>
+  <p id="liBlurb"></p>
+  <label for="liName">USERNAME</label>
+  <input id="liName" autocomplete="username" autocapitalize="none" spellcheck="false">
+  <label for="liPass">PASSWORD</label>
   <input id="liPass" type="password" autocomplete="current-password">
   <div id="loginErr"></div>
   <button id="liGo">Sign in</button>
@@ -1544,10 +1560,12 @@ function renderAttchips(){
 const msgs=new Map();
 
 let setupMode=false;
+// The card is only ever raised through here, so this is the ONE place the blurb is
+// written -- the markup ships it empty rather than carrying a copy that can drift.
 function showLogin(msg){
  $('liBlurb').textContent=setupMode
   ? 'first run -- create the admin account'
-  : 'agent bus';
+  : 'fleet comms';
  $('liGo').textContent=setupMode?'Create admin':'Sign in';
  $('loginErr').textContent=msg||'';
  $('login').classList.add('on');$('liName').focus();
@@ -1581,15 +1599,21 @@ function paintMe(){
  $('meAvatar').style.background=tint(myName);
  const rooms=(me&&me.rooms)||[];
  const r=rooms.find(x=>x.id===room);
- // Say how many rooms are switchable, and show a chevron when there is a choice to make.
- // The name alone looked like a readout of where you are, not a way to go elsewhere.
- $('meRoom').innerHTML=esc(r?r.name:'no room')+
-  (rooms.length>1?'<span class="chev">&#9660;</span>':'');
+ // The chevron says the card OPENS something -- always, since the menu is always there.
+ // It used to appear only with 2+ rooms, back when the card jumped straight to the room
+ // list; pointing it at a menu that is sometimes absent would be the lie.
+ $('meRoom').innerHTML=esc(r?r.name:'no room')+'<span class="chev">&#9660;</span>';
  $('meCard').title=rooms.length>1
-  ? 'switch room ('+rooms.length+' available) / settings'
-  : 'rooms, tokens, account';
+  ? 'settings, logout -- rooms ('+rooms.length+' available) are the first tab of Settings'
+  : 'settings, logout';
 }
-$('meCard').onclick=()=>openRooms();
+$('meCard').onclick=e=>{e.stopPropagation();$('meMenu').classList.toggle('on');};
+$('miSettings').onclick=()=>{$('meMenu').classList.remove('on');openRooms();};
+// Logout is the panel's sign-out, reached without opening the panel: same one call, same
+// reload. The reload is what clears every in-page trace of the session.
+$('miLogout').onclick=async()=>{await fetch('/logout',{method:'POST'});location.reload();};
+document.addEventListener('click',()=>$('meMenu').classList.remove('on'));
+document.addEventListener('keydown',e=>{if(e.key==='Escape')$('meMenu').classList.remove('on');});
 
 function hue(name){let h=0;for(const c of name)h=(h*31+c.charCodeAt(0))>>>0;return h%360;}
 function color(n){return 'hsl('+hue(n)+' 62% 64%)';}
