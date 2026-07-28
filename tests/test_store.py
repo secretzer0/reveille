@@ -663,7 +663,8 @@ def test_ratify_completes_pending_supersession():
     a = store.memory_add(c, **kw(fact="old law"))
     d = store.memory_add(c, **kw(fact="new law", tier="state", supersedes=a["id"]))
     assert d["status"] == "draft"
-    store.ratify_memory(c, d["id"], is_admin=False, owned_rooms={room["id"]})
+    store.ratify_memory(c, d["id"], tier="ratify", is_admin=False,
+                        owned_rooms={room["id"]})
     tips = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], kind="decision")
     facts = [m["fact"] for m in tips["memories"]]
     assert "new law" in facts and "old law" not in facts
@@ -672,6 +673,46 @@ def test_ratify_completes_pending_supersession():
         assert False, "ratifying a non-draft must fail"
     except store.BusError:
         pass
+
+
+def test_ratify_requires_ratify_tier_not_just_ownership():
+    """BLOCKER fix (msg 8400): the tier IS the capability, owning the room only its
+    SCOPE -- ANDed, never either. A state- or write-tier token whose owner owns the
+    room must NOT ratify, or the draft gate is one call deep and any owned-room token
+    self-promotes its own drafts to live doctrine."""
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    d = store.memory_add(c, **kw(kind="doctrine", tier="write", fact="self-promoted rule"))
+    assert d["status"] == "draft"
+    for bad in ("state", "write"):
+        try:
+            store.ratify_memory(c, d["id"], tier=bad, is_admin=False,
+                                owned_rooms={room["id"]})
+            assert False, f"{bad}-tier ratify in an owned room must be refused"
+        except store.AccessError:
+            pass
+    # ratify-tier owner: allowed. (admin bypasses both, covered elsewhere.)
+    store.ratify_memory(c, d["id"], tier="ratify", is_admin=False,
+                        owned_rooms={room["id"]})
+    live = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], kind="doctrine")
+    assert any(m["fact"] == "self-promoted rule" for m in live["memories"])
+
+
+def test_draft_queue_visible_only_to_ratify_tier():
+    """Same missing parameter, disclosure side (section 5): recall(status='draft')
+    shows the ratify QUEUE -- owned-room drafts you did not author -- only to a
+    ratify-tier caller. A write-tier owner still sees its OWN drafts, never the queue."""
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    store.memory_add(c, **kw(kind="doctrine", tier="write", author="drafter",
+                             fact="queued draft"))
+    R = {room["id"]: "R"}
+    seen_write = store.recall(c, rooms=R, token_id=tok["id"], caller="reviewer",
+                              tier="write", owned_rooms={room["id"]}, status="draft")
+    assert all(m["fact"] != "queued draft" for m in seen_write["memories"])
+    seen_ratify = store.recall(c, rooms=R, token_id=tok["id"], caller="reviewer",
+                               tier="ratify", owned_rooms={room["id"]}, status="draft")
+    assert any(m["fact"] == "queued draft" for m in seen_ratify["memories"])
 
 
 def test_recall_pool_rank_order_and_truncation_flag():
