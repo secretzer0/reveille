@@ -486,7 +486,6 @@ def test_fts_delete_sync_and_upgrade_backfill():
     # version, migrate -- history must come back searchable.
     c.execute("DROP TABLE messages_fts")
     c.execute("PRAGMA user_version=4")
-    import tempfile, os
     assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "x.db")) == store.SCHEMA_VERSION
     assert len(store.search(c, keywords=["keepable"], rooms=[room["id"]])) == 1
     assert store.search(c, keywords=[str(keep["id"]) + "zzz"], rooms=[room["id"]]) == []
