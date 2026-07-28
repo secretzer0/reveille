@@ -135,6 +135,14 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.6  history() and web /search take entity= -- exact, case-insensitive match on the
+       extracted identifier class (ADR-061, #263, RunStatus, run_id, disposal_run_id,
+       repo names, proto-vX.Y.Z). This is the recovery path 0.2.5 promised for
+       compounds token search fuses: entity=run_id and entity=disposal_run_id are
+       distinct keys, each exact. Combines with keywords/since/with_agent as AND.
+       Extraction is deterministic regex at send time; the whole backlog is
+       backfilled by the migration. Unmatched vocabulary: say it in a message and it
+       still FTS-matches -- entities are an index, not a gate.
 0.2.5  history() and web /search are FTS5-ranked (bm25, best-first, ties oldest-first).
        BREAKING semantics, deliberately: keywords match TOKENS now, not substrings --
        'eboot' no longer matches "reboot". The tokenizer keeps fleet vocabulary whole
@@ -640,7 +648,8 @@ def _when_ns(spec: str):
 @mcp.tool()
 async def history(keywords: str = "", since: str = "", until: str = "",
                   with_agent: str = "", mine: bool = False,
-                  thread_id: int = 0, limit: int = 200, ctx: Context = None) -> dict:
+                  thread_id: int = 0, limit: int = 200, entity: str = "",
+                  ctx: Context = None) -> dict:
     """Search the full message log (read OR unread) -- this is how you review past
     coordination instead of reading the broker DB. Filters AND together:
       keywords   space-separated words, e.g. 'reboot deploy upgrade'. A message matches
@@ -656,6 +665,10 @@ async def history(keywords: str = "", since: str = "", until: str = "",
       mine=True  only messages where YOU are sender or recipient (your asks + replies to
                  you); combine with with_agent for just your 1:1 thread with them
       thread_id  restrict to one thread
+      entity     only messages citing this identifier (ADR-061, #263, RunStatus,
+                 run_id, disposal_run_id, repo names, proto-vX.Y.Z) -- exact on the
+                 identifier class, case-insensitive. This is how you reach compounds
+                 that token search fuses (CHANGES 0.2.5/0.2.6).
     Returns the most recent <=limit matches as {messages, count} (oldest-first when no
     keywords). Each message carries thread_id and parent_id -- pass thread_id to
     graph()/thread() or an id to trace() to expand the reply DAG."""
@@ -665,9 +678,10 @@ async def history(keywords: str = "", since: str = "", until: str = "",
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
         involves=with_agent or None, mine_agent=(p.name if mine else None),
-        thread_id=thread_id or None, limit=limit, rooms=p.rooms)
-    log.info("%s history kw=%r since=%r until=%r with=%r mine=%s -> %s", p.name, keywords,
-             since, until, with_agent, mine, len(msgs))
+        thread_id=thread_id or None, limit=limit, rooms=p.rooms,
+        entity=entity or None)
+    log.info("%s history kw=%r since=%r until=%r with=%r mine=%s ent=%r -> %s", p.name,
+             keywords, since, until, with_agent, mine, entity, len(msgs))
     return {"messages": msgs, "count": len(msgs)}
 
 
@@ -1023,8 +1037,9 @@ async def files_http(request):
 
 @_guard
 async def search_http(request):
-    """GET /search?keywords=&since=&until=&agent=&thread_id=&limit=[&room=] -> the whole
-    log, same semantics as the history() tool (keywords ranked; naive ISO = UTC)."""
+    """GET /search?keywords=&since=&until=&agent=&thread_id=&limit=[&room=][&entity=]
+    -> the whole log, same semantics as the history() tool (keywords ranked;
+    naive ISO = UTC; entity= exact on the extracted identifier class)."""
     p = _principal(request)
     q = request.query_params
     try:
@@ -1035,7 +1050,8 @@ async def search_http(request):
             until_ns=_when_ns(q.get("until") or ""),
             involves=q.get("agent") or None,
             thread_id=int(q.get("thread_id") or 0) or None,
-            limit=int(q.get("limit") or 500), rooms=_scope(request, p))
+            limit=int(q.get("limit") or 500), rooms=_scope(request, p),
+            entity=q.get("entity") or None)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return JSONResponse({"messages": msgs, "count": len(msgs)})

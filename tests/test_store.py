@@ -492,6 +492,48 @@ def test_fts_delete_sync_and_upgrade_backfill():
     c.execute("INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')")
 
 
+def test_entity_extraction_patterns():
+    """DES-001 S2: the deterministic identifier classes, lowercased as the normal form."""
+    got = store.extract_entities(
+        "ADR-061 ratified. PR #263 renames FieldTicketStatus; roc-api repins "
+        "proto-v3.6.2 and disposal_run_id joins run_id. R&D#5 is not a PR.")
+    assert {"adr-061", "#263", "fieldticketstatus", "roc-api", "proto-v3.6.2",
+            "disposal_run_id", "run_id"} <= got
+    assert "#5" not in got                    # &-prefixed: not an issue reference
+    assert store.extract_entities("") == set()
+    assert store.extract_entities(None) == set()
+
+
+def test_entity_filter_send_delete_and_backfill():
+    """entity= is exact on the identifier class -- the recovery path for compounds
+    FTS fuses -- and the index follows the log through send, delete, and the
+    v5->v6 backfill."""
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    a = store.send(c, "alice", store.BROADCAST,
+                   "disposal_run_id carries the site per ADR-061", room=room["id"])
+    store.send(c, "alice", store.BROADCAST, "run_id rides the leg", room=room["id"])
+    rid = [room["id"]]
+    # exact per identifier: the fused compound and its suffix are DISTINCT keys
+    assert [m["id"] for m in store.search(c, entity="disposal_run_id", rooms=rid)] == [a["id"]]
+    assert len(store.search(c, entity="run_id", rooms=rid)) == 1
+    assert len(store.search(c, entity="ADR-061", rooms=rid)) == 1      # case-normal
+    # ANDs with keywords
+    assert len(store.search(c, keywords=["site"], entity="adr-061", rooms=rid)) == 1
+    assert store.search(c, keywords=["leg"], entity="adr-061", rooms=rid) == []
+    # delete cleans the index
+    with store.tx(c):
+        store._delete_messages(c, [a["id"]])
+    assert store.search(c, entity="disposal_run_id", rooms=rid) == []
+    assert c.execute("SELECT count(*) FROM message_entities WHERE message_id=?",
+                     (a["id"],)).fetchone()[0] == 0
+    # v5->v6 re-run against a live table: drop, rewind, migrate -> backfilled
+    c.execute("DROP TABLE message_entities")
+    c.execute("PRAGMA user_version=5")
+    assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "x.db")) == store.SCHEMA_VERSION
+    assert len(store.search(c, entity="run_id", rooms=rid)) == 1
+
+
 def test_threading_and_graph():
     c, admin, room, tok = fixture()
     store.join(c, "alice", "TA", room["id"], tok["id"])

@@ -54,7 +54,34 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+# Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
+# These are the identifier classes the fleet actually cites -- and the recovery path
+# for the compounds FTS tokenization fuses (CHANGES 0.2.5): snake_case is in the list
+# because "the S2 entities index owns the identifier class" (DES 5) is a promise about
+# run_id AND disposal_run_id, not just CamelCase. Extend the list, never fork it.
+_REPO_NAMES = ("roc-api", "roc-ui", "controller-api", "controller-ui", "vendor-api",
+               "vendor-ui", "minimal-mobile", "streaming", "deployment", "kiosk",
+               "reveille", "shared", "mobile")
+_ENTITY_RES = (
+    re.compile(r"\bADR-\d+\b", re.I),                       # ADR-061
+    re.compile(r"(?<![\w&])#\d+\b"),                        # #263 (PRs/issues)
+    re.compile(r"\bproto-v\d+\.\d+\.\d+\b", re.I),          # proto-v3.6.2
+    re.compile(r"\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b"),   # RunStatus (>=2 humps)
+    re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b"),       # run_id, disposal_run_id
+    re.compile(r"\b(?:%s)\b" % "|".join(_REPO_NAMES), re.I),
+)
+
+
+def extract_entities(text):
+    """Every entity the patterns above find, lowercased and deduped. Lowercase IS the
+    normal form -- the entity= filter normalizes the same way, so RunStatus and
+    runstatus are one key."""
+    found = set()
+    for rx in _ENTITY_RES:
+        found.update(m.group(0).lower() for m in rx.finditer(text or ""))
+    return found
 
 # scrypt cost. 128 * n * r = 16 MB per hash; maxmem must clear that or it raises.
 _SCRYPT = dict(n=2**14, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024)
@@ -195,6 +222,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content='messages', content_rowid='id',
     tokenize="unicode61 tokenchars '-_'"
 );
+CREATE TABLE IF NOT EXISTS message_entities (
+    entity     TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY (entity, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_msgent_msg ON message_entities(message_id);
 """
 # messages_fts (DES-001 S1; tokenizer measured on the live corpus, bus msg 8366):
 # unicode61 with tokenchars '-_' keeps fleet vocabulary (ADR-061, wake-127, run_id) as
@@ -314,11 +347,16 @@ def migrate(conn, db_path):
         _upgrade_v2(conn, db_path)
         _upgrade_v3(conn, db_path)
         _upgrade_v4(conn, db_path)
+        _upgrade_v5(conn, db_path)
     elif v == 3:
         _upgrade_v3(conn, db_path)
         _upgrade_v4(conn, db_path)
+        _upgrade_v5(conn, db_path)
     elif v == 4:
         _upgrade_v4(conn, db_path)
+        _upgrade_v5(conn, db_path)
+    elif v == 5:
+        _upgrade_v5(conn, db_path)
     return SCHEMA_VERSION
 
 
@@ -373,6 +411,32 @@ def _upgrade_v4(conn, db_path):
                          "SELECT id, subject, body FROM messages").rowcount
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return n
+
+
+def _upgrade_v5(conn, db_path):
+    """v5 -> v6: entity index over messages (DES-001 S2).
+
+    Backfill runs the same extractor send() uses, over the whole log, in the
+    migration's transaction -- a created-but-empty entity table would make
+    entity= silently return nothing for all of history."""
+    with tx(conn):
+        _exec_script(conn, """
+            CREATE TABLE IF NOT EXISTS message_entities (
+                entity     TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (entity, message_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_msgent_msg ON message_entities(message_id)
+        """)
+        conn.execute("DELETE FROM message_entities")
+        rows = []
+        for r in conn.execute("SELECT id, subject, body FROM messages"):
+            rows += [(e, r["id"]) for e in
+                     extract_entities(f"{r['subject']} {r['body']}")]
+        conn.executemany(
+            "INSERT OR IGNORE INTO message_entities(entity, message_id) VALUES(?,?)", rows)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    return len(rows)
 
 
 def _upgrade_v0(conn, db_path):
@@ -819,6 +883,7 @@ def _delete_messages(conn, ids):
         "INSERT INTO messages_fts(messages_fts, rowid, subject, body) "
         "VALUES('delete',?,?,?)",
         [(r["id"], r["subject"], r["body"]) for r in doomed])
+    conn.execute(f"DELETE FROM message_entities WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM attachments WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM reads WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM links WHERE parent_id IN ({ph}) OR child_id IN ({ph})", ids + ids)
@@ -1054,6 +1119,9 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
         # own; every insert here must be mirrored or the message is unsearchable.
         conn.execute("INSERT INTO messages_fts(rowid, subject, body) VALUES(?,?,?)",
                      (mid, subject, body))
+        conn.executemany(
+            "INSERT OR IGNORE INTO message_entities(entity, message_id) VALUES(?,?)",
+            [(e, mid) for e in extract_entities(f"{subject} {body}")])
         if thread_id is None:  # new thread roots on its own id
             conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
             thread_id = mid
@@ -1140,7 +1208,8 @@ def tail(conn, since_id=0, limit=200, rooms=()):
 
 
 def search(conn, *, keywords=None, since_ns=None, until_ns=None,
-           involves=None, mine_agent=None, thread_id=None, limit=200, rooms=()):
+           involves=None, mine_agent=None, thread_id=None, limit=200, rooms=(),
+           entity=None):
     """Search the message log (read or not) across the caller's rooms. Every filter
     ANDs together:
       keywords   list of words; a message matches if ANY word appears as a
@@ -1154,6 +1223,10 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
       involves   agent is sender OR recipient (the full convo touching that agent)
       mine_agent agent is sender OR recipient (the caller's own slice)
       thread_id  restrict to one thread
+      entity     only messages whose text carries this extracted entity (ADR-061,
+                 #263, RunStatus, run_id, disposal_run_id, repo names, proto-vX.Y.Z);
+                 case-insensitive, matches the identifier class exactly -- this is
+                 the recovery path for compounds FTS tokenization fuses
     involves + mine_agent together => the 1:1 conversation between the two.
     Returns the most recent <=limit matches. Without keywords: oldest-first. With
     keywords: ranked best-first by bm25, ties oldest-first. Each carries thread_id so
@@ -1193,6 +1266,11 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
     if thread_id:
         where.append("m.thread_id=?")
         args.append(thread_id)
+    if entity:
+        # Same normal form as extraction: lowercase. entity="RunStatus" and
+        # entity="runstatus" are one key, exactly like the index itself.
+        where.append("m.id IN (SELECT message_id FROM message_entities WHERE entity=?)")
+        args.append(entity.lower())
     clause = " WHERE " + " AND ".join(where)
     limit = max(1, min(int(limit), 1000))
     sel = _SEL.replace("SELECT m.*", "SELECT m.*, f.rank AS _rank", 1) if keywords else _SEL
