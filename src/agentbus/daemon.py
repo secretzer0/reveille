@@ -135,6 +135,14 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.9  brief() -- the onboarding pack (DES-001 S4). One call after join() returns a
+       char-budgeted (default 28000 ~ 7k tokens), ranked composition: lessons,
+       doctrine (ranked by entity overlap with your role= string), live contracts,
+       decisions (recent first), your own saved state, and who is live in your
+       rooms. Every truncation is marked in the text -- no silent caps. join() now
+       returns brief_available (a count) so a fresh agent knows the pack is worth
+       pulling; the 15-minute replay is unchanged -- brief() is the knowledge floor,
+       replay is the conversation floor.
 0.2.8  HIVE MEMORY (DES-001 S3). New tools: memory_add / recall / memory_retract /
        ratify. A memory is ONE distilled fact with provenance (source= message id ->
        trace() the deliberation) and supersession instead of edits: correcting a fact
@@ -483,9 +491,17 @@ async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context 
                    fresh=fresh, url=url or None)
     unread = len(store.inbox(_conn, p.name, p.rooms))
     rooms = [{"id": r, "name": n} for r, n in p.rooms.items()]
-    log.info("%s join url=%s rooms=%s unread=%s", p.name, url or "-", len(rooms), unread)
+    # A COUNT, not the pack: joining stays cheap, brief() pulls the pack on demand.
+    scopes = ["global"] + list(p.rooms)
+    brief_available = _conn.execute(
+        f"SELECT count(*) FROM memories WHERE status='live' AND "
+        f"(scope IN ({','.join('?' * len(scopes))}) OR scope=?)",
+        scopes + [f"agent:{p.token_id}"]).fetchone()[0]
+    log.info("%s join url=%s rooms=%s unread=%s brief=%s", p.name, url or "-",
+             len(rooms), unread, brief_available)
     return {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
-            "unread": unread, "version": __version__}
+            "unread": unread, "brief_available": brief_available,
+            "version": __version__}
 
 
 @mcp.tool()
@@ -585,6 +601,22 @@ async def recall(query: str = "", kind: str = "", scope: str = "", entity: str =
         owned_rooms=owned, query=query, kind=kind, scope=scope, entity=entity,
         author=author, since_ns=_when_ns(since), until_ns=_when_ns(until),
         status=status, limit=limit, explain=explain)
+
+
+@mcp.tool()
+async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> dict:
+    """The onboarding pack (DES-001): lessons, doctrine (ranked by entity overlap
+    with your role string), live contracts, decisions, your own saved state, and a
+    presence digest -- composed, ranked, and budgeted in CHARS (~4/token,
+    approximate: the broker has no tokenizer). Every truncation is marked in the
+    text; nothing is silently capped. Call it at boot after join() and lessons();
+    call it again anytime -- it always reflects the live tips."""
+    p = _me(ctx.request_context.request)
+    out = store.brief(_conn, rooms=p.rooms, token_id=p.token_id, role=role,
+                      budget=budget)
+    log.info("%s brief role=%r -> %s chars, sections=%s", p.name, role,
+             out["chars"], out["sections"])
+    return out
 
 
 @mcp.tool()

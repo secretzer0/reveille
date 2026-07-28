@@ -1883,6 +1883,101 @@ def sweep_expired_state(conn):
     return len(rows)
 
 
+def brief(conn, *, rooms, token_id, role="", budget=28000):
+    """The onboarding pack (DES-001 section 7): lessons, then doctrine ranked by
+    entity overlap with the caller's role, then live contracts, then decisions
+    (recent weighted up), then own state, then a presence digest. Budget is CHARS
+    (~4/token, approximate by construction: the broker has no tokenizer, G4).
+    Every truncation is MARKED -- a silent cap reads as "covered everything"."""
+    budget = max(2000, int(budget))
+    role_ents = {e.lower() for e in
+                 (set((role or "").replace(",", " ").split()) |
+                  extract_entities(role or ""))}
+    parts, spent = [], 0
+    truncated = []
+
+    def emit(line):
+        nonlocal spent
+        parts.append(line)
+        spent += len(line) + 1
+
+    def room_scopes():
+        return ["global"] + list(rooms)
+
+    def mem_rows(kind, order="created_ns DESC"):
+        scopes = room_scopes()
+        return conn.execute(
+            f"SELECT * FROM memories WHERE kind=? AND status='live' AND "
+            f"(expires_ns IS NULL OR expires_ns > ?) AND scope IN ({_ph(scopes)}) "
+            f"ORDER BY {order}", [kind, time.time_ns()] + scopes).fetchall()
+
+    def overlap(r):
+        ents = set(r["entities"].split())
+        return len(ents & role_ents)
+
+    def section(title, rows, render, cap_share):
+        room_for = dict(rooms)
+        cap = int(budget * cap_share)
+        used, shown = 0, 0
+        emit(f"== {title} ({len(rows)}) ==")
+        for r in rows:
+            line = render(r, room_for)
+            if used + len(line) > cap or spent + len(line) > budget:
+                break
+            emit(line)
+            used += len(line) + 1
+            shown += 1
+        if shown < len(rows):
+            truncated.append(title)
+            emit(f"[{shown} of {len(rows)} shown -- recall(kind='{title.rstrip('s')}') "
+                 f"or lessons() for the rest]")
+
+    # 1. lessons -- the rules the fleet already paid for, all of them if they fit
+    lrows = conn.execute(
+        f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
+        f"scope IN ({_ph(room_scopes())}) ORDER BY created_ns DESC", room_scopes()
+    ).fetchall()
+    section("lessons", lrows,
+            lambda r, _: f"- {r['slug']}: {r['rule']} [detect: {r['detection']}]", 0.30)
+    # 2. doctrine, role-relevant first
+    drows = sorted(mem_rows("doctrine"), key=lambda r: (-overlap(r), -r["created_ns"]))
+    section("doctrine", drows, lambda r, _: f"- {r['fact']}", 0.25)
+    # 3. live contracts (supersession already resolved by status='live')
+    section("contracts", mem_rows("contract"),
+            lambda r, _: f"- {r['fact']}"
+                         + (f" [src msg {r['source_msg_id']}]" if r["source_msg_id"] else ""),
+            0.20)
+    # 4. decisions -- last 30d first, older by role relevance
+    cutoff = time.time_ns() - 30 * 24 * 3600 * 10**9
+    dec = mem_rows("decision")
+    dec = sorted(dec, key=lambda r: (r["created_ns"] < cutoff, -overlap(r),
+                                     -r["created_ns"]))
+    section("decisions", dec,
+            lambda r, _: f"- {r['fact']}"
+                         + (f" [src msg {r['source_msg_id']}]" if r["source_msg_id"] else ""),
+            0.20)
+    # 5. own state (restart case) -- only ever the caller's own bucket
+    srows = conn.execute(
+        "SELECT * FROM memories WHERE kind='state' AND status='live' AND scope=? "
+        "AND (expires_ns IS NULL OR expires_ns > ?) ORDER BY created_ns DESC",
+        (f"agent:{token_id}", time.time_ns())).fetchall()
+    if srows:
+        section("state", srows, lambda r, _: f"- {r['fact']}", 0.15)
+    # 6. presence digest
+    emit("== presence ==")
+    for rid, rname in rooms.items():
+        live = [r["name"] for r in conn.execute(
+            "SELECT name, seen_ns FROM members WHERE room_id=? ORDER BY seen_ns DESC",
+            (rid,)) if _is_live(r["seen_ns"], time.time_ns())]
+        emit(f"- {rname}: {', '.join(live) if live else '(nobody live)'}")
+
+    return {"text": "\n".join(parts)[:budget], "chars": min(spent, budget),
+            "sections": {"lessons": len(lrows), "doctrine": len(drows),
+                         "contracts": len(mem_rows('contract')),
+                         "decisions": len(dec), "state": len(srows)},
+            "truncated": truncated}
+
+
 # ---- lessons: same API, rebacked onto memories (DES-001 B1) ----------------------
 
 def add_lesson(conn, *, author, slug, symptom, root_cause, rule, detection, room_id=None):
