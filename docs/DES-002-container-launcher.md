@@ -193,8 +193,16 @@ Enforcement — at the entry wrapper, not in the client's hands:
   disappears mid-keystroke, which is the point. The <1s smoke in T3 measures
   exactly this path.
 - The mode rides the SERVER side of the WebSocket. A visitor cannot flip their own
-  `-r` off: ttyd's writable flag stays off globally; write capability exists only
-  through the gate's exec choice. Client-side anything is decoration.
+  `-r` off. ttyd itself must run writable (`-W`) or no driver could ever type;
+  what that flag buys is transport only — client input crosses the wire, and
+  whether tmux HONORS it is decided server-side by the gate's exec choice (`-r`
+  for viewers). Write capability exists only through that choice. Client-side
+  anything is decoration.
+- The gate's argv is attacker-controlled. ttyd's `-a` appends URL `?arg=` values
+  to the command, which is how the token arrives — so it is also how anything
+  else arrives. The gate takes a FIXED first argument from ttyd and treats every
+  client-supplied word as untrusted data, never as a subcommand: signing
+  (`mint`) must be unreachable from the wire, or the door hands out its own keys.
 - Auth to ttyd: per-grant URL token issued by the launcher UI, single audience,
   short TTL, renewed while the grant lives — layered under Cloudflare Access at
   the edge (tunnel plan, backlog item 1). Neither layer alone is the gate.
