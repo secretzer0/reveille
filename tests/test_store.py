@@ -752,6 +752,39 @@ def test_lessons_fold_in_migration_v8_to_v9():
     assert got[0]["slug"] == "old-lesson" and got[0]["rule"] == "the old rule"
 
 
+def test_brief_composition_ranking_and_budget():
+    """DES-001 section 7: sections in order, role-relevant doctrine first, own state
+    included, other agents' state absent, truncation MARKED never silent."""
+    c, admin, room, tok = fixture()
+    rooms = {room["id"]: "Reveille"}
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    store.add_lesson(c, author="carol", slug="wake-127", symptom="s", root_cause="r",
+                     rule="fix the PATH", detection="command -v wake")
+    store.memory_add(c, **kw(kind="doctrine", tier="ratify",
+                             fact="roc-ui uses stacked branches"))
+    store.memory_add(c, **kw(kind="doctrine", tier="ratify",
+                             fact="python services pin uv"))
+    store.memory_add(c, **kw(kind="contract",
+                             fact="leg carries field_ticket_id ONLY"))
+    store.memory_add(c, **kw(fact="RunStatus has no TRANSPORT member"))
+    store.memory_add(c, **kw(kind="state", tier="state", fact="my open task: S4"))
+    other = store.create_token(c, admin["id"], "other", agent_name="bob")
+    store.memory_add(c, **kw(kind="state", tier="state", token_id=other["id"],
+                             fact="bob secret state"))
+
+    out = store.brief(c, rooms=rooms, token_id=tok["id"], role="roc-ui dev")
+    t = out["text"]
+    assert "wake-127" in t and "field_ticket_id ONLY" in t and "TRANSPORT" in t
+    assert "my open task: S4" in t and "bob secret state" not in t
+    # role relevance: the roc-ui doctrine line outranks the uv line
+    assert t.index("roc-ui uses stacked branches") < t.index("python services pin uv")
+    assert out["truncated"] == [] and out["chars"] <= 28000
+    # tight budget: hard cap holds and the cut is MARKED
+    small = store.brief(c, rooms=rooms, token_id=tok["id"], budget=2000)
+    assert len(small["text"]) <= 2000
+    assert small["truncated"] or small["sections"]["lessons"] <= 1
+
+
 def test_state_expiry_sweep():
     c, admin, room, tok = fixture()
     kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
