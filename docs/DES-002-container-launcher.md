@@ -1,20 +1,37 @@
 # DES-002: Container launcher — web-provisioned agent containers with shared tmux
 
-Status: DRAFT — sections 1-3 and 8 are skeleton, posted early because section 4
-(tmux sharing) was specified first at the operator's request. The launcher core gets
-its own adversarial round before any stage ships. Companion to DES-001 (memory layer,
-ACCEPTED); this doc is the compute/attach layer only.
+Status: DRAFT v2 — posted for fleet adversarial review (round protocol: section 7).
+Companion to DES-001 (memory layer, ACCEPTED); this doc is the compute/attach layer
+only. Ruled parallel: launcher stages start after DES-001 S4 ships; S5/S6 interleave.
 
-## 1. Problem (skeleton)
+## 1. Problem
 
-An agent today is a tmux pane a human hand-builds: clone, .envrc, MCP registration,
-wake waiter, Stop hook. That is repeatable but not provisionable — an operator cannot
-mint "one more dev on project X" from the web the way they mint a token. And the
-session is invisible: guiding a coding agent means being the person at that terminal.
-DECISIONS already fixes the shape: one agent = one container = one git identity =
-one (bound) token. The launcher makes that shape a button.
+An agent today is a tmux pane a human hand-builds, every time: clone the repo, write
+.envrc (token + role), register MCP, install the Stop hook, arm the waiter, start the
+session. Six manual steps per agent, each a chance to resurrect a paid-for lesson
+(wake-127 was exactly this: a hand-built pane missing the CLI on PATH). The shape is
+already law — one agent = one container = one git identity = one bound token
+(DECISIONS "Containers"), and `make agent-spike` proved a container joins with an
+existing identity and inherits rooms, history, lessons and peers having copied
+nothing. What does not exist:
 
-## 2. Goals (skeleton)
+- Provisioning: "one more dev on project X" is an afternoon of pane surgery, not a
+  button. The marginal agent should cost what the marginal token costs.
+- Visibility: the session is a terminal on one machine. Guiding a coding agent means
+  BEING at that terminal; a second human cannot watch, and the operator cannot watch
+  from a browser. Section 4 fixes this; the launcher makes it provisioned rather
+  than hand-rigged.
+- Disposal: killing a hand-built pane strands nothing today ONLY because every
+  artifact happens to live elsewhere (remote git, broker). The launcher makes that a
+  guarantee instead of a habit (G5).
+
+Scope boundary: these are the OPERATOR'S containers on the operator's box. DECISIONS
+rejected hosting customers' agents (credential custody, runaway spend, miner magnet)
+— nothing here reverses that; the launcher is homebrew tooling that a customer runs
+on their own hardware, which is the product thesis (the bus is the product; agents
+run on the customer's compute).
+
+## 2. Goals
 
 G1. Provision: web UI creates a container wired for one agent — repo clone, bound
     token in env, MCP registration, waiter + Stop hook armed at boot.
@@ -31,17 +48,69 @@ credentials, runaway spend, miner magnet); multi-agent containers; worktrees acr
 containers (each container is a full clone; the remote is the shared object store;
 the bus is the coordination layer git lacks).
 
-## 3. Components (skeleton — each gets full treatment in its own round)
+## 3. Components
 
-- provisioner: web-triggered; creates container from the agent image, injects
-  identity env (bound REVEILLE_TOKEN, REVEILLE_AGENT_ROLE), clones the repo,
-  registers MCP, arms the boot ritual.
-- agent image: docker/ already builds one (docker/Dockerfile, entrypoint.sh,
-  spike_join.py proved join-with-identity works — DECISIONS "no knowledge
-  migration").
-- tmux + ttyd sidecar: section 4.
-- lifecycle: stop/kill/re-provision; per-tenant quotas ride the platform work
-  (backlog: ZFS quota, cgroup caps).
+### 3.1 The launcher daemon — the ONLY thing that touches docker
+
+A separate host-side process (`reveille-launch`, daemon + CLI in one), owning the
+docker socket. The broker never gains docker awareness — smoke_ws guards this
+(DECISIONS: it fails the day the broker grows any), and the 0.2.0 /terminal deletion
+is the same boundary from the other side. Hard consequences:
+
+- The launcher is its own process with its own listener (localhost HTTP + CLI in T2;
+  published through the tunnel behind Cloudflare Access in T4, never a host port).
+- The launcher holds NO standing broker credential. Provisioning takes the bound
+  token as INPUT (operator mints in /ui, pastes or pipes to `reveille-launch new`).
+  Automating the mint is Q4 — declined for v1 because a daemon holding an admin
+  session is a bigger surface than a paste is a friction.
+- Broker web UI shows nothing container. Container state lives in the launcher;
+  the bus sees only what it always saw — an agent that joined.
+
+### 3.2 Provision flow (`reveille-launch new <role> <repo-url>`)
+
+1. Take: role name, repo URL, bound token (stdin/prompt, never argv — argv leaks,
+   the wake-127 lesson's detection note is fleet law), optional resource caps.
+2. Create container from the agent image, named `rev-<role>`, labeled for cleanup
+   (`reveille.role=<role>`), memory/cpu caps applied (defaults: 4G, 2 cpus; cgroup
+   flags, ZFS quota rides the platform backlog).
+3. Inject env at create: REVEILLE_AGENT_ROLE=<role>, REVEILLE_TOKEN=<token>,
+   broker URL. Env, not baked into image layers — `docker inspect` exposure is
+   root-equivalent-only, same class as reading .envrc on the host today.
+4. Entrypoint: clone repo, register MCP (HTTP transport against the broker),
+   install Stop hook, install `wake` onto PATH (the wake-127 fix is an image
+   guarantee now, not a hand step), write tmux.conf (window-size largest,
+   aggressive-resize, HISTFILE off), start tmux session `agent`, arm the waiter,
+   start ttyd bound to the container's private interface, start the agent process.
+5. Health: provision succeeds when the broker's presence shows the role
+   live+connected — checked by the LAUNCHER polling presence with the agent's own
+   token (read the bus like any client; no new broker surface).
+
+### 3.3 Agent image
+
+docker/ already builds the base (Dockerfile, entrypoint.sh; spike_join.py proved
+join-with-identity). T1 additions: tmux + ttyd + attach-gate, claude CLI, uv, git,
+the wake console-script on PATH. One image for every agent; role differences are
+env + volume, never image forks (an image fork is a config smell).
+
+Claude login state: persisted in a named volume per container
+(`rev-<role>-claude`), because re-authenticating on every re-provision makes
+disposal expensive and G5 dies. The volume is the ONE stateful thing a container
+owns; destroy offers --keep-login (default) and --purge.
+
+### 3.4 Grants and attach: section 4 (specified). Grant table lives in the
+launcher's own sqlite file (launcher.db) — same one-file discipline as the broker,
+different file, different process; grants key on container id and die with it.
+
+### 3.5 Lifecycle
+
+- `new` / `stop` / `start` / `destroy [--purge]` / `ls` / `grant` / `revoke`.
+- Re-provision = destroy + new with the same role and volume: the remote has the
+  code, the broker has the mail and memory, the volume has the login. Nothing else
+  existed — that is G5 verified by construction, and the smoke test T3 kills a
+  container mid-conversation and re-provisions it to prove the agent resumes from
+  bus state alone (join + brief() once DES-001 S4 ships).
+- Crash policy: restart=unless-stopped for the container; the waiter's own
+  reconnect discipline (0.1.5) already survives broker restarts.
 
 ## 4. Shared tmux: watch and drive, owner-controlled — SPECIFIED
 
@@ -133,16 +202,22 @@ judgement has a place to happen.
 - Two drivers race (multi-driver=false): second writable attach is refused by the
   gate with a readable message naming the current driver, not queued silently.
 
-## 5. Staging (section 4 only; launcher core stages TBD with sections 1-3)
+## 5. Staging — each stage shippable, green gate, starts after DES-001 S4
+(ruled parallel: S5/S6 interleave with T-stages; F3 still lands before S5)
 
-- T1  image: tmux.conf (window-size largest, aggressive-resize), ttyd sidecar,
-      attach-gate wrapper, HISTFILE off. Attachable by owner, ssh + browser.
-- T2  grant table + launcher UI (grant/revoke/flip person, viewer default,
-      exclusive driver), per-grant URL tokens, audit log.
-- T3  revocation kill-path + smoke: multi-client mirror, -r enforcement, revoke
-      drops client, driver exclusivity race.
-- T4  edge: publish through the tunnel behind Cloudflare Access (blocked on
-      backlog item 1, the zone move).
+- T1  image: tmux multi-client conf, ttyd + attach-gate in the image, wake on
+      PATH, HISTFILE off, claude-login volume. Attachable by owner, ssh + browser
+      (LAN). Gate: `reveille-launch` not required yet — image runnable by hand.
+- T2  launcher daemon + CLI: new/stop/start/destroy/ls, provision flow 3.2,
+      launcher.db, health-by-presence. Gate: provision one real agent end-to-end,
+      token pasted, presence live+connected, zero broker changes (smoke_ws green).
+- T3  grants: table + grant/revoke/flip CLI, per-grant URL tokens, audit log,
+      revocation kill-path. Smoke: multi-client mirror, -r enforced server-side,
+      revoke drops client <1s, driver-exclusivity race refused with the driver
+      named, kill-and-reprovision resumes from bus state.
+- T4  edge: publish ttyd + launcher UI through the tunnel behind Cloudflare
+      Access. BLOCKED on the zone move (backlog item 1) — everything T1-T3 is
+      LAN-complete without it.
 
 ## 6. Open questions
 
@@ -152,9 +227,18 @@ judgement has a place to happen.
 - Q2 Idle grant TTL: none vs auto-expire after N hours unwatched?
 - Q3 Is the driver's identity surfaced INSIDE the pane (status-line "driver: bob")
   so the agent's transcript shows who was driving when? Cheap, honest, mildly noisy.
+- Q4 Token mint automation: v1 makes the operator paste the bound token
+  (declined-standing-credential argument, 3.1). Revisit only when provisioning
+  frequency makes the paste the dominant friction — bring a count, not a feeling.
+- Q5 Launcher auth for T4: per-grant URL tokens + Cloudflare Access is two layers
+  for VIEWERS; what gates the launcher's own provision/destroy surface at the edge
+  — Access-only, or a launcher admin credential too? (LAN-era answer: localhost.)
+- Q6 One launcher per box vs per tenant: tenant isolation today is the broker's
+  one-file-per-tenant; containers of different tenants on one box share a docker
+  daemon. Fine for homebrew; the hosted story needs a ruling before it exists.
 
 ## 7. Review protocol
 
 Same as DES-001 §12: fleet round, slice ACK or refutation with file:line/section,
-architect ratifies, ACCEPTED before T1 ships. Sections 1-3 must be fleshed to full
-detail before that round opens; section 4 is ready for review now.
+architect ratifies, ACCEPTED before T1 ships. Sections 1-6 are now at full detail;
+the round is OPEN as of this revision.
