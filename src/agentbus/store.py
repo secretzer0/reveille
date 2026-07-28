@@ -736,11 +736,6 @@ def _admin_count(conn):
     return conn.execute("SELECT count(*) c FROM users WHERE role='admin'").fetchone()["c"]
 
 
-def is_admin(conn, user_id):
-    """Public read for the daemon's memory-tool gating."""
-    return _is_admin(conn, user_id)
-
-
 def _is_admin(conn, user_id):
     r = conn.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
     return bool(r and r["role"] == "admin")
@@ -1798,9 +1793,15 @@ def recall(conn, *, rooms, token_id, caller="", is_admin=False, owned_rooms=(),
         where.append("memories_fts MATCH ?")
         args.append(" OR ".join(terms))
     limit = max(1, min(int(limit), 200))
+    # Pool order must agree with what the scorer values most (S3 review F2): with a
+    # query the 0.5-weighted bm25 term dominates, so the pool takes the BEST FTS
+    # matches -- a recency-ordered pool would silently drop a perfect old match past
+    # row limit*4. Without a query the top-weighted signal IS recency, so newest-first
+    # is the honest pool; pool_truncated below tells the caller when it hit bottom.
+    pool_order = "f.rank" if query else "m.created_ns DESC"
     rows = conn.execute(
         f"SELECT m.*{sel_rank} FROM memories m{join} WHERE " + " AND ".join(where) +
-        " ORDER BY m.created_ns DESC LIMIT ?", args + [limit * 4]).fetchall()
+        f" ORDER BY {pool_order} LIMIT ?", args + [limit * 4]).fetchall()
 
     now = time.time_ns()
     ent_q = {e.lower() for e in (entity or query or "").replace("*", " ").split()}
@@ -1828,7 +1829,8 @@ def recall(conn, *, rooms, token_id, caller="", is_admin=False, owned_rooms=(),
             m["score"] = {"final": round(final, 4),
                           **{k: round(v, 4) for k, v in comp.items()}}
         out.append(m)
-    return {"memories": out, "count": len(out)}
+    return {"memories": out, "count": len(out),
+            "pool_truncated": len(rows) == limit * 4}
 
 
 def memory_retract(conn, uid, *, actor, is_admin):
@@ -1940,11 +1942,16 @@ def promote_lesson(conn, slug, room_id, promoted_by="admin"):
     if tip is None:
         raise BusError(f"no such lesson in this room: {slug}")
     with tx(conn):
+        # Promotion is the ONE sanctioned cross-scope supersede (S3 review F1): the
+        # global row must carry the chain link to its room-scoped ancestor or the
+        # promotion's provenance is dropped -- history would answer WHAT went global
+        # but never WHERE it came from. memory_add's same-scope constraint stands for
+        # every other path; only this function may cross, and only room -> global.
         _memory_insert(
             conn, kind="lesson", scope="global", fact=tip["rule"][:1000],
-            author=promoted_by, status="live", slug=tip["slug"],
-            symptom=tip["symptom"], root_cause=tip["root_cause"], rule=tip["rule"],
-            detection=tip["detection"])
+            author=promoted_by, status="live", supersedes_id=tip["id"],
+            slug=tip["slug"], symptom=tip["symptom"], root_cause=tip["root_cause"],
+            rule=tip["rule"], detection=tip["detection"])
         conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (tip["id"],))
 
 

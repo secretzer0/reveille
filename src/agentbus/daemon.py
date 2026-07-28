@@ -529,11 +529,16 @@ async def lesson_add(slug: str, symptom: str, root_cause: str, rule: str,
 def _mem_ctx(p):
     """(agent_bound, tier, is_admin, owned_room_ids) for the calling token -- resolved
     LIVE per call, same discipline as rooms: a tier change or ownership change lands
-    on the very next request."""
+    on the very next request.
+
+    is_admin is False ALWAYS on this plane (S3 review F3): an agent is not its owner.
+    Inheriting the owner's instance-admin bit would let every token minted by an admin
+    write global doctrine and ratify globally -- the exact gate DES-001 puts admin
+    behind. Admin memory powers flow only through web principals (S6 UI)."""
     tok = _conn.execute("SELECT agent_name, mem_tier, owner_id FROM tokens WHERE id=?",
                         (p.token_id,)).fetchone()
     owned = {r["id"] for r in store.list_rooms(_conn, tok["owner_id"])}
-    return bool(tok["agent_name"]), tok["mem_tier"], store.is_admin(_conn, tok["owner_id"]), owned
+    return bool(tok["agent_name"]), tok["mem_tier"], False, owned
 
 
 @mcp.tool()
@@ -570,7 +575,9 @@ async def recall(query: str = "", kind: str = "", scope: str = "", entity: str =
     identifier class). Each hit carries source_msg_id (trace() it for the WHY),
     supersession chain depth, and a fork flag when two facts contend. status='draft'
     shows your own drafts (plus the ratify queue if you own rooms). explain=True
-    returns per-row score components."""
+    returns per-row score components. Scoring runs over a bounded pool (limit*4 rows:
+    best FTS matches with a query, newest-first without); pool_truncated=True in the
+    result means the pool hit that bound -- narrow the filters or raise limit."""
     p = _me(ctx.request_context.request)
     bound, tier, adm, owned = _mem_ctx(p)
     return store.recall(
