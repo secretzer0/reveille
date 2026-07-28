@@ -149,7 +149,12 @@ directly, per migrate()'s existing branching discipline (store.py:282-305).
 
 Supersession constraints (Amended R1-M6):
 - A supersede targets the SAME scope and SAME kind only -- a room-tier writer must not
-  be able to kill global doctrine by "superseding" it.
+  be able to kill global doctrine by "superseding" it. ONE sanctioned exception
+  (S3 review, F1 in bus msg 8378): lesson PROMOTION is a cross-scope supersede --
+  the global successor row carries supersedes_id to the room tip it replaces, so the
+  chain answers "where did this global rule come from". The exemption is an explicit,
+  commented branch in the constraint check, admin-gated by the promotion path itself;
+  nothing else may cross scopes.
 - The target flips to 'superseded' ONLY when the successor becomes live. A draft
   supersede leaves its target untouched -- otherwise a below-tier writer kills doctrine
   by drafting against it.
