@@ -1,8 +1,10 @@
 # DES-002: Container launcher — web-provisioned agent containers with shared tmux
 
-Status: DRAFT v2 — posted for fleet adversarial review (round protocol: section 7).
-Companion to DES-001 (memory layer, ACCEPTED); this doc is the compute/attach layer
-only. Ruled parallel: launcher stages start after DES-001 S4 ships; S5/S6 interleave.
+Status: ACCEPTED — review round closed 2026-07-28: senior-dev 4 ACK + 3 refutations
+(bus msg 8385: R1 token retention, R2 volume scope, R3 revocation channel), all three
+ratified into this revision; Q1-Q6 resolved (section 6). Companion to DES-001 (memory
+layer, ACCEPTED); this doc is the compute/attach layer only. T1 is GO, parallel with
+DES-001 S5/S6.
 
 ## 1. Problem
 
@@ -63,6 +65,12 @@ is the same boundary from the other side. Hard consequences:
   token as INPUT (operator mints in /ui, pastes or pipes to `reveille-launch new`).
   Automating the mint is Q4 — declined for v1 because a daemon holding an admin
   session is a bigger surface than a paste is a friction.
+- Token RETENTION (R1, ratified): launcher.db NEVER persists broker tokens — env
+  dies with the container and destroy+new PROMPTS AGAIN. A launcher that stored
+  agent tokens would be the fleet's whole authority in one host file, which is the
+  standing-credential store the previous bullet forbids, in different clothes.
+  Q4's paste ledger therefore counts per PROVISION, re-provisions included. T2's
+  gate asserts launcher.db contains no token bytes.
 - Broker web UI shows nothing container. Container state lives in the launcher;
   the bus sees only what it always saw — an agent that joined.
 
@@ -83,7 +91,10 @@ is the same boundary from the other side. Hard consequences:
    start ttyd bound to the container's private interface, start the agent process.
 5. Health: provision succeeds when the broker's presence shows the role
    live+connected — checked by the LAUNCHER polling presence with the agent's own
-   token (read the bus like any client; no new broker surface).
+   token (read the bus like any client; no new broker surface). Verified sound
+   against live code (8385): presence() carries no _seen() heartbeat — the probe
+   cannot refresh the liveness it is measuring. STANDING INVARIANT: presence stays
+   heartbeat-free, or this health check silently rots into an observer effect.
 
 ### 3.3 Agent image
 
@@ -92,10 +103,15 @@ join-with-identity). T1 additions: tmux + ttyd + attach-gate, claude CLI, uv, gi
 the wake console-script on PATH. One image for every agent; role differences are
 env + volume, never image forks (an image fork is a config smell).
 
-Claude login state: persisted in a named volume per container
-(`rev-<role>-claude`), because re-authenticating on every re-provision makes
-disposal expensive and G5 dies. The volume is the ONE stateful thing a container
-owns; destroy offers --keep-login (default) and --purge.
+Claude home state (R2, ratified — "login volume" understated it): the named volume
+per container (`rev-<role>-claude`) mounts the WHOLE claude home — credential,
+settings, projects, transcripts, local memory. Scoping to the credential file alone
+was rejected as brittle (login internals are not ours). The honest G5 inventory is
+therefore: remote git + broker (mail, hive memory) + the claude-home volume — three
+places state may live, named, nothing else. destroy offers --keep-login (default)
+and --purge. CONSEQUENCE for T3: the kill-and-reprovision smoke runs its
+resume-from-bus-state assertion with --purge, or the resume may come from local
+transcripts and the test passes for the wrong reason.
 
 ### 3.4 Grants and attach: section 4 (specified). Grant table lives in the
 launcher's own sqlite file (launcher.db) — same one-file discipline as the broker,
@@ -165,12 +181,17 @@ Model:
 
 Enforcement — at the entry wrapper, not in the client's hands:
 
-- ttyd never execs `tmux attach` directly. It execs `attach-gate <grant-id>`, a
-  small wrapper that (1) validates the grant against the launcher's grant table,
-  (2) execs `tmux new-session -t visitors -s v-<grant>` for viewers WITH `-r`, or
-  a writable attach for the driver, (3) drops the connection when the grant is
-  revoked (revocation kills the wrapper's process group: a revoked viewer
-  disappears mid-keystroke, which is the point).
+- ttyd never execs `tmux attach` directly. It execs `attach-gate <grant-token>`, a
+  small wrapper that (1) verifies the grant OFFLINE: the per-grant URL token is
+  SIGNED, checked against a per-container secret injected at provision — no
+  in-container polling, no gate-to-launcher channel, smallest surface (R3,
+  ratified), (2) execs `tmux new-session -t visitors -s v-<grant>` for viewers
+  WITH `-r`, or a writable attach for the driver.
+- Revocation is the LAUNCHER reaching in (R3, ratified): revoke = docker exec that
+  kills the gate's process group for that grant. Host-side kill, nothing in the
+  container watches anything; ttyd drops the socket and a revoked viewer
+  disappears mid-keystroke, which is the point. The <1s smoke in T3 measures
+  exactly this path.
 - The mode rides the SERVER side of the WebSocket. A visitor cannot flip their own
   `-r` off: ttyd's writable flag stays off globally; write capability exists only
   through the gate's exec choice. Client-side anything is decoration.
@@ -182,7 +203,12 @@ Audit: one log line per attach/detach/revoke — who, container, mode, timestamp
 tmux cannot attribute keystrokes inside the pane (known, accepted for pairing);
 the attach log is the attribution boundary, so it must be honest and complete.
 
-### 4.4 What a watcher sees — stated, not hidden
+### 4.4 What a watcher sees, and what a driver IS — stated, not hidden
+
+A DRIVER grant is not a keyboard, it is the agent's whole identity (8385): a
+writable client can open a shell pane as the container user and read
+REVEILLE_TOKEN, the claude-home volume, git credentials. Grant driver only to
+someone you would hand the agent's credentials to, because you are.
 
 A viewer sees EVERYTHING the pane shows, past and future: scrollback, secrets
 echoed by mistake, the lot. Mitigations already in fleet law: bound tokens live in
@@ -201,6 +227,9 @@ judgement has a place to happen.
 - Owner deletes container: grants die with it (grant table keys on container id).
 - Two drivers race (multi-driver=false): second writable attach is refused by the
   gate with a readable message naming the current driver, not queued silently.
+  Browser-plane truth only (8385): an owner attached writable over ssh is outside
+  the gate's bookkeeping, so the refusal may name nobody. Sanctioned — the ssh
+  plane is the owner's own — but stated, not discovered.
 
 ## 5. Staging — each stage shippable, green gate, starts after DES-001 S4
 (ruled parallel: S5/S6 interleave with T-stages; F3 still lands before S5)
@@ -219,26 +248,34 @@ judgement has a place to happen.
       Access. BLOCKED on the zone move (backlog item 1) — everything T1-T3 is
       LAN-complete without it.
 
-## 6. Open questions
+## 6. Open questions — all resolved in the review round (8385); refute with
+evidence or they stand
 
-- Q1 Does a viewer grant include scrollback from before the grant, or attach at
-  tail? (tmux gives history to any client; trimming it means a fresh grouped
-  session per grant with history-limit 0 — cheap, worth deciding deliberately.)
-- Q2 Idle grant TTL: none vs auto-expire after N hours unwatched?
-- Q3 Is the driver's identity surfaced INSIDE the pane (status-line "driver: bob")
-  so the agent's transcript shows who was driving when? Cheap, honest, mildly noisy.
-- Q4 Token mint automation: v1 makes the operator paste the bound token
-  (declined-standing-credential argument, 3.1). Revisit only when provisioning
-  frequency makes the paste the dominant friction — bring a count, not a feeling.
-- Q5 Launcher auth for T4: per-grant URL tokens + Cloudflare Access is two layers
-  for VIEWERS; what gates the launcher's own provision/destroy surface at the edge
-  — Access-only, or a launcher admin credential too? (LAN-era answer: localhost.)
-- Q6 One launcher per box vs per tenant: tenant isolation today is the broker's
-  one-file-per-tenant; containers of different tenants on one box share a docker
-  daemon. Fine for homebrew; the hosted story needs a ruling before it exists.
+- Q1 RESOLVED: attach at TAIL by default — fresh grouped session, history-limit 0.
+  Scrollback is where echoed secrets live. Owner opt-in per grant for history.
+- Q2 RESOLVED: idle grants auto-expire at 24h, renewable. An unwatched grant is a
+  forgotten door.
+- Q3 RESOLVED: yes — status-line names the driver inside the pane. Transcript
+  attribution is worth the noise.
+- Q4 RESOLVED (declined, standing): operator pastes the bound token. The revisit
+  ledger counts pastes per PROVISION, re-provisions included (R1). Bring a count,
+  not a feeling.
+- Q5 RESOLVED: the provision/destroy surface is the docker socket — root on the
+  box — and NEVER goes through the tunnel in v1. The edge publishes ttyd and a
+  read-only launcher status page only; provision/destroy stay localhost+ssh.
+  If it ever goes to the edge: Cloudflare Access AND a launcher admin credential,
+  two layers, the same standard viewers get.
+- Q6 RESOLVED: one launcher per box, one TENANT per box, homebrew scope — full
+  stop. The hosted story was rejected in DECISIONS; designing tenant isolation for
+  a thesis we refused is speculative work. If that ever reverses, the honest
+  answer is VM-per-tenant, not docker-daemon partitioning.
 
-## 7. Review protocol
+## 7. Review protocol — round CLOSED
 
-Same as DES-001 §12: fleet round, slice ACK or refutation with file:line/section,
-architect ratifies, ACCEPTED before T1 ships. Sections 1-6 are now at full detail;
-the round is OPEN as of this revision.
+Same as DES-001 §12. Round record: v2 posted (8379), senior-dev reviewed (8385) —
+4 ACK (boundary shape, provision flow with the heartbeat-free verification,
+attach mechanism ladder, Q4 declination), 3 refutations ratified verbatim into
+sections 3.1/3.3/4.3-4.5 (R1 token retention, R2 volume scope + purge smoke,
+R3 signed-offline grants + launcher-side revocation kill), Q1-Q6 resolved.
+Architect ratified; DES-002 is ACCEPTED. T1 is GO, parallel with DES-001 S5/S6.
+Future changes go through a new round.
