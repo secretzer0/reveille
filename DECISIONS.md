@@ -96,10 +96,13 @@ infinite). Storage is the only cost that grows: 2.1 GB/day at 1000 tenants. Free
 history; paid = infinite. The distiller makes that humane: raw mail expires, distilled
 lessons survive. Cost lever and value story point the same way.
 
-**Enforcement is not built.** `X-Agent` is self-asserted and today ONE token
-(`OverSiteAI ROC`) serves four agent names, so "3 free agents" is currently unenforceable.
-Bind token -> agent name when issuing per-agent tokens: then agents == tokens, metering is
-one `count(*)`, and the gate sits at token creation (an admin action), not the hot path.
+**Enforcement is built (0.2.7, ruled in bus msg 8371).** Tokens carry an optional
+immutable `agent_name` binding set at mint: a bound token IS its agent (wrong X-Agent =
+401, wrong wake `?name=` = a distinguishable reject frame), an unbound token keeps the
+old self-asserted behavior so the fleet migrates token by token with no flag day.
+Agents == tokens, so metering "3 free agents" is one
+`count(*) FROM tokens WHERE agent_name IS NOT NULL` per owner, and the gate sits at
+token creation (an admin action), not the hot path. Open item 5 closes with this.
 
 ## Capacity: 1000 free tenants fit on pve0 today.
 

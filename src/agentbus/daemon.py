@@ -135,6 +135,13 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.7  Tokens can be BOUND to one agent name at mint (web UI, optional field).
+       A bound token IS its agent: presenting a different X-Agent is a 401, and the
+       wake WS rejects a wrong ?name= with a distinguishable {"error":"name_mismatch"}
+       frame. An absent X-Agent inherits the binding, so bound tokens need no env
+       beyond the token itself. Unbound tokens (today's fleet token) behave exactly
+       as before -- migrate agent by agent: mint bound, update that agent's .envrc,
+       revoke the shared token LAST. Binding is immutable; rebinding = new token.
 0.2.6  history() and web /search take entity= -- exact, case-insensitive match on the
        extracted identifier class (ADR-061, #263, RunStatus, run_id, disposal_run_id,
        repo names, proto-vX.Y.Z). This is the recovery path 0.2.5 promised for
@@ -392,6 +399,16 @@ def _agent_principal(request):
     if not tok:
         raise store.AuthError("bad token")
     name = (request.headers.get("x-agent") if request else "") or ""
+    bound = tok.get("agent_name")
+    if bound:
+        # A bound token IS its agent. A disagreeing X-Agent is a forged identity ->
+        # 401, loud (ruled in 8371). An ABSENT header inherits the binding instead of
+        # failing: the header only ever existed because unbound tokens had no other
+        # identity source, and a bare `curl -H 'Authorization: ...' /messages` (which
+        # scripts/set-token's validation depends on) claims no identity to forge.
+        if name and name != bound:
+            raise store.AuthError(f"token is bound to {bound!r}")
+        name = bound
     return Principal(kind="agent", name=name, user_id=tok["owner_id"],
                      token_id=tok["id"], rooms=store.rooms_for_token(_conn, tok["id"]))
 
@@ -748,6 +765,15 @@ async def wake_ws(ws: WebSocket):
         await ws.send_json({"error": "bad_token", "detail": "unknown or revoked token"})
         await ws.close(code=4401)
         log.warning("%s wake rejected: bad_token", name)
+        return
+    # Same binding check as the HTTP principal (ruled in 8371), same distinguishable-
+    # reject discipline as bad_token/missing_name: the operator must be able to tell
+    # a forged name from a dead credential without reading broker logs.
+    if tok.get("agent_name") and name != tok["agent_name"]:
+        await ws.send_json({"error": "name_mismatch",
+                            "detail": f"token is bound to {tok['agent_name']!r}"})
+        await ws.close(code=4403)
+        log.warning("%s wake rejected: name_mismatch (bound to %s)", name, tok["agent_name"])
         return
     rooms = store.rooms_for_token(_conn, tok["id"])
     key = (tok["id"], name)
@@ -2339,14 +2365,21 @@ async function openTokens(){
     'The token is deleted. Every agent using it goes dark on its next call, and the '+
     'secret cannot be recovered.','');
   return '<div class="pRow"><b>'+esc(t.label||t.id.slice(0,8))+'</b>'+
+   (t.agent_name?' <span class="pDim">= '+esc(t.agent_name)+' (bound)</span>'
+                :' <span class="pDim">(unbound: any name)</span>')+
    '<button class="danger" data-rev="'+t.id+'">revoke</button>'+
    '</div><div class="pChips">'+chips+'</div>';}).join('')||'<div class="pDim">no tokens</div>';
  panel('tokens',
   '<div class="pDim">A token is a credential and carries no room. Tick the rooms it may '+
-  'see -- the change lands on the agent\'s very next call.</div>'+rows+
-  '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)"><button id="mkTok">generate</button></div>');
+  'see -- the change lands on the agent\'s very next call. Binding an agent name makes '+
+  'the token BE that agent: a different X-Agent gets a 401. Binding is set here, once; '+
+  'rebinding means a new token.</div>'+rows+
+  '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)">'+
+  '<input id="newTokName" placeholder="bind to agent (optional)">'+
+  '<button id="mkTok">generate</button></div>');
  $('mkTok').onclick=async()=>{
-  try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim()})});
+  try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim(),
+    agent_name:$('newTokName').value.trim()})});
    // Shown once, deliberately: only the hash is stored, so there is no second chance.
    panel('tokens',
     '<div class="pSec">TOKEN CREATED</div>'+
@@ -2657,8 +2690,10 @@ async def tokens_http(request):
     if request.method == "GET":
         return JSONResponse({"tokens": store.list_tokens(_conn, p.user_id)})
     d = await request.json()
-    t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip())
-    log.info("%s minted token %s", p.name, t["id"])
+    t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip(),
+                           agent_name=d.get("agent_name"))
+    log.info("%s minted token %s%s", p.name, t["id"],
+             f" bound to {t['agent_name']}" if t["agent_name"] else "")
     # The secret is returned exactly once here; only its hash is stored.
     return JSONResponse(t)
 

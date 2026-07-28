@@ -143,6 +143,17 @@ async def check_auth(port, token):
         res = await bad.call_tool("inbox", {})
         assert res.isError and "bad token" in res.content[0].text.lower(), res
 
+    # Binding (0.2.7): alice's token IS alice. Presenting it as bob must fail in each
+    # surface's own idiom -- MCP isError, WS name_mismatch frame -- and both reasons
+    # must be DISTINGUISHABLE from a dead credential.
+    async with session(port, "bob", token) as (r2, w2, _d), ClientSession(r2, w2) as forged:
+        await forged.initialize()
+        res = await forged.call_tool("inbox", {})
+        assert res.isError and "bound" in res.content[0].text.lower(), res
+    async with websockets.connect(f"ws://127.0.0.1:{port}/wake?name=bob&token={token}") as ws:
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
+        assert frame.get("error") == "name_mismatch", frame
+
     # WS rejections must be DISTINGUISHABLE (bug.md): accepted, then a reason frame.
     async with websockets.connect(f"ws://127.0.0.1:{port}/wake?name=x&token=WRONG") as ws:
         frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
@@ -150,7 +161,8 @@ async def check_auth(port, token):
     async with websockets.connect(f"ws://127.0.0.1:{port}/wake?token={token}") as ws:  # good token, no name
         frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
         assert frame.get("error") == "missing_name", frame
-    print("auth: REST 401 + MCP isError('bad token') + WS reasons (bad_token, missing_name)")
+    print("auth: REST 401 + MCP isError('bad token'/'bound') + WS reasons "
+          "(bad_token, missing_name, name_mismatch)")
 
 
 def seed(db):
@@ -166,11 +178,15 @@ def seed(db):
     room = store.create_room(conn, owner["id"], "smoke")
     secrets = {}
     for name in ("alice", "bob"):
-        tok = store.create_token(conn, owner["id"], name)
+        # BOUND tokens (0.2.7): the whole smoke then runs the per-agent path --
+        # every MCP call and wake connect below is also a binding check.
+        tok = store.create_token(conn, owner["id"], name, agent_name=name)
         store.assign_room(conn, tok["id"], room["id"], owner["id"])
         secrets[name] = tok["secret"]
     conn.close()
     return secrets
+
+
 
 
 def spawn_daemon():

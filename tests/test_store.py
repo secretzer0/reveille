@@ -63,6 +63,36 @@ def test_token_secret_never_stored_plaintext():
     assert store.resolve_token(c, "not-the-secret") is None
 
 
+def test_token_binding_minted_and_resolved():
+    """Per-agent tokens (0.2.7): binding set at mint, immutable by construction --
+    there is no update path, rebinding is a new token."""
+    c, admin, room, tok = fixture()
+    b = store.create_token(c, admin["id"], "randy's", agent_name="randy-roc-ui")
+    assert b["agent_name"] == "randy-roc-ui"
+    assert store.resolve_token(c, b["secret"])["agent_name"] == "randy-roc-ui"
+    assert store.resolve_token(c, tok["secret"])["agent_name"] is None  # unbound stays
+    listed = {t["id"]: t for t in store.list_tokens(c, admin["id"])}
+    assert listed[b["id"]]["agent_name"] == "randy-roc-ui"
+    # whitespace-only = unbound, not a bound-to-"" credential
+    assert store.create_token(c, admin["id"], "x", agent_name="  ")["agent_name"] is None
+    try:
+        store.create_token(c, admin["id"], "y", agent_name="bad name!")
+        assert False, "expected BusError -- binding must be a valid bus name"
+    except store.BusError:
+        pass
+
+
+def test_token_binding_migration_v7_to_v8(tmp_path):
+    """Re-run the v7->v8 step against a live table: drop the column, rewind, migrate."""
+    c, admin, room, tok = fixture()
+    c.execute("ALTER TABLE tokens DROP COLUMN agent_name")
+    c.execute("PRAGMA user_version=7")
+    assert store.migrate(c, str(tmp_path / "x.db")) == store.SCHEMA_VERSION
+    assert store.resolve_token(c, tok["secret"])["agent_name"] is None
+    b = store.create_token(c, admin["id"], "bound", agent_name="alice")
+    assert store.resolve_token(c, b["secret"])["agent_name"] == "alice"
+
+
 def test_revoke_is_instant():
     c, admin, room, tok = fixture()
     assert store.resolve_token(c, tok["secret"])

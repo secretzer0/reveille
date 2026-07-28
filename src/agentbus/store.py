@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -124,6 +124,12 @@ CREATE TABLE IF NOT EXISTS tokens (
     secret_hash  TEXT NOT NULL UNIQUE,
     owner_id     TEXT NOT NULL REFERENCES users(id),
     label        TEXT NOT NULL DEFAULT '',
+    -- NULL = unbound (the migration-era fleet token: X-Agent stays self-asserted).
+    -- Set = this credential IS that agent: a presented X-Agent must equal it or the
+    -- request is a 401, same check on the wake WS. Immutable after mint -- rebinding
+    -- a credential is a new token. agents == tokens is also what makes per-agent
+    -- metering one count(*) (DECISIONS).
+    agent_name   TEXT,
     created_ns   INTEGER NOT NULL,
     last_used_ns INTEGER
 );
@@ -351,17 +357,24 @@ def migrate(conn, db_path):
         _upgrade_v3(conn, db_path)
         _upgrade_v4(conn, db_path)
         _upgrade_v5(conn, db_path)
+        _upgrade_v7(conn, db_path)
     elif v == 3:
         _upgrade_v3(conn, db_path)
         _upgrade_v4(conn, db_path)
         _upgrade_v5(conn, db_path)
+        _upgrade_v7(conn, db_path)
     elif v == 4:
         _upgrade_v4(conn, db_path)
         _upgrade_v5(conn, db_path)
+        _upgrade_v7(conn, db_path)
     elif v == 5:
         _upgrade_v5(conn, db_path)
+        _upgrade_v7(conn, db_path)
     elif v == 6:
         _upgrade_v6(conn, db_path)
+        _upgrade_v7(conn, db_path)
+    elif v == 7:
+        _upgrade_v7(conn, db_path)
     return SCHEMA_VERSION
 
 
@@ -451,6 +464,21 @@ def _upgrade_v6(conn, db_path):
     indexed under the OLD rules -- two vocabularies pretending to be one index.
     Same body as v5: the backfill is already a delete-and-rebuild."""
     return _upgrade_v5(conn, db_path)
+
+
+def _upgrade_v7(conn, db_path):
+    """v7 -> v8: tokens gain a nullable bound agent name (per-agent tokens,
+    DECISIONS open item 5, ruled in bus msg 8371). NULL keeps today's unbound
+    behavior, so the fleet migrates token by token with no flag day."""
+    snapshot(conn, f"{db_path}.pre-v8-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    with tx(conn):
+        # Idempotent like every other step's IF NOT EXISTS: a chain replayed over a
+        # db that already grew the column (fresh schema, or a re-run) must not die
+        # on ALTER's lack of an IF NOT EXISTS clause.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tokens)")}
+        if "agent_name" not in cols:
+            conn.execute("ALTER TABLE tokens ADD COLUMN agent_name TEXT")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
 def _upgrade_v0(conn, db_path):
@@ -710,15 +738,25 @@ def delete_session(conn, secret):
 
 # ---- tokens ------------------------------------------------------------------
 
-def create_token(conn, owner_id, label=""):
+def create_token(conn, owner_id, label="", agent_name=None):
     """Mint a token. The secret is returned ONCE and never stored -- only its hash.
-    Rooms are assigned afterwards (assign_room), never baked into the secret."""
+    Rooms are assigned afterwards (assign_room), never baked into the secret.
+
+    agent_name binds the credential to one bus identity at mint, immutably: a
+    presented X-Agent that disagrees is a 401, and rebinding is a new token (revoke
+    the old one -- revoke-is-delete is already instant). None mints an unbound
+    token with today's self-asserted-name behavior."""
+    agent_name = (agent_name or "").strip() or None
+    if agent_name:
+        valid_name(agent_name)
     secret = secrets.token_urlsafe(32)
     tid, now = _uuid(), time.time_ns()
     conn.execute(
-        "INSERT INTO tokens(id, secret_hash, owner_id, label, created_ns) VALUES(?,?,?,?,?)",
-        (tid, _sha(secret), owner_id, label, now))
-    return {"id": tid, "secret": secret, "label": label, "created_ns": now}
+        "INSERT INTO tokens(id, secret_hash, owner_id, label, agent_name, created_ns) "
+        "VALUES(?,?,?,?,?,?)",
+        (tid, _sha(secret), owner_id, label, agent_name, now))
+    return {"id": tid, "secret": secret, "label": label, "agent_name": agent_name,
+            "created_ns": now}
 
 
 def resolve_token(conn, secret):
@@ -731,15 +769,16 @@ def resolve_token(conn, secret):
     if not r:
         return None
     conn.execute("UPDATE tokens SET last_used_ns=? WHERE id=?", (time.time_ns(), r["id"]))
-    return {"id": r["id"], "owner_id": r["owner_id"], "label": r["label"]}
+    return {"id": r["id"], "owner_id": r["owner_id"], "label": r["label"],
+            "agent_name": r["agent_name"]}
 
 
 def list_tokens(conn, owner_id):
     out = []
     for r in conn.execute(
             "SELECT * FROM tokens WHERE owner_id=? ORDER BY created_ns", (owner_id,)):
-        out.append({"id": r["id"], "label": r["label"], "created_ns": r["created_ns"],
-                    "last_used_ns": r["last_used_ns"],
+        out.append({"id": r["id"], "label": r["label"], "agent_name": r["agent_name"],
+                    "created_ns": r["created_ns"], "last_used_ns": r["last_used_ns"],
                     "rooms": rooms_for_token(conn, r["id"])})
     return out
 
