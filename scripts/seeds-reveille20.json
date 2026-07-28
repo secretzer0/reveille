@@ -1,0 +1,52 @@
+[
+  {
+    "kind": "decision",
+    "fact": "messages_fts and memories_fts tokenize with unicode61 tokenchars '-_', not trigram: trigram cannot match queries under 3 chars ('S1' and 'qa' returned 0 vs LIKE 57/535 on the 8,356-message live corpus) and its index measured 44.8MB vs 7.2MB. Prefix star reaches right-extended compounds only; entity= is the exact route to fused identifiers.",
+    "entities": "unicode61 trigram fts5",
+    "source": 8366
+  },
+  {
+    "kind": "doctrine",
+    "fact": "Every code slice ships on a feature branch (feat/<design>-<stage>) pushed to origin; the ship message names branch + head; the architect reviews on the branch and merges to main -- merge IS acceptance. Never force-push over a reviewed head. DES design docs are the architect's alone and go direct to main.",
+    "source": 8377
+  },
+  {
+    "kind": "doctrine",
+    "fact": "Migration snapshots (VACUUM INTO *.bak) never belong in git: tests must pass a real tmp db_path, *.bak stays gitignored. The sanctioned backup of a live broker is VACUUM INTO -- never copy broker.db alone, the WAL holds recent writes.",
+    "entities": "vacuum-into wal",
+    "source": 8373
+  },
+  {
+    "kind": "doctrine",
+    "fact": "Entity extraction is deterministic regex, never an LLM, and pattern changes ride schema bumps: widen the pattern, bump user_version, re-extract every row in the migration -- the index and the pattern must never disagree.",
+    "source": 8371
+  },
+  {
+    "kind": "contract",
+    "fact": "A bound token IS its agent (0.2.7): presenting it with the wrong X-Agent gets 401 'token is bound to...', the wake WS rejects with a name_mismatch frame, an absent X-Agent header inherits the binding. Rebinding is a new token -- no update path exists.",
+    "entities": "x-agent name_mismatch",
+    "source": 8372
+  },
+  {
+    "kind": "decision",
+    "fact": "S3 review rulings: lesson promotion is the ONE sanctioned cross-scope supersede (the global row carries supersedes_id to its room ancestor); recall's scoring pool follows the scorer's dominant signal and confesses truncation via pool_truncated; the agent plane is admin-free -- no token inherits its owner's admin bit, admin memory powers are web-principal only (S6).",
+    "entities": "pool_truncated supersedes_id",
+    "source": 8378
+  },
+  {
+    "kind": "decision",
+    "fact": "DES-002 container launcher ACCEPTED: the launcher is its own daemon owning the docker socket and the broker never learns docker exists; launcher.db never persists broker tokens (destroy+new prompts again); the claude-home volume is a container's one stateful thing (G5 inventory: git + broker + claude-home volume); grant verification is signed-offline against a per-container secret, revocation is a launcher-side docker-exec process-group kill; a driver grant is the agent's whole identity, not a keyboard.",
+    "entities": "des-002 launcher.db ttyd attach-gate",
+    "source": 8387
+  },
+  {
+    "kind": "decision",
+    "fact": "The live broker runs as container reveille-server: one image, port 8765, one bind mount ~/reveille to /data. The server process needs no REVEILLE_AGENT_ROLE or REVEILLE_TOKEN -- those are client credentials only. Deploy follows main: make server-image && make server-run after the architect merges.",
+    "entities": "reveille-server server-image server-run"
+  },
+  {
+    "kind": "decision",
+    "fact": "The reveille repo lives at github.com/secretzer0/reveille and stays PRIVATE until the operator flips it; branches push to that origin.",
+    "entities": "secretzer0"
+  }
+]
