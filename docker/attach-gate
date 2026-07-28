@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # attach-gate: the ONLY door between ttyd and the agent's tmux (DES-002 4.3).
 #
-# ttyd never execs tmux directly; it execs `attach-gate <token>`. The token is
-# verified OFFLINE against the per-container secret (R3, ratified): no polling,
-# no gate-to-launcher channel. Revocation is the launcher docker-exec'ing a kill
-# of this process group -- nothing in here watches anything.
+# ttyd never execs tmux directly; it execs `attach-gate attach` with the URL's
+# ?arg= values appended. The FIXED literal "attach" is load-bearing: ttyd's -a
+# hands the client control of argv, so without it a browser could invoke `mint`
+# and mint itself a driver grant -- the subcommands below are trusted-side only
+# (docker exec / launcher), and the ONLY dispatch reachable from the wire is
+# `attach <token>`. The token is verified OFFLINE against the per-container
+# secret (R3, ratified): no polling, no gate-to-launcher channel. Revocation is
+# the launcher docker-exec'ing a kill of this process group -- nothing in here
+# watches anything.
 #
-#   attach-gate <token>                    verify, then exec tmux (viewer: -r
+#   attach-gate attach <token>             verify, then exec tmux (viewer: -r
 #                                          grouped session; driver: writable)
 #   attach-gate verify <token>             verify only, print "ok <mode> <id>"
 #   attach-gate mint <viewer|driver> [ttl_seconds] [grant_id]
@@ -75,9 +80,12 @@ attach() {
   exec tmux attach-session -t agent
 }
 
+# No catch-all-as-token: an unknown first arg dies. Anything a browser smuggles
+# past the fixed "attach" arrives at attach() as a token and fails the HMAC.
 case "${1:-}" in
   mint)   shift; mint "$@" ;;
   verify) shift; res="$(check "${1:?verify needs a token}")"; echo "ok $res" ;;
-  "")     die "usage: attach-gate <token> | verify <token> | mint <mode> [ttl] [id]" ;;
-  *)      attach "$1" ;;
+  attach) shift; attach "${1:?attach needs a token}" ;;
+  "")     die "usage: attach-gate attach <token> | verify <token> | mint <mode> [ttl] [id]" ;;
+  *)      die "unknown subcommand: $1" ;;
 esac

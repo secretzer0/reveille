@@ -51,3 +51,21 @@ def test_expired_refused():
 def test_unknown_mode_refused_even_with_valid_signature():
     payload = f"v1.g5.root.{int(time.time()) + 60}"
     assert gate("verify", f"{payload}.{sign(payload)}").returncode != 0
+
+
+def test_url_args_cannot_reach_mint():
+    # The exact argv ttyd builds for ?arg=mint&arg=driver&arg=86400 behind the
+    # pinned "attach" first arg. The stdout assertion is the load-bearing one:
+    # the blocker was a signed token PRINTED to an unauthenticated browser.
+    res = gate("attach", "mint", "driver", "86400")
+    assert res.returncode != 0
+    assert "v1." not in res.stdout
+
+
+def test_unknown_subcommand_refused():
+    token = gate("mint", "viewer", "60", "g6").stdout.strip()
+    # A bare token with no subcommand must die too -- the old catch-all-as-token
+    # dispatch is what let client argv select a code path.
+    res = gate(token)
+    assert res.returncode != 0
+    assert "v1." not in res.stdout

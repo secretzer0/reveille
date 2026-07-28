@@ -29,13 +29,16 @@ umask 077
 printf '%s' "$REVEILLE_GATE_SECRET" > /home/agent/.gate-secret
 umask 022
 
-# Browser plane: ttyd execs attach-gate with the ?arg= token from the URL and
-# nothing else. -W passes client input over the wire; whether tmux HONORS it is
-# the gate's exec choice (-r for viewers), which no client can reach.
+# Browser plane: ttyd execs `attach-gate attach` with the ?arg= token appended.
+# The literal "attach" is the security boundary: -a gives the CLIENT argv, and
+# only this pinned first arg keeps the trusted-side subcommands (mint, verify)
+# out of the browser's reach -- without it, ?arg=mint&arg=driver is an
+# unauthenticated signing oracle. -W passes client input over the wire; whether
+# tmux HONORS it is the gate's exec choice (-r for viewers).
 # ponytail: while-loop supervisor -- ttyd is a sidecar, its death must not take
 # the agent down (4.5); replace with a real supervisor if restart churn appears.
 ( while :; do
-    ttyd -W -a -p "${REVEILLE_TTYD_PORT:-7681}" attach-gate >/dev/null 2>&1
+    ttyd -W -a -p "${REVEILLE_TTYD_PORT:-7681}" attach-gate attach >/dev/null 2>&1
     sleep 1
   done ) &
 
