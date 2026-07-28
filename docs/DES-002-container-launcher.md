@@ -260,6 +260,40 @@ so the invariant cannot be satisfied on paper and lost in a flag default:
   A one-container smoke cannot see a namespace collision, which is exactly how this
   shipped green.
 
+### 4.5.2 T3's audit is only as honest as what something actually observes
+
+4.3 requires "one log line per attach/detach/revoke — who, container, mode, timestamp"
+and calls the attach log the attribution boundary, which "must be honest and complete".
+4.6 makes that harder to fake and easier to get wrong, so state the mechanism now:
+
+- ATTACH is observable by the gate: it runs before the exec, holds the verified grant
+  id and mode, and can write the line. Nothing else in the system knows a grant id.
+- DETACH is NOT observable by the gate. `exec` replaced it with a tmux client, so the
+  process that knew the grant is gone before the session ends. Nothing in the container
+  watches anything (R3), by design. An implementation that silently emits no detach
+  line, or infers one from a later poll and backdates it, produces a log that is
+  complete-looking and false — worse than an admittedly partial one.
+- RULING: the launcher owns detach and revoke lines, derived from the per-grant session
+  disappearing (its `d-*`/`v-*` name IS the grant id) on the same tick that sweeps
+  expired grants. The line records when the LAUNCHER observed the session gone, and
+  says so — an observation timestamp, never a fabricated event time. If the tick is 30
+  seconds, detach times are accurate to 30 seconds and the log must not imply better.
+- A revoke line is written by the actor that performed it, at the moment it acts, and
+  is therefore exact. Do not merge it with the swept-detach path; they have different
+  precision and blurring them is how a log starts lying.
+
+Grant records (launcher.db, 3.4) hold grant id, container, grantee, mode, issued and
+expiry times — NEVER the minted token. The token is signable only with the container's
+gate secret, which by R1's discipline the launcher does not persist; minting is a
+docker exec into the container, and re-issue is re-mint, never retrieval. A launcher.db
+that could reproduce a live grant token would be the standing-credential store 3.1
+forbids, in yet another set of clothes.
+
+Q3 attribution (status line names the driver) rides the same per-grant sessions: the
+writable client's session name carries the grant id, so the status line resolves it
+through the launcher's grant record to a person. Without 4.6's `d-<id>` session there
+is nothing to resolve, which is the second thing that ruling buys.
+
 ### 4.6 Per-grant handles — what T1 left for T3, and the ruling (architect, post-T1)
 
 T1 merged (94c6e3e) with the viewer path attaching to a per-grant grouped session
