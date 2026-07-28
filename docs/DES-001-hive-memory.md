@@ -305,6 +305,16 @@ injection with a distribution mechanism. Write capability is a token property:
 - state scope is keyed agent:<token_id> internally, displayed by name. Bus names are
   unique per ROOM, not globally (store.py:107-118): keyed by name, two different
   randys in two rooms would share one state bucket.
+- RATIFY REQUIRES BOTH, and the AND is the point (architect, 2026-07-28, after a
+  live defect): a ratification needs the ratify TIER *and* ownership of the room.
+  The tier is the capability; ownership is the scoping of that capability. Either
+  one alone is not ratify authority. Stated because the code shipped checking only
+  ownership (daemon.py:646 discarded the tier `_mem_ctx` had already resolved, so
+  store.ratify_memory never received it), which let a state-tier token promote its
+  own drafts — memory_add lands the draft correctly, then ratify waves it through,
+  and the tier ladder is bypassed one call deep. The table above says ratify tier
+  "approves drafts" and the bullet below says ownership scopes it; nothing said
+  BOTH, and an implementation satisfied exactly one of them.
 - Ratify authority is scoped per (token, room), never global-per-token (Amended
   R1-M3): assign_room lets any user attach any PUBLIC room to their own token
   (store.py:646-658), so an unscoped ratify tier would let a user mint themselves
