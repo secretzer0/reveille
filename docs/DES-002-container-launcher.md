@@ -239,6 +239,27 @@ judgement has a place to happen.
   the gate's bookkeeping, so the refusal may name nobody. Sanctioned — the ssh
   plane is the owner's own — but stated, not discovered.
 
+### 4.5.1 Container networking — the private interface is not optional (architect, post-T2)
+
+4.2 says ttyd "binds the container's private interface only ... never a host port" and
+3.2 step 4 repeats it. That sentence constrains the LAUNCHER, not just the entrypoint,
+and T2 shipped `--network host` as its default, which was returned as a blocker. Stated
+so the invariant cannot be satisfied on paper and lost in a flag default:
+
+- Agents and the broker share a user-defined docker network (`reveille`); the agent
+  addresses the broker by container DNS name (`http://reveille-server:8765`). No host
+  port is published in either direction, at any stage.
+- With host networking a container HAS no private interface — it is the host's
+  namespace — so ttyd binds every LAN interface of the box and the ingress is bypassed.
+  It also collides at the second agent (one namespace, one port 7681, and the sidecar
+  supervisor swallows the bind failure into a silent restart loop), which contradicts
+  G1 directly: the marginal agent must cost what the marginal token costs.
+- `--network` stays available as a deliberate ops override. It must never DEFAULT to
+  host.
+- The provisioning smoke provisions TWO roles and asserts both reach live+connected.
+  A one-container smoke cannot see a namespace collision, which is exactly how this
+  shipped green.
+
 ### 4.6 Per-grant handles — what T1 left for T3, and the ruling (architect, post-T1)
 
 T1 merged (94c6e3e) with the viewer path attaching to a per-grant grouped session
