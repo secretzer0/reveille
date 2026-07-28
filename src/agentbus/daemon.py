@@ -604,10 +604,10 @@ async def recall(query: str = "", kind: str = "", scope: str = "", entity: str =
     p = _me(ctx.request_context.request)
     bound, tier, adm, owned = _mem_ctx(p)
     return store.recall(
-        _conn, rooms=p.rooms, token_id=p.token_id, caller=p.name, is_admin=adm,
-        owned_rooms=owned, query=query, kind=kind, scope=scope, entity=entity,
-        author=author, since_ns=_when_ns(since), until_ns=_when_ns(until),
-        status=status, limit=limit, explain=explain)
+        _conn, rooms=p.rooms, token_id=p.token_id, caller=p.name, tier=tier,
+        is_admin=adm, owned_rooms=owned, query=query, kind=kind, scope=scope,
+        entity=entity, author=author, since_ns=_when_ns(since),
+        until_ns=_when_ns(until), status=status, limit=limit, explain=explain)
 
 
 @mcp.tool()
@@ -643,8 +643,8 @@ async def ratify(id: str, ctx: Context = None) -> dict:
     OWNS; scope='global' requires an instance admin. Going live also completes any
     pending supersession the draft carried."""
     p = _me(ctx.request_context.request)
-    _, _, adm, owned = _mem_ctx(p)
-    out = store.ratify_memory(_conn, id, is_admin=adm, owned_rooms=owned)
+    _, tier, adm, owned = _mem_ctx(p)
+    out = store.ratify_memory(_conn, id, tier=tier, is_admin=adm, owned_rooms=owned)
     log.info("%s ratified memory %s", p.name, id)
     return out
 

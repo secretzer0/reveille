@@ -1739,9 +1739,9 @@ def _chain_info(conn, row):
     return depth, fork
 
 
-def recall(conn, *, rooms, token_id, caller="", is_admin=False, owned_rooms=(),
-           query="", kind="", scope="", entity="", author="", since_ns=None,
-           until_ns=None, status="live", limit=10, explain=False):
+def recall(conn, *, rooms, token_id, caller="", tier="state", is_admin=False,
+           owned_rooms=(), query="", kind="", scope="", entity="", author="",
+           since_ns=None, until_ns=None, status="live", limit=10, explain=False):
     """Ranked live facts (DES-001 section 5). Read scoping is the invariant every
     read path obeys: global OR the caller's rooms OR the caller's OWN agent scope --
     other agents' state is never returned, at any status. Drafts are visible to
@@ -1751,9 +1751,12 @@ def recall(conn, *, rooms, token_id, caller="", is_admin=False, owned_rooms=(),
     where.append("(m.expires_ns IS NULL OR m.expires_ns > ?)")
     args.append(time.time_ns())
     if status == "draft" and not is_admin:
-        # Draft visibility is about the CALLER (own drafts + the ratify queue for
-        # rooms their owner owns), never about the author= FILTER below.
-        owned = list(owned_rooms)
+        # Draft visibility is about the CALLER: own drafts always, PLUS the ratify
+        # queue (owned-room drafts) only when the caller's tier can actually act on
+        # it. Section 5: ratify-tier callers see the queue; a write/state caller that
+        # merely owns the room sees only what it authored, never a queue it cannot
+        # clear (msg 8400, disclosure side of the same missing parameter).
+        owned = list(owned_rooms) if tier == "ratify" else []
         cond = "m.author=?"
         dargs = [caller]
         if owned:
@@ -1842,18 +1845,25 @@ def memory_retract(conn, uid, *, actor, is_admin):
     return {"id": uid, "status": "retracted"}
 
 
-def ratify_memory(conn, uid, *, is_admin, owned_rooms):
-    """draft -> live. Per (token, room): effective only in rooms the token's OWNER
-    owns; scope='global' requires an instance admin (R1-M3). Flipping live also
-    completes any pending supersession (flip-on-live, R1-M6)."""
+def ratify_memory(conn, uid, *, tier="state", is_admin, owned_rooms):
+    """draft -> live. The ratify TIER is the capability; owning the room is only its
+    SCOPE -- both are required, never either (msg 8400: an ownership-only gate lets any
+    owned-room token self-promote its own drafts, making the whole tier ladder
+    cosmetic). scope='global' still requires an instance admin (R1-M3); tier does not
+    grant global. Flipping live also completes any pending supersession (R1-M6).
+    tier defaults to 'state' so a caller that forgets to thread it gets the LEAST
+    privilege, never the most."""
     r = _mem_by_uid(conn, uid)
     if r["status"] != "draft":
         raise BusError(f"memory is {r['status']}, not draft")
     if r["scope"] == "global":
         if not is_admin:
             raise AccessError("global ratification requires an instance admin")
-    elif not (is_admin or r["scope"] in owned_rooms):
-        raise AccessError("ratify is per-room: you must own this room")
+    elif not is_admin:
+        if tier != "ratify":
+            raise AccessError("ratify requires a ratify-tier token")
+        if r["scope"] not in owned_rooms:
+            raise AccessError("ratify is per-room: you must own this room")
     with tx(conn):
         conn.execute("UPDATE memories SET status='live' WHERE id=?", (r["id"],))
         if r["supersedes_id"] is not None:
