@@ -135,6 +135,16 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.5  history() and web /search are FTS5-ranked (bm25, best-first, ties oldest-first).
+       BREAKING semantics, deliberately: keywords match TOKENS now, not substrings --
+       'eboot' no longer matches "reboot". The tokenizer keeps fleet vocabulary whole
+       (ADR-061, wake-127, run_id are single tokens; measured decision, DES-001 S1).
+       A prefix star reaches right-extended compounds (run_id* also finds
+       run_id_batch); left-fused ones (disposal_run_id) stay hidden until the S2
+       entities index lands -- search the fused form or its own prefix meanwhile.
+       Keywords with -, :, quotes or NOT/OR/AND are safe -- every keyword is quoted
+       into the FTS query, never parsed as operators. Nothing else changes: same
+       params, same result shape, historical backlog fully indexed by the migration.
 0.2.4  /upload can answer 413 for two different reasons and they need different fixes:
        "too large" is ONE file over the 25MB cap -- split it or link it instead. "storage
        full" is the whole broker's attachment quota, so retrying is pointless and deleting

@@ -438,7 +438,59 @@ def test_search_scoped_and_ranked():
     store.send(c, "carol", store.BROADCAST, "widget in another room", room=r2["id"])
     hits = store.search(c, keywords=["widget"], rooms=[room["id"]])
     assert len(hits) == 2                                     # r2 excluded
-    assert hits[0]["body"] == "widget widget widget"          # ranked by hits
+    assert hits[0]["body"] == "widget widget widget"          # bm25: repetition wins
+
+
+def test_search_fts_semantics_and_escaping():
+    """DES-001 S1: tokens not substrings; fleet vocabulary and FTS5 operators are
+    data, never grammar; prefix star reaches fused compounds."""
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.send(c, "alice", store.BROADCAST, "ADR-061 ratified, reboot the run_id relay",
+               subject="NEED: review", room=room["id"])
+    store.send(c, "alice", store.BROADCAST, "disposal_run_id carries the site",
+               room=room["id"])
+    store.send(c, "alice", store.BROADCAST, "run_id_batch rolls up nightly",
+               room=room["id"])
+    rid = [room["id"]]
+
+    def hit(kws):
+        return [m["body"] for m in store.search(c, keywords=kws, rooms=rid)]
+
+    assert len(hit(["ADR-061"])) == 1        # hyphenated vocab is one token, not NOT
+    assert len(hit(["NEED:"])) == 1          # colon survives quoting
+    assert len(hit(['say "quoted"'])) == 0   # internal quotes doubled, no syntax error
+    assert len(hit(["eboot"])) == 0          # substring era is over (CHANGES 0.2.5)
+    assert len(hit(["run_id"])) == 1         # tokenchars fuse compounds out of reach
+    assert len(hit(["run_id*"])) == 2        # prefix star: run_id_batch, RIGHT-extended
+    assert len(hit(["disposal*"])) == 1      # ...left-fused needs ITS prefix; the
+    # identifier class itself is S2's entities index, not a search trick
+    assert len(hit(["NOT"])) == 0            # bare operator word = data, empty is fine
+
+
+def test_fts_delete_sync_and_upgrade_backfill():
+    """The index follows the log through deletes (old-values contract) and the
+    v4->v5 migration backfills history -- an empty FTS table would make the whole
+    backlog silently unsearchable."""
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    keep = store.send(c, "alice", store.BROADCAST, "keepable fact", room=room["id"])
+    kill = store.send(c, "alice", store.BROADCAST, "doomed detail", room=room["id"])
+    with store.tx(c):
+        store._delete_messages(c, [kill["id"]])
+    assert store.search(c, keywords=["doomed"], rooms=[room["id"]]) == []
+    assert len(store.search(c, keywords=["keepable"], rooms=[room["id"]])) == 1
+    c.execute("INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')")
+
+    # Re-run the v4->v5 step against a live table: drop the index, rewind the
+    # version, migrate -- history must come back searchable.
+    c.execute("DROP TABLE messages_fts")
+    c.execute("PRAGMA user_version=4")
+    import tempfile, os
+    assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "x.db")) == store.SCHEMA_VERSION
+    assert len(store.search(c, keywords=["keepable"], rooms=[room["id"]])) == 1
+    assert store.search(c, keywords=[str(keep["id"]) + "zzz"], rooms=[room["id"]]) == []
+    c.execute("INSERT INTO messages_fts(messages_fts) VALUES('integrity-check')")
 
 
 def test_threading_and_graph():

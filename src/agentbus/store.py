@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # scrypt cost. 128 * n * r = 16 MB per hash; maxmem must clear that or it raises.
 _SCRYPT = dict(n=2**14, r=8, p=1, dklen=32, maxmem=64 * 1024 * 1024)
@@ -190,7 +190,20 @@ CREATE INDEX IF NOT EXISTS idx_links_parent  ON links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_reads_agent   ON reads(agent);
 CREATE INDEX IF NOT EXISTS idx_troom_room    ON token_rooms(room_id);
 CREATE INDEX IF NOT EXISTS idx_members_name  ON members(name);
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    subject, body,
+    content='messages', content_rowid='id',
+    tokenize="unicode61 tokenchars '-_'"
+);
 """
+# messages_fts (DES-001 S1; tokenizer measured on the live corpus, bus msg 8366):
+# unicode61 with tokenchars '-_' keeps fleet vocabulary (ADR-061, wake-127, run_id) as
+# single tokens; trigram was refuted because <3-char queries (S1, qa) can never match a
+# trigram index. External-content FTS is synced MANUALLY at the store's write choke
+# points -- send() and _delete_messages() -- never by triggers: _exec_script splits DDL
+# on ';' and would shred a trigger body. The 'delete' sync command must carry the OLD
+# indexed values (FTS5 manual, "External Content Tables"), which is why
+# _delete_messages reads the doomed rows before deleting them.
 
 
 class BusError(Exception):
@@ -300,8 +313,12 @@ def migrate(conn, db_path):
     elif v == 2:
         _upgrade_v2(conn, db_path)
         _upgrade_v3(conn, db_path)
+        _upgrade_v4(conn, db_path)
     elif v == 3:
         _upgrade_v3(conn, db_path)
+        _upgrade_v4(conn, db_path)
+    elif v == 4:
+        _upgrade_v4(conn, db_path)
     return SCHEMA_VERSION
 
 
@@ -332,6 +349,28 @@ def _upgrade_v3(conn, db_path):
             "SELECT replace(a.url, rtrim(a.url, replace(a.url, '/', '')), ''), "
             "       m.room, m.sender, m.ts_ns "
             "  FROM attachments a JOIN messages m ON m.id = a.message_id").rowcount
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    return n
+
+
+def _upgrade_v4(conn, db_path):
+    """v4 -> v5: full-text index over messages (DES-001 S1).
+
+    Creates the external-content FTS table and backfills it from the existing log.
+    The backfill is the whole point of the migration: a created-but-empty FTS table
+    would make every historical message silently unsearchable -- the failure mode
+    that LOOKS like a quiet bus."""
+    with tx(conn):
+        _exec_script(conn, """
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                subject, body,
+                content='messages', content_rowid='id',
+                tokenize="unicode61 tokenchars '-_'"
+            )
+        """)
+        conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('delete-all')")
+        n = conn.execute("INSERT INTO messages_fts(rowid, subject, body) "
+                         "SELECT id, subject, body FROM messages").rowcount
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return n
 
@@ -388,6 +427,12 @@ def _upgrade_v0(conn, db_path):
             # join()'s ON CONFLICT(name) yanked human-web out of its first room.
             conn.execute("DROP TABLE agents")
             _exec_script(conn, _SCHEMA)        # re-add indexes lost with the old table
+            # The messages table was rebuilt (DROP + RENAME), so the external-content
+            # FTS index is stale by definition -- rebuild it from the rows that exist
+            # now. Any future rebuild-the-table migration owes this same step (DES-001).
+            conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('delete-all')")
+            conn.execute("INSERT INTO messages_fts(rowid, subject, body) "
+                         "SELECT id, subject, body FROM messages")
             bad = conn.execute("PRAGMA foreign_key_check").fetchall()
             if bad:
                 raise BusError(f"migration left {len(bad)} FK violations")
@@ -765,6 +810,15 @@ def _delete_messages(conn, ids):
         return
     ids = list(ids)
     ph = _ph(ids)
+    # FTS delete-sync FIRST, while the rows still exist: the 'delete' command must
+    # carry exactly the values the index holds (FTS5 manual, External Content Tables).
+    # Reading after the DELETE would feed it nothing and silently corrupt the index.
+    doomed = conn.execute(
+        f"SELECT id, subject, body FROM messages WHERE id IN ({ph})", ids).fetchall()
+    conn.executemany(
+        "INSERT INTO messages_fts(messages_fts, rowid, subject, body) "
+        "VALUES('delete',?,?,?)",
+        [(r["id"], r["subject"], r["body"]) for r in doomed])
     conn.execute(f"DELETE FROM attachments WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM reads WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM links WHERE parent_id IN ({ph}) OR child_id IN ({ph})", ids + ids)
@@ -996,6 +1050,10 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
             "VALUES(?,?,?,?,?,?,?,?)",
             (thread_id, parent_id, sender, recipient, subject, body, room, now))
         mid = cur.lastrowid
+        # Manual FTS sync (DES-001 S1): external-content tables index nothing on their
+        # own; every insert here must be mirrored or the message is unsearchable.
+        conn.execute("INSERT INTO messages_fts(rowid, subject, body) VALUES(?,?,?)",
+                     (mid, subject, body))
         if thread_id is None:  # new thread roots on its own id
             conn.execute("UPDATE messages SET thread_id=? WHERE id=?", (mid, mid))
             thread_id = mid
@@ -1086,26 +1144,40 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
     """Search the message log (read or not) across the caller's rooms. Every filter
     ANDs together:
       keywords   list of words; a message matches if ANY word appears as a
-                 case-insensitive substring, any position, in subject OR body
+                 case-insensitive TOKEN in subject OR body (FTS5, unicode61 with
+                 tokenchars '-_': ADR-061 and run_id are single tokens). A word*
+                 prefix query reaches right-extended compounds (run_id* finds
+                 run_id_batch) -- left-fused ones (disposal_run_id) need their own
+                 prefix; the S2 entities index owns that class. This replaced
+                 substring match in 0.2.5: 'eboot' no longer matches "reboot"
       since_ns   ts_ns >= since_ns        until_ns  ts_ns <= until_ns
       involves   agent is sender OR recipient (the full convo touching that agent)
       mine_agent agent is sender OR recipient (the caller's own slice)
       thread_id  restrict to one thread
     involves + mine_agent together => the 1:1 conversation between the two.
     Returns the most recent <=limit matches. Without keywords: oldest-first. With
-    keywords: ranked best-first -- more distinct words matched wins, then more total
-    hits, ties oldest-first. Each carries thread_id so the caller can expand the DAG
-    with thread()/graph()/trace().
+    keywords: ranked best-first by bm25, ties oldest-first. Each carries thread_id so
+    the caller can expand the DAG with thread()/graph()/trace().
     """
     if not rooms:
         return []
     rooms = list(rooms)
     where, args = [f"m.room IN ({_ph(rooms)})"], list(rooms)
+    join = ""
     if keywords:
-        ors = " OR ".join(["(m.subject LIKE ? OR m.body LIKE ?)"] * len(keywords))
-        where.append(f"({ors})")
+        # Every keyword is quoted, ALWAYS (DES-001 R1-M1): bare fleet vocabulary
+        # (ADR-061, NEED:) collides with the FTS5 query grammar where -, ", : and
+        # NOT/OR/AND are operators -- unescaped, that is a syntax error, not a search.
+        # Quote-and-double-internal-quotes is quote_fts() from sqlite-utils, cribbed
+        # not imported. A trailing * survives quoting as a prefix query ("run_id"*).
+        terms = []
         for k in keywords:
-            args += [f"%{k}%", f"%{k}%"]
+            prefix = k.endswith("*") and len(k) > 1
+            base = k[:-1] if prefix else k
+            terms.append('"' + base.replace('"', '""') + '"' + ("*" if prefix else ""))
+        join = " JOIN messages_fts f ON f.rowid = m.id"
+        where.append("messages_fts MATCH ?")
+        args.append(" OR ".join(terms))
     if since_ns is not None:
         where.append("m.ts_ns >= ?")
         args.append(since_ns)
@@ -1123,21 +1195,16 @@ def search(conn, *, keywords=None, since_ns=None, until_ns=None,
         args.append(thread_id)
     clause = " WHERE " + " AND ".join(where)
     limit = max(1, min(int(limit), 1000))
+    sel = _SEL.replace("SELECT m.*", "SELECT m.*, f.rank AS _rank", 1) if keywords else _SEL
     rows = conn.execute(
-        f"{_SEL}{clause} ORDER BY m.id DESC LIMIT ?", args + [limit]).fetchall()
+        f"{sel}{join}{clause} ORDER BY m.id DESC LIMIT ?", args + [limit]).fetchall()
     msgs = _with_attachments(conn, [_msg(r) for r in reversed(rows)])
     if keywords:
         # ponytail: rank the most recent <=limit matches, not the whole log; raise
-        # limit if a search needs deeper reach. SQLite LIKE is ASCII-case-insensitive,
-        # matching the Python .count() below.
-        kws = [k.lower() for k in keywords]
-
-        def rank(m):
-            hay = f"{m['subject'] or ''} {m['body']}".lower()
-            hits = [hay.count(k) for k in kws]
-            return (sum(1 for h in hits if h), sum(hits))
-
-        msgs.sort(key=rank, reverse=True)  # stable: ties stay oldest-first
+        # limit if a search needs deeper reach. FTS5 rank IS bm25 here: negative,
+        # smaller = better (sign pinned in DES-001 so nobody re-derives it).
+        by_rank = {r["id"]: r["_rank"] for r in rows}
+        msgs.sort(key=lambda m: by_rank[m["id"]])  # stable: ties stay oldest-first
     return msgs
 
 
