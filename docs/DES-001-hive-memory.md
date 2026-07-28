@@ -112,6 +112,27 @@ CREATE INDEX idx_mem_slug    ON memories(scope, slug) WHERE slug IS NOT NULL;
 CREATE VIRTUAL TABLE memories_fts USING fts5(
     fact, entities, content='memories', content_rowid='id');
 
+-- DEFECT, found 2026-07-28, fix rides the next schema bump: this indexes `fact` and
+-- `entities` ONLY, while B1 folded lessons into this same table with four MORE text
+-- columns -- symptom, root_cause, detection, and rule. For a lesson, `fact` mirrors
+-- `rule`, so symptom / root_cause / detection are UNSEARCHABLE. Demonstrated on the
+-- live hive: the lesson host-pkill-reaches-container-daemon prescribes
+-- `pkill -f agentbus-daemon` in its root_cause, and recall(query='agentbus') returns
+-- ZERO while recall(query='pkill') returns it -- 'pkill' is in the rule, 'agentbus'
+-- is not.
+--
+-- Two consequences, both load-bearing. (1) SYMPTOM is how a human or agent actually
+-- looks for a lesson: you have the failure in front of you and search what you SEE,
+-- which is the one field search cannot reach. (2) DETECTION is where commands live,
+-- so an audit sweeping the hive for a stale identifier -- exactly what a rename
+-- requires -- silently misses the lessons that prescribe it. A sweep must therefore
+-- enumerate full lesson rows via lessons() and match client-side; recall(query=) is
+-- NOT a sufficient instrument, and any doctrine that says otherwise is wrong.
+--
+-- Fix: index symptom, root_cause, detection alongside fact, and re-index every row in
+-- the migration -- the same discipline the entity extractor already carries (a pattern
+-- change rides a schema bump, or the index and the data disagree).
+
 -- messages.id is already a rowid alias (INTEGER PRIMARY KEY AUTOINCREMENT), so this
 -- binding is VACUUM-safe as-is.
 CREATE VIRTUAL TABLE messages_fts USING fts5(
