@@ -31,9 +31,17 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://127.0.0.1:8765")
+# The AGENT reaches the broker by container DNS on a shared docker network (4.2: the
+# container has a PRIVATE interface, never the host's -- host networking would bind
+# ttyd to every LAN interface and collide every container's 7681 on one namespace).
+DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-server:8765")
+# The LAUNCHER's own health poll runs on the host, so it reaches the broker's PUBLISHED
+# port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
+DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
+DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
 DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.0")
 ROLE_RE = re.compile(r"\A[a-z0-9][a-z0-9-]{1,63}\Z")
 
@@ -163,11 +171,33 @@ def _docker(*args, check=True, capture=False):
         stdout=subprocess.PIPE if capture else None, text=True)
 
 
+def _exists(name):
+    return _docker("inspect", name, check=False, capture=True).returncode == 0
+
+
+def _ensure_network(net, broker_url):
+    """Create the shared network if missing and pull the broker onto it, so the agent
+    can resolve it by DNS. Both are idempotent -- create/connect on an existing
+    network/membership is a harmless non-zero we swallow. host mode owns no network."""
+    if net == "host":
+        return
+    _docker("network", "create", net, check=False, capture=True)
+    host = urllib.parse.urlparse(broker_url).hostname
+    if host:  # a container name resolves; an IP or external host just no-ops here
+        _docker("network", "connect", net, host, check=False, capture=True)
+
+
 # ---- subcommands -------------------------------------------------------------------
 
 def cmd_new(a):
     if not ROLE_RE.match(a.role):
         die(f"bad role {a.role!r}: lowercase alnum + dash, 2-64 chars")
+    # Re-provision is routine (3.5) but must never be UNPROMPTED: an accidental `new`
+    # on a live role would destroy its session mid-conversation. Refuse unless the
+    # operator says --replace; the volume (login) survives either way.
+    if _exists(container_name(a.role)) and not a.replace:
+        die(f"{container_name(a.role)} already exists -- `destroy {a.role}` first, "
+            f"or pass --replace to re-provision (its claude-home volume is kept)")
     token = read_secret(f"bound broker token for {a.role}")
     if not token:
         die("no token given (stdin empty and no prompt)")
@@ -183,8 +213,10 @@ def cmd_new(a):
         REVEILLE_GATE_SECRET=secrets.token_hex(32),
     )
 
+    _ensure_network(a.network, a.broker)
     _docker("volume", "create", volume_name(a.role), capture=True)
-    _docker("rm", "-f", container_name(a.role), check=False, capture=True)
+    if a.replace:
+        _docker("rm", "-f", container_name(a.role), check=False, capture=True)
     argv = docker_run_argv(a.role, a.image, a.mem, a.cpus, a.network,
                            forward_anthropic=bool(os.environ.get("ANTHROPIC_API_KEY")),
                            boot_cmd=a.boot_cmd)
@@ -194,10 +226,10 @@ def cmd_new(a):
     _record(conn, a.role, a.repo_url, a.image, a.broker)
     conn.close()
 
-    print(f"provisioned {container_name(a.role)}; waiting for presence live+connected "
-          f"(timeout {a.timeout}s)...")
-    if wait_healthy(a.broker, a.role, token, a.timeout):
-        print(f"OK: {a.role} is live+connected on {a.broker}")
+    print(f"provisioned {container_name(a.role)} on network {a.network}; waiting for "
+          f"presence live+connected (timeout {a.timeout}s)...")
+    if wait_healthy(a.health_url, a.role, token, a.timeout):
+        print(f"OK: {a.role} is live+connected (broker {a.broker})")
         return 0
     print(f"UNHEALTHY: {a.role} never reached live+connected. Inspect:\n"
           f"  docker logs --tail 20 {container_name(a.role)}", file=sys.stderr)
@@ -255,15 +287,25 @@ def build_parser():
     n = sub.add_parser("new", help="provision one agent container")
     n.add_argument("role")
     n.add_argument("repo_url")
-    n.add_argument("--broker", default=DEFAULT_BROKER)
+    n.add_argument("--broker", default=DEFAULT_BROKER,
+                   help="broker URL the AGENT dials (container DNS; "
+                        f"default {DEFAULT_BROKER})")
+    n.add_argument("--health-url", default=DEFAULT_HEALTH,
+                   help="broker URL the LAUNCHER polls from the host "
+                        f"(default {DEFAULT_HEALTH})")
+    n.add_argument("--network", default=DEFAULT_NETWORK,
+                   help="docker network for the agent + broker; `host` is an ops "
+                        f"escape hatch, never the default (default {DEFAULT_NETWORK})")
+    n.add_argument("--replace", action="store_true",
+                   help="re-provision an existing role (destroys its container; the "
+                        "claude-home volume is kept)")
     n.add_argument("--image", default=DEFAULT_IMAGE)
     n.add_argument("--mem", default="4g")
     n.add_argument("--cpus", default="2")
-    n.add_argument("--network", default="host")
     n.add_argument("--timeout", type=int, default=90)
     n.add_argument("--boot-cmd", default=None,
                    help="override the image command (default: claude reveille); "
-                        "e.g. `agent-probe` to health-check without an Anthropic login")
+                        "e.g. agent-probe to health-check without an Anthropic login")
     n.set_defaults(fn=cmd_new)
 
     sub.add_parser("ls", help="list provisioned containers").set_defaults(fn=cmd_ls)

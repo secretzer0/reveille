@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route, WebSocketRoute
@@ -331,7 +332,16 @@ def _poke_ok(key):
     ts = _poke_pending.get(key)
     return ts is None or time.time_ns() - ts > POKE_TTL_NS
 
-mcp = FastMCP("agentbus", stateless_http=True, json_response=True)
+# DNS-rebinding Host validation is OFF: it defaults on with an empty allow-list, so the
+# transport 421s any request whose Host is not localhost -- which rejects every remote
+# agent reaching the broker by LAN name (a documented feature) and every containerised
+# agent reaching it by docker-DNS name (DES-002 4.2, the reveille network). That check
+# guards UNAUTHENTICATED localhost services against malicious web pages; the broker is a
+# multi-host API where the bearer TOKEN is the security boundary, checked on every call,
+# so Host validation adds nothing and only breaks legitimate addressing.
+mcp = FastMCP("agentbus", stateless_http=True, json_response=True,
+              transport_security=TransportSecuritySettings(
+                  enable_dns_rebinding_protection=False))
 
 
 def _notify(room_id, names):
