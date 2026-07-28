@@ -495,10 +495,11 @@ def test_fts_delete_sync_and_upgrade_backfill():
 def test_entity_extraction_patterns():
     """DES-001 S2: the deterministic identifier classes, lowercased as the normal form."""
     got = store.extract_entities(
-        "ADR-061 ratified. PR #263 renames FieldTicketStatus; roc-api repins "
-        "proto-v3.6.2 and disposal_run_id joins run_id. R&D#5 is not a PR.")
-    assert {"adr-061", "#263", "fieldticketstatus", "roc-api", "proto-v3.6.2",
-            "disposal_run_id", "run_id"} <= got
+        "ADR-061 ratified per DES-001; lesson wake-127 applies. PR #263 renames "
+        "FieldTicketStatus; roc-api repins proto-v3.6.2 and disposal_run_id joins "
+        "run_id. R&D#5 is not a PR.")
+    assert {"adr-061", "des-001", "wake-127", "#263", "fieldticketstatus", "roc-api",
+            "proto-v3.6.2", "disposal_run_id", "run_id"} <= got
     assert "#5" not in got                    # &-prefixed: not an issue reference
     assert store.extract_entities("") == set()
     assert store.extract_entities(None) == set()

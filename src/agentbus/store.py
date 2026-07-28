@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -65,7 +65,10 @@ _REPO_NAMES = ("roc-api", "roc-ui", "controller-api", "controller-ui", "vendor-a
                "vendor-ui", "minimal-mobile", "streaming", "deployment", "kiosk",
                "reveille", "shared", "mobile")
 _ENTITY_RES = (
-    re.compile(r"\bADR-\d+\b", re.I),                       # ADR-061
+    # word-dash-number covers the fleet's whole ID idiom in one rule: ADR-061,
+    # DES-001, lesson slugs like wake-127. Found live: the ADR-only version left
+    # entity=des-001 empty while the thread naming it was right there.
+    re.compile(r"\b[A-Za-z]{2,}(?:-[A-Za-z0-9]+)*-\d+\b"),
     re.compile(r"(?<![\w&])#\d+\b"),                        # #263 (PRs/issues)
     re.compile(r"\bproto-v\d+\.\d+\.\d+\b", re.I),          # proto-v3.6.2
     re.compile(r"\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b"),   # RunStatus (>=2 humps)
@@ -357,6 +360,8 @@ def migrate(conn, db_path):
         _upgrade_v5(conn, db_path)
     elif v == 5:
         _upgrade_v5(conn, db_path)
+    elif v == 6:
+        _upgrade_v6(conn, db_path)
     return SCHEMA_VERSION
 
 
@@ -437,6 +442,15 @@ def _upgrade_v5(conn, db_path):
             "INSERT OR IGNORE INTO message_entities(entity, message_id) VALUES(?,?)", rows)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     return len(rows)
+
+
+def _upgrade_v6(conn, db_path):
+    """v6 -> v7: re-extract entities. The ID pattern generalized (ADR-only ->
+    word-dash-number, found live: entity=des-001 was empty with the naming thread
+    right there), and an extraction change without a re-extract would leave history
+    indexed under the OLD rules -- two vocabularies pretending to be one index.
+    Same body as v5: the backfill is already a delete-and-rebuild."""
+    return _upgrade_v5(conn, db_path)
 
 
 def _upgrade_v0(conn, db_path):
