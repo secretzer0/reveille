@@ -28,7 +28,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from agentbus import __version__, store  # noqa: E402
+from reveille import __version__, store  # noqa: E402
 
 
 def free_port():
@@ -195,7 +195,7 @@ def spawn_daemon():
     secrets = seed(db)
     env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port),
                REVEILLE_HOST="127.0.0.1")
-    proc = subprocess.Popen(["agentbus-daemon"], env=env,
+    proc = subprocess.Popen(["reveille-daemon"], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return port, proc, secrets
 

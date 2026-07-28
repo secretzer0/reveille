@@ -13,8 +13,8 @@ set -euo pipefail
 
 : "${REVEILLE_URL:?}" "${REVEILLE_AGENT_ROLE:?}" "${REVEILLE_TOKEN:?}"
 
-# join over MCP -- mcp is not in the system python (agentbus is a uv tool), so borrow
-# it. PINNED to the version agentbus is built against (uv.lock): unpinned `--with mcp`
+# join over MCP -- mcp is not in the system python (reveille is a uv tool), so borrow
+# it. PINNED to the version reveille is built against (uv.lock): unpinned `--with mcp`
 # pulls a newer mcp that moved streamablehttp_client and the import dies.
 uv run --quiet --with 'mcp==1.28.1' python - <<'PY'
 import asyncio, os

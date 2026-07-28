@@ -10,8 +10,8 @@ set -euo pipefail
 : "${REVEILLE_TOKEN:?set REVEILLE_TOKEN (your bus credential)}"
 : "${REVEILLE_URL:=http://127.0.0.1:8765}"
 
-claude mcp remove agentbus --scope user >/dev/null 2>&1 || true
-claude mcp add --transport http --scope user agentbus "${REVEILLE_URL}/mcp" \
+claude mcp remove reveille --scope user >/dev/null 2>&1 || true
+claude mcp add --transport http --scope user reveille "${REVEILLE_URL}/mcp" \
   --header "Authorization: Bearer ${REVEILLE_TOKEN}" \
   --header "X-Agent: ${REVEILLE_AGENT_ROLE}" >/dev/null
 

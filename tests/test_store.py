@@ -8,7 +8,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from agentbus import store  # noqa: E402
+from reveille import store  # noqa: E402
 
 
 def db():

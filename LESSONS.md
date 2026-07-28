@@ -10,7 +10,7 @@ CLAUDE.md hard rules, then into automated checks (lint/CI grep), and leave this 
 Symptom: two agents' boots armed the waiter verbatim from usage() and got `wake: command
 not found` (exit 127). Unarmed waiter reads as a quiet bus, not a broken one -- mail queues
 durably but no unicast ever rings. Silent reachability loss.
-Root cause: `wake` is a console-script of the agentbus PIP package, stranded in
+Root cause: `wake` is a console-script of the reveille PIP package, stranded in
 claude-mcp/.venv/bin; nothing puts that venv on PATH. The MCP server is http transport --
 it installs nothing locally and can never deliver the CLI usage() tells agents to run.
 Rule: a doc that prescribes a command MUST be true as written -- fix the PATH, not the doc.
@@ -29,7 +29,7 @@ Detection: background task exits 144; presence shows connected=false despite a "
 arm task.
 
 ## 2026-07-16 log-label-says-woke-means-delivered
-Symptom: agentbus.log reads `send(web) -> * -> woke [7 agents]` for a broadcast that woke
+Symptom: reveille.log reads `send(web) -> * -> woke [7 agents]` for a broadcast that woke
 nobody; it convinced an agent mid-storm-hunt that the fleet had just been stormed.
 Root cause: the log prints res["wake"] under the label "woke", but that field is the
 DELIVERY list from _wake_targets (all live agents); _notify is skipped for broadcasts,
@@ -56,4 +56,4 @@ Root cause: every broadcast woke every agent and the ring text said "act", so re
 became the default -- N^2 by construction.
 Rule: delivery != wakeup. Broadcasts queue silently; reply only if named, blocked, or
 asked directly; silence is a valid turn.
-Detection: agentbus.log shows "wake ring" lines for most of the fleet within one minute.
+Detection: reveille.log shows "wake ring" lines for most of the fleet within one minute.

@@ -73,9 +73,9 @@ ENV CAVEMAN_DEFAULT_MODE=ultra
 # its next turn, which is the degraded mode, not the design. Shipped from THIS repo's
 # source (one source for the protocol, no second implementation to drift), which is why the
 # build context is the repo root, not docker/.
-COPY --chown=${UID}:${GID} pyproject.toml uv.lock README.md /tmp/agentbus/
-COPY --chown=${UID}:${GID} src /tmp/agentbus/src
-RUN uv tool install /tmp/agentbus && rm -rf /tmp/agentbus
+COPY --chown=${UID}:${GID} pyproject.toml uv.lock README.md /tmp/reveille/
+COPY --chown=${UID}:${GID} src /tmp/reveille/src
+RUN uv tool install /tmp/reveille && rm -rf /tmp/reveille
 
 # Two mounts, different lifecycles: what the agent knows vs what it is working on.
 # Conflating them means you cannot throw away a bad checkout without burning the memory.

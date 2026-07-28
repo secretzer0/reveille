@@ -24,7 +24,7 @@ import sys
 
 import websockets
 
-from agentbus import __version__
+from reveille import __version__
 
 HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))  # presence heartbeat cadence
 

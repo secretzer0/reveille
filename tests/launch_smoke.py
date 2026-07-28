@@ -7,7 +7,7 @@ Provisions TWO roles and asserts BOTH reach live+connected: the second agent is 
 test that catches host-networking's 7681 collision (msg 8402). agent-probe stands in
 for `claude reveille` (join + hold the waiter) so the gate needs no Anthropic login.
 
-Zero broker changes: this touches only src/agentbus via store.seed; the broker code is
+Zero broker changes: this touches only src/reveille via store.seed; the broker code is
 unmodified, so smoke_ws stays green in the same `make build`.
 """
 import contextlib
@@ -21,7 +21,7 @@ import time
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-from agentbus import store  # noqa: E402
+from reveille import store  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 LAUNCHER = str(REPO / "scripts" / "reveille_launch.py")
