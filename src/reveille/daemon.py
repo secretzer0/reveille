@@ -2937,7 +2937,8 @@ def _setup_logging():
     # Own handler + no propagation, so uvicorn's logging config can't silence us.
     # Level via REVEILLE_LOG (default INFO). Lines show: time, client name, op, thread/id.
     h = logging.StreamHandler()
-    h.setFormatter(logging.Formatter("%(asctime)s reveille %(message)s", "%H:%M:%S"))
+    h.setFormatter(logging.Formatter("%(asctime)s reveille %(message)s",
+                                     "%Y-%m-%d %H:%M:%S"))
     log.handlers[:] = [h]
     log.setLevel(os.environ.get("REVEILLE_LOG", "INFO").upper())
     log.propagate = False
