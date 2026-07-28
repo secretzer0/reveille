@@ -1929,8 +1929,11 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
             shown += 1
         if shown < len(rows):
             truncated.append(title)
-            emit(f"[{shown} of {len(rows)} shown -- recall(kind='{title.rstrip('s')}') "
-                 f"or lessons() for the rest]")
+            # the pointer must name the tool that actually serves this section:
+            # lessons() for lessons, recall(kind=...) for everything else
+            more = ("lessons()" if title == "lessons"
+                    else f"recall(kind='{title.rstrip('s')}')")
+            emit(f"[{shown} of {len(rows)} shown -- {more} for the rest]")
 
     # 1. lessons -- the rules the fleet already paid for, all of them if they fit
     lrows = conn.execute(

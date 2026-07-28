@@ -143,6 +143,13 @@ CHANGES (newest first; re-read after any broker version bump):
        returns brief_available (a count) so a fresh agent knows the pack is worth
        pulling; the 15-minute replay is unchanged -- brief() is the knowledge floor,
        replay is the conversation floor.
+       Also (S3 review fixes): recall() results carry pool_truncated -- true means
+       scoring hit its pool floor (limit*4 rows), narrow filters or raise limit;
+       with a query the pool now takes the BEST FTS matches, not the newest. And
+       the agent plane is admin-free: no token inherits its owner's admin bit, so
+       global doctrine writes and global ratify land as drafts for every agent --
+       admin memory powers arrive with the web UI (S6). Lesson promotion now
+       records the room ancestor in the global row's supersession chain.
 0.2.8  HIVE MEMORY (DES-001 S3). New tools: memory_add / recall / memory_retract /
        ratify. A memory is ONE distilled fact with provenance (source= message id ->
        trace() the deliberation) and supersession instead of edits: correcting a fact
