@@ -239,6 +239,55 @@ judgement has a place to happen.
   the gate's bookkeeping, so the refusal may name nobody. Sanctioned — the ssh
   plane is the owner's own — but stated, not discovered.
 
+### 4.6 Per-grant handles — what T1 left for T3, and the ruling (architect, post-T1)
+
+T1 merged (94c6e3e) with the viewer path attaching to a per-grant grouped session
+`v-<id>` and the driver path attaching to the shared session directly:
+
+    exec tmux attach-session -t agent      # driver
+
+That is correct for T1's gate (a driver can drive) and wrong for T3's, and the reason
+is worth stating because it is not visible until you try to build revocation. After
+`exec`, the gate process is GONE — replaced by a tmux client whose argv is
+`tmux attach-session -t agent` for every driver, the owner's own ssh attach included.
+A driver grant therefore leaves NO per-grant handle in the container, and R3's ratified
+revocation path — "docker exec that kills the gate's process group for that grant" —
+has nothing to aim at. Killing every client of session `agent` would revoke the owner
+along with the grantee, which is not revocation, it is a boot.
+
+RULING for T3: every BROWSER client attaches into a per-grant grouped session, drivers
+included — `d-<id>` writable, `v-<id>` read-only. Consequences, all of which T3 wants
+anyway:
+
+- Revocation becomes `tmux kill-session -t d-<id>` (or `v-<id>`): pure tmux, no pid
+  bookkeeping, no stale-pgid problem, and it targets exactly one grant. The <1s smoke
+  measures a tmux operation rather than a process hunt.
+- The OWNER's ssh plane attaches session `agent` directly and is therefore outside
+  every grant handle by construction — revoking a grantee can never collateral the
+  owner. That is the same boundary 4.5 already states from the other side.
+- Driver exclusivity (4.3) becomes countable: refuse a second writable attach when an
+  attached `d-*` session already exists unless multi-driver=true, and name the holding
+  grant id in the refusal. Without per-grant sessions there is nothing to count, which
+  is why 4.3's "refused with a readable message naming the current driver" was not
+  buildable as T1 shipped.
+- Audit (4.3) gets its attach/detach events from session lifecycle rather than from
+  the gate, which no longer exists after exec.
+
+Two related clarifications, so nobody "fixes" a non-defect:
+
+- Q1 (attach at TAIL, scrollback is where echoed secrets live) is satisfied by `-r`,
+  NOT by history-limit. A read-only client cannot enter copy-mode — tmux drops its
+  input server-side — so a viewer sees the current screen and everything after it, and
+  cannot scroll back. Do NOT set `history-limit 0` to chase Q1: grouped sessions share
+  panes, so that would destroy the operator's own scrollback to constrain a client that
+  already cannot reach it. Drivers can scroll back; a driver is the agent's whole
+  identity (4.4) and scrollback is the least of what they hold.
+- Token expiry is checked at ATTACH time only. A client that attached with 10 minutes
+  left on a 24h grant stays attached indefinitely, which contradicts Q2's "an unwatched
+  grant is a forgotten door". T3 owns the sweep: the launcher kills `d-*`/`v-*` sessions
+  whose grant has expired on its regular tick. Expiry that only gates the doorway is
+  not expiry.
+
 ## 5. Staging — each stage shippable, green gate, starts after DES-001 S4
 (ruled parallel: S5/S6 interleave with T-stages; F3 still lands before S5)
 
@@ -249,9 +298,12 @@ judgement has a place to happen.
       launcher.db, health-by-presence. Gate: provision one real agent end-to-end,
       token pasted, presence live+connected, zero broker changes (smoke_ws green).
 - T3  grants: table + grant/revoke/flip CLI, per-grant URL tokens, audit log,
-      revocation kill-path. Smoke: multi-client mirror, -r enforced server-side,
-      revoke drops client <1s, driver-exclusivity race refused with the driver
-      named, kill-and-reprovision resumes from bus state.
+      revocation kill-path. Requires the 4.6 change to the merged gate: drivers
+      attach into a per-grant grouped session (`d-<id>`) too, or revocation and
+      exclusivity have no handle to aim at. Also owns the expiry sweep (4.6).
+      Smoke: multi-client mirror, -r enforced server-side, revoke drops client
+      <1s, driver-exclusivity race refused with the driver named,
+      kill-and-reprovision resumes from bus state.
 - T4  edge: publish ttyd + launcher UI through the tunnel behind Cloudflare
       Access. BLOCKED on the zone move (backlog item 1) — everything T1-T3 is
       LAN-complete without it.
