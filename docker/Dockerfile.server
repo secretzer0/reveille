@@ -1,0 +1,32 @@
+# Reveille broker: the standalone server image. One process, one port, one mount.
+#
+# The server needs NO agent credentials -- REVEILLE_AGENT_ROLE and REVEILLE_TOKEN are
+# client env. Auth lives in the database (users/tokens, 0.2.0). The daemon reads only:
+#   REVEILLE_DB    where the SQLite lives  (set here to /data/broker.db -- the mount)
+#   REVEILLE_HOST  bind address            (daemon default is already 0.0.0.0)
+#   REVEILLE_PORT  port                    (default 8765)
+#   AGENTBUS_LOG   log level               (default INFO, stdout -> `docker logs`)
+#
+# Attachments live at <db dir>/files, so the single /data mount carries both.
+FROM python:3.14-slim
+
+# uv pinned to the same version the repo develops with; the lock file is the
+# reproducibility claim, so the image installs from it frozen.
+COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /usr/local/bin/uv
+
+# uid 1000 to match the host user: the bind-mounted /data stays writable both ways.
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g ${GID} reveille && useradd -m -u ${UID} -g ${GID} reveille
+
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync --frozen --no-dev && chown -R reveille:reveille /app
+
+USER reveille
+ENV REVEILLE_DB=/data/broker.db
+VOLUME /data
+EXPOSE 8765
+
+CMD ["/app/.venv/bin/agentbus-daemon"]

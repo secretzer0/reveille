@@ -5,7 +5,7 @@ PID  := $(REPO)/agentbus.pid
 
 AGENT_IMAGE ?= reveille-agent:0.1.0-base
 
-.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image server-run server-stop
 
 help:
 	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
@@ -102,6 +102,33 @@ install-agent:
 
 unregister:
 	claude mcp remove agentbus --scope user || true
+
+# ---- the standalone server --------------------------------------------------------
+# The broker as a container: built from this source, run from anywhere. One bind mount
+# ($(SERVER_DATA)) carries the database AND attachments (<db dir>/files). The server
+# needs no agent credentials -- REVEILLE_AGENT_ROLE/REVEILLE_TOKEN are client env; auth
+# lives in the database. Port published on 0.0.0.0 so the LAN (and remote agents) reach it.
+SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+SERVER_DATA  ?= $(HOME)/reveille
+
+server-image:
+	docker build -t $(SERVER_IMAGE) -f docker/Dockerfile.server .
+
+server-run: server-image
+	@mkdir -p "$(SERVER_DATA)"
+	docker rm -f reveille-server 2>/dev/null || true
+	docker run -d --name reveille-server --restart unless-stopped \
+	  -p 8765:8765 \
+	  -v "$(SERVER_DATA)":/data \
+	  $(SERVER_IMAGE)
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+	  curl -sf http://127.0.0.1:8765/health >/dev/null && \
+	    { echo "reveille-server up: http://0.0.0.0:8765  data=$(SERVER_DATA)"; exit 0; }; \
+	  sleep 1; \
+	done; echo "FAILED -- docker logs reveille-server:"; docker logs --tail 5 reveille-server; exit 1
+
+server-stop:
+	docker rm -f reveille-server
 
 # ---- containerised agents ---------------------------------------------------------
 # A container is just another client: it sets the same two env vars and runs the same
