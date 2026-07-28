@@ -150,6 +150,28 @@ def test_send_room_comes_from_the_query_scope():
         pass
 
 
+def test_mem_ctx_never_inherits_owner_admin(tmp_path):
+    """F3: an agent is not its owner. A token minted by an instance admin must NOT
+    carry the admin bit onto the MCP plane -- otherwise every fleet token bypasses
+    the global doctrine gate. Admin memory powers are web-principal only (S6)."""
+    from types import SimpleNamespace
+    from agentbus import store
+    db = str(tmp_path / "f3.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    tok = store.create_token(c, admin["id"], "fleet", agent_name="agent-x",
+                             mem_tier="ratify")
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        bound, tier, adm, _ = daemon._mem_ctx(SimpleNamespace(token_id=tok["id"]))
+        assert bound and tier == "ratify" and adm is False
+    finally:
+        daemon._conn = prev
+        c.close()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

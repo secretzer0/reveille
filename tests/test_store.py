@@ -674,6 +674,32 @@ def test_ratify_completes_pending_supersession():
         pass
 
 
+def test_recall_pool_rank_order_and_truncation_flag():
+    """F2: with a query the pool takes the BEST FTS matches, so an old strong match
+    survives a flood of newer weak ones; pool_truncated says when scoring hit the
+    pool floor instead of pretending the pool was the corpus."""
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    R = {room["id"]: "Reveille"}
+    best = store.memory_add(c, **kw(fact="needle needle needle needle needle"))
+    for i in range(6):
+        store.memory_add(c, **kw(fact=f"one needle buried in filler words number {i} "
+                                      "with more filler to dilute the term frequency"))
+    for i in range(20):
+        # corpus without the term, so bm25's idf is real (a term present in EVERY
+        # doc scores ~0 for everyone and recency silently decides instead)
+        store.memory_add(c, **kw(fact=f"unrelated haystack fact number {i}"))
+    c.execute("UPDATE memories SET created_ns=1 WHERE uid=?", (best["id"],))
+    got = store.recall(c, rooms=R, token_id=tok["id"], query="needle", limit=1)
+    # a recency-ordered pool of limit*4=4 would have dropped the old best match
+    assert got["memories"][0]["id"] == best["id"]
+    assert got["pool_truncated"] is True                    # 7 matches > pool of 4
+    wide = store.recall(c, rooms=R, token_id=tok["id"], query="needle", limit=10)
+    assert wide["pool_truncated"] is False
+    # no-query path keeps the recency pool but still reports hitting the floor
+    assert store.recall(c, rooms=R, token_id=tok["id"], limit=1)["pool_truncated"]
+
+
 def test_lessons_rebacked_same_shape_and_gate():
     """lessons()/add_lesson keep their contract; cross-author slug replacement is a
     DRAFT now (R1-B5); promotion supersedes into global."""
@@ -699,6 +725,14 @@ def test_lessons_rebacked_same_shape_and_gate():
     tips = store.lessons(c, [room["id"]])
     promoted = next(t for t in tips if t["slug"] == "room-rule")
     assert promoted["scope"] == "global" and promoted["author"] == "travis"
+    # F1: the global row carries the chain link to its room ancestor -- promotion is
+    # the ONE sanctioned cross-scope supersede, and without the link trace loses
+    # WHERE the rule came from.
+    old = c.execute("SELECT * FROM memories WHERE slug='room-rule' AND scope=?",
+                    (room["id"],)).fetchone()
+    new = c.execute("SELECT * FROM memories WHERE slug='room-rule' AND "
+                    "scope='global'").fetchone()
+    assert new["supersedes_id"] == old["id"] and old["status"] == "superseded"
 
 
 def test_lessons_fold_in_migration_v8_to_v9():
