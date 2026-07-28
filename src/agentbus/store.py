@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -130,6 +130,10 @@ CREATE TABLE IF NOT EXISTS tokens (
     -- a credential is a new token. agents == tokens is also what makes per-agent
     -- metering one count(*) (DECISIONS).
     agent_name   TEXT,
+    -- Memory write tier (DES-001 section 6): state < write < ratify. Every new token
+    -- starts at 'state' -- randy day one reads the hive and writes only his own state.
+    mem_tier     TEXT NOT NULL DEFAULT 'state'
+                 CHECK (mem_tier IN ('state','write','ratify')),
     created_ns   INTEGER NOT NULL,
     last_used_ns INTEGER
 );
@@ -196,25 +200,9 @@ CREATE TABLE IF NOT EXISTS files (
     uploaded_by TEXT NOT NULL,
     ts_ns       INTEGER NOT NULL
 );
--- Defect post-mortems, distilled. This was LESSONS.md at each repo root, which worked
--- only while every agent shared one filesystem; containerised agents each have their own,
--- so the shared-lessons pattern has to live on the wire. room_id NULL = a GLOBAL lesson
--- everyone reads; otherwise it is scoped to one room. One table, not two: the columns are
--- identical, and two would make every read a UNION and every write pick a side.
--- The old "hard cap 10 lines" was an honour system; these columns enforce the shape.
-CREATE TABLE IF NOT EXISTS lessons (
-    id         TEXT PRIMARY KEY,
-    room_id    TEXT REFERENCES rooms(id) ON DELETE CASCADE,
-    slug       TEXT NOT NULL,
-    symptom    TEXT NOT NULL,
-    root_cause TEXT NOT NULL,
-    rule       TEXT NOT NULL,
-    detection  TEXT NOT NULL,
-    author     TEXT NOT NULL,
-    created_ns INTEGER NOT NULL,
-    UNIQUE (room_id, slug)
-);
-CREATE INDEX IF NOT EXISTS idx_lessons_room  ON lessons(room_id);
+-- Lessons live in memories (kind='lesson') since v9 -- the structured columns ride
+-- along nullable, lessons()/lesson_add() keep their signatures, and the fold-in is
+-- DES-001 S3's clean cutover: one store, no dual path.
 CREATE INDEX IF NOT EXISTS idx_att_message   ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_msg_room      ON messages(room);
 CREATE INDEX IF NOT EXISTS idx_msg_recipient ON messages(recipient);
@@ -238,6 +226,45 @@ CREATE TABLE IF NOT EXISTS message_entities (
 );
 CREATE INDEX IF NOT EXISTS idx_msgent_msg ON message_entities(message_id);
 """
+
+# The hive memory store (DES-001 S3). Separate constant so _upgrade_v8 can lay exactly
+# this without replaying the whole schema; the fresh-db path gets it via _SCHEMA below.
+_MEMORIES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS memories (
+    id            INTEGER PRIMARY KEY,
+    uid           TEXT NOT NULL UNIQUE,
+    kind          TEXT NOT NULL CHECK (kind IN
+                    ('doctrine','contract','decision','lesson','state')),
+    scope         TEXT NOT NULL,
+    fact          TEXT NOT NULL CHECK (length(fact) <= 1000),
+    entities      TEXT NOT NULL DEFAULT '',
+    source_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    supersedes_id INTEGER REFERENCES memories(id),
+    slug          TEXT,
+    symptom       TEXT, root_cause TEXT, rule TEXT, detection TEXT,
+    author        TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'live'
+                  CHECK (status IN ('live','draft','superseded','retracted')),
+    occurred_ns   INTEGER,
+    created_ns    INTEGER NOT NULL,
+    expires_ns    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mem_scope ON memories(scope, kind, status);
+CREATE INDEX IF NOT EXISTS idx_mem_super ON memories(supersedes_id);
+CREATE INDEX IF NOT EXISTS idx_mem_slug  ON memories(scope, slug) WHERE slug IS NOT NULL;
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    fact, entities,
+    content='memories', content_rowid='id',
+    tokenize="unicode61 tokenchars '-_'"
+);
+CREATE TABLE IF NOT EXISTS memory_entities (
+    entity    TEXT NOT NULL,
+    memory_id INTEGER NOT NULL,
+    PRIMARY KEY (entity, memory_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mement_mem ON memory_entities(memory_id);
+"""
+_SCHEMA += _MEMORIES_SCHEMA
 # messages_fts (DES-001 S1; tokenizer measured on the live corpus, bus msg 8366):
 # unicode61 with tokenchars '-_' keeps fleet vocabulary (ADR-061, wake-127, run_id) as
 # single tokens; trigram was refuted because <3-char queries (S1, qa) can never match a
@@ -358,23 +385,31 @@ def migrate(conn, db_path):
         _upgrade_v4(conn, db_path)
         _upgrade_v5(conn, db_path)
         _upgrade_v7(conn, db_path)
+        _upgrade_v8(conn, db_path)
     elif v == 3:
         _upgrade_v3(conn, db_path)
         _upgrade_v4(conn, db_path)
         _upgrade_v5(conn, db_path)
         _upgrade_v7(conn, db_path)
+        _upgrade_v8(conn, db_path)
     elif v == 4:
         _upgrade_v4(conn, db_path)
         _upgrade_v5(conn, db_path)
         _upgrade_v7(conn, db_path)
+        _upgrade_v8(conn, db_path)
     elif v == 5:
         _upgrade_v5(conn, db_path)
         _upgrade_v7(conn, db_path)
+        _upgrade_v8(conn, db_path)
     elif v == 6:
         _upgrade_v6(conn, db_path)
         _upgrade_v7(conn, db_path)
+        _upgrade_v8(conn, db_path)
     elif v == 7:
         _upgrade_v7(conn, db_path)
+        _upgrade_v8(conn, db_path)
+    elif v == 8:
+        _upgrade_v8(conn, db_path)
     return SCHEMA_VERSION
 
 
@@ -478,6 +513,32 @@ def _upgrade_v7(conn, db_path):
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tokens)")}
         if "agent_name" not in cols:
             conn.execute("ALTER TABLE tokens ADD COLUMN agent_name TEXT")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v8(conn, db_path):
+    """v8 -> v9: the memories store (DES-001 S3) and the lessons fold-in.
+
+    Lessons become memories rows (kind='lesson', structured columns ride along),
+    then the lessons table is DROPPED -- clean cutover, one store, no dual path.
+    lessons()/lesson_add() keep their exact signatures and return shape, rebacked.
+    Destructive (a table dies), so it snapshots first like v0 and v2."""
+    snapshot(conn, f"{db_path}.pre-v9-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    with tx(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(tokens)")}
+        if "mem_tier" not in cols:
+            conn.execute("ALTER TABLE tokens ADD COLUMN mem_tier TEXT NOT NULL "
+                         "DEFAULT 'state' CHECK (mem_tier IN ('state','write','ratify'))")
+        _exec_script(conn, _MEMORIES_SCHEMA)
+        if _table_exists(conn, "lessons"):
+            for r in conn.execute("SELECT * FROM lessons ORDER BY created_ns"):
+                _memory_insert(
+                    conn, kind="lesson",
+                    scope="global" if r["room_id"] is None else r["room_id"],
+                    fact=r["rule"][:1000], author=r["author"], status="live",
+                    slug=r["slug"], symptom=r["symptom"], root_cause=r["root_cause"],
+                    rule=r["rule"], detection=r["detection"], created_ns=r["created_ns"])
+            conn.execute("DROP TABLE lessons")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -675,6 +736,11 @@ def _admin_count(conn):
     return conn.execute("SELECT count(*) c FROM users WHERE role='admin'").fetchone()["c"]
 
 
+def is_admin(conn, user_id):
+    """Public read for the daemon's memory-tool gating."""
+    return _is_admin(conn, user_id)
+
+
 def _is_admin(conn, user_id):
     r = conn.execute("SELECT role FROM users WHERE id=?", (user_id,)).fetchone()
     return bool(r and r["role"] == "admin")
@@ -738,7 +804,7 @@ def delete_session(conn, secret):
 
 # ---- tokens ------------------------------------------------------------------
 
-def create_token(conn, owner_id, label="", agent_name=None):
+def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state"):
     """Mint a token. The secret is returned ONCE and never stored -- only its hash.
     Rooms are assigned afterwards (assign_room), never baked into the secret.
 
@@ -749,14 +815,16 @@ def create_token(conn, owner_id, label="", agent_name=None):
     agent_name = (agent_name or "").strip() or None
     if agent_name:
         valid_name(agent_name)
+    if mem_tier not in TIERS:
+        raise BusError(f"bad mem_tier {mem_tier!r}: one of {TIERS}")
     secret = secrets.token_urlsafe(32)
     tid, now = _uuid(), time.time_ns()
     conn.execute(
-        "INSERT INTO tokens(id, secret_hash, owner_id, label, agent_name, created_ns) "
-        "VALUES(?,?,?,?,?,?)",
-        (tid, _sha(secret), owner_id, label, agent_name, now))
+        "INSERT INTO tokens(id, secret_hash, owner_id, label, agent_name, mem_tier, "
+        "created_ns) VALUES(?,?,?,?,?,?,?)",
+        (tid, _sha(secret), owner_id, label, agent_name, mem_tier, now))
     return {"id": tid, "secret": secret, "label": label, "agent_name": agent_name,
-            "created_ns": now}
+            "mem_tier": mem_tier, "created_ns": now}
 
 
 def resolve_token(conn, secret):
@@ -770,7 +838,7 @@ def resolve_token(conn, secret):
         return None
     conn.execute("UPDATE tokens SET last_used_ns=? WHERE id=?", (time.time_ns(), r["id"]))
     return {"id": r["id"], "owner_id": r["owner_id"], "label": r["label"],
-            "agent_name": r["agent_name"]}
+            "agent_name": r["agent_name"], "mem_tier": r["mem_tier"]}
 
 
 def list_tokens(conn, owner_id):
@@ -1530,49 +1598,354 @@ def prune_agent(conn, name, room_id):
 
 # ---- files -------------------------------------------------------------------
 
+# ---- hive memory (DES-001 S3) --------------------------------------------------
+
+KINDS = ("doctrine", "contract", "decision", "lesson", "state")
+TIERS = ("state", "write", "ratify")
+STATE_TTL_NS = 30 * 24 * 3600 * 10**9   # Q2 resolved: stale open_tasks mislead
+
+
+def _memory_insert(conn, *, kind, scope, fact, author, status, entities="",
+                   source_msg_id=None, supersedes_id=None, slug=None, symptom=None,
+                   root_cause=None, rule=None, detection=None, occurred_ns=None,
+                   created_ns=None, expires_ns=None):
+    """Low-level insert + manual FTS/entity sync. Every memory write funnels here --
+    the same one-choke-point discipline as messages. Caller holds the transaction
+    when the write is part of a supersession pair."""
+    uid, now = _uuid(), (created_ns or time.time_ns())
+    ents = set((entities or "").split()) | extract_entities(fact)
+    ents = {e.lower() for e in ents if e}
+    cur = conn.execute(
+        "INSERT INTO memories(uid, kind, scope, fact, entities, source_msg_id, "
+        "supersedes_id, slug, symptom, root_cause, rule, detection, author, status, "
+        "occurred_ns, created_ns, expires_ns) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (uid, kind, scope, fact, " ".join(sorted(ents)), source_msg_id, supersedes_id,
+         slug, symptom, root_cause, rule, detection, author, status,
+         occurred_ns, now, expires_ns))
+    mid = cur.lastrowid
+    conn.execute("INSERT INTO memories_fts(rowid, fact, entities) VALUES(?,?,?)",
+                 (mid, fact, " ".join(sorted(ents))))
+    conn.executemany(
+        "INSERT OR IGNORE INTO memory_entities(entity, memory_id) VALUES(?,?)",
+        [(e, mid) for e in ents])
+    return {"id": mid, "uid": uid}
+
+
+def _mem_by_uid(conn, uid):
+    r = conn.execute("SELECT * FROM memories WHERE uid=?", (uid,)).fetchone()
+    if not r:
+        raise BusError(f"no such memory: {uid}")
+    return r
+
+
+def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
+               owned_rooms, fact, kind, scope="", entities="", source=0,
+               supersedes="", occurred_ns=None):
+    """Add one memory, gated by the caller's tier (DES-001 section 6).
+
+    Below-tier writes land as status='draft' -- invisible to recall()/brief() until
+    ratified. kind='state' is allowed ONLY for a BOUND token (ruled in 8373): under
+    a shared token every agent would share one state bucket, and serving alice's
+    open_tasks to bob as his own is active misinformation, worse than no gate.
+    kind='lesson' goes through lesson_add(), never here -- one path per behavior."""
+    if kind not in KINDS:
+        raise BusError(f"bad kind {kind!r}")
+    if kind == "lesson":
+        raise BusError("lessons go through lesson_add(), which owns their gate")
+    if not (fact or "").strip():
+        raise BusError("fact is required")
+    if len(fact) > 1000:
+        raise BusError("fact is over 1000 chars -- distill it or link a source message")
+
+    if kind == "state":
+        if not agent_bound:
+            raise AccessError(
+                "state memories need a BOUND token: under a shared token every agent "
+                "shares one state bucket, and a wrong brief is worse than none")
+        scope = f"agent:{token_id}"
+        status = "live"                       # own state is always yours to write
+        expires_ns = time.time_ns() + STATE_TTL_NS
+    else:
+        expires_ns = None
+        if scope == "global":
+            status = "live" if is_admin else "draft"
+        else:
+            if not scope:
+                if len(rooms) == 1:
+                    scope = next(iter(rooms))
+                elif not rooms:
+                    raise AccessError("this token has no rooms")
+                else:
+                    raise AmbiguousRoom(
+                        [{"id": r, "name": n} for r, n in rooms.items()])
+            if scope not in rooms:
+                raise AccessError(f"no access to room {scope}")
+            if kind == "doctrine":
+                status = ("live" if is_admin or
+                          (tier == "ratify" and scope in owned_rooms) else "draft")
+            else:                              # contract / decision
+                status = "live" if (is_admin or tier in ("write", "ratify")) else "draft"
+
+    sup_row = None
+    if supersedes:
+        sup_row = _mem_by_uid(conn, supersedes)
+        if sup_row["scope"] != scope or sup_row["kind"] != kind:
+            raise BusError("a supersede targets the SAME scope and SAME kind only")
+        if sup_row["status"] not in ("live", "superseded"):
+            raise BusError(f"cannot supersede a {sup_row['status']} memory")
+
+    with tx(conn):
+        out = _memory_insert(
+            conn, kind=kind, scope=scope, fact=fact, author=author, status=status,
+            entities=entities, source_msg_id=source or None,
+            supersedes_id=sup_row["id"] if sup_row else None,
+            occurred_ns=occurred_ns, expires_ns=expires_ns)
+        # Flip-on-live ONLY: a draft supersede must not kill its target, or a
+        # below-tier writer deletes doctrine by drafting against it (R1-M6).
+        if sup_row is not None and status == "live":
+            conn.execute("UPDATE memories SET status='superseded' WHERE id=? "
+                         "AND status='live'", (sup_row["id"],))
+    return {"id": out["uid"], "status": status}
+
+
+def _mem_dict(r, chain=None, fork=False):
+    m = {"id": r["uid"], "kind": r["kind"], "scope": r["scope"], "fact": r["fact"],
+         "entities": r["entities"].split() if r["entities"] else [],
+         "source_msg_id": r["source_msg_id"], "author": r["author"],
+         "status": r["status"], "occurred_ns": r["occurred_ns"],
+         "created_ns": r["created_ns"]}
+    if r["slug"]:
+        m.update(slug=r["slug"], symptom=r["symptom"], root_cause=r["root_cause"],
+                 rule=r["rule"], detection=r["detection"])
+    if chain is not None:
+        m["chain"] = chain                     # supersession depth behind this tip
+    if fork:
+        m["fork"] = True                       # a sibling also superseded the target
+    return m
+
+
+def _chain_info(conn, row):
+    """(depth, fork) for a memory: how many ancestors it superseded, and whether any
+    OTHER memory also claims its direct target (the section 10 fork case)."""
+    depth, fork, cur = 0, False, row
+    if row["supersedes_id"] is not None:
+        n = conn.execute(
+            "SELECT count(*) FROM memories WHERE supersedes_id=? AND status IN "
+            "('live','draft')", (row["supersedes_id"],)).fetchone()[0]
+        fork = n > 1
+    while cur["supersedes_id"] is not None:
+        cur = conn.execute("SELECT * FROM memories WHERE id=?",
+                           (cur["supersedes_id"],)).fetchone()
+        if cur is None:
+            break
+        depth += 1
+        if depth > 100:                        # a cycle would be a bug, not a chain
+            break
+    return depth, fork
+
+
+def recall(conn, *, rooms, token_id, caller="", is_admin=False, owned_rooms=(),
+           query="", kind="", scope="", entity="", author="", since_ns=None,
+           until_ns=None, status="live", limit=10, explain=False):
+    """Ranked live facts (DES-001 section 5). Read scoping is the invariant every
+    read path obeys: global OR the caller's rooms OR the caller's OWN agent scope --
+    other agents' state is never returned, at any status. Drafts are visible to
+    their author, to ratify-eligible owners (owned_rooms), and to admins."""
+    where = ["(m.scope='global' OR m.scope IN (%s) OR m.scope=?)" % _ph(list(rooms))]
+    args = list(rooms) + [f"agent:{token_id}"]
+    where.append("(m.expires_ns IS NULL OR m.expires_ns > ?)")
+    args.append(time.time_ns())
+    if status == "draft" and not is_admin:
+        # Draft visibility is about the CALLER (own drafts + the ratify queue for
+        # rooms their owner owns), never about the author= FILTER below.
+        owned = list(owned_rooms)
+        cond = "m.author=?"
+        dargs = [caller]
+        if owned:
+            cond += f" OR m.scope IN ({_ph(owned)})"
+            dargs += owned
+        where.append(f"({cond})")
+        args += dargs
+    where.append("m.status=?")
+    args.append(status)
+    if kind:
+        where.append("m.kind=?")
+        args.append(kind)
+    if scope:
+        where.append("m.scope=?")
+        args.append(scope)
+    if entity:
+        where.append("m.id IN (SELECT memory_id FROM memory_entities WHERE entity=?)")
+        args.append(entity.lower())
+    if author:
+        where.append("m.author=?")
+        args.append(author)
+    if since_ns is not None:
+        where.append("m.created_ns >= ?")
+        args.append(since_ns)
+    if until_ns is not None:
+        where.append("m.created_ns <= ?")
+        args.append(until_ns)
+    join, sel_rank = "", ""
+    if query:
+        terms = []
+        for k in query.split():
+            prefix = k.endswith("*") and len(k) > 1
+            base = k[:-1] if prefix else k
+            terms.append('"' + base.replace('"', '""') + '"' + ("*" if prefix else ""))
+        join = " JOIN memories_fts f ON f.rowid = m.id"
+        sel_rank = ", f.rank AS _rank"
+        where.append("memories_fts MATCH ?")
+        args.append(" OR ".join(terms))
+    limit = max(1, min(int(limit), 200))
+    rows = conn.execute(
+        f"SELECT m.*{sel_rank} FROM memories m{join} WHERE " + " AND ".join(where) +
+        " ORDER BY m.created_ns DESC LIMIT ?", args + [limit * 4]).fetchall()
+
+    now = time.time_ns()
+    ent_q = {e.lower() for e in (entity or query or "").replace("*", " ").split()}
+    scored = []
+    for r in rows:
+        bm = -(r["_rank"] if query else 0.0)
+        ents = set(r["entities"].split())
+        overlap = len(ents & ent_q) / len(ent_q) if ent_q else 0.0
+        kw = {"doctrine": 1.0, "contract": 0.9, "decision": 0.8,
+              "lesson": 0.9, "state": 0.6}[r["kind"]]
+        age_d = max(0.0, (now - r["created_ns"]) / 86400e9)
+        rec = 1.0 / (1.0 + age_d / 30.0)
+        final = 0.5 * bm + 0.2 * overlap + 0.15 * kw + 0.15 * rec
+        scored.append((final, {"bm25_norm": bm, "entity_overlap": overlap,
+                               "kind_weight": kw, "recency_decay": rec}, r))
+    if query:
+        mx = max((s for s, _, _ in scored), default=1.0) or 1.0
+        scored = [(s / mx, d, r) for s, d, r in scored]
+    scored.sort(key=lambda t: -t[0])
+    out = []
+    for final, comp, r in scored[:limit]:
+        depth, fork = _chain_info(conn, r)
+        m = _mem_dict(r, chain=depth, fork=fork)
+        if explain:
+            m["score"] = {"final": round(final, 4),
+                          **{k: round(v, 4) for k, v in comp.items()}}
+        out.append(m)
+    return {"memories": out, "count": len(out)}
+
+
+def memory_retract(conn, uid, *, actor, is_admin):
+    r = _mem_by_uid(conn, uid)
+    if r["author"] != actor and not is_admin:
+        raise AccessError("only the author or an admin retracts a memory")
+    conn.execute("UPDATE memories SET status='retracted' WHERE id=? AND "
+                 "status IN ('live','draft')", (r["id"],))
+    return {"id": uid, "status": "retracted"}
+
+
+def ratify_memory(conn, uid, *, is_admin, owned_rooms):
+    """draft -> live. Per (token, room): effective only in rooms the token's OWNER
+    owns; scope='global' requires an instance admin (R1-M3). Flipping live also
+    completes any pending supersession (flip-on-live, R1-M6)."""
+    r = _mem_by_uid(conn, uid)
+    if r["status"] != "draft":
+        raise BusError(f"memory is {r['status']}, not draft")
+    if r["scope"] == "global":
+        if not is_admin:
+            raise AccessError("global ratification requires an instance admin")
+    elif not (is_admin or r["scope"] in owned_rooms):
+        raise AccessError("ratify is per-room: you must own this room")
+    with tx(conn):
+        conn.execute("UPDATE memories SET status='live' WHERE id=?", (r["id"],))
+        if r["supersedes_id"] is not None:
+            conn.execute("UPDATE memories SET status='superseded' WHERE id=? AND "
+                         "status='live'", (r["supersedes_id"],))
+    return {"id": uid, "status": "live"}
+
+
+def sweep_expired_state(conn):
+    """Hard-delete expired state memories (they are ephemeral by contract) with the
+    FTS old-values delete sync. Joins the hourly sweep; reads already filter on
+    expires_ns, so this is hygiene, not the correctness gate."""
+    rows = conn.execute("SELECT id, fact, entities FROM memories WHERE kind='state' "
+                        "AND expires_ns IS NOT NULL AND expires_ns <= ?",
+                        (time.time_ns(),)).fetchall()
+    if not rows:
+        return 0
+    with tx(conn):
+        conn.executemany(
+            "INSERT INTO memories_fts(memories_fts, rowid, fact, entities) "
+            "VALUES('delete',?,?,?)",
+            [(r["id"], r["fact"], r["entities"]) for r in rows])
+        ids = [r["id"] for r in rows]
+        ph = _ph(ids)
+        conn.execute(f"DELETE FROM memory_entities WHERE memory_id IN ({ph})", ids)
+        conn.execute(f"DELETE FROM memories WHERE id IN ({ph})", ids)
+    return len(rows)
+
+
+# ---- lessons: same API, rebacked onto memories (DES-001 B1) ----------------------
+
 def add_lesson(conn, *, author, slug, symptom, root_cause, rule, detection, room_id=None):
-    """Record one lesson. room_id=None makes it global. Re-using a slug in the same scope
-    REPLACES it: a lesson is a distilled rule, not an append-only log."""
+    """Record one lesson. Same signature and observable behavior as ever: re-using a
+    slug in the same scope replaces it. Underneath, replacement is a SUPERSESSION
+    (add-only, G5) -- and a replacement by a DIFFERENT author lands as draft, because
+    lessons are the most-obeyed kind in the system and slug re-use was an unguarded
+    overwrite of someone else's rule (R1-B5). Fresh lessons stay any-agent-live."""
     valid_name(slug)
-    lid, now = _uuid(), time.time_ns()
-    conn.execute(
-        "INSERT INTO lessons(id, room_id, slug, symptom, root_cause, rule, detection, "
-        "author, created_ns) VALUES(?,?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(room_id, slug) DO UPDATE SET symptom=excluded.symptom, "
-        "root_cause=excluded.root_cause, rule=excluded.rule, detection=excluded.detection, "
-        "author=excluded.author, created_ns=excluded.created_ns",
-        (lid, room_id, slug, symptom, root_cause, rule, detection, author, now))
-    return {"id": lid, "slug": slug, "room": room_id}
+    scope = "global" if room_id is None else room_id
+    tip = conn.execute(
+        "SELECT * FROM memories WHERE kind='lesson' AND scope=? AND slug=? AND "
+        "status='live'", (scope, slug)).fetchone()
+    status = "live"
+    if tip is not None and tip["author"] != author:
+        status = "draft"
+    with tx(conn):
+        out = _memory_insert(
+            conn, kind="lesson", scope=scope, fact=rule[:1000], author=author,
+            status=status, supersedes_id=tip["id"] if tip is not None else None,
+            slug=slug, symptom=symptom, root_cause=root_cause, rule=rule,
+            detection=detection)
+        if tip is not None and status == "live":
+            conn.execute("UPDATE memories SET status='superseded' WHERE id=? AND "
+                         "status='live'", (tip["id"],))
+    return {"id": out["uid"], "slug": slug, "room": room_id,
+            **({"status": "draft"} if status == "draft" else {})}
 
 
 def _lesson(r):
-    return {"slug": r["slug"], "room": r["room_id"], "symptom": r["symptom"],
-            "root_cause": r["root_cause"], "rule": r["rule"], "detection": r["detection"],
-            "author": r["author"], "created_ns": r["created_ns"],
-            "scope": "global" if r["room_id"] is None else "room"}
+    room = None if r["scope"] == "global" else r["scope"]
+    return {"slug": r["slug"], "room": room, "symptom": r["symptom"],
+            "root_cause": r["root_cause"], "rule": r["rule"],
+            "detection": r["detection"], "author": r["author"],
+            "created_ns": r["created_ns"],
+            "scope": "global" if room is None else "room"}
 
 
 def lessons(conn, rooms=()):
-    """Every global lesson, plus the ones scoped to the caller's rooms. Newest first.
-    This is what an agent reads at boot instead of a file it can no longer share."""
+    """Every global lesson plus the caller's rooms' lessons -- chain TIPS only
+    (status='live'), newest first. Same return shape as always."""
     rooms = list(rooms or [])
-    if rooms:
-        rows = conn.execute(
-            f"SELECT * FROM lessons WHERE room_id IS NULL OR room_id IN ({_ph(rooms)}) "
-            f"ORDER BY created_ns DESC", rooms)
-    else:
-        rows = conn.execute("SELECT * FROM lessons WHERE room_id IS NULL "
-                            "ORDER BY created_ns DESC")
+    scopes = ["global"] + rooms
+    rows = conn.execute(
+        f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
+        f"scope IN ({_ph(scopes)}) ORDER BY created_ns DESC", scopes)
     return [_lesson(r) for r in rows]
 
 
-def promote_lesson(conn, slug, room_id):
-    """Room lesson -> global. The architect's judgement call, per CLAUDE.md: a rule that
-    generalises stops being one room's business."""
-    n = conn.execute("UPDATE lessons SET room_id=NULL WHERE slug=? AND room_id=?",
-                     (slug, room_id)).rowcount
-    if not n:
+def promote_lesson(conn, slug, room_id, promoted_by="admin"):
+    """Room lesson -> global. Promotion is a superseding row at scope='global'
+    authored by the promoting admin (R1-B1) -- the room tip flips to superseded, so
+    history keeps who wrote it and when it went global."""
+    tip = conn.execute(
+        "SELECT * FROM memories WHERE kind='lesson' AND scope=? AND slug=? AND "
+        "status='live'", (room_id, slug)).fetchone()
+    if tip is None:
         raise BusError(f"no such lesson in this room: {slug}")
+    with tx(conn):
+        _memory_insert(
+            conn, kind="lesson", scope="global", fact=tip["rule"][:1000],
+            author=promoted_by, status="live", slug=tip["slug"],
+            symptom=tip["symptom"], root_cause=tip["root_cause"], rule=tip["rule"],
+            detection=tip["detection"])
+        conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (tip["id"],))
 
 
 def record_file(conn, stored, room_id, uploaded_by):

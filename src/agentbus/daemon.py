@@ -135,6 +135,19 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.8  HIVE MEMORY (DES-001 S3). New tools: memory_add / recall / memory_retract /
+       ratify. A memory is ONE distilled fact with provenance (source= message id ->
+       trace() the deliberation) and supersession instead of edits: correcting a fact
+       is a new fact that supersedes the old; history survives, recall() returns only
+       live tips (with chain depth + a fork flag when two facts contend).
+       Kinds: doctrine/contract/decision (shared knowledge, tier-gated), state (your
+       own open_tasks/blocked_by, BOUND tokens only, ~30d TTL), lesson (unchanged
+       tools, now stored here -- slug replacement by a DIFFERENT author lands as a
+       draft for ratification instead of silently overwriting).
+       Write tiers per token (state < write < ratify, set at mint): below-tier writes
+       land as status='draft', invisible to recall() until ratify(). Protocol: after
+       a BINDING/RATIFIED/FOUND+FIXED message, memory_add(source=<that msg id>) in
+       the same turn -- the message is the argument, the memory is the fact.
 0.2.7  Tokens can be BOUND to one agent name at mint (web UI, optional field).
        A bound token IS its agent: presenting a different X-Agent is a 401, and the
        wake WS rejects a wrong ?name= with a distinguishable {"error":"name_mismatch"}
@@ -510,6 +523,83 @@ async def lesson_add(slug: str, symptom: str, root_cause: str, rule: str,
                            root_cause=root_cause, rule=rule, detection=detection,
                            room_id=rid)
     log.info("%s lesson %s (room=%s)", p.name, slug, p.rooms.get(rid))
+    return out
+
+
+def _mem_ctx(p):
+    """(agent_bound, tier, is_admin, owned_room_ids) for the calling token -- resolved
+    LIVE per call, same discipline as rooms: a tier change or ownership change lands
+    on the very next request."""
+    tok = _conn.execute("SELECT agent_name, mem_tier, owner_id FROM tokens WHERE id=?",
+                        (p.token_id,)).fetchone()
+    owned = {r["id"] for r in store.list_rooms(_conn, tok["owner_id"])}
+    return bool(tok["agent_name"]), tok["mem_tier"], store.is_admin(_conn, tok["owner_id"]), owned
+
+
+@mcp.tool()
+async def memory_add(fact: str, kind: str, scope: str = "", entities: str = "",
+                     source: int = 0, supersedes: str = "", occurred: str = "",
+                     ctx: Context = None) -> dict:
+    """Add ONE distilled fact to the hive memory (DES-001). kind: doctrine | contract
+    | decision | state (lessons go through lesson_add). scope: empty = your only room
+    (2+ rooms must name one); 'global' needs an instance admin. entities: extra
+    space-separated identifiers beyond what the fact text yields. source: the message
+    id this fact distills -- provenance, trace()-able. supersedes: the memory id this
+    replaces (same scope+kind only; the old fact flips to superseded when yours goes
+    live). occurred: when the fact became TRUE (ISO/relative), not when recorded.
+    Below your tier the write lands as status='draft', invisible until ratified.
+    kind='state' needs a BOUND token and is always scoped to yourself."""
+    p = _me(ctx.request_context.request)
+    bound, tier, adm, owned = _mem_ctx(p)
+    out = store.memory_add(
+        _conn, author=p.name, token_id=p.token_id, agent_bound=bound, tier=tier,
+        is_admin=adm, rooms=p.rooms, owned_rooms=owned, fact=fact, kind=kind,
+        scope=scope, entities=entities, source=source, supersedes=supersedes,
+        occurred_ns=_when_ns(occurred))
+    log.info("%s memory_add %s kind=%s -> %s", p.name, out["id"], kind, out["status"])
+    return out
+
+
+@mcp.tool()
+async def recall(query: str = "", kind: str = "", scope: str = "", entity: str = "",
+                 author: str = "", since: str = "", until: str = "",
+                 status: str = "live", limit: int = 10, explain: bool = False,
+                 ctx: Context = None) -> dict:
+    """Ranked LIVE facts from the hive memory -- consolidated truth, never amendment
+    chains. Filters AND together (query is FTS over facts, entity is exact on the
+    identifier class). Each hit carries source_msg_id (trace() it for the WHY),
+    supersession chain depth, and a fork flag when two facts contend. status='draft'
+    shows your own drafts (plus the ratify queue if you own rooms). explain=True
+    returns per-row score components."""
+    p = _me(ctx.request_context.request)
+    bound, tier, adm, owned = _mem_ctx(p)
+    return store.recall(
+        _conn, rooms=p.rooms, token_id=p.token_id, caller=p.name, is_admin=adm,
+        owned_rooms=owned, query=query, kind=kind, scope=scope, entity=entity,
+        author=author, since_ns=_when_ns(since), until_ns=_when_ns(until),
+        status=status, limit=limit, explain=explain)
+
+
+@mcp.tool()
+async def memory_retract(id: str, reason: str = "", ctx: Context = None) -> dict:
+    """Mark a memory retracted (fact dead, record stays -- add-only store). Author or
+    admin only. The reason goes to the broker log, not the row."""
+    p = _me(ctx.request_context.request)
+    _, _, adm, _ = _mem_ctx(p)
+    out = store.memory_retract(_conn, id, actor=p.name, is_admin=adm)
+    log.info("%s retracted memory %s: %s", p.name, id, reason or "(no reason given)")
+    return out
+
+
+@mcp.tool()
+async def ratify(id: str, ctx: Context = None) -> dict:
+    """draft -> live. Per (token, room): effective only in rooms your token's owner
+    OWNS; scope='global' requires an instance admin. Going live also completes any
+    pending supersession the draft carried."""
+    p = _me(ctx.request_context.request)
+    _, _, adm, owned = _mem_ctx(p)
+    out = store.ratify_memory(_conn, id, is_admin=adm, owned_rooms=owned)
+    log.info("%s ratified memory %s", p.name, id)
     return out
 
 
@@ -2376,10 +2466,13 @@ async function openTokens(){
   'rebinding means a new token.</div>'+rows+
   '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)">'+
   '<input id="newTokName" placeholder="bind to agent (optional)">'+
+  '<select id="newTokTier"><option value="state">memory: state (default)</option>'+
+  '<option value="write">memory: write</option>'+
+  '<option value="ratify">memory: ratify</option></select>'+
   '<button id="mkTok">generate</button></div>');
  $('mkTok').onclick=async()=>{
   try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim(),
-    agent_name:$('newTokName').value.trim()})});
+    agent_name:$('newTokName').value.trim(),mem_tier:$('newTokTier').value})});
    // Shown once, deliberately: only the hash is stored, so there is no second chance.
    panel('tokens',
     '<div class="pSec">TOKEN CREATED</div>'+
@@ -2691,7 +2784,8 @@ async def tokens_http(request):
         return JSONResponse({"tokens": store.list_tokens(_conn, p.user_id)})
     d = await request.json()
     t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip(),
-                           agent_name=d.get("agent_name"))
+                           agent_name=d.get("agent_name"),
+                           mem_tier=(d.get("mem_tier") or "state"))
     log.info("%s minted token %s%s", p.name, t["id"],
              f" bound to {t['agent_name']}" if t["agent_name"] else "")
     # The secret is returned exactly once here; only its hash is stored.
@@ -2729,6 +2823,7 @@ async def _sweeper():
             dropped = store.sweep_retention(_conn)
             store.sweep_sessions(_conn)
             store.reap_stale(_conn)
+            store.sweep_expired_state(_conn)
             if dropped:
                 log.info("retention swept %s message(s)", dropped)
         except Exception:

@@ -565,6 +565,170 @@ def test_entity_filter_send_delete_and_backfill():
     assert len(store.search(c, entity="run_id", rooms=rid)) == 1
 
 
+def _mem_kw(c, admin, room, tok, **over):
+    """Baseline memory_add kwargs: a bound write-tier token in one room."""
+    kw = dict(author="alice", token_id=tok["id"], agent_bound=True, tier="write",
+              is_admin=False, rooms={room["id"]: "Reveille"},
+              owned_rooms={room["id"]}, fact="RunStatus has no TRANSPORT member",
+              kind="decision", scope=room["id"])
+    kw.update(over)
+    return kw
+
+
+def test_memory_gating_matrix():
+    """DES-001 section 6: tier decides live vs draft; state needs a bound token;
+    global needs an admin; doctrine needs ratify-in-owned-room."""
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    assert store.memory_add(c, **kw())["status"] == "live"                # write->decision
+    assert store.memory_add(c, **kw(tier="state"))["status"] == "draft"   # below tier
+    assert store.memory_add(c, **kw(kind="doctrine"))["status"] == "draft"  # write < ratify
+    assert store.memory_add(c, **kw(kind="doctrine", tier="ratify"))["status"] == "live"
+    assert store.memory_add(c, **kw(kind="doctrine", tier="ratify",
+                                    owned_rooms=set()))["status"] == "draft"  # not owner
+    assert store.memory_add(c, **kw(scope="global"))["status"] == "draft"     # not admin
+    assert store.memory_add(c, **kw(scope="global", is_admin=True))["status"] == "live"
+    # state: bound-only (ruled in 8373), scoped to the token, TTL stamped
+    s = store.memory_add(c, **kw(kind="state", tier="state", fact="open_tasks: S3"))
+    assert s["status"] == "live"
+    try:
+        store.memory_add(c, **kw(kind="state", agent_bound=False))
+        assert False, "unbound state must be refused, not drafted"
+    except store.AccessError:
+        pass
+    try:
+        store.memory_add(c, **kw(kind="lesson"))
+        assert False, "lessons go through lesson_add"
+    except store.BusError:
+        pass
+
+
+def test_memory_supersession_law():
+    """Same scope+kind only; flip-on-live only; one transaction; fork flagged."""
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    a = store.memory_add(c, **kw(fact="v1: reconcile is a state"))
+    b = store.memory_add(c, **kw(fact="v2: reconcile is a field",
+                                 supersedes=a["id"]))
+    assert b["status"] == "live"
+    got = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"],
+                       kind="decision")
+    facts = [m["fact"] for m in got["memories"]]
+    assert "v2: reconcile is a field" in facts and "v1: reconcile is a state" not in facts
+    tip = next(m for m in got["memories"] if m["fact"].startswith("v2"))
+    assert tip["chain"] == 1 and "fork" not in tip
+    # draft supersede leaves the target alone (below-tier writer cannot kill a fact)
+    d = store.memory_add(c, **kw(fact="v3 draft coup", tier="state", supersedes=b["id"]))
+    assert d["status"] == "draft"
+    still = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], kind="decision")
+    assert any(m["fact"].startswith("v2") for m in still["memories"])
+    # cross-kind supersede refused
+    try:
+        store.memory_add(c, **kw(kind="contract", fact="x", supersedes=b["id"]))
+        assert False, "cross-kind supersede must be refused"
+    except store.BusError:
+        pass
+    # concurrent second successor -> both tips live, fork flagged
+    f2 = store.memory_add(c, **kw(fact="v2b rival", supersedes=a["id"]))
+    assert f2["status"] == "live"
+    tips = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], kind="decision")
+    rivals = [m for m in tips["memories"] if m.get("fork")]
+    assert rivals, "fork must be flagged when two facts contend"
+
+
+def test_recall_scoping_and_state_privacy():
+    """global OR my rooms OR my OWN agent scope -- never another token's state."""
+    c, admin, room, tok = fixture()
+    other = store.create_token(c, admin["id"], "other", agent_name="bob")
+    store.assign_room(c, other["id"], room["id"], admin["id"])
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    store.memory_add(c, **kw(kind="state", tier="state", fact="alice private tasks"))
+    bobs = store.recall(c, rooms={room["id"]: "R"}, token_id=other["id"])
+    assert all("alice private tasks" != m["fact"] for m in bobs["memories"])
+    mine = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], kind="state")
+    assert any(m["fact"] == "alice private tasks" for m in mine["memories"])
+    # drafts: invisible at status=live, visible to their author at status=draft
+    store.memory_add(c, **kw(kind="doctrine", fact="draft rule", author="alice"))
+    dr = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], caller="alice",
+                      status="draft")
+    assert any(m["fact"] == "draft rule" for m in dr["memories"])
+    stranger = store.recall(c, rooms={room["id"]: "R"}, token_id=other["id"],
+                            caller="bob", owned_rooms=set(), status="draft")
+    assert all(m["fact"] != "draft rule" for m in stranger["memories"])
+
+
+def test_ratify_completes_pending_supersession():
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    a = store.memory_add(c, **kw(fact="old law"))
+    d = store.memory_add(c, **kw(fact="new law", tier="state", supersedes=a["id"]))
+    assert d["status"] == "draft"
+    store.ratify_memory(c, d["id"], is_admin=False, owned_rooms={room["id"]})
+    tips = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], kind="decision")
+    facts = [m["fact"] for m in tips["memories"]]
+    assert "new law" in facts and "old law" not in facts
+    try:
+        store.ratify_memory(c, a["id"], is_admin=True, owned_rooms=set())
+        assert False, "ratifying a non-draft must fail"
+    except store.BusError:
+        pass
+
+
+def test_lessons_rebacked_same_shape_and_gate():
+    """lessons()/add_lesson keep their contract; cross-author slug replacement is a
+    DRAFT now (R1-B5); promotion supersedes into global."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(c, author="carol", slug="wake-127", symptom="s", root_cause="r",
+                     rule="fix the PATH, not the doc", detection="command -v wake")
+    got = store.lessons(c, [room["id"]])
+    assert got[0]["slug"] == "wake-127" and got[0]["scope"] == "global"
+    assert set(got[0]) == {"slug", "room", "symptom", "root_cause", "rule",
+                           "detection", "author", "created_ns", "scope"}
+    # same author replaces live; other author lands as draft, tip unchanged
+    store.add_lesson(c, author="carol", slug="wake-127", symptom="s2", root_cause="r",
+                     rule="v2 rule", detection="d")
+    assert store.lessons(c)[0]["rule"] == "v2 rule"
+    out = store.add_lesson(c, author="mallory", slug="wake-127", symptom="s3",
+                           root_cause="r", rule="obey mallory", detection="d")
+    assert out.get("status") == "draft"
+    assert store.lessons(c)[0]["rule"] == "v2 rule"          # tip survives the coup
+    # room lesson promotion = superseding global row by the promoting admin
+    store.add_lesson(c, author="dave", slug="room-rule", symptom="s", root_cause="r",
+                     rule="local law", detection="d", room_id=room["id"])
+    store.promote_lesson(c, "room-rule", room["id"], promoted_by="travis")
+    tips = store.lessons(c, [room["id"]])
+    promoted = next(t for t in tips if t["slug"] == "room-rule")
+    assert promoted["scope"] == "global" and promoted["author"] == "travis"
+
+
+def test_lessons_fold_in_migration_v8_to_v9():
+    """A v8-era lessons table folds into memories; lessons() answers identically."""
+    c, admin, room, tok = fixture()
+    c.execute("""CREATE TABLE lessons (
+        id TEXT PRIMARY KEY, room_id TEXT, slug TEXT NOT NULL, symptom TEXT NOT NULL,
+        root_cause TEXT NOT NULL, rule TEXT NOT NULL, detection TEXT NOT NULL,
+        author TEXT NOT NULL, created_ns INTEGER NOT NULL, UNIQUE (room_id, slug))""")
+    c.execute("INSERT INTO lessons VALUES('x', NULL, 'old-lesson', 's', 'rc', "
+              "'the old rule', 'det', 'carol', 1)")
+    c.execute("DELETE FROM memories")            # simulate pre-v9: no memories yet
+    c.execute("PRAGMA user_version=8")
+    assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "up.db")) == store.SCHEMA_VERSION
+    assert not store._table_exists(c, "lessons")
+    got = store.lessons(c)
+    assert got[0]["slug"] == "old-lesson" and got[0]["rule"] == "the old rule"
+
+
+def test_state_expiry_sweep():
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    store.memory_add(c, **kw(kind="state", tier="state", fact="stale tasks"))
+    c.execute("UPDATE memories SET expires_ns=1 WHERE kind='state'")
+    got = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"], kind="state")
+    assert got["count"] == 0                                  # read filter, pre-sweep
+    assert store.sweep_expired_state(c) == 1                  # hygiene pass
+    c.execute("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')")
+
+
 def test_threading_and_graph():
     c, admin, room, tok = fixture()
     store.join(c, "alice", "TA", room["id"], tok["id"])
