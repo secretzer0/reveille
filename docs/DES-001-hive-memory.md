@@ -232,8 +232,10 @@ hits, "qa" 369, trigram returns 0 for both); index cost 44.8MB vs 11.6MB raw tex
 matters: "ADR-061" 49 = LIKE 49, "proto-v3.6.2" 4 = LIKE 4.
 Known losses, priced by the CHANGES entry: substring matches die ("eboot" 0 vs LIKE
 85); tokenchars fuse compounds ("run_id" 79 vs 138 -- disposal_run_id is one token).
-Recovery: prefix queries (token*) + the S2 entities index, which owns exactly the
-identifier class. Dual-index hybrid rejected: +45MB to un-price a break the CHANGES
+Recovery: a prefix star reaches RIGHT-extended compounds only (run_id* finds
+run_id_batch, not disposal_run_id -- that token starts 'disposal'); the S2 entities
+index owns the identifier class. (Wording corrected at S1 ship, bus msg 8368: the
+original "prefix queries + S2 entities own the recovery" overclaimed the prefix half.) Dual-index hybrid rejected: +45MB to un-price a break the CHANGES
 entry already prices. Escaping stays as directed: per-keyword double-quote wrapping,
 crib sqlite-utils quote_fts(), no dependency.
 
