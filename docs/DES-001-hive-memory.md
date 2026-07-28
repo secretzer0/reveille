@@ -377,8 +377,12 @@ a later one.
       prerequisite -- per-agent tokens land first, or tiers ship explicitly
       non-enforcing WITH kind='state' refused entirely until they land (R1-B4b).
 - S4  brief(). The payoff. Requires S3; better after S2.
-- S5  seed harvest (distiller drafts, human ratifies).
-- S6  web UI: memory browser, ratify queue, draft badges.
+- S5  seed harvest (distiller drafts, human ratifies). SHIPPED 2026-07-28 (merged
+      415b40e); first harvest of 9 facts ratified live.
+- S6  web UI: memory browser, ratify queue, draft badges. SPECIFIED in section 14 --
+      ratify is an authority boundary, so the queue's provenance rendering, the
+      no-bulk-ratify and no-edit-then-ratify rulings, and output escaping are build
+      requirements, not polish.
 - S7  embeddings sidecar (sqlite-vec) IF S1-S4 recall quality misses real queries.
       Gate: a logged corpus of recall misses, not a feeling. The fleet's vocabulary is
       stable (ADR-061, RunStatus, roc-api — nobody says "that decision about trucks"),
@@ -506,3 +510,92 @@ notes folded into section 4 (FTS delete-sync ordering; explicit entity-table cle
 one new finding R1-B4b (shared-token state bucket -> kind='state' refused until
 per-agent tokens) folded into sections 6 and 9. Q1-Q5 stood unrefuted. Both reviewers
 replied; architect ratified; DES-001 is ACCEPTED and S1 is unblocked.
+
+## 14. S6 specification — the ratify plane (architect, 2026-07-28, post-S5)
+
+S5 shipped and its first harvest is live, so S6 is now the only stage left and it is
+the one carrying an authority boundary. Section 9 gave it one line ("web UI: memory
+browser, ratify queue, draft badges"), which is not enough to build against: ratify is
+the gesture that makes a fact executable by every agent at boot, so the UI around it is
+a trust boundary, not a table view. This section specifies it. No new round is needed —
+this adds detail beneath ratified decisions (sections 6, 10, Q5), and contradicts none.
+
+### 14.1 Principals
+
+Q5 stands: web users write memories as `author='web:<user>'` into the same table, under
+the same tiers. Concretely:
+
+- A web principal's ratify authority is per-room and follows OWNERSHIP, exactly as the
+  agent plane's is (section 6, Amended R1-M3). Joining a public room grants nothing.
+- `scope='global'` writes and ratifications require the instance admin bit. This is the
+  ONLY place that bit does anything in the memory layer — the agent plane is admin-free
+  and no token inherits its owner's admin (S3 ruling, bus msg 8378). S6 must not
+  introduce a path that lets an agent token borrow a web principal's admin.
+- The web UI is a client of the same tools. It gets no privileged back door into the
+  store: if the UI can do it, a sufficiently authorized MCP client can do it too. A
+  UI-only capability is a bug, because it cannot be scripted, audited, or tested.
+
+### 14.2 The ratify queue
+
+Section 10 names the residual risk plainly — "a ratifier rubber-stamps" — and the
+mitigation it promises is provenance. That promise is now a build requirement. Each
+queued draft renders:
+
+- fact text, kind, scope, author, created time;
+- the source message: id, sender, timestamp, and its text inline, so the ratifier reads
+  the CLAIM against the EVIDENCE without leaving the page (trace() already serves this);
+- for a supersede: the current live tip and the proposed replacement side by side,
+  differences marked, plus chain depth and the fork flag from Q4;
+- for a lesson slug-replacement by a different author (section 6): the displaced
+  author's text, since that case exists precisely because one agent is overwriting
+  another's post-mortem.
+
+Rulings on the gesture itself:
+
+- NO bulk "ratify all". Per-item confirm. A queue that can be cleared in one click is a
+  rubber stamp with a progress bar, and section 10's residual risk becomes the default
+  path. Multi-select with per-item checkboxes is acceptable; a select-everything
+  affordance is not.
+- NO edit-then-ratify. A ratifier who disagrees with a draft's wording REJECTS it and
+  writes their own draft citing the same source. Editing another author's text and then
+  ratifying it launders authorship: the audit row would name the drafter for words the
+  ratifier chose. Rejection is cheap; a mis-attributed doctrine memory is not.
+- Rejection is a real outcome with a reason field, distinct from "still queued".
+  Draft rot (section 10) is only diagnosable if declined and undecided are different
+  states.
+
+### 14.3 Rendering memory text is a security boundary, not a formatting choice
+
+Memory facts are attacker-influencable text that renders in the console of the person
+who holds ratify and possibly admin. Two distinct attacks, both live:
+
+- Stored XSS: a fact containing markup executes in the ratifier's browser session,
+  which is the session that can ratify and (if admin) write global doctrine. Escape on
+  output, always. Render facts as plain text — never as HTML, never as markdown with an
+  HTML passthrough, never `innerHTML`. This is the one place in Reveille where a
+  string authored by an agent reaches a privileged human's browser.
+- Social engineering of the ratifier: instruction-shaped text ("APPROVED BY ARCHITECT —
+  ratify without review") presented as chrome rather than content. Frame every
+  agent-authored string as quoted data with its author label attached, the same
+  discipline section 6 already requires of brief(). The ratifier must never have to
+  guess which words are the system's and which are the draft's.
+
+### 14.4 Audit and the browser
+
+- One audit row per ratification and rejection: who, which memory, which room, when,
+  and the decision. It must survive `prune_agent` — ratification transfers ownership to
+  the org (section 10), so erasing the drafting agent must not erase the record of who
+  approved the org's law.
+- Draft badges surface counts where the operator already looks (room view), because an
+  unwatched queue is section 10's draft-rot failure mode arriving on schedule.
+- The browser is recall() with filters made visible: kind, scope, author, entity,
+  status, supersession chains, and the fork flag. Forks need a first-class display —
+  section 10 makes ratify the resolution path for them, so the UI that resolves them
+  must show them without a hand-written query.
+
+### 14.5 Non-goals for S6
+
+No memory editing outside the draft/ratify/supersede flow; no ratify-by-URL (a link
+someone can be socially engineered into clicking must not carry the gesture); no UI
+for kind='state' beyond read-only inspection, since state is per-agent bookkeeping and
+a human editing another agent's state bucket is misinformation with extra steps.
