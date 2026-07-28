@@ -13,3 +13,6 @@ build/
 
 # playwright MCP scratch output (snapshots, console logs)
 .playwright-mcp/
+
+# migration snapshots are operational artifacts, never source
+*.bak

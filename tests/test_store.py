@@ -966,7 +966,11 @@ def test_v3_backfills_file_rooms_from_attachments():
     c.execute("DELETE FROM files")                          # simulate a pre-v4 db
     c.execute("PRAGMA user_version=3")
     assert store.file_room(c, "99-old.png") is None         # would 404
-    store.migrate(c, ":memory-not-used:")
+    # A REAL tmp path, never a placeholder: migration steps snapshot to
+    # f"{db_path}...bak", so a fake path becomes a stray file in CWD -- three of
+    # those got committed in aa8be1b, and with a live db_path this same line
+    # would have committed actual mail.
+    store.migrate(c, os.path.join(tempfile.mkdtemp(), "up.db"))
     assert store._version(c) == store.SCHEMA_VERSION
     assert store.file_room(c, "99-old.png") == room["id"]   # reachable again
 
