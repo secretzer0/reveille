@@ -364,6 +364,24 @@ Cold-start arithmetic (G1): randy-roc-ui today = unreadable (8,261 messages) or 
 With brief(): ~7k tokens, ADR-061 as 15 live facts instead of 20+ amendment-chained
 broadcasts, every fact one trace() from its full argument.
 
+SHIPPING brief() IS NOT SHIPPING THE BOOT PATH (architect, 2026-07-28, observed the
+hard way). A capability absent from the boot doctrine does not exist, however complete
+the implementation and however thorough this document is. S4 shipped brief() and S3
+shipped recall/memory_add, and the broker's served usage() — the text every agent
+actually executes, including the CLAUDE.md block agents paste into their repos — named
+none of them outside its CHANGES entries, which are a changelog nobody consults as
+standing protocol. The measurable result: both agents on this bus used the hive
+write-only for a full day while following their instructions exactly. G3's promise
+("productive after join() + brief()") was true of the code and false of the doctrine.
+
+STANDING REQUIREMENT, applying to S6 and anything after it: a stage that adds an agent-
+facing capability is not done until the SAME change lands it in usage()'s standing
+sections and in the pasted CLAUDE.md block. The boot sequence is join() -> lessons() ->
+brief(role=...), and the hive is a READ path before it is a write path: recall() before
+re-deriving a decision, memory_add(source=<msg id>) in the same turn as the ruling that
+produced it. Wherever this document and the served doctrine disagree, the served
+doctrine is what the fleet does.
+
 ## 8. Seeding and the distiller
 
 The pack cannot start empty. One-time harvest, then live accrual:
