@@ -1,8 +1,9 @@
 # DES-001: Hive memory for Reveille
 
-Status: DRAFT — posted for fleet adversarial review. Push back with file:line where
-the claim touches code; with section number where it does not. Every dev ACKs a slice
-or refutes it; silence is not agreement on a design review.
+Status: DRAFT v2 — amended 2026-07-28 after architect review round 1 (see section 13
+for the amendment log). Posted for fleet adversarial review. Push back with file:line
+where the claim touches code; with section number where it does not. Every dev ACKs a
+slice or refutes it; silence is not agreement on a design review.
 
 Companion (separate doc, out of scope here): DES-002 container launcher — web-provisioned
 isolated agent containers with tmux attach. This doc is the memory layer only.
@@ -35,7 +36,9 @@ G1. Token reduction: a caught-up agent reads consolidated live facts, never amen
 G2. Latency: recall is an in-process SQLite query. No network, no embedding API on the
     read path. Sub-second is not a target, it is the floor; sub-10ms is the expectation.
 G3. Onboarding: a fresh agent with a fresh token is productive after join() + brief(),
-    with provenance (every fact traces to the deliberation that made it).
+    with provenance (every fact traces to the deliberation that made it, WHILE the
+    source is retained — retention is a pricing lever and expired mail takes its
+    provenance with it; the fact survives, its source_msg_id goes NULL. Amended R1-B3).
 G4. Zero new hard dependencies. The broker boots with no API key and no model. LLM work
     happens only at the edges (authors) or in an opt-in distiller agent.
 G5. Honest memory: add-only with supersession. Nothing is silently rewritten. History
@@ -73,14 +76,29 @@ All in broker.db, WAL, same store.py idiom. Migration is versioned (store.migrat
 
 ```sql
 CREATE TABLE memories (
-    id            TEXT PRIMARY KEY,             -- uuid
+    -- INTEGER PK (rowid alias), NOT a uuid TEXT PK: memories_fts is external-content
+    -- keyed on rowid, and VACUUM renumbers IMPLICIT rowids -- snapshot() is VACUUM INTO
+    -- (store.py:399) and "the snapshot IS the undo", so a TEXT PK would silently corrupt
+    -- FTS on the first restore. The uuid callers see lives in uid. (Amended R1-B2)
+    id            INTEGER PRIMARY KEY,
+    uid           TEXT NOT NULL UNIQUE,         -- uuid, the external identifier
     kind          TEXT NOT NULL CHECK (kind IN
                     ('doctrine','contract','decision','lesson','state')),
-    scope         TEXT NOT NULL,                -- 'global' | <room_id> | 'agent:<name>'
-    fact          TEXT NOT NULL,                -- the distilled statement, <= 1000 chars
+    scope         TEXT NOT NULL,                -- 'global' | <room_id> | 'agent:<token_id>'
+    fact          TEXT NOT NULL CHECK (length(fact) <= 1000),
     entities      TEXT NOT NULL DEFAULT '',     -- normalized, space-separated
-    source_msg_id INTEGER REFERENCES messages(id),  -- provenance -> trace()
-    supersedes_id TEXT REFERENCES memories(id),
+    -- ON DELETE SET NULL, not bare REFERENCES: _delete_messages (store.py:762) is the
+    -- single delete choke point behind sweep_retention/purge_room/prune_agent/
+    -- delete_if_unseen, and foreign_keys=ON (store.py:269) would otherwise make the
+    -- hourly retention sweep raise an FK violation forever the moment one memory cites
+    -- an expired thread. Raw mail expires; the fact survives with source_msg_id NULL.
+    -- (Amended R1-B3)
+    source_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    supersedes_id INTEGER REFERENCES memories(id),
+    -- lesson kind only: the slug + the four structured fields lessons() must keep
+    -- returning (store.py:1350-1354). NULL for every other kind. (Amended R1-B1)
+    slug          TEXT,
+    symptom       TEXT, root_cause TEXT, rule TEXT, detection TEXT,
     author        TEXT NOT NULL,                -- bus name that wrote it
     status        TEXT NOT NULL DEFAULT 'live', -- 'live'|'draft'|'superseded'|'retracted'
     occurred_ns   INTEGER,                      -- when the fact became true
@@ -89,20 +107,46 @@ CREATE TABLE memories (
 );
 CREATE INDEX idx_mem_scope   ON memories(scope, kind, status);
 CREATE INDEX idx_mem_super   ON memories(supersedes_id);
+CREATE INDEX idx_mem_slug    ON memories(scope, slug) WHERE slug IS NOT NULL;
 
 CREATE VIRTUAL TABLE memories_fts USING fts5(
-    fact, entities, content='memories', content_rowid='rowid');
+    fact, entities, content='memories', content_rowid='id');
 
+-- messages.id is already a rowid alias (INTEGER PRIMARY KEY AUTOINCREMENT), so this
+-- binding is VACUUM-safe as-is.
 CREATE VIRTUAL TABLE messages_fts USING fts5(
     subject, body, content='messages', content_rowid='id');
 
 CREATE TABLE message_entities (
     entity TEXT NOT NULL, message_id INTEGER NOT NULL,
     PRIMARY KEY (entity, message_id));
+CREATE INDEX idx_msgent_msg ON message_entities(message_id);  -- delete-by-message path
 CREATE TABLE memory_entities (
-    entity TEXT NOT NULL, memory_id TEXT NOT NULL,
+    entity TEXT NOT NULL, memory_id INTEGER NOT NULL,
     PRIMARY KEY (entity, memory_id));
+CREATE INDEX idx_mement_mem ON memory_entities(memory_id);
 ```
+
+FTS sync is MANUAL, in the store choke points -- no triggers. `_exec_script` splits DDL
+on `;` (store.py:234-247), which would shred a `CREATE TRIGGER ... BEGIN ...; END`
+body; and manual sync keeps all SQL in store.py (DECISIONS: engine swap stays a
+one-file change). The complete write set: send() insert, `_delete_messages`,
+memory_add, and the lesson upsert path. Status flips (ratify/retract/supersede) touch
+no indexed column and need no FTS write. The S1 migration backfills messages_fts for
+the existing backlog; any future rebuild-the-table migration (the v0 pattern,
+store.py:364-383) must rebuild the FTS table alongside. Migrations chain one
+user_version bump per stage (v4->5->6->7); the fresh-db path lays the final schema
+directly, per migrate()'s existing branching discipline (store.py:282-305).
+(Amended R1-M2)
+
+Supersession constraints (Amended R1-M6):
+- A supersede targets the SAME scope and SAME kind only -- a room-tier writer must not
+  be able to kill global doctrine by "superseding" it.
+- The target flips to 'superseded' ONLY when the successor becomes live. A draft
+  supersede leaves its target untouched -- otherwise a below-tier writer kills doctrine
+  by drafting against it.
+- Flip + insert are one tx() (BEGIN IMMEDIATE, store.py:250-260); that transaction is
+  what makes the concurrent-fork story in section 10 true rather than hopeful.
 
 Kinds and their behavior:
 
@@ -114,9 +158,18 @@ Kinds and their behavior:
 | lesson | wake-127, passive-listener wheel bug | append-only, existing model | any agent (unchanged) |
 | state | open_tasks, blocked_by, uncommitted_work | expires_ns or superseded by self | self only |
 
-Lessons migration: the lessons table folds into memories (kind='lesson'). lessons() and
-lesson_add() keep their exact signatures, backed by the new table. Clean cutover, one
-store, no dual-path — the migration is versioned and snapshot-proven like every other.
+Lessons migration (Amended R1-B1): the lessons table folds into memories (kind='lesson')
+via the nullable structured columns above -- lessons() and lesson_add() keep their exact
+signatures AND their exact return shape (slug/symptom/root_cause/rule/detection,
+store.py:1350-1354), which a single 1000-char fact column could not carry. Two
+in-place mutations become supersessions, because add-only (G5) is not negotiable:
+- Slug re-use was an UPSERT replace (store.py:1335-1347); it becomes a superseding row.
+  lessons() returns chain tips, so the observable behavior ("re-using a slug replaces
+  it") is unchanged while the history survives.
+- promote_lesson mutated room_id in place (store.py:1371-1377); promotion becomes a
+  superseding row at scope='global' authored by the promoting admin.
+Clean cutover, one store, no dual-path — the migration is versioned and snapshot-proven
+like every other, and scripts/seed-lessons is updated in the same change.
 
 Entity extraction is deterministic, no LLM: ADR-\d+, #\d+ (PRs/issues), known repo
 names, proto-vX.Y.Z, CamelCase identifiers >= 2 humps, room names. The pattern list
@@ -130,14 +183,51 @@ memory_add(fact, kind, scope="", entities="", source=0, supersedes="", occurred=
     -> {id, status}          status='draft' if the token lacks the tier for kind
 recall(query="", kind="", scope="", entity="", author="", since="", until="",
        status="live", limit=10, explain=False)
-    -> {memories:[...], count}   each carries source_msg_id and supersedes chain tip
+    -> {memories:[...], count}   each carries source_msg_id and supersedes chain
+                                 tip + chain length + fork flag (Q4, resolved)
 memory_retract(id, reason)   -> author or admin; status='retracted', reason logged
-ratify(id)                   -> admin/room-owner; 'draft' -> 'live'  (also in web UI)
-brief(role="", budget=7000)  -> the onboarding pack, section 7
+ratify(id)                   -> see section 6 for WHO; 'draft' -> 'live' (also web UI)
+brief(role="", budget=28000) -> the onboarding pack, section 7. budget is in CHARS
+                                (~4 chars/token; the broker has no tokenizer -- G4 --
+                                so a "token cap" would be a dishonest label. R1-M5)
 ```
 
-history() gains: FTS5 ranking replaces the OR-LIKE scan, plus entity= filter. Signature
-otherwise unchanged.
+memory_add scope resolution never guesses (Amended R1-M4): scope="" with a 2+-room
+token raises the same room_required refusal as resolve_send_room (store.py:933-954),
+for the same reason -- a contract written into the wrong room is a non-recoverable
+disclosure, and an error is recoverable while a guess is not.
+
+recall() read scoping is the same invariant every read path already obeys
+(store.py:30-34): rows where scope='global' OR scope IN (caller's rooms) OR
+scope=agent:<own token>. Other agents' agent: scopes are never returned, at any
+status=. Authors see their OWN drafts via status='draft'; ratify-tier callers see all
+drafts in rooms where their tier is effective (the ratify queue). recall/brief also
+filter expires_ns > now -- the sweep (which joins the existing hourly loop) is
+hygiene, not the correctness gate.
+
+history() gains: FTS5 ranking replaces the OR-LIKE scan, plus entity= filter.
+Signature unchanged; SEMANTICS change and that is a documented break, not a footnote
+(Amended R1-M1): today's contract is substring-match at any position (CHANGES 0.1.1;
+store.py:1104-1108) -- FTS5 matches tokens, so 'eboot' stops matching "reboot".
+Every user keyword is wrapped as a quoted FTS5 string, ALWAYS: bare fleet vocabulary
+(ADR-061, wake-127) collides with the FTS5 query grammar where -, ", :, NOT/OR/AND
+are operators, and an unescaped keyword is a syntax error, not a search. Ships with a
+CHANGES entry, and the web /search regression-tests ride along (same store.search
+path).
+
+SOLUTION DIRECTION (R1-M1) -- do not invent a query parser; SQLite already ships two
+answers, S1 evaluates both against the real 8,261-message corpus and picks one:
+  (a) unicode61 tokenizer with tokenchars='-_' -- keeps ADR-061/wake-127 as single
+      tokens (kills most of the operator-collision surface at the root), plus
+      per-keyword double-quote wrapping for the rest. Escaping is a solved two-line
+      problem: quote the token, double any internal quotes -- sqlite-utils'
+      quote_fts() (Datasette project) is the reference implementation to crib, not a
+      dependency to add.
+  (b) the built-in trigram tokenizer -- restores TRUE substring semantics (it exists
+      precisely to make LIKE-style matching indexable), so the 0.1.1 contract holds
+      unbroken. Cost: bigger index, weaker bm25 -- measure both on this corpus.
+If (b) wins, the CHANGES entry shrinks to "faster, ranked"; if (a) wins, the entry
+documents the substring->token break honestly.
 
 Scoring (recall, and history when keywords present):
 
@@ -150,6 +240,17 @@ superseded/retracted rows are excluded unless status= says otherwise. explain=Tr
 returns every component per row (mem0 score_details parity) — a reviewer can see WHY a
 fact ranked, which is the difference between a memory and an oracle. Weights are
 constants in store.py, tuned against real queries during S1; they are not config.
+bm25() in FTS5 returns negative-is-better; bm25_norm is defined as -bm25 min-max
+normalized over the result set, pinned here so the S1 tuning session does not burn an
+hour rediscovering the sign. (R1 minor)
+
+SOLUTION DIRECTION (R1): before hand-tuning four weights, evaluate Reciprocal Rank
+Fusion (RRF) -- the standard, essentially parameter-free way to fuse ranked lists
+(one constant, k~60; it is what Elasticsearch and most hybrid-search stacks ship as
+the default). If RRF over (bm25 rank, entity-overlap rank, recency rank) matches the
+weighted sum on the S1 query corpus, take it: zero tuning surface beats a tuned one.
+The weighted sum stays as the fallback if kind_weight genuinely needs to override
+rank fusion.
 
 ## 6. Trust tiers
 
@@ -162,6 +263,32 @@ injection with a distribution mechanism. Write capability is a token property:
 | write | + contract, decision (live) in granted rooms | fleet dev tokens |
 | ratify | + doctrine; approves drafts | architect, room owners |
 
+- PREREQUISITE, stated plainly (Amended R1-B4): tiers are a token property, and today
+  ONE token serves the whole fleet with X-Agent self-asserted (daemon.py:360-378;
+  DECISIONS "Enforcement is not built"). Until per-agent tokens with name binding land
+  (DECISIONS open item 5), every fleet agent inherits the same tier, "randy day one
+  gets state-only" is false, and "self only" guards a header any client can forge.
+  Per-agent tokens are therefore an entry criterion for S3 -- or S3 ships with tiers
+  wired but DOCUMENTED as non-enforcing until they land. No third option; a gate that
+  looks load-bearing and is not would be the worst outcome in this document.
+- state scope is keyed agent:<token_id> internally, displayed by name. Bus names are
+  unique per ROOM, not globally (store.py:107-118): keyed by name, two different
+  randys in two rooms would share one state bucket.
+- Ratify authority is scoped per (token, room), never global-per-token (Amended
+  R1-M3): assign_room lets any user attach any PUBLIC room to their own token
+  (store.py:646-658), so an unscoped ratify tier would let a user mint themselves
+  doctrine-writing power over rooms they merely joined. Ratify is effective only in
+  rooms the token's OWNER owns. scope='global' writes and ratifications require an
+  instance admin: "global to this customer" is the tenant boundary (DECISIONS), but
+  within a tenant, one room owner must not silently write doctrine into every other
+  owner's rooms.
+- kind='lesson' is IN the threat model, not exempt from it (Amended R1-B5): lessons
+  are read at boot by every agent as rules-already-paid-for -- the most-obeyed kind
+  in the system -- and slug re-use lets any agent replace any other agent's lesson
+  today (store.py:1343-1346). Under the fold-in: slug replacement by a DIFFERENT
+  author lands as draft; same-author replacement stays live (self-correction is the
+  common, honest case). Room-scoped fresh lessons stay any-agent-live -- that
+  residual risk is accepted and stated, not omitted.
 - Below-tier memory_add succeeds as status='draft'. Drafts are invisible to recall()
   and brief() until ratified. The web UI shows the ratify queue; the existing lesson
   promotion model ("admin promotes a room lesson to global") is this same gesture.
@@ -173,10 +300,13 @@ injection with a distribution mechanism. Write capability is a token property:
 
 ## 7. brief() — the onboarding pack
 
-Composed, ranked, budgeted. Default 7k tokens, hard cap. Order:
+Composed, ranked, budgeted. Default 28,000 chars (~7k tokens, approximate by
+construction: no tokenizer on the broker, per G4 and R1-M5), hard cap in chars. Order:
 
 1. lessons — global + rooms (existing content, existing discipline)
-2. doctrine — for the agent's rooms, ranked by entity overlap with its role
+2. doctrine — for the agent's rooms, ranked by entity overlap with its role. "role"
+   is defined narrowly (R1-M5): the role string is tokenized by the same entity
+   normalizer and matched against memory entities. Nothing more is claimed.
 3. contracts — live only, supersession-resolved
 4. decisions — live, last 30 days weighted up, older included by entity relevance
 5. own state — scope=agent:<name>, if any (restart case)
@@ -221,6 +351,10 @@ a later one.
 - S1  messages_fts + ranked history(). No new API. Measurable immediately.
 - S2  entity extraction at send + message_entities backfill + entity= filter.
 - S3  memories table + tools + trust tiers + lessons fold-in. The store.
+      ENTRY CRITERIA (Amended R1): the schema amendments in section 4 (rowid-keyed
+      FTS, ON DELETE SET NULL, structured lesson columns) and the section 6
+      prerequisite -- per-agent tokens land first, or tiers ship explicitly
+      non-enforcing.
 - S4  brief(). The payoff. Requires S3; better after S2.
 - S5  seed harvest (distiller drafts, human ratifies).
 - S6  web UI: memory browser, ratify queue, draft badges.
@@ -250,16 +384,31 @@ a later one.
   target.
 - FTS scale: 8,261 rows is nothing; 10M rows is fine (FTS5 design point). Non-issue at
   fleet scale.
+- Retention vs provenance (Amended R1-B3): sweep_retention deletes expired threads;
+  a live memory citing one keeps its fact and loses its source (source_msg_id NULL,
+  via ON DELETE SET NULL inside _delete_messages' transaction). Pinning cited threads
+  against the sweep was considered and REJECTED: it silently breaks retention as the
+  pricing lever (DECISIONS: "retention is the honest second lever"). Raw mail expires,
+  distilled knowledge survives -- that is the product thesis, now consistent with G3.
+- prune_agent (Amended R1 minor): erasing an agent deletes its agent:<token_id> state
+  memories along with its mail. Ratified doctrine/contracts it authored STAY --
+  ratification transferred ownership to the org; erasing a person must not erase the
+  org's law.
 
-## 11. Open questions
+## 11. Open questions — resolved in review round 1; refute with evidence or they stand
 
-- Q1 kind enum: is a real kind missing? (Candidates rejected: 'spec' = decision with
-  entities; 'status' = state; 'faq' = doctrine.)
-- Q2 state TTL default: none (explicit expires_ns only) vs 30d sweep?
-- Q3 brief() budget: 7k default — right number? Per-role override worth it?
-- Q4 Should recall() hits carry a compact supersession chain (tip + count) or tip only?
-- Q5 Web user memories: users are principals too — do human notes belong in the same
-  table (author=web:<user>) or is that scope creep?
+- Q1 kind enum: RESOLVED, the enum holds. Five kinds, each with distinct behavior;
+  the rejected candidates were rejected correctly.
+- Q2 state TTL: RESOLVED, default ~30d. Stale open_tasks in a brief() is actively
+  misleading, and "explicit expires_ns only" assumes a discipline the fleet will not
+  keep. Doctrine-never-expires is unaffected.
+- Q3 brief() budget: RESOLVED, 28k chars (~7k tokens) stands; per-role override is
+  YAGNI — budget is already a call parameter.
+- Q4 supersession chain: RESOLVED, tip + chain count + fork flag. The count is nearly
+  free and the fork flag is required by section 10's own detection story anyway.
+- Q5 web user memories: RESOLVED, yes — same table, author='web:<user>' (the web: tag
+  prefix already exists, daemon.py:870,903), humans obey the same tiers. Lands with
+  S6, where the UI is.
 
 ## 12. Review protocol
 
@@ -268,3 +417,65 @@ file:line / section. Architect ratifies amendments; DES goes ACCEPTED; S1 starts
 after the round closes. Same shape as the ADR-061 feasibility round, which caught two
 factual errors and a live casualty before a line of code — that is what this round is
 for.
+
+## 13. Amendment log — review round 1 (architect, 2026-07-28)
+
+Every finding carries its DIRECTED solution; implementers follow these, and where a
+"prior art" line appears, SEARCH FOR AND READ the named thing before writing code --
+the round's standing rule is: if a solved problem is being solved, steal the solution
+and cite it; invent only where the search comes back empty.
+
+Blockers (design was not implementable as drafted):
+- B1 lessons fold-in vs one fact column: memories grows nullable structured columns +
+  slug; slug re-use and promotion become supersessions (section 4). No new tools.
+- B2 TEXT-PK + implicit rowid + VACUUM INTO = FTS corruption on restore: id INTEGER
+  PRIMARY KEY (rowid alias) + uid TEXT UNIQUE (section 4). Prior art: the FTS5
+  external-content contract is documented in the SQLite FTS5 manual, "External
+  Content Tables" -- read it once, whole, before S1; every FTS defect in this round
+  traces to a sentence in that page.
+- B3 source_msg_id FK vs retention sweep: ON DELETE SET NULL, handled inside
+  _delete_messages' transaction; G3 amended; thread-pinning rejected (section 10).
+- B4 trust tiers vacuous under the shared fleet token: per-agent tokens with name
+  binding become an S3 entry criterion, or tiers ship documented as non-enforcing;
+  state scope keyed by token id (section 6). This work is DECISIONS open item 5 --
+  it was already owed; S3 just makes the debt due.
+- B5 kind='lesson' bypassed the write gate: cross-author slug replacement lands as
+  draft; residual room-lesson risk accepted and stated (section 6).
+
+Majors:
+- M1 history() FTS semantics + query-grammar collisions: solution direction in
+  section 5 -- evaluate unicode61+tokenchars vs trigram tokenizer on the real corpus;
+  crib sqlite-utils quote_fts() for escaping. Do NOT write a query sanitizer from
+  scratch.
+- M2 external-content FTS sync + trigger DDL vs _exec_script: manual sync in the
+  store choke points, no triggers; backfill + rebuild rules pinned (section 4).
+- M3 unscoped ratify: per (token, room), owner-bound; global requires admin
+  (section 6).
+- M4 memory_add scope guessing: room_required refusal, same as resolve_send_room
+  (section 5).
+- M5 token-denominated budget with no tokenizer: budget is chars, ~4/token, stated
+  approximate (sections 5, 7). Rejected alternative, for the record: tiktoken or a
+  count-tokens API call -- both violate G4 (a dependency / a network call on the
+  read path) to buy precision brief() does not need.
+- M6 supersession constraints: same scope+kind, flip-on-live-only, one tx
+  (section 4).
+
+Minors (all folded into sections 4, 5, 10): length CHECK on fact, id-side indexes on
+both entity tables, expires_ns filter at read + sweep at the hourly loop, bm25_norm
+sign pinned, migration chain v4->5->6->7, prune_agent memory semantics.
+
+Prior-art directives (bounded spikes, half a day each, BEFORE the stage that needs
+them -- validation reads, never dependencies; G4 stands):
+- Before S3: skim Zep's Graphiti model (bi-temporal knowledge graph; their
+  edge-invalidation is this doc's supersession) and Letta/MemGPT's memory-block
+  design. If either contradicts a section 4 choice, bring the argument to the round;
+  if not, cite them in the DES as convergent evidence. mem0 is already reviewed
+  (section 3).
+- Before S1 ranking work: Reciprocal Rank Fusion (section 5) -- it is the industry
+  default for exactly this fusion; hand-tuned weights must beat it to earn their
+  tuning surface.
+- Before S7 (if its gate ever opens): sqlite-vec is already named; also check its
+  companion sqlite-lembed and whatever has displaced either by then -- the sidecar
+  landscape moves fast and S7 is deliberately last.
+
+DES-001 remains DRAFT v2 until the fleet round closes per section 12.
