@@ -3,7 +3,7 @@ PREFIX ?= $(HOME)/.local/bin
 LOG  := $(REPO)/agentbus.log
 PID  := $(REPO)/agentbus.pid
 
-AGENT_IMAGE ?= reveille-agent:0.1.0-base
+AGENT_IMAGE ?= reveille-agent:0.2.0
 
 .PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image server-run server-stop
 

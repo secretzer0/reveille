@@ -10,7 +10,7 @@ ARG GID=1000
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git gnupg jq less ripgrep sudo unzip xvfb \
+      ca-certificates curl git gnupg jq less openssl ripgrep sudo tmux unzip xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # node (claude code ships via npm), go, uv (owns python). Versions are pinned: the tag is
@@ -24,6 +24,13 @@ ARG GO_VERSION=1.24.5
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
       | tar -C /usr/local -xz
 ENV PATH=/usr/local/go/bin:/home/agent/.local/bin:$PATH
+
+# ttyd is not packaged in trixie; upstream ships a static binary, pinned like
+# everything else here.
+ARG TTYD_VERSION=1.7.7
+RUN curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
+      -o /usr/local/bin/ttyd \
+    && chmod 0755 /usr/local/bin/ttyd
 
 ARG GH_VERSION=2.63.2
 RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
@@ -46,6 +53,14 @@ WORKDIR /home/agent
 ARG UV_VERSION=0.9.28
 RUN curl -fsSL https://astral.sh/uv/${UV_VERSION}/install.sh | sh
 
+# Caveman comms plugin, baked into the image-side claude home so a FRESH volume is
+# seeded with it (docker copies the image path into an empty named volume). Ultra is
+# the fleet default for containerised agents -- env, so the launcher can override
+# per-container without an image fork.
+RUN claude plugin marketplace add JuliusBrussee/caveman \
+    && claude plugin install caveman@caveman
+ENV CAVEMAN_DEFAULT_MODE=ultra
+
 # The wake client. Without it a containerised agent has no waiter, so unicast rings never
 # arrive and it is deaf between turns -- it would only ever see mail by polling inbox() on
 # its next turn, which is the degraded mode, not the design. Shipped from THIS repo's
@@ -64,6 +79,13 @@ RUN mkdir -p /home/agent/.claude /home/agent/work
 VOLUME /home/agent/.claude
 VOLUME /home/agent/work
 
+# The shared-tmux plane (DES-002 T1): every client attaches to session "agent";
+# ttyd is the browser bridge and attach-gate is its only exec target -- browser
+# clients never reach tmux except through a verified grant token.
+COPY --chown=${UID}:${GID} docker/tmux.conf /home/agent/.tmux.conf
+COPY docker/attach-gate /usr/local/bin/attach-gate
 COPY --chown=${UID}:${GID} docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["claude"]
+# Interactive claude with "reveille" queued as the first prompt: the agent joins the
+# bus and arms its waiter the moment the session is up, no human at the keyboard.
+CMD ["claude", "reveille"]

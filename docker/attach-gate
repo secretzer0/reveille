@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# attach-gate: the ONLY door between ttyd and the agent's tmux (DES-002 4.3).
+#
+# ttyd never execs tmux directly; it execs `attach-gate attach` with the URL's
+# ?arg= values appended. The FIXED literal "attach" is load-bearing: ttyd's -a
+# hands the client control of argv, so without it a browser could invoke `mint`
+# and mint itself a driver grant -- the subcommands below are trusted-side only
+# (docker exec / launcher), and the ONLY dispatch reachable from the wire is
+# `attach <token>`. The token is verified OFFLINE against the per-container
+# secret (R3, ratified): no polling, no gate-to-launcher channel. Revocation is
+# the launcher docker-exec'ing a kill of this process group -- nothing in here
+# watches anything.
+#
+#   attach-gate attach <token>             verify, then exec tmux (viewer: -r
+#                                          grouped session; driver: writable)
+#   attach-gate verify <token>             verify only, print "ok <mode> <id>"
+#   attach-gate mint <viewer|driver> [ttl_seconds] [grant_id]
+#                                          print a signed token (launcher UI's
+#                                          job in T3; by hand until then)
+#
+# Token: v1.<grant-id>.<mode>.<exp-epoch>.<hmac-sha256-hex>
+# Secret: $REVEILLE_GATE_SECRET, injected at provision. Both planes of a grant
+# (mint and verify) see the same secret; nobody else can forge a signature.
+set -euo pipefail
+
+die() { echo "attach-gate: $*" >&2; exit 1; }
+
+# Env when the launcher (or a test) injects it; otherwise the file the
+# entrypoint persisted -- the only way `docker exec` invocations can sign.
+if [ -z "${REVEILLE_GATE_SECRET:-}" ] && [ -r "${HOME:-}/.gate-secret" ]; then
+  REVEILLE_GATE_SECRET="$(cat "${HOME}/.gate-secret")"
+fi
+[ -n "${REVEILLE_GATE_SECRET:-}" ] || die "REVEILLE_GATE_SECRET not set"
+
+hmac() { printf '%s' "$1" | openssl dgst -sha256 -hmac "$REVEILLE_GATE_SECRET" | awk '{print $NF}'; }
+
+mint() {
+  local mode="${1:?mint needs a mode: viewer|driver}"
+  case "$mode" in viewer|driver) ;; *) die "mode must be viewer or driver" ;; esac
+  local ttl="${2:-86400}"   # Q2: 24h default, renew by re-minting
+  local id="${3:-$(openssl rand -hex 4)}"
+  local payload="v1.${id}.${mode}.$(( $(date +%s) + ttl ))"
+  echo "${payload}.$(hmac "$payload")"
+}
+
+# Returns "<mode> <id>" on stdout iff the token is genuine and unexpired.
+check() {
+  local token="${1:?no token}" v id mode exp sig
+  IFS=. read -r v id mode exp sig <<<"$token"
+  [ "$v" = v1 ] && [ -n "${sig:-}" ] || die "malformed token"
+  local want; want="$(hmac "v1.${id}.${mode}.${exp}")"
+  # Compare via fresh-keyed HMACs so the string compare's timing says nothing
+  # about how many leading bytes of the real signature the caller guessed.
+  local k; k="$(openssl rand -hex 16)"
+  [ "$(printf '%s' "$sig"  | openssl dgst -sha256 -hmac "$k" | awk '{print $NF}')" \
+  = "$(printf '%s' "$want" | openssl dgst -sha256 -hmac "$k" | awk '{print $NF}')" ] \
+    || die "bad signature"
+  [ "$(date +%s)" -lt "$exp" ] || die "token expired"
+  case "$mode" in viewer|driver) ;; *) die "unknown mode" ;; esac
+  echo "$mode $id"
+}
+
+attach() {
+  # check runs in a command substitution, where its die() only kills the
+  # subshell -- the assignment carries the failure out so set -e can act on it.
+  local res mode id
+  res="$(check "$1")"
+  read -r mode id <<<"$res"
+  if [ "$mode" = viewer ]; then
+    # Grouped session (shares the agent's windows, independent focus), attached
+    # read-only: tmux drops every keystroke server-side -- the browser cannot
+    # opt out of -r because -r never crossed the wire. destroy-unattached reaps
+    # the visitor session on detach; it MUST be set after the attach in one
+    # command sequence -- set on a still-detached session, tmux reaps it on the
+    # spot and the attach finds nothing.
+    tmux new-session -d -t agent -s "v-${id}" 2>/dev/null || true
+    exec tmux attach-session -r -t "v-${id}" \; set-option destroy-unattached on
+  fi
+  # Driver: the agent's whole identity (4.4) -- exclusivity bookkeeping is T3.
+  exec tmux attach-session -t agent
+}
+
+# No catch-all-as-token: an unknown first arg dies. Anything a browser smuggles
+# past the fixed "attach" arrives at attach() as a token and fails the HMAC.
+case "${1:-}" in
+  mint)   shift; mint "$@" ;;
+  verify) shift; res="$(check "${1:?verify needs a token}")"; echo "ok $res" ;;
+  attach) shift; attach "${1:?attach needs a token}" ;;
+  "")     die "usage: attach-gate attach <token> | verify <token> | mint <mode> [ttl] [id]" ;;
+  *)      die "unknown subcommand: $1" ;;
+esac
