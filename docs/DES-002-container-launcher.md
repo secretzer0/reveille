@@ -247,8 +247,16 @@ and T2 shipped `--network host` as its default, which was returned as a blocker.
 so the invariant cannot be satisfied on paper and lost in a flag default:
 
 - Agents and the broker share a user-defined docker network (`reveille`); the agent
-  addresses the broker by container DNS name (`http://reveille-server:8765`). No host
-  port is published in either direction, at any stage.
+  addresses the broker by container DNS name (`http://reveille-server:8765`). No AGENT
+  container publishes a host port, at any stage — that is what 4.2 constrains, and
+  ttyd is what it is about.
+  PRECISION, corrected once T2's fix made it concrete: the BROKER does publish 8765 and
+  always has. That published port is how every host-side client reaches the bus,
+  including the launcher's own health poll, which runs on the host and therefore cannot
+  resolve container DNS. Hence two URLs for one broker — an agent-facing one on the
+  shared network, a host-facing one on the published port. My first draft of this
+  bullet said "no host port in either direction", which was false of the broker and,
+  read literally, forbade the very poll 3.2.5 requires.
 - With host networking a container HAS no private interface — it is the host's
   namespace — so ttyd binds every LAN interface of the box and the ingress is bypassed.
   It also collides at the second agent (one namespace, one port 7681, and the sidecar
