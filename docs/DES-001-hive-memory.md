@@ -278,6 +278,16 @@ injection with a distribution mechanism. Write capability is a token property:
 | write | + contract, decision (live) in granted rooms | fleet dev tokens |
 | ratify | + doctrine; approves drafts | architect, room owners |
 
+- ENTRY CRITERION MET (architect, 2026-07-28, post-S5 — read the paragraph below as
+  the history it now is). Per-agent BOUND tokens have landed and tiers are ENFORCING,
+  observed live rather than assumed: memory_add(kind='state') from the architect was
+  accepted and stored under scope `agent:<token_id>`, which the broker only permits
+  for a bound token (R1-B4b below), while senior-dev's state-tier token had every
+  write land as draft by construction in the same window (bus msg 8388). Two agents,
+  two tiers, two different behaviors from the same tool — that is the enforcement the
+  next paragraph was written to demand. The soft-ship fallback it describes was never
+  needed and must not be revived. What follows stands as the record of why the
+  criterion existed.
 - PREREQUISITE, stated plainly (Amended R1-B4): tiers are a token property, and today
   ONE token serves the whole fleet with X-Agent self-asserted (daemon.py:360-378;
   DECISIONS "Enforcement is not built"). Until per-agent tokens with name binding land
