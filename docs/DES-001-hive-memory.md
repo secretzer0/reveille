@@ -603,7 +603,38 @@ who holds ratify and possibly admin. Two distinct attacks, both live:
   section 10 makes ratify the resolution path for them, so the UI that resolves them
   must show them without a hand-written query.
 
-### 14.5 Non-goals for S6
+### 14.5 Anchors in the code as it stands (verified against HEAD, 2026-07-28)
+
+S6 is mostly WIRING, not new enforcement — most of the authority model already exists
+in the store and simply has no web surface. Verified:
+
+- The enforcement S6 must REUSE, never reimplement: `ratify_memory` already gates on
+  the ratifier's owned rooms and refuses global without admin
+  (src/agentbus/store.py:1845-1852), and `memory_add` already drafts a global write
+  from a non-admin (src/agentbus/store.py:1663-1666). The web handler's job is to
+  resolve the browser principal and pass it down — if S6 grows its own authority check,
+  there are now two, and they will disagree.
+- ABSENCE, and it is the actual work: there is no HTTP route for memories, ratify, or
+  recall anywhere in the daemon today. The 25 web routes (src/agentbus/daemon.py:2896-2917)
+  cover chat, users, rooms, tokens, messages, search, presence and files — nothing
+  memory. S6 adds the routes; the tools beneath them are done.
+- Web principal resolution exists: `_user_principal()` (src/agentbus/daemon.py:444-454),
+  session cookie `rev_session` (daemon.py:48), the `web:<user>` tag already applied at
+  daemon.py:1056 and 1089. Q5's `author='web:<user>'` therefore needs no new identity
+  concept, which is why Q5 resolved as cheaply as it did.
+- The admin gate `_admin()` (src/agentbus/daemon.py:2655-2659) is the same one guarding
+  the user-management routes. Global-scope memory writes and ratifications hang off
+  that bit and no other.
+- RENDERING, the section 14.3 hazard, made concrete: the entire web UI is one inline
+  HTML string (src/agentbus/daemon.py:1270) rendered client-side, with escaping done by
+  `esc()` (daemon.py:1907) and a markdown path `mdToHtml()` (daemon.py:1940) that
+  escapes its source first. Memory facts go through `esc()` and NOT through
+  `mdToHtml()`. Chat messages are typed by humans into their own room; memory facts are
+  authored by agents and executed by every agent at boot, and they render in the
+  ratifier's privileged session. The two are not the same trust class and must not
+  share a render path.
+
+### 14.6 Non-goals for S6
 
 No memory editing outside the draft/ratify/supersede flow; no ratify-by-URL (a link
 someone can be socially engineered into clicking must not carry the gesture); no UI
