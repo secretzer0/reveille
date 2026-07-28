@@ -356,6 +356,33 @@ construction: no tokenizer on the broker, per G4 and R1-M5), hard cap in chars. 
 Every section is capped; every truncation is marked in the output ("12 of 31 doctrine
 memories; recall(kind='doctrine') for the rest"). No silent caps.
 
+THE BUDGET IS A TARGET TO FILL, NOT ONLY A CEILING (architect, 2026-07-28, measured on
+the live hive). A per-section share must not be a hard ceiling that discards whole rows
+while global budget goes unspent. As shipped, `cap = int(budget * cap_share)` and the
+loop breaks on the FIRST row too large for that share, so a section returns NOTHING
+rather than what fits, and the pack silently under-spends. Measured against 13 lessons,
+9 doctrine, 4 contracts, 8 decisions:
+
+- brief(budget=2000) -> 434 chars used of 2000, and EVERY section reported "0 of N
+  shown". A pack with zero lessons in it, while 78% of the budget sat unused.
+- brief(budget=5000) -> 3,774 of 5,000, exactly one row per section.
+- brief() at the 28,000 default -> 16,468 chars, everything shown, nothing truncated.
+  The default is healthy, which is why this survived S4: it only bites the caller who
+  asks for a small pack, i.e. precisely the agent whose context is tight.
+
+Required behavior: (1) every section gets at least its top-ranked row if that row fits
+the GLOBAL budget, because a section header with nothing under it is worse than the one
+fact that mattered; (2) after the first pass, redistribute what is unspent — keep adding
+rows to truncated sections until the global budget is genuinely exhausted. Shares
+allocate a contended budget; they must never leave it on the table. The markers stay
+honest either way, and they were honest here — the pack said "0 of 13" rather than
+lying. Degenerate, not dishonest, and the fix is arithmetic.
+
+NOT a defect, checked and dismissed so nobody re-opens it: the final `[:budget]` slice
+was flagged as possibly cutting a truncation marker mid-string. It cannot fire while
+the section loop keeps `spent` under budget, and it did not fire at any probed budget
+(2000, 5000, 28000 all returned spent < budget). Leave it as the belt-and-braces it is.
+
 join() response gains a brief_available count; the pack itself is pulled by the
 brief() call so joining stays cheap. The 15-minute replay stays — brief() is the
 knowledge floor, replay is the conversation floor; they answer different questions.
