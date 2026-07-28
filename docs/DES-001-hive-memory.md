@@ -1,9 +1,9 @@
 # DES-001: Hive memory for Reveille
 
-Status: DRAFT v2 — amended 2026-07-28 after architect review round 1 (see section 13
-for the amendment log). Posted for fleet adversarial review. Push back with file:line
-where the claim touches code; with section number where it does not. Every dev ACKs a
-slice or refutes it; silence is not agreement on a design review.
+Status: ACCEPTED — review round 1 closed 2026-07-28. Architect amendments (v2) +
+senior-dev ACK with corpus measurements (bus msg 8366, thread 8365); round-close
+record in section 13. S1 is unblocked. Future changes go through a new round per
+section 12.
 
 Companion (separate doc, out of scope here): DES-002 container launcher — web-provisioned
 isolated agent containers with tmux attach. This doc is the memory layer only.
@@ -132,7 +132,15 @@ on `;` (store.py:234-247), which would shred a `CREATE TRIGGER ... BEGIN ...; EN
 body; and manual sync keeps all SQL in store.py (DECISIONS: engine swap stays a
 one-file change). The complete write set: send() insert, `_delete_messages`,
 memory_add, and the lesson upsert path. Status flips (ratify/retract/supersede) touch
-no indexed column and need no FTS write. The S1 migration backfills messages_fts for
+no indexed column and need no FTS write.
+Delete ordering is LOAD-BEARING (R1 round close, senior-dev impl note): the FTS5
+external-content 'delete' command -- INSERT INTO fts(fts, rowid, cols...)
+VALUES('delete', ...) -- must carry EXACTLY the values the index holds, so
+_delete_messages SELECTs the doomed rows' indexed columns BEFORE deleting them, in
+the same transaction. Wrong order is the silent-corruption class B2 exists to
+prevent. And the entity tables carry no FK by design, so their cleanup is an
+EXPLICIT statement in _delete_messages' write set (message_entities by message_id;
+memory_entities on memory retraction-by-admin) -- code, not a comment. The S1 migration backfills messages_fts for
 the existing backlog; any future rebuild-the-table migration (the v0 pattern,
 store.py:364-383) must rebuild the FTS table alongside. Migrations chain one
 user_version bump per stage (v4->5->6->7); the fresh-db path lays the final schema
@@ -215,19 +223,19 @@ are operators, and an unescaped keyword is a syntax error, not a search. Ships w
 CHANGES entry, and the web /search regression-tests ride along (same store.search
 path).
 
-SOLUTION DIRECTION (R1-M1) -- do not invent a query parser; SQLite already ships two
-answers, S1 evaluates both against the real 8,261-message corpus and picks one:
-  (a) unicode61 tokenizer with tokenchars='-_' -- keeps ADR-061/wake-127 as single
-      tokens (kills most of the operator-collision surface at the root), plus
-      per-keyword double-quote wrapping for the rest. Escaping is a solved two-line
-      problem: quote the token, double any internal quotes -- sqlite-utils'
-      quote_fts() (Datasette project) is the reference implementation to crib, not a
-      dependency to add.
-  (b) the built-in trigram tokenizer -- restores TRUE substring semantics (it exists
-      precisely to make LIKE-style matching indexable), so the 0.1.1 contract holds
-      unbroken. Cost: bigger index, weaker bm25 -- measure both on this corpus.
-If (b) wins, the CHANGES entry shrinks to "faster, ranked"; if (a) wins, the entry
-documents the substring->token break honestly.
+RESOLUTION (R1-M1, measured -- senior-dev, bus msg 8366, live corpus 8,356 msgs,
+sqlite 3.45.1): option (a), unicode61 with tokenchars='-_'. Trigram REFUTED on this
+corpus, not disfavored: queries under 3 chars can NEVER match a trigram index, and
+fleet vocabulary is dense in 2-char terms (S1-S7, qa, M1-M6, B1-B5 -- "S1" has 42
+hits, "qa" 369, trigram returns 0 for both); index cost 44.8MB vs 11.6MB raw text
+(unicode61: 7.2MB); build 1.46s vs 0.19s. (a) is exact on the vocabulary that
+matters: "ADR-061" 49 = LIKE 49, "proto-v3.6.2" 4 = LIKE 4.
+Known losses, priced by the CHANGES entry: substring matches die ("eboot" 0 vs LIKE
+85); tokenchars fuse compounds ("run_id" 79 vs 138 -- disposal_run_id is one token).
+Recovery: prefix queries (token*) + the S2 entities index, which owns exactly the
+identifier class. Dual-index hybrid rejected: +45MB to un-price a break the CHANGES
+entry already prices. Escaping stays as directed: per-keyword double-quote wrapping,
+crib sqlite-utils quote_fts(), no dependency.
 
 Scoring (recall, and history when keywords present):
 
@@ -271,6 +279,12 @@ injection with a distribution mechanism. Write capability is a token property:
   Per-agent tokens are therefore an entry criterion for S3 -- or S3 ships with tiers
   wired but DOCUMENTED as non-enforcing until they land. No third option; a gate that
   looks load-bearing and is not would be the worst outcome in this document.
+  EXCEPTION, and it is hard (R1-B4b, senior-dev): the non-enforcing fallback does NOT
+  extend to kind='state'. Under one shared token, agent:<token_id> is ONE state
+  bucket for the whole fleet -- brief() would serve alice's open_tasks to bob as
+  bob's own, which is active misinformation, worse than an unenforced tier. Without
+  per-agent tokens, memory_add(kind='state') is REFUSED, not soft-shipped. Tiers may
+  soft-ship; state may not.
 - state scope is keyed agent:<token_id> internally, displayed by name. Bus names are
   unique per ROOM, not globally (store.py:107-118): keyed by name, two different
   randys in two rooms would share one state bucket.
@@ -354,7 +368,7 @@ a later one.
       ENTRY CRITERIA (Amended R1): the schema amendments in section 4 (rowid-keyed
       FTS, ON DELETE SET NULL, structured lesson columns) and the section 6
       prerequisite -- per-agent tokens land first, or tiers ship explicitly
-      non-enforcing.
+      non-enforcing WITH kind='state' refused entirely until they land (R1-B4b).
 - S4  brief(). The payoff. Requires S3; better after S2.
 - S5  seed harvest (distiller drafts, human ratifies).
 - S6  web UI: memory browser, ratify queue, draft badges.
@@ -478,4 +492,10 @@ them -- validation reads, never dependencies; G4 stands):
   companion sqlite-lembed and whatever has displaced either by then -- the sidecar
   landscape moves fast and S7 is deliberately last.
 
-DES-001 remains DRAFT v2 until the fleet round closes per section 12.
+Round close (2026-07-28, thread 8365): senior-dev ACK v2 (msg 8366) -- every cited
+file:line verified against HEAD; M1 settled by measurement (unicode61 tokenchars,
+trigram refuted on short tokens -- section 5 has the numbers); two implementation
+notes folded into section 4 (FTS delete-sync ordering; explicit entity-table cleanup);
+one new finding R1-B4b (shared-token state bucket -> kind='state' refused until
+per-agent tokens) folded into sections 6 and 9. Q1-Q5 stood unrefuted. Both reviewers
+replied; architect ratified; DES-001 is ACCEPTED and S1 is unblocked.
