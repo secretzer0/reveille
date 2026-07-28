@@ -15,6 +15,15 @@ claude mcp add --transport http --scope user agentbus "${REVEILLE_URL}/mcp" \
   --header "Authorization: Bearer ${REVEILLE_TOKEN}" \
   --header "X-Agent: ${REVEILLE_AGENT_ROLE}" >/dev/null
 
+# Provision step 3.2.4: clone the repo the launcher named, into the work dir, if it
+# is empty. Best-effort -- a private repo with no creds in the volume fails here and
+# the agent clones it by hand; the health gate is join+arm, not the checkout. Auth
+# rides whatever the claude-home volume carries (gh/git creds), same as a laptop.
+if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/work 2>/dev/null)" ]; then
+  git clone "${REVEILLE_REPO_URL}" /home/agent/work \
+    || echo "reveille: repo clone failed (${REVEILLE_REPO_URL}) -- clone by hand" >&2
+fi
+
 # Per-container gate secret (DES-002 4.3): injected by the launcher at provision
 # (T2); a hand-run container gets a random one, never printed -- mint grant
 # tokens from inside: `docker exec <name> attach-gate mint viewer`.
@@ -50,7 +59,20 @@ if [ -t 0 ]; then
   exec tmux new-session -A -s agent -c /home/agent/work "$@"
 fi
 
-# Detached run: the session carries the agent; the container lives exactly as
-# long as the session does, so restart policy sees the agent's real exit.
+# Detached run (the launcher's path): this shell is PID 1. On `docker stop` PID 1
+# gets SIGTERM -- WITHOUT a trap it would exit immediately, docker would SIGKILL the
+# tmux server, and claude would die mid-turn never dropping its waiter or acking its
+# inbox, manufacturing exactly the stale-presence confusion the fleet keeps paying
+# for. So: trap TERM, forward it to the agent process in the pane, and let docker's
+# grace window give claude a clean shutdown before the eventual SIGKILL.
 tmux new-session -d -s agent -c /home/agent/work "$@"
-while tmux has-session -t agent 2>/dev/null; do sleep 5; done
+
+forward_term() {
+  pid="$(tmux list-panes -t agent -F '#{pane_pid}' 2>/dev/null | head -1)"
+  [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+}
+trap forward_term TERM INT
+
+# sleep 1 (not 5) so the trap is serviced promptly: the signal interrupts the sleep,
+# the trap forwards TERM, and this loop exits as soon as claude tears the session down.
+while tmux has-session -t agent 2>/dev/null; do sleep 1; done

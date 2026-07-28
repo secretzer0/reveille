@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# agent-probe: does THIS container reach the bus and stay reachable? A diagnostic
+# sibling to spike_join.py -- join() (which creates the presence row + heartbeat, so
+# the role goes `live`) then hold the wake waiter (so it goes `connected`). That is
+# exactly the live+connected state `reveille-launch` health-by-presence waits for, so
+# provisioning can be proven end-to-end WITHOUT a claude/Anthropic login in the volume.
+#
+#   reveille-launch new <role> <repo> --boot-cmd agent-probe
+#
+# Real agents reach the same state via `claude reveille` (join + arm on the first
+# prompt); this is the credential-free stand-in for smokes and provision debugging.
+set -euo pipefail
+
+: "${REVEILLE_URL:?}" "${REVEILLE_AGENT_ROLE:?}" "${REVEILLE_TOKEN:?}"
+
+# join over MCP -- mcp is not in the system python (agentbus is a uv tool), so borrow
+# it. PINNED to the version agentbus is built against (uv.lock): unpinned `--with mcp`
+# pulls a newer mcp that moved streamablehttp_client and the import dies.
+uv run --quiet --with 'mcp==1.28.1' python - <<'PY'
+import asyncio, os
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+
+async def main():
+    base = os.environ["REVEILLE_URL"]
+    name = os.environ["REVEILLE_AGENT_ROLE"]
+    headers = {"X-Agent": name, "Authorization": f"Bearer {os.environ['REVEILLE_TOKEN']}"}
+    async with streamablehttp_client(f"{base}/mcp", headers=headers) as (r, w, _), \
+               ClientSession(r, w) as s:
+        await s.initialize()
+        await s.call_tool("join", {"url": base})
+
+asyncio.run(main())
+PY
+
+ws="${REVEILLE_URL/http/ws}/wake"
+echo "agent-probe: ${REVEILLE_AGENT_ROLE} joined; holding waiter on ${ws}"
+exec wake --once --url "$ws" --name "$REVEILLE_AGENT_ROLE" --token "$REVEILLE_TOKEN"

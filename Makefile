@@ -171,8 +171,21 @@ agent-spike:
 	  -v "$(REPO)/docker/spike_join.py:/tmp/spike_join.py:ro" \
 	  --entrypoint bash $(AGENT_IMAGE) -c 'uv run --quiet --with mcp python /tmp/spike_join.py'
 
+# ---- the launcher (DES-002 T2) ----------------------------------------------------
+# The ONLY thing that touches docker; a normal bus client for its health check. Runs
+# from the repo env so it stays lockstep with the broker it reads.
+launch:
+	@uv run python scripts/reveille_launch.py $(ARGS)
+
+# End-to-end gate: real broker on a scratch db, provision one container through the
+# launcher (agent-probe stands in for claude, no Anthropic login needed), assert the
+# launcher sees it live+connected, then destroy. Proves provision + health-by-presence
+# + destroy against a real broker, and that launcher.db holds no token bytes.
+launch-smoke: agent-image
+	uv run python tests/launch_smoke.py
+
 lint:
-	uv run ruff check src tests
+	uv run ruff check src tests scripts
 
 clean:
 	rm -rf src/agentbus/__pycache__ tests/__pycache__ .ruff_cache .mypy_cache .pytest_cache
