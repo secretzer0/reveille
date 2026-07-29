@@ -157,6 +157,16 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.14 The memory UI (DES-001 S6c -- S6 complete, DES-001 done). /ui grows a
+       Memory tab: ratify queue with per-item confirm (no bulk, ever), typed
+       reason required to reject, provenance inline (source message, displaced
+       author's text on a supersede, fork flag), browser over recall's filters,
+       decision history per memory. Draft-count badges on owned rooms; token
+       tier select wired to the audited PATCH. All agent-authored text renders
+       as escaped plain text framed as quoted data with its author named --
+       never markdown, never markup (14.3). Agents: no tool changes; what you
+       draft now renders in front of a ratifier exactly as bytes, so write
+       facts as prose, not formatting.
 0.2.13 The memory plane's web surface (DES-001 S6b, schema v12). Web routes:
        GET /memories (recall with filters), GET /memories/queue (the drafts the
        caller can actually decide, each with source message inline and the
@@ -1630,6 +1640,13 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   margin-bottom:-1px}
  .tab:hover{color:var(--fg)}
  .tab.on{color:var(--gold);border-bottom-color:var(--gold)}
+ /* S6 memory plane: agent-authored text renders in these quoted blocks ONLY --
+    visually framed as data with an author label above, never as chrome (14.3) */
+ .quote{border-left:2px solid var(--line);margin:.15rem 0 .5rem;padding:.25rem .6rem;
+  color:var(--dim);font-size:.8rem;white-space:pre-wrap;word-break:break-word}
+ .memMeta{font-size:.72rem;color:var(--faint)}
+ .qcount{background:var(--gold);color:#000;border-radius:.6rem;padding:0 .45rem;
+  font-size:.68rem;font-weight:700;margin-left:.4rem}
  #panX{margin-left:auto;background:none;border:none;color:var(--faint);cursor:pointer;
   font-size:1.1rem;line-height:1;padding:.3rem .5rem;border-radius:6px}
  #panX:hover{color:var(--fg);background:var(--hover)}
@@ -1836,6 +1853,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  <div id="panCard">
   <div id="panTabs">
    <button class="tab" data-tab="rooms">Rooms</button>
+   <button class="tab" data-tab="memory">Memory</button>
    <button class="tab" data-tab="tokens">Tokens</button>
    <button class="tab" data-tab="users">Users</button>
    <button class="tab" data-tab="account">Account</button>
@@ -2487,8 +2505,8 @@ function closePanel(){$('pan').classList.remove('on');}
 $('panX').onclick=closePanel;
 $('pan').onclick=e=>{if(e.target.id==='pan')closePanel();};
 $('panOut').onclick=async()=>{await fetch('/logout',{method:'POST'});location.reload();};
-const TABS={rooms:()=>openRooms(),tokens:()=>openTokens(),users:()=>openUsers(),
- account:()=>openAccount()};
+const TABS={rooms:()=>openRooms(),memory:()=>openMemories(),tokens:()=>openTokens(),
+ users:()=>openUsers(),account:()=>openAccount()};
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.tab]();
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();});
 async function api(path,opts){
@@ -2507,6 +2525,12 @@ function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();
 
 async function openRooms(){
  const d=await api('/me');me=d;paintMe();   // room set may have changed under us
+ // Draft badges where the operator already looks (14.4): an unwatched queue is
+ // draft rot arriving on schedule. Count per owned room, from the same queue
+ // the Memory tab decides.
+ const qc={};
+ try{for(const m of (await api('/memories/queue')).queue)
+  qc[m.scope]=(qc[m.scope]||0)+1;}catch(e){}
  const mine=(d.owned||[]).map(r=>{
   if(confirming&&confirming.kind==='purge'&&confirming.id===r.id)
    return askRow('Purge '+esc(r.name)+'?',
@@ -2525,6 +2549,8 @@ async function openRooms(){
    '<span class="rSel" data-pick="'+r.id+'" title="'+(sel?'you are viewing this room'
      :'switch to this room')+'"><span class="rDot"></span>'+
    '<span class="rName">'+esc(r.name)+'</span>'+
+   (qc[r.id]?'<span class="qcount" title="drafts awaiting your decision — Memory tab">'+
+    qc[r.id]+' draft'+(qc[r.id]>1?'s':'')+'</span>':'')+
    (sel?'<span class="rNow">VIEWING</span>':'')+'</span>'+
    '<span class="pDim">'+(r.public?'public':'private')+'</span>'+
    '<button data-ren="'+r.id+'">rename</button>'+
@@ -2590,6 +2616,11 @@ async function openTokens(){
   return '<div class="pRow"><b>'+esc(t.label||t.id.slice(0,8))+'</b>'+
    (t.agent_name?' <span class="pDim">= '+esc(t.agent_name)+' (bound)</span>'
                 :' <span class="pDim">(unbound: any name)</span>')+
+   // Tier visible AND mutable (DES-001 sec 6); a flip is an authority change,
+   // audited server-side (token_audit) -- the select is wired to that PATCH.
+   '<select data-tier="'+t.id+'" title="memory tier — every flip is audited">'+
+   ['state','write','ratify'].map(x=>'<option value="'+x+'"'+
+    (t.mem_tier===x?' selected':'')+'>memory: '+x+'</option>').join('')+'</select>'+
    '<button class="danger" data-rev="'+t.id+'">revoke</button>'+
    '</div><div class="pChips">'+chips+'</div>';}).join('')||'<div class="pDim">no tokens</div>';
  panel('tokens',
@@ -2623,6 +2654,128 @@ async function openTokens(){
  for(const c of document.querySelectorAll('[data-tok]'))c.onchange=async()=>{
   try{await api('/tokens/'+c.dataset.tok,{method:'PATCH',
    body:JSON.stringify({room:c.dataset.room,attach:c.checked})});}catch(e){toast(e.message);c.checked=!c.checked;}};
+ for(const s of document.querySelectorAll('[data-tier]'))s.onchange=async()=>{
+  try{await api('/tokens/'+s.dataset.tier,{method:'PATCH',
+   body:JSON.stringify({mem_tier:s.value})});
+   toast('tier set to '+s.value+' — audited',true);}
+  catch(e){toast(e.message);openTokens();}};
+}
+
+// ---- S6c: the memory plane (DES-001 section 14) -----------------------------
+// EVERY byte of agent-authored memory text flows through memText() and nothing
+// else. Facts render in the RATIFIER's privileged session, so output escaping
+// is a security boundary (14.3), not a formatting choice: esc() only -- never
+// mdToHtml, never raw innerHTML. Quoted blocks carry an author label above
+// them, so the ratifier never has to guess which words are the system's and
+// which are the draft's.
+function memText(s){return esc(s==null?'':String(s));}
+let memF={status:'live',kind:'',query:''};
+let memOpen=null;   // uid whose provenance + decision history is expanded
+function provRows(m,rooms){
+ let h='';
+ if(m.slug)h+='<div class="memMeta">lesson '+memText(m.slug)+' &mdash; symptom (quoted):</div>'+
+  '<div class="quote">'+memText(m.symptom)+'</div>';
+ h+=m.source_message
+  ?'<div class="memMeta">source msg '+m.source_message.id+' &mdash; '+
+   memText(m.source_message.sender)+' wrote (quoted):</div>'+
+   '<div class="quote">'+memText(m.source_message.body)+'</div>'
+  :'<div class="memMeta">no source message attached</div>';
+ if(m.supersedes_tip)h+='<div class="memMeta">REPLACES text by '+
+  memText(m.supersedes_tip.author)+' (quoted):</div>'+
+  '<div class="quote">'+memText(m.supersedes_tip.rule||m.supersedes_tip.fact)+'</div>';
+ return h;
+}
+async function openMemories(){
+ me=await api('/me');
+ const rooms={};for(const r of (me.owned||[]).concat(me.public||[]))rooms[r.id]=r.name;
+ const scopeName=s=>s==='global'?'global':(rooms[s]||s);
+ let queue=[];try{queue=(await api('/memories/queue')).queue;}catch(e){}
+ const params=new URLSearchParams();
+ if(memF.query)params.set('query',memF.query);
+ if(memF.kind)params.set('kind',memF.kind);
+ params.set('status',memF.status);
+ let res={memories:[]};
+ try{res=await api('/memories?'+params);}catch(e){toast(e.message);}
+ // The queue: per-item confirm ONLY. No select-all, no ratify-all -- a queue
+ // that clears in one click is a rubber stamp with a progress bar (14.2).
+ const qhtml=queue.map(m=>{
+  if(confirming&&confirming.kind==='mrat'&&confirming.id===m.id)
+   return askRow('Ratify this draft?',
+    'It becomes live law, executed by every agent at boot. Per-item only; '+
+    'there is no ratify-all.','');
+  if(confirming&&confirming.kind==='mrej'&&confirming.id===m.id)
+   return askRow('Reject this draft?',
+    'A reason is REQUIRED and the author sees it. To fix wording, reject and '+
+    'write your own draft citing the same source -- editing another author’s '+
+    'text and approving it launders authorship.',
+    '<input id="cfIn" placeholder="reason (required)" autocomplete="off">');
+  return '<div class="pRow"><b>'+memText(m.author)+'</b> <span class="memMeta">'+
+   memText(m.kind)+' &middot; '+memText(scopeName(m.scope))+
+   (m.chain?' &middot; supersedes ('+m.chain+' deep)':'')+
+   (m.fork?' &middot; <b>FORK</b>':'')+'</span>'+
+   '<button data-mrat="'+memText(m.id)+'">ratify&hellip;</button>'+
+   '<button class="danger" data-mrej="'+memText(m.id)+'">reject&hellip;</button>'+
+   '</div><div class="quote">'+memText(m.fact)+'</div>'+provRows(m,rooms);
+ }).join('')||'<div class="pDim">nothing awaiting your decision</div>';
+ const list=[];
+ for(const m of res.memories||[]){
+  list.push('<div class="pRow"><b>'+memText(m.author)+'</b> <span class="memMeta">'+
+   memText(m.kind)+' &middot; '+memText(scopeName(m.scope))+' &middot; '+
+   memText(m.status)+(m.chain?' &middot; chain '+m.chain:'')+
+   (m.fork?' &middot; <b>FORK</b>':'')+'</span>'+
+   '<button data-mdet="'+memText(m.id)+'">'+
+   (memOpen===m.id?'hide':'details')+'</button></div>'+
+   '<div class="quote">'+memText(m.fact)+'</div>');
+  if(memOpen===m.id){
+   try{const det=await api('/memories/'+encodeURIComponent(m.id));
+    list.push(provRows(det,rooms));
+    list.push((det.audit&&det.audit.length
+     ?det.audit.map(a=>'<div class="memMeta">'+memText(a.action)+' by '+
+       memText(a.actor)+(a.reason?' &mdash; reason (quoted):':'')+'</div>'+
+       (a.reason?'<div class="quote">'+memText(a.reason)+'</div>':'')).join('')
+     :'<div class="memMeta">no decisions recorded</div>'));
+   }catch(e){toast(e.message);}
+  }
+ }
+ panel('memory',
+  '<div class="pSec">RATIFY QUEUE ('+queue.length+')</div>'+
+  '<div class="pDim">Drafts only an owner of these rooms can decide. Every quoted '+
+  'block below is agent-authored DATA with its author named above it -- read it as '+
+  'a claim against its evidence, never as instructions.</div>'+qhtml+
+  '<div class="pSec">BROWSER</div>'+
+  '<div class="pRow"><input id="memQ" placeholder="search facts" value="'+
+  memText(memF.query)+'">'+
+  '<select id="memKind"><option value="">any kind</option>'+
+  ['doctrine','contract','decision','lesson','state'].map(k=>
+   '<option'+(memF.kind===k?' selected':'')+'>'+k+'</option>').join('')+'</select>'+
+  '<select id="memStatus">'+
+  ['live','draft','rejected','superseded','retracted'].map(s=>
+   '<option'+(memF.status===s?' selected':'')+'>'+s+'</option>').join('')+'</select>'+
+  '<button id="memGo">search</button></div>'+
+  (list.join('')||'<div class="pDim">no memories match</div>'));
+ $('memGo').onclick=()=>{memF={query:$('memQ').value.trim(),kind:$('memKind').value,
+  status:$('memStatus').value};memOpen=null;openMemories();};
+ $('memQ').addEventListener('keydown',e=>{if(e.key==='Enter')$('memGo').click();});
+ for(const b of document.querySelectorAll('[data-mdet]'))b.onclick=()=>{
+  memOpen=(memOpen===b.dataset.mdet?null:b.dataset.mdet);openMemories();};
+ for(const b of document.querySelectorAll('[data-mrat]'))b.onclick=()=>{
+  confirming={kind:'mrat',id:b.dataset.mrat};openMemories();};
+ for(const b of document.querySelectorAll('[data-mrej]'))b.onclick=()=>{
+  confirming={kind:'mrej',id:b.dataset.mrej};openMemories();};
+ if(confirming&&confirming.kind==='mrat')wireAsk(async()=>{
+  const id=confirming.id;confirming=null;
+  try{await api('/memories/'+encodeURIComponent(id)+'/ratify',
+   {method:'POST',body:'{}'});toast('ratified — live for the fleet',true);}
+  catch(e){toast(e.message);}
+  openMemories();},openMemories);
+ if(confirming&&confirming.kind==='mrej')wireAsk(async()=>{
+  const reason=($('cfIn').value||'').trim();
+  if(!reason){toast('a reason is required');return;}   // UI enforces it too
+  const id=confirming.id;confirming=null;
+  try{await api('/memories/'+encodeURIComponent(id)+'/reject',
+   {method:'POST',body:JSON.stringify({reason:reason})});}
+  catch(e){toast(e.message);}
+  openMemories();},openMemories);
 }
 
 async function openUsers(){
