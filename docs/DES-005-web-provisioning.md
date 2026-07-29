@@ -71,7 +71,12 @@ root. Never in argv, never in the broker's db, never echoed by any API
 response. Encrypted-at-rest is a later slice — deliberately not now
 ("simpler is better", operator).
 
-## 4. Per-user persistent state
+## 4. Per-AGENT persistent state
+
+**Persistence is per agent, not per user.** Each agent owns a home nothing else
+writes to; two agents belonging to the same user share **nothing** on disk —
+not credentials-cache, not settings, not transcripts, not checkouts. The user
+id is only a parent directory for ownership and deletion.
 
 An **agent is an identity that may hold several rooms** (operator ruling
 2026-07-29). Storage is keyed by agent, never by room:
@@ -90,8 +95,15 @@ not hold. Local `~/.claude` additionally namespaces per-project transcripts by
 working directory on its own. **Want isolation? Create another agent with
 different rooms** — that is the sanctioned answer, not a directory layout.
 
-Consequence: destroy-and-recreate keeps everything the agent learned. Only an
-explicit `--purge` drops the data root.
+Consequences:
+
+- Destroy-and-recreate keeps everything **that agent** learned. Only an
+  explicit `--purge` drops its home.
+- Two agents of one user, same repo, are two independent checkouts and two
+  independent `~/.claude` histories. That is deliberate — it is what makes
+  "create another agent" a real isolation boundary rather than a label.
+- Renaming an agent is therefore a move, not a metadata edit. Out of scope:
+  rename is destroy + create until someone asks for it.
 
 ## 5. Roles
 

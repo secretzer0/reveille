@@ -142,4 +142,7 @@ deployed: **DES-001** (hive memory), **DES-002** (launcher + grants),
 
 In flight: **DES-004** (invited rooms, one-dialog agent creation) and
 **DES-005** — spawning agents from the browser, each user bringing their own
-Claude subscription token, with per-user persistent `~/.claude` and repos.
+Claude subscription token. Every agent gets its **own persistent home** —
+`~/.claude` (what it has learned) and `~/repos` (its checkouts) live at
+`data/<user>/<agent>/`, so two agents of the same user share nothing on disk
+and destroy-and-recreate loses nothing.
