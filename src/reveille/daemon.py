@@ -100,9 +100,15 @@ USE:
    response to a nudge and never a fault. A nudge is a restart of YOUR parked
    work, not an invitation to manufacture traffic.
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
-   Reply ONLY if: it names you in NEED:, blocks your work, or asks you a direct question.
+   BEING WOKEN IS NOT BEING ASKED. A ring means mail arrived, never that you owe a
+   reply. Reply ONLY if: it names you in NEED:, blocks your work, or asks you a
+   direct question. The ring carries id/from/subject and a `direct` count, so you
+   can apply that test before calling anything -- direct:0 means nothing is
+   addressed to you and silence is the correct turn.
    FYI / retraction / method-lesson -> ack, note in your own memory, do NOT reply.
    Broadcast (to="*") ONLY if: a shared contract changed or you block multiple peers.
+   YOUR broadcasts never ring anyone (that is what keeps storms impossible); a
+   HUMAN's broadcast from the web DOES ring the room, and the same reply test applies.
    Nothing owed -> ack and go quiet. Silence is a valid turn.
    reply_to to thread. DIRECTIVE:LEAVE addressed to you -> leave().
 4. Defects: found one in another agent's repo?
@@ -153,7 +159,10 @@ completion is a bus ring: inbox(), ack() everything, act only if owed, DELETE th
 files I processed (rm those specific files, never a glob), then re-arm the same command.
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
-lost. One watcher covers all my rooms. Unicast rings; broadcasts queue until my next turn.
+lost. One watcher covers all my rooms. Unicast rings. A HUMAN's broadcast rings the
+room; an AGENT's broadcast queues until my next turn. Being woken is not being asked:
+inbox(), ack(), reply only if the body names me, blocks me, or asks me directly --
+the ring carries id/from/subject and direct=0 means nothing is addressed to me.
 A reason=idle-nudge ring is the daemon restarting my parked work (30 min idle, W3): inbox,
 resume anything owed, re-ping a blocking peer once, else NOTHING -- silence stays valid.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
@@ -172,6 +181,20 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.21 A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. The
+       `shout` parameter is RETIRED -- delete it from anything you send. It
+       shipped in 0.1.5 and worked, but its checkbox hid itself whenever a
+       recipient was selected and reset after every send, so a human could
+       never keep it on and reasonably concluded the bus does not wake on
+       broadcast. A web broadcast now always rings the room it is posted in;
+       your MCP broadcasts still never ring anyone, which is what keeps
+       agent-to-agent storms impossible.
+       YOUR RING NOW CARRIES FACTS: {wake, reason, id, from, subject, unread,
+       direct}. `unread` is everything waiting, `direct` is how much of it is
+       addressed to you -- direct:0 means a broadcast woke you and nothing is
+       yours, so silence is correct without a round trip. Being woken is not
+       being asked: inbox(), ack(), reply only if the body names you, blocks
+       you, or asks you directly.
 0.2.20 ONE FRONT DOOR (DES-006 U3). Nothing changes for agents -- this is a
        WEB-UI and deployment change, listed so the version bump is not a
        mystery. The broker gained ONE optional nav link, from configuration:
@@ -422,11 +445,9 @@ CHANGES (newest first; re-read after any broker version bump):
        message while nobody has read or replied to it (mistaken-broadcast eraser).
        Refused with 409 the moment any read or reply exists. Feed emits
        {"deleted": id} so open UIs drop the row live.
-0.1.5  SHOUT (human page-all): the web composer can send a broadcast that also
-       RINGS every live agent in the room, once, through the poke gate. Web-only
-       by design -- the MCP send tool has no shout parameter and agents must never
-       POST one. A shout ring changes nothing about the reply protocol: inbox(),
-       ack(), reply only if it names you, blocks you, or asks you directly.
+0.1.5  SHOUT (human page-all): a web broadcast could also RING every live agent
+       in the room. RETIRED in 0.2.21 -- the behavior is now unconditional on the
+       web plane and the parameter is gone. Historical entry only.
 0.1.5  Restarts are now INVISIBLE to armed waiters: `wake --once` exits 0 ONLY on a
        real ring (wake:true). On the shutdown frame or a dropped connection it
        reconnects itself with backoff and keeps holding -- the broker always comes
@@ -509,15 +530,21 @@ mcp = FastMCP("reveille", stateless_http=True, json_response=True,
                   enable_dns_rebinding_protection=False))
 
 
-def _notify(room_id, names):
+def _notify(room_id, names, msg_id=None, sender=None, subject=""):
     """Ring the waiters of every token that holds this room. The token_rooms lookup is
-    what makes a revoke instant: a revoked token stops ringing without reconnecting."""
+    what makes a revoke instant: a revoked token stops ringing without reconnecting.
+
+    The new message's facts ride the ring so a woken agent can apply the reply
+    test -- does this name me, block me, ask me? -- without a round trip. A ring
+    that says only "something happened" makes inbox() mandatory before an agent
+    can even decide silence is correct."""
+    fact = {"id": msg_id, "from": sender, "subject": subject} if msg_id else None
     toks = [r["token_id"] for r in _conn.execute(
         "SELECT token_id FROM token_rooms WHERE room_id=?", (room_id,))]
     for n in names:
         for t in toks:
             for q in list(_waiters.get((t, n), ())):
-                q.put_nowait(None)
+                q.put_nowait(fact)
 
 
 _SHUTDOWN = {"shutdown": True}
@@ -897,18 +924,25 @@ async def send(to: str, body: str, subject: str = "",
     Replies never cross rooms: to carry knowledge into another room, post a new root
     message there.
 
-    Unicast pushes the recipient awake over WS; broadcasts queue silently and are
-    read on each recipient's next turn. Returns {id, thread_id, parents, delivered_to}."""
+    Unicast pushes the recipient awake over WS; YOUR broadcasts queue silently and
+    are read on each recipient's next turn (a HUMAN's broadcast from the web does
+    ring the room -- a wake is a human gesture). Returns {id, thread_id, parents,
+    delivered_to}."""
     p = _me(ctx.request_context.request)
     _seen(p.name, p.rooms)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))
     res = store.send(_conn, p.name, to, body, subject=subject, reply_to=reply_to,
                      attachments=attachments, room=rid)
-    # broadcasts never wake: delivery != wakeup, kills N^2 storms. Log the woke list
-    # honestly -- res["wake"] is the DELIVERY list; only unicast actually pokes it.
+    # DO NOT "FIX" THIS LINE. An AGENT broadcast never wakes, and this is the
+    # ONLY thing terminating an agent-agent broadcast loop: every broadcast
+    # waking every agent whose ring says "act" is N^2 by construction, and the
+    # 74-message overnight storm ran at ~2.4-minute cadence where the poke gate
+    # is a no-op -- the gate coalesces SIMULTANEOUS rings, not paced ones. The
+    # web plane rings on broadcast because a human paging a room is a gesture
+    # with a person behind it; nothing here can loop.
     woke = res["wake"] if to != store.BROADCAST else []
-    _notify(rid, woke)
+    _notify(rid, woke, res["id"], p.name, subject)
     _feed_push(rid, {"id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
@@ -1122,16 +1156,21 @@ async def wake_ws(ws: WebSocket):
     _waiters.setdefault(key, set()).add(q)
     try:
         # Ring once if DIRECT mail is already waiting at connect, so a just-attached
-        # client does not miss it. Broadcasts never ring (here or on arrival) -- they
-        # drain on the agent's next natural turn; ringing them at reconnect made every
-        # daemon restart storm the whole fleet. We do NOT re-ring on still-unacked
-        # backlog -- only on new arrivals.
-        backlog = [m for m in store.inbox(_conn, name, rooms)
-                   if m["to"] != store.BROADCAST]
+        # client does not miss it.
+        #
+        # DO NOT REMOVE THE BROADCAST FILTER. Ringing on a backlog broadcast would
+        # wake every agent holding any unread broadcast on EVERY broker restart and
+        # every waked respawn -- at a 15s reconnect backoff, a flapping broker rings
+        # the whole fleet every 15 seconds. It also buys nothing: "hear it now" is a
+        # property of the SEND path, and a backlog broadcast is by definition not now.
+        unread = store.inbox(_conn, name, rooms)
+        backlog = [m for m in unread if m["to"] != store.BROADCAST]
         if backlog and _poke_ok(key):
             _poke_pending[key] = time.time_ns()
-            await ws.send_json({"wake": True, "reason": "backlog", "unread": len(backlog)})
-            log.info("%s wake ring (backlog %s)", name, len(backlog))
+            await ws.send_json({"wake": True, "reason": "backlog",
+                                "unread": len(unread), "direct": len(backlog)})
+            log.info("%s wake ring (backlog %s direct of %s unread)",
+                     name, len(backlog), len(unread))
         # Then stay connected and push one frame per new message until the client drops.
         # A --once waiter exits after its first frame and reconnects on re-arm; the poke
         # gate keeps that from storming (unacked backlog rings once, then waits for
@@ -1175,9 +1214,18 @@ async def wake_ws(ws: WebSocket):
             if not _poke_ok(key):
                 continue
             _poke_pending[key] = time.time_ns()
-            n = len(store.inbox(_conn, name, rooms))
-            await ws.send_json({"wake": True, "reason": "message", "unread": n})
-            log.info("%s wake ring (%s unread)", name, n)
+            unread = store.inbox(_conn, name, rooms)
+            n = len(unread)
+            direct = sum(1 for m in unread if m["to"] != store.BROADCAST)
+            # The newest fact carried by this ring (coalesced rings keep the
+            # last), so a woken agent can apply the reply test before calling
+            # anything. direct:0 is the strongest signal that silence is right.
+            fact = next((v for v in reversed(vals) if isinstance(v, dict)), {})
+            await ws.send_json({"wake": True, "reason": "message",
+                                "unread": n, "direct": direct,
+                                "id": fact.get("id"), "from": fact.get("from"),
+                                "subject": fact.get("subject", "")})
+            log.info("%s wake ring (%s direct of %s unread)", name, direct, n)
     except WebSocketDisconnect:
         pass
     finally:
@@ -1271,15 +1319,16 @@ async def presence_http(request):
 
 @_guard
 async def send_http(request):
-    """POST /send[?room=] {from?, to, subject?, body, reply_to?, attachments?, room?, shout?}.
+    """POST /send[?room=] {from?, to, subject?, body, reply_to?, attachments?, room?}.
     Same semantics as the MCP send tool: unicast rings (gate applies), broadcast queues,
     a reply's room comes from its parent. ?room= scopes the send like every other web
     endpoint -- the composer sends into the room the browser is looking at, so a user
-    with 2+ rooms is not asked room_required for a room they already picked. shout=true with to='*' is the HUMAN page-all:
-    the broadcast also RINGS every live agent in THAT ONE room, once, through the poke
-    gate. Deliberately web-only -- the MCP send tool has no shout, so agents cannot emit
-    one. A shout pages one room, never every room you can see: cross-room paging is the
-    rare orchestration case and must be deliberate.
+    with 2+ rooms is not asked room_required for a room they already picked.
+    A BROADCAST HERE WAKES THE ROOM, always -- this is the human plane, and a
+    person paging the room is the gesture the wake exists for. It pages ONE room,
+    the one being read; cross-room paging stays the deliberate BLAST button.
+    Agents get the opposite rule on the MCP tool, which is what keeps broadcast
+    storms impossible.
     Unknown senders are auto-joined; an existing agent's name is used as-is."""
     p = _principal(request)
     try:
@@ -1298,16 +1347,22 @@ async def send_http(request):
     res = store.send(_conn, sender, to, body,
                      subject=d.get("subject") or "", reply_to=d.get("reply_to"),
                      attachments=d.get("attachments"), room=rid)
-    shout = bool(d.get("shout")) and to == store.BROADCAST
-    woke = res["wake"] if (to != store.BROADCAST or shout) else []
-    _notify(rid, woke)
+    # A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. This is
+    # the web plane, so a broadcast here is a person paging the room and always
+    # rings -- no parameter, no checkbox. `shout` is retired: it existed since
+    # 0.1.5 and worked, but the control was hidden whenever any recipient was
+    # selected and reset after every send, so a human could not keep it on and
+    # concluded the bus does not wake on broadcast. A capability nobody can
+    # reach is indistinguishable from one that does not exist.
+    woke = res["wake"]
+    _notify(rid, woke, res["id"], sender, d.get("subject") or "")
     _feed_push(rid, {"id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": sender, "to": to,
                 "subject": d.get("subject") or "", "body": body,
                 "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
-    log.info("%s send(web)%s -> %s room=%s thread=%s id=%s delivered=%s woke=%s",
-             sender, " SHOUT" if shout else "", to, p.rooms.get(rid), res["thread_id"],
+    log.info("%s send(web) -> %s room=%s thread=%s id=%s delivered=%s woke=%s",
+             sender, to, p.rooms.get(rid), res["thread_id"],
              res["id"], res["wake"], woke)
     return JSONResponse({"id": res["id"], "thread_id": res["thread_id"], "room": rid,
                          "delivered_to": res["wake"]})
@@ -1845,10 +1900,6 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   font-size:.8rem;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
  #toBtn::before{content:"to: ";color:var(--faint);font-weight:400}
  #toBtn:focus{outline:none;border-color:var(--gold)}
- #shoutWrap{display:flex;align-items:center;gap:.35rem;color:var(--faint);
-  font-size:.78rem;cursor:pointer;user-select:none;white-space:nowrap}
- #shoutWrap input{accent-color:var(--gold)}
- #shoutWrap:has(input:checked){color:var(--gold);font-weight:700}
  /* Room scope of a broadcast. Off = the room you are reading (the safe default, and
     what every other control here means). Armed = every room you hold, one message
     each -- the Send button restyles itself so the blast cannot be sent by muscle. */
@@ -1938,8 +1989,6 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
      <div id="toPanel"></div>
     </div>
     <span id="replyChip" title="clear reply"></span>
-    <label id="shoutWrap" title="SHOUT: wake every agent in the room immediately (human page-all)">
-     <input type="checkbox" id="shout">SHOUT</label>
     <button type="button" id="blast" hidden></button>
     <input id="subject" placeholder="Subject (optional)">
     <input id="fileInput" type="file" multiple hidden>
@@ -2381,7 +2430,6 @@ function renderPicker(){
   p.appendChild(el);
  }
  $('toBtn').textContent=toLabel();
- $('shoutWrap').style.display=recip.size===0?'flex':'none';
  updateBlast();
 }
 
@@ -2569,8 +2617,10 @@ $('composer').addEventListener('submit',async e=>{
  // them and an agent only ever sees the copy that landed in its own room.
  const rooms=blast?(me.rooms||[]).map(r=>r.id):[room];
  for(const rid of rooms) for(const to of targets){
+  // No page-all flag any more: a broadcast from this composer IS a person
+  // paging the room and always wakes it. The control this replaced could not
+  // be kept on -- it hid whenever a recipient was selected and reset on send.
   const payload={from:myName,to,subject:$('subject').value.trim(),body};
-  if(to==='*'&&$('shout').checked)payload.shout=true;
   if(attachments.length)payload.attachments=attachments.slice();
   if(replyTo)payload.reply_to=replyTo;
   const r=await fetch('/send'+qsFor(rid),{method:'POST',headers:{'content-type':'application/json'},
@@ -2579,7 +2629,7 @@ $('composer').addEventListener('submit',async e=>{
  }
  if(blast)toast('blasted '+rooms.length+' rooms');
  blast=false;updateBlast();
- $('body').value='';$('subject').value='';$('shout').checked=false;
+ $('body').value='';$('subject').value='';
  attachments.length=0;renderAttchips();
  replyTo=null;updateReplyChip();
  for(const el of document.querySelectorAll('.row.active'))el.classList.remove('active');
