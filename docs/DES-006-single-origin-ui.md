@@ -92,13 +92,24 @@ host at the gateway address, not loopback). The proxy is the only path in.
 ## 3. Shape
 
 ```
-                    ┌──────── one origin ────────┐
-browser ──────────► │  proxy (caddy)             │
-                    │   /          → Agents page │──► launcher (127.0.0.1:8766)
-                    │   /bus       → broker UI   │──► broker  (0.0.0.0:8765)
-                    │   /attach/*  → launcher ───┼──► ttyd in the container
-                    └────────────────────────────┘
+                    ┌──────── one origin ─────────┐
+browser ──────────► │  proxy (caddy)              │
+                    │   /          → broker UI    │──► broker  (0.0.0.0:8765)
+                    │   /agents    → Agents page  │──► launcher (127.0.0.1:8766)
+                    │   /attach/*  → launcher ────┼──► ttyd in the container
+                    └─────────────────────────────┘
 ```
+
+**`/` is the BROKER** (operator ruling 2026-07-29). The bus — chat, rooms,
+memory, presence — is the daily surface; agent management is an occasional
+second step. An earlier note of mine (msg 8493) recommended the launcher as
+the home page; that was a workaround for the constraint in §2.2, which this
+document removes. With the broker able to render a nav link, the natural
+ordering wins and the workaround is withdrawn.
+
+The configured nav link therefore carries real weight: it is the discovery
+path from the landing page to agent management. The Agents page links back to
+`/` the same way.
 
 - The **proxy** knows both addresses. Neither service learns the other's.
 - The user types one address, sees one product, never types a port.
@@ -119,10 +130,12 @@ browser ──────────► │  proxy (caddy)             │
   treatment the waiter got (DES-003): flock-guarded, hook/entrypoint-spawned,
   no systemd. Bind `127.0.0.1`. Gate: kill it, confirm it comes back without a
   human; confirm it is unreachable from the LAN address.
-- **U3 — single origin.** Caddy config, the three routes, the one configured
-  nav link in the broker (§2.2), and a dim line on the Agents page stating
-  *signed in via your broker session* (§1). Gate: from a clean browser, one
-  address reaches both UIs with one login and no port ever typed.
+- **U3 — single origin.** Caddy config with the three routes (`/` broker,
+  `/agents` launcher, `/attach/*`), the one configured nav link in the broker
+  pointing at `/agents` (§2.2), a link back to `/` from the Agents page, and a
+  dim line there stating *signed in via your broker session* (§1). Gate: from
+  a clean browser, one address lands on the bus, one click reaches agents, one
+  login covers both, and no port is ever typed.
 - **U4 — attach-through-proxy.** §2.3, with both gates and the
   no-open-proxy property. Gate: a grant URL works from a machine that is NOT
   the host — the hole this closes — and a request for an agent the session
