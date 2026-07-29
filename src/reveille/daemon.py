@@ -2011,6 +2011,19 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   border:1px solid var(--line);border-radius:999px;padding:.15rem .5rem;font-size:.7rem}
  .tokOut{background:var(--bg);border:1px solid var(--line);border-radius:6px;
   padding:.6rem;font-size:.72rem;user-select:all;white-space:pre-wrap;word-break:break-all}
+ /* DES-006 §6 U6: #chatWell keeps #main's existing flex children exactly as
+    they were (display:contents = this wrapper is invisible to layout) so
+    adding it is a no-op until .hidden is toggled on. */
+ #chatWell{display:contents}
+ #chatWell.hidden{display:none}
+ #agentsWell{display:none;flex:1;min-height:0;overflow-y:auto;
+  padding:1.1rem 1.4rem 2rem;text-align:left}
+ #agentsWell.on{display:block}
+ #agentsWell .lnk{color:var(--dim);cursor:pointer;font-size:.78rem}
+ #agentsWell .lnk:hover{color:var(--fg);text-decoration:underline}
+ #agUnavail{color:#e8555a;background:rgba(232,85,90,.08);border-left:2px solid #e8555a;
+  padding:.6rem .7rem;font-size:.8rem;margin:.4rem 0 1rem;border-radius:0 6px 6px 0}
+ #agUnavail .lnk{color:#e8555a;text-decoration:underline;margin-left:.4rem}
  #dlgWho{display:none;margin-bottom:1.1rem}
  #dlgWho.on{display:block}
  #dlgWho .lbl{color:var(--faint);font-size:.68rem;letter-spacing:.12em;
@@ -2083,6 +2096,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  <div id="brand"><h1>REVEILLE</h1>
   <small><span id="status"></span><span id="ver">bus</span></small></div>
  <!--NAVLINK-->
+ <button type="button" id="agentsNav" class="navlink">Agents</button>
  <h2>AGENTS</h2>
  <div id="fmode" title="filter selected agents by messages they sent, or messages sent to them">
   <button type="button" id="fmFrom" class="on">FROM</button>
@@ -2103,6 +2117,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  </div>
 </nav>
 <div id="main">
+<div id="chatWell">
  <div id="top">
   <input id="filter" placeholder="Filter messages&hellip;">
   <span id="filterState" title="clear agent filter"></span>
@@ -2151,6 +2166,52 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
    </div>
   </form>
  </div>
+</div>
+<!-- DES-006 §6 U6: agent management embedded in the bus's own content well,
+     calling the launcher's API directly (same origin, same session cookie).
+     Fails SOFT (§6.6): a launcher that is down or absent degrades ONLY this
+     pane to #agUnavail -- chat/rooms/memory/presence never know it happened,
+     because the broker's own code never touches docker or a launcher URL;
+     this is the browser doing an extra fetch, nothing more. -->
+<div id="agentsWell">
+ <div class="pRow"><b>AGENTS</b><span class="lnk" id="agBack">&larr; back to chat</span></div>
+ <div id="agUnavail" hidden><span id="agUnavailMsg"></span>
+  <span class="lnk" id="agRetry">retry</span></div>
+ <div id="agList"></div>
+ <div class="pSec">NEW AGENT</div>
+ <div class="pRow">
+  <input id="agName" placeholder="agent name (e.g. senior-dev)">
+  <select id="agRole"><option value="">no role template</option></select>
+ </div>
+ <div class="pRow">
+  <input id="agAppend" placeholder="anything to append to the role prompt (optional)"
+   style="flex:1">
+ </div>
+ <div class="pChips" id="agRooms"></div>
+ <div class="pRow"><input id="agRepo" placeholder="repo URL (blank = your profile default)"></div>
+ <div class="pRow"><input id="agModel" placeholder="model (blank = the account default)"></div>
+ <div class="pRow">
+  <button id="agCreate">create agent</button>
+  <span class="pDim">the token is minted from your session and never shown</span>
+ </div>
+ <div id="agStatus" class="pDim"></div>
+ <div class="pSec">CREDENTIALS</div>
+ <div id="agCredState" class="pDim"></div>
+ <div class="pRow">
+  <input id="agCredClaude" placeholder="claude token (setup-token or API key)">
+  <button id="agCredClaudeClear">clear</button>
+ </div>
+ <div class="pRow">
+  <input id="agCredGithub" placeholder="github token">
+  <button id="agCredGithubClear">clear</button>
+ </div>
+ <div class="pRow"><input id="agCredRepo" placeholder="default repo URL"></div>
+ <div class="pRow">
+  <button id="agCredSave">save credentials</button>
+  <span class="pDim">stored 0600 on the launcher host; values are never echoed back</span>
+ </div>
+ <div id="agCredNotes" class="pDim"></div>
+</div>
 </div>
 <div id="toasts"></div>
 <div id="dlg">
@@ -2835,6 +2896,160 @@ async function api(path,opts){
  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||e.error||r.status);}
  return r.json();
 }
+
+// ---- DES-006 §6 U6: agents, embedded in the bus's own content well --------
+// Same api() as everything else on this page: same session cookie, same
+// same-origin fetch. The launcher still runs its own two gates (session
+// principal + agent ownership, §2.3) on every one of these calls -- this
+// code is a caller, never a bypass (§6.1). Fails SOFT (§6.6): every entry
+// point below is try/caught so a launcher that is down or absent degrades
+// ONLY this pane to #agUnavail; chat/rooms/memory/presence never know,
+// because nothing here is on their path.
+let agConfirm=null;   // {agent} -- at most one destroy-confirm open at a time
+let agMeta=null;      // {roles, role_prompts, rooms} from /rooms-mine, cached per open
+function openAgentsWell(){
+ $('chatWell').classList.add('hidden');
+ $('agentsWell').classList.add('on');
+ refreshAgents();
+}
+function closeAgentsWell(){
+ $('agentsWell').classList.remove('on');
+ $('chatWell').classList.remove('hidden');
+}
+$('agentsNav').onclick=openAgentsWell;
+$('agBack').onclick=closeAgentsWell;
+$('agRetry').onclick=refreshAgents;
+function agUnavailable(msg){
+ $('agUnavailMsg').textContent='agent management is unavailable right now ('+
+  msg+') -- chat, rooms, and memory are unaffected. ';
+ $('agUnavail').hidden=false;
+ $('agList').innerHTML='';
+}
+async function refreshAgents(){
+ $('agUnavail').hidden=true;
+ let d;
+ try{d=await api('/agents');}
+ catch(e){agUnavailable(e.message==='401'?'session expired -- reload the page':
+  'the launcher is not reachable');return;}
+ const list=$('agList');
+ const running=a=>a.status==='running';
+ // Only the actions valid for the agent's current state are ever offered --
+ // same reasoning as the launcher page's own U6-predecessor fix: a stopped
+ // agent shows start, a running one shows watch+stop, both show destroy.
+ list.innerHTML=(d.agents.length?'':'<div class="pDim">no agents yet</div>')+
+  d.agents.map(a=>{
+   if(agConfirm&&agConfirm.agent===a.agent)
+    return '<div class="pRow warn"><b>Destroy '+esc(a.agent)+'?</b></div>'+
+     '<div class="pAsk">Its running session and bus grants end now -- that '+
+     'cannot be undone. Its files (repo checkouts, claude config) are kept, '+
+     'and reused if you create an agent with this same name again.</div>'+
+     '<div class="pRow"><button class="danger" data-agdelyes="'+esc(a.agent)+
+     '">confirm destroy</button> '+
+     '<button data-agdelno="'+esc(a.agent)+'">cancel</button></div>';
+   return '<div class="pRow"><b>'+esc(a.agent)+'</b>'+
+    '<span class="pDim">'+esc(a.status)+' &middot; '+esc(a.image)+'</span>'+
+    (running(a)
+      ? '<button data-agwatch="'+esc(a.agent)+'">watch</button>'+
+        '<button data-agstop="'+esc(a.agent)+'">stop</button>'
+      : '<button data-agstart="'+esc(a.agent)+'">start</button>')+
+    '<button data-agdel="'+esc(a.agent)+'">destroy</button></div>';
+  }).join('');
+ for(const b of list.querySelectorAll('[data-agwatch]'))b.onclick=async()=>{
+  try{
+   const g=await api('/agents/'+encodeURIComponent(b.dataset.agwatch)+'/grants',
+    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
+   window.open(g.attach_url,'_blank');
+  }catch(e){toast(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-agstart]'))b.onclick=async()=>{
+  try{await api('/agents/'+encodeURIComponent(b.dataset.agstart)+'/start',
+   {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-agstop]'))b.onclick=async()=>{
+  try{await api('/agents/'+encodeURIComponent(b.dataset.agstop)+'/stop',
+   {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-agdel]'))b.onclick=()=>{
+  agConfirm={agent:b.dataset.agdel};refreshAgents();
+ };
+ for(const b of list.querySelectorAll('[data-agdelno]'))b.onclick=()=>{
+  agConfirm=null;refreshAgents();
+ };
+ for(const b of list.querySelectorAll('[data-agdelyes]'))b.onclick=async()=>{
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.agdelyes),{method:'DELETE'});
+   agConfirm=null;refreshAgents();
+  }catch(e){toast(e.message);}
+ };
+ // Focus lands on the confirm button the moment it renders (keyboard/screen-
+ // reader path): no tabbing to find the one control that matters this turn.
+ const cfBtn=list.querySelector('[data-agdelyes]');
+ if(cfBtn)cfBtn.focus();
+
+ // The create-agent form and credentials section degrade quietly on their
+ // own fetch failures -- the list above already reported the same outage
+ // once; a second red banner for the same cause would just be noise.
+ try{
+  if(!agMeta){
+   agMeta=await api('/rooms-mine');
+   const sel=$('agRole');
+   for(const r of agMeta.roles){
+    const o=document.createElement('option');o.value=o.textContent=r;sel.appendChild(o);}
+  }
+  $('agRooms').innerHTML=agMeta.rooms.map(r=>
+   '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"> '+
+   esc(r.name)+' <span class="pDim">('+esc(r.kind)+')</span></label>').join('')||
+   '<span class="pDim">no rooms yet -- create one from the Rooms tab first</span>';
+ }catch(e){/* soft-degrade, see comment above */}
+ try{
+  const p=await api('/profile');
+  const c=p.credentials||{};
+  $('agCredState').textContent='claude token: '+(c.claude_token||'absent')+
+   ' / github token: '+(c.github_token||'absent');
+  $('agCredRepo').value=c.repo_url||'';
+  $('agCredNotes').textContent=p.notes||'';
+ }catch(e){/* soft-degrade, see comment above */}
+}
+$('agCreate').onclick=async()=>{
+ const st=$('agStatus');
+ const rooms=[...document.querySelectorAll('#agRooms input:checked')].map(c=>c.value);
+ const name=$('agName').value.trim();
+ try{
+  st.textContent='provisioning...';
+  await api('/agents',{method:'POST',body:JSON.stringify({
+   agent:name,rooms:rooms,role:$('agRole').value,
+   append:$('agAppend').value.trim(),
+   repo_url:$('agRepo').value.trim(),
+   model:$('agModel').value.trim()})});
+  st.textContent='container up; waiting for the agent to reach the bus...';
+  for(let i=0;i<60;i++){
+   await new Promise(r=>setTimeout(r,2000));
+   const a=await api('/agents/'+encodeURIComponent(name));
+   if(a.live){st.textContent='LIVE: '+name+' is on the bus.';refreshAgents();return;}
+  }
+  st.textContent='container is up but not live yet -- check its logs.';
+  refreshAgents();
+ }catch(e){st.textContent='';toast(e.message);}
+};
+$('agCredSave').onclick=async()=>{
+ const b={repo_url:$('agCredRepo').value.trim()};
+ const cl=$('agCredClaude').value.trim();if(cl)b.claude_token=cl;
+ const gh=$('agCredGithub').value.trim();if(gh)b.github_token=gh;
+ try{
+  await api('/profile',{method:'PUT',body:JSON.stringify(b)});
+  $('agCredClaude').value='';$('agCredGithub').value='';
+  refreshAgents();
+ }catch(e){toast(e.message);}
+};
+$('agCredClaudeClear').onclick=async()=>{
+ try{await api('/profile',{method:'PUT',body:'{"claude_token":""}'});refreshAgents();}
+ catch(e){toast(e.message);}
+};
+$('agCredGithubClear').onclick=async()=>{
+ try{await api('/profile',{method:'PUT',body:'{"github_token":""}'});refreshAgents();}
+ catch(e){toast(e.message);}
+};
+
 // The presence poll is armed once, here or at boot -- whichever gets a room first. A
 // room-less first-run boots without it, so picking the first room must start it.
 let polling=false;
