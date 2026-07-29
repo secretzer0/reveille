@@ -1332,11 +1332,20 @@ async function refresh(){
   throw e;}
  document.getElementById('app').style.display='';
  const list=document.getElementById('list');
+ // A stopped agent is not a new agent: docker start reuses its data root and
+ // its bus identity untouched (sec 7.1), so "start" is the restart path and
+ // "stop"/"watch" (which needs a live container to exec attach-gate into)
+ // only make sense while running. Showing only the valid actions for the
+ // current state means there is no invalid click to handle, rather than
+ // hiding the gap behind an error alert.
  list.innerHTML=(d.agents.length?'':'<div class="dim">no agents yet</div>')+
-  d.agents.map(a=>'<div class="card"><b>'+esc(a.agent)+'</b> '+
+  d.agents.map(a=>{const running=a.status==='running';
+   return '<div class="card"><b>'+esc(a.agent)+'</b> '+
    '<span class="dim">'+esc(a.status)+' &middot; '+esc(a.image)+'</span> '+
-   '<button data-watch="'+esc(a.agent)+'">watch</button>'+
-   '<button data-stop="'+esc(a.agent)+'">stop</button>'+
+   (running
+     ? '<button data-watch="'+esc(a.agent)+'">watch</button>'+
+       '<button data-stop="'+esc(a.agent)+'">stop</button>'
+     : '<button data-start="'+esc(a.agent)+'">start</button>')+
    '<button data-del="'+esc(a.agent)+'">destroy</button>'+
    '<button data-creds="'+esc(a.agent)+'">creds</button>'+
    '<div data-ovr="'+esc(a.agent)+'" style="display:none;margin-top:.4rem">'+
@@ -1344,20 +1353,57 @@ async function refresh(){
     '<input data-oc size="26" placeholder="claude token override"> '+
     '<input data-og size="26" placeholder="github token override"> '+
     '<button data-osave>save</button> '+
-    '<button data-owipe>clear overrides</button></div></div>').join('');
+    '<button data-owipe>clear overrides</button></div>'+
+   // Styled, in-panel, non-blocking -- never confirm(): a native dialog can't
+   // say what is and is not recoverable, and this product avoids them for
+   // exactly that reason elsewhere. Focus lands on "yes" so a keyboard or
+   // screen-reader user gets the warning read immediately, no tabbing to find
+   // it; "cancel" is the very next stop, "destroy" the one before.
+   '<div data-delc="'+esc(a.agent)+'" style="display:none;margin-top:.4rem" '+
+    'role="group" aria-label="confirm destroy '+esc(a.agent)+'">'+
+    '<span class="dim">Destroy '+esc(a.agent)+'? Its running session and bus '+
+    'grants end now -- that cannot be undone. Its files (repo checkouts, '+
+    'claude config) are kept, and reused if you create an agent with this '+
+    'same name again.</span><br>'+
+    '<button data-delyes="'+esc(a.agent)+'">yes, destroy '+esc(a.agent)+
+    '</button> <button data-delno>cancel</button></div></div>';
+  }).join('');
  for(const b of list.querySelectorAll('[data-watch]'))b.onclick=async()=>{
-  const g=await api('/agents/'+encodeURIComponent(b.dataset.watch)+'/grants',
-   {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
-  // Relative on purpose (U4): resolves against THIS origin -- the proxy --
-  // so the same URL works for a remote human, which it never did before.
-  window.open(g.attach_url,'_blank');};   // shown once, never retrievable
+  try{
+   const g=await api('/agents/'+encodeURIComponent(b.dataset.watch)+'/grants',
+    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
+   // Relative on purpose (U4): resolves against THIS origin -- the proxy --
+   // so the same URL works for a remote human, which it never did before.
+   window.open(g.attach_url,'_blank');   // shown once, never retrievable
+  }catch(e){alert(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-start]'))b.onclick=async()=>{
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.start)+'/start',
+    {method:'POST',body:'{}'});refresh();
+  }catch(e){alert(e.message);}
+ };
  for(const b of list.querySelectorAll('[data-stop]'))b.onclick=async()=>{
-  await api('/agents/'+encodeURIComponent(b.dataset.stop)+'/stop',
-   {method:'POST',body:'{}'});refresh();};
- for(const b of list.querySelectorAll('[data-del]'))b.onclick=async()=>{
-  if(!confirm('Destroy '+b.dataset.del+'? Its data root is kept.'))return;
-  await api('/agents/'+encodeURIComponent(b.dataset.del),{method:'DELETE'});
-  refresh();};
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.stop)+'/stop',
+    {method:'POST',body:'{}'});refresh();
+  }catch(e){alert(e.message);}
+ };
+ // Destroy asks in-panel (see the card template above) instead of firing the
+ // DELETE straight away; these three just drive that panel open/closed/through.
+ for(const b of list.querySelectorAll('[data-del]'))b.onclick=()=>{
+  const box=list.querySelector('[data-delc="'+CSS.escape(b.dataset.del)+'"]');
+  box.style.display='';box.querySelector('[data-delyes]').focus();
+ };
+ for(const b of list.querySelectorAll('[data-delno]'))b.onclick=()=>{
+  b.closest('[data-delc]').style.display='none';
+ };
+ for(const b of list.querySelectorAll('[data-delyes]'))b.onclick=async()=>{
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.delyes),{method:'DELETE'});
+   refresh();
+  }catch(e){alert(e.message);}
+ };
  // U1 per-agent overrides: PUT /agents/<name>/profile (P2 backend, unchanged).
  // Masked state only -- the page never sees a stored value.
  for(const b of list.querySelectorAll('[data-creds]'))b.onclick=async()=>{
