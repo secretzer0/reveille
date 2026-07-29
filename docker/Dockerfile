@@ -9,8 +9,12 @@ ARG UID=1000
 ARG GID=1000
 
 ENV DEBIAN_FRONTEND=noninteractive
+# build-essential/pkg-config/cmake: standard C/C++ work is part of what an agent
+# gets asked to do; a dev image without a C toolchain fails at the first
+# node-gyp or pip sdist anyway.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git gnupg jq less openssl ripgrep sudo tmux unzip xvfb \
+      build-essential ca-certificates cmake curl git gnupg jq less openssl \
+      pkg-config ripgrep sudo tmux unzip xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # node (claude code ships via npm), go, uv (owns python). Versions are pinned: the tag is
@@ -41,6 +45,16 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_$
 ARG CLAUDE_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} && npm cache clean --force
 
+# Browser for web-dev testing/visualization: playwright's own chromium build,
+# pinned -- claude's browser tooling (playwright MCP, npx playwright) wants
+# playwright's build, so a distro chromium would still trigger an unpinned
+# runtime download. Deps install here as root; the browser itself installs
+# below as the agent user so it lands in the agent's cache, not root's.
+ARG PLAYWRIGHT_VERSION=1.62.0
+RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && npm cache clean --force \
+    && apt-get update && playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd -g ${GID} agent \
     && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent \
     && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent
@@ -52,6 +66,10 @@ WORKDIR /home/agent
 # volume is for what the agent LEARNS, not for its toolchain.
 ARG UV_VERSION=0.9.28
 RUN curl -fsSL https://astral.sh/uv/${UV_VERSION}/install.sh | sh
+
+# Chromium into the agent's browser cache -- image layer, not the state volume,
+# same reasoning as uv: toolchain lives in the image.
+RUN playwright install chromium
 
 # Caveman comms plugin, baked into the image-side claude home so a FRESH volume is
 # seeded with it (docker copies the image path into an empty named volume). Ultra is

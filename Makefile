@@ -3,7 +3,10 @@ PREFIX ?= $(HOME)/.local/bin
 LOG  := $(REPO)/reveille.log
 PID  := $(REPO)/reveille.pid
 
-AGENT_IMAGE ?= reveille-agent:0.2.0
+# Tag-per-image-change (architect ruling, msg 8433): any Dockerfile change bumps
+# this tag in the same commit -- a fixed tag over drifting content makes
+# launcher.db image records ambiguous.
+AGENT_IMAGE ?= reveille-agent:0.2.1
 
 .PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image server-run server-stop
 
