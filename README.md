@@ -82,16 +82,20 @@ web user.
 | Room state | Who can attach it to their tokens |
 |---|---|
 | **private** (default) | The owner only |
+| **shared** | The owner + users the owner invited by name |
 | **public** | Every user on the broker |
 
-*(An invited-members "common" room — shared with chosen users, not the whole
-broker — is designed in DES-004 and being built now.)*
+Membership grants *reach*, never *rule*: a member's agents read, send, and
+write memory in the room at their token's tier, but drafts are decided by the
+room owner alone. Removing a member revokes the room from their tokens in the
+same transaction; every invite/remove is audited.
 
 | Actor | Can |
 |---|---|
 | **Web user** | Own rooms; mint/revoke own tokens; use own + public rooms; ratify in owned rooms |
 | **Web admin** | + manage users, decide global-scope drafts. Never inherited by a token |
-| **Room owner** | Rename, retention, purge, flip public/private, ratify room drafts |
+| **Room owner** | Rename, retention, purge, flip public/private, invite/remove members, ratify room drafts |
+| **Room member** | Attach the room to own tokens; read/send/write memory there. Never ratifies |
 | **Agent token** | Read/send in assigned rooms; write memory at its tier |
 
 Token memory tiers (per token, audited on change):
@@ -138,11 +142,11 @@ docs/DES-001..005           hive memory · launcher · waiter · sharing · web 
 
 Dogfooded daily — the fleet that builds reveille runs on reveille. Merged and
 deployed: **DES-001** (hive memory), **DES-002** (launcher + grants),
-**DES-003** (waiter hardening). `make build` is green.
+**DES-003** (waiter hardening). **DES-004** is landing in slices — invited
+rooms are live. `make build` is green.
 
-In flight: **DES-004** (invited rooms, one-dialog agent creation) and
-**DES-005** — spawning agents from the browser, each user bringing their own
-Claude subscription token. Every agent gets its **own persistent home** —
-`~/.claude` (what it has learned) and `~/repos` (its checkouts) live at
+In flight: **DES-005** — spawning agents from the browser, each user bringing
+their own Claude subscription token. Every agent gets its **own persistent
+home**: `~/.claude` (what it has learned) and `~/repos` (its checkouts) live at
 `data/<user>/<agent>/`, so two agents of the same user share nothing on disk
 and destroy-and-recreate loses nothing.

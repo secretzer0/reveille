@@ -1486,6 +1486,127 @@ def test_migration_v12_to_v13_dedupes_live_slugs():
                      "status='superseded'").fetchone()[0] == 2
 
 
+# ---- membership (DES-004 M1: reach, never rule) ------------------------------
+
+def _member_fixture():
+    """Owner travis with a private room; user bob with his own token."""
+    c, admin, room, tok = fixture()
+    bob = store.create_user(c, "bob", "hunter2hunter2")
+    btok = store.create_token(c, bob["id"], "bobs", agent_name="bob-agent")
+    return c, admin, room, tok, bob, btok
+
+
+def test_assign_room_admits_owner_public_member_only():
+    """The ONE reach check (I1): a non-member is refused on a private room, an
+    invited member is admitted, and removal refuses them again."""
+    c, admin, room, tok, bob, btok = _member_fixture()
+    with pytest.raises(store.AccessError):
+        store.assign_room(c, btok["id"], room["id"], bob["id"])
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    store.assign_room(c, btok["id"], room["id"], bob["id"])   # member: admitted
+    assert room["id"] in store.rooms_for_token(c, btok["id"])
+    store.remove_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    with pytest.raises(store.AccessError):
+        store.assign_room(c, btok["id"], room["id"], bob["id"])
+
+
+def test_removal_revokes_token_rooms_in_the_same_transaction():
+    """I2/G2: removal is a revoke, not a hide -- the member's token_rooms rows
+    die with the membership, so reach ends on the agent's next call."""
+    c, admin, room, tok, bob, btok = _member_fixture()
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    store.assign_room(c, btok["id"], room["id"], bob["id"])
+    store.remove_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    assert store.rooms_for_token(c, btok["id"]) == {}
+    assert not store.is_member(c, room["id"], bob["id"])
+
+
+def test_membership_grants_reach_never_rule():
+    """I3 proven, not assumed (msg 8469): a member's ratify queue is EMPTY for
+    the shared room, and ratifying there is refused even at ratify tier --
+    ownership is the scope of the decide power and membership is not ownership."""
+    c, admin, room, tok, bob, btok = _member_fixture()
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    store.assign_room(c, btok["id"], room["id"], bob["id"])
+    d = _draft(c, room, tok)
+    bob_owned = {r["id"] for r in store.list_rooms(c, bob["id"])}
+    assert room["id"] not in bob_owned                  # membership is not ownership
+    assert store.ratify_queue(c, owned_rooms=bob_owned, is_admin=False) == []
+    with pytest.raises(store.AccessError):
+        store.ratify_memory(c, d["id"], tier="ratify", is_admin=False,
+                            owned_rooms=bob_owned, actor="web:bob")
+    # ...and the member rooms listing is deliberately NOT list_rooms: the
+    # authority derivations read list_rooms, the UI reads member_rooms.
+    assert [r["id"] for r in store.member_rooms(c, bob["id"])] == [room["id"]]
+
+
+def test_membership_audit_rows_exact():
+    c, admin, room, tok, bob, btok = _member_fixture()
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    store.remove_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    rows = store.room_audit_rows(c, room["id"])
+    assert [(r["action"], r["actor"], r["subject"]) for r in rows] == [
+        ("remove", "web:travis", "bob"), ("invite", "web:travis", "bob")]
+
+
+def test_invite_failures_confirm_nothing_about_who_exists():
+    """Q2: unknown user, the owner themselves, and an existing member all fail
+    with the SAME text -- a failed invite is not a user-directory probe. Only
+    the owner can invite at all."""
+    c, admin, room, tok, bob, btok = _member_fixture()
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    msgs = set()
+    for name in ("nosuchuser", "travis", "bob"):
+        try:
+            store.invite_member(c, room["id"], admin["id"], name,
+                                actor_name="web:travis")
+            assert False, f"expected BusError for {name}"
+        except store.BusError as e:
+            msgs.add(str(e))
+    assert len(msgs) == 1
+    with pytest.raises(store.AccessError):
+        store.invite_member(c, room["id"], bob["id"], "bob", actor_name="web:bob")
+
+
+def test_flip_to_private_spares_members_revokes_strangers():
+    """DES-004 sec 3: membership is additive to public. Going non-public keeps
+    the members' reach (to make it fully private, remove them) and still
+    revokes every non-member's tokens instantly."""
+    c, admin, room, tok, bob, btok = _member_fixture()
+    carol = store.create_user(c, "carol", "hunter2hunter2")
+    ctok = store.create_token(c, carol["id"], "carols", agent_name="carol-agent")
+    store.set_public(c, room["id"], admin["id"], True)
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    store.assign_room(c, btok["id"], room["id"], bob["id"])     # as member
+    store.assign_room(c, ctok["id"], room["id"], carol["id"])   # as public
+    store.set_public(c, room["id"], admin["id"], False)
+    assert room["id"] in store.rooms_for_token(c, btok["id"])   # member spared
+    assert store.rooms_for_token(c, ctok["id"]) == {}           # stranger revoked
+
+
+def test_membership_dies_with_user_and_room_audit_survives():
+    c, admin, room, tok, bob, btok = _member_fixture()
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    store.delete_user(c, bob["id"])
+    assert not store.is_member(c, room["id"], bob["id"])
+    assert store.member_list(c, room["id"], admin["id"]) == []
+    store.purge_room(c, room["id"], admin["id"])
+    rows = store.room_audit_rows(c, room["id"])
+    assert [r["action"] for r in rows] == ["invite"]   # record outlives both
+
+
+def test_migration_v13_to_v14_adds_membership_tables():
+    c, admin, room, tok = fixture()
+    c.execute("DROP TABLE room_members")
+    c.execute("DROP TABLE room_audit")
+    c.execute("PRAGMA user_version=13")
+    assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "v14.db")) \
+        == store.SCHEMA_VERSION
+    bob = store.create_user(c, "bob", "hunter2hunter2")
+    store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
+    assert store.is_member(c, room["id"], bob["id"])
+
+
 def test_last_admin_guard_holds_inside_the_transaction():
     """The guard must read the admin count INSIDE the write transaction. Read it outside
     and two admins deleting each other concurrently both see "2 admins", both proceed, and
