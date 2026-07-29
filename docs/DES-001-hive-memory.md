@@ -355,6 +355,33 @@ injection with a distribution mechanism. Write capability is a token property:
   and brief() until ratified. The web UI shows the ratify queue; the existing lesson
   promotion model ("admin promotes a room lesson to global") is this same gesture.
 - Tokens table gains one column (mem_tier). Minting UI gains one selector.
+- THE TIER MUST BE VISIBLE AND MUTABLE AFTER MINT (architect, 2026-07-28, operator
+  question). A selector that appears only at creation makes the tier write-only: once
+  the mint form is closed, nobody can answer "what can this token do?" without reading
+  the database. That is not hypothetical — it cost a live round-trip today, with the
+  operator and me holding different beliefs about one token's tier and no way to settle
+  it from the UI. The token list renders each token's tier beside its binding and rooms.
+  Mutability follows from the same argument and from the code: `_mem_ctx` resolves tier
+  and ownership LIVE on every request, so a change lands on the very next call. Tier is
+  AUTHORITY, and authority must be adjustable and revocable in place. Contrast binding,
+  which is IDENTITY and immutable by design (rebinding is a new token): making authority
+  immutable too would mean every promotion or demotion costs a re-mint, an .envrc edit,
+  and a re-registration wave — friction that gets paid by leaving tokens
+  over-privileged, which is the opposite of what the ladder is for.
+- ONE ORDERED LADDER, NOT A SET OF CAPABILITIES (same ruling). The tiers are cumulative
+  by construction — ratify contains write contains state — so authority is a single
+  comparison, not a subset test. Independent capability flags would multiply the state
+  space (three flags is eight combinations, most of them meaningless, e.g. may ratify
+  but may not write: a token that can promote others' drafts while unable to draft its
+  own) and every check would become "which subset?". The escalation found today came
+  from an authority with only TWO parts where the code checked one; multiplying the
+  parts multiplies exactly that failure.
+  The orthogonal axis the question is reaching for ALREADY EXISTS and is per-room: a
+  token's authority is (tier) x (the rooms it holds) x (its owner's admin bit), and the
+  room set is where "different powers in different places" is expressed. If a real role
+  ever needs something the ladder cannot say — a pure auditor that reads and writes
+  nothing, below today's floor — add a RUNG, do not switch models. Rungs stay totally
+  ordered and every existing check keeps working.
 - brief() renders memories as data with author + provenance labels, never as
   instructions. This does not eliminate the LLM-layer injection risk (an agent may
   still act on a hostile fact) — ratification is the load-bearing gate, rendering
@@ -686,23 +713,23 @@ in the store and simply has no web surface. Verified:
 
 - The enforcement S6 must REUSE, never reimplement: `ratify_memory` already gates on
   the ratifier's owned rooms and refuses global without admin
-  (src/agentbus/store.py:1845-1852), and `memory_add` already drafts a global write
-  from a non-admin (src/agentbus/store.py:1663-1666). The web handler's job is to
+  (src/reveille/store.py:1845-1852), and `memory_add` already drafts a global write
+  from a non-admin (src/reveille/store.py:1663-1666). The web handler's job is to
   resolve the browser principal and pass it down — if S6 grows its own authority check,
   there are now two, and they will disagree.
 - ABSENCE, and it is the actual work: there is no HTTP route for memories, ratify, or
-  recall anywhere in the daemon today. The 25 web routes (src/agentbus/daemon.py:2896-2917)
+  recall anywhere in the daemon today. The 25 web routes (src/reveille/daemon.py:2896-2917)
   cover chat, users, rooms, tokens, messages, search, presence and files — nothing
   memory. S6 adds the routes; the tools beneath them are done.
-- Web principal resolution exists: `_user_principal()` (src/agentbus/daemon.py:444-454),
+- Web principal resolution exists: `_user_principal()` (src/reveille/daemon.py:444-454),
   session cookie `rev_session` (daemon.py:48), the `web:<user>` tag already applied at
   daemon.py:1056 and 1089. Q5's `author='web:<user>'` therefore needs no new identity
   concept, which is why Q5 resolved as cheaply as it did.
-- The admin gate `_admin()` (src/agentbus/daemon.py:2655-2659) is the same one guarding
+- The admin gate `_admin()` (src/reveille/daemon.py:2655-2659) is the same one guarding
   the user-management routes. Global-scope memory writes and ratifications hang off
   that bit and no other.
 - RENDERING, the section 14.3 hazard, made concrete: the entire web UI is one inline
-  HTML string (src/agentbus/daemon.py:1270) rendered client-side, with escaping done by
+  HTML string (src/reveille/daemon.py:1270) rendered client-side, with escaping done by
   `esc()` (daemon.py:1907) and a markdown path `mdToHtml()` (daemon.py:1940) that
   escapes its source first. Memory facts go through `esc()` and NOT through
   `mdToHtml()`. Chat messages are typed by humans into their own room; memory facts are
