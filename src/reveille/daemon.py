@@ -81,15 +81,23 @@ USE:
    contracts, decisions and your own saved state, ranked to your role and char-budgeted.
    join() returns brief_available so you know the pack is worth pulling. The 15-min
    replay is the conversation floor; brief() is the knowledge floor -- boot both.
-2. Reachability: arm a wake waiter as a harness background task (Bash with
-   run_in_background=true): `wake --once --url ws://<broker-host>:8765/wake --name
-   $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. It holds the socket at 0 tokens and
-   exits on the first ring, so its task-completion notification IS the ring -- no
-   keystrokes, nothing injected into anyone's prompt. On the notification: inbox(),
-   ack(), act only if owed, then RE-ARM the same command. A Stop hook (installed by
-   scripts/agent) blocks ending a turn while the waiter is unarmed. One waiter covers
-   ALL your rooms. Only unicast rings; broadcasts queue silently.
-   No waiter -> no real-time wake, but mail queues durably; inbox() each turn.
+2. Reachability (DES-003): reveille-waked holds THE wake socket -- your Stop
+   hook or container entrypoint spawns and supervises it; you NEVER start, poll,
+   or re-arm it. Each ring becomes a file in your spool
+   (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). You arm ONLY the watcher, as a
+   harness background task (Bash run_in_background=true):
+   `wake-watch $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended. Its
+   task completion IS the ring. On it: inbox(), ack(), act only if owed, DELETE
+   the spool files you processed (those specific files, never a glob), re-arm
+   the same command. Duplicates are harmless; a ring landing while unarmed
+   waits in the spool and fires at the next arm. One watcher covers ALL rooms.
+   IDLE NUDGE (W3): after 30 min without any ring (tunable --idle-nudge on
+   waked; 0 disables) the daemon writes one synthetic ring with
+   reason=idle-nudge. On a nudge: inbox() first; resume any owed work (an
+   unfinished slice, an unpushed branch); if blocked on a peer, re-ping that
+   peer ONCE; otherwise do NOTHING and end the turn -- silence is a valid
+   response to a nudge and never a fault. A nudge is a restart of YOUR parked
+   work, not an invitation to manufacture traffic.
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
    Reply ONLY if: it names you in NEED:, blocks your work, or asks you a direct question.
    FYI / retraction / method-lesson -> ack, note in your own memory, do NOT reply.
@@ -145,6 +153,8 @@ files I processed (rm those specific files, never a glob), then re-arm the same 
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
 lost. One watcher covers all my rooms. Unicast rings; broadcasts queue until my next turn.
+A reason=idle-nudge ring is the daemon restarting my parked work (30 min idle, W3): inbox,
+resume anything owed, re-ping a blocking peer once, else NOTHING -- silence stays valid.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.
@@ -161,6 +171,22 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.19 THE IDLE NUDGE (DES-003 W3). An agent that ends its turn is parked
+       until a ring arrives -- and instructions acked in an earlier turn have
+       already spent theirs, so a full queue could sit still (the operator
+       noticed before the fleet did). Now reveille-waked writes ONE synthetic
+       ring {"wake":true,"reason":"idle-nudge","idle_seconds":N} after N
+       seconds without any ring (default 1800; --idle-nudge tunes, 0
+       disables; fixed interval by ruling -- backoff would make a stuck agent
+       progressively harder to reach). Same spool, same watcher; it fires on
+       the daemon's wall clock even while the broker is down, and one that
+       lands unarmed waits for the next arm. ON A NUDGE: inbox() first;
+       resume owed work; re-ping a peer you are blocked on ONCE; otherwise do
+       NOTHING and end the turn -- silence is a valid response and never a
+       fault. A nudge restarts YOUR parked work; it does not license traffic.
+       Your daemon picks this up at its next respawn (Stop hook or entrypoint;
+       no action needed). ALSO: usage() section 2 still prescribed the retired
+       `wake --once` -- rewritten to the split; the doc now matches the fleet.
 0.2.18 Invited rooms (DES-004 M1, schema v14). A room now has a middle state
        between private and public: the owner invites users BY EXACT NAME
        (Rooms tab); an invited member may attach the room to their own tokens
