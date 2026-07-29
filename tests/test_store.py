@@ -793,6 +793,54 @@ def test_lessons_fold_in_migration_v8_to_v9():
     assert got[0]["slug"] == "old-lesson" and got[0]["rule"] == "the old rule"
 
 
+def test_recall_reaches_every_lesson_field():
+    """v10: the index must cover all text a row carries. The two-probe test from
+    the search-index lesson, run positively: one unique term per lesson field,
+    each findable -- a zero on any of them means the index is narrower than the
+    data model again."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(
+        c, author="alice", slug="probe-lesson", room_id=room["id"],
+        symptom="probesymptomterm broke visibly",
+        root_cause="proberootterm was the actual cause",
+        rule="proberuleterm is now law",
+        detection="run probedetectterm to spot it")
+    for term in ("probesymptomterm", "proberootterm", "proberuleterm",
+                 "probedetectterm"):
+        got = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"],
+                           query=term)
+        assert got["count"] == 1, f"term {term} unreachable by search"
+        assert got["memories"][0]["slug"] == "probe-lesson"
+
+
+def test_fts_widen_migration_v9_to_v10():
+    """A v9-era narrow index (fact+entities only) is rebuilt wide: a term living
+    only in root_cause goes from zero hits to one, and delete-sync still works
+    against the new shape."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(
+        c, author="alice", slug="narrow-era", room_id=room["id"],
+        symptom="s", root_cause="onlyinrootcause", rule="r", detection="d")
+    # Rewind to the v9 shape: narrow index over the same rows.
+    c.execute("DROP TABLE memories_fts")
+    c.executescript("""
+        CREATE VIRTUAL TABLE memories_fts USING fts5(
+            fact, entities, content='memories', content_rowid='id',
+            tokenize="unicode61 tokenchars '-_'");
+    """)
+    c.execute("INSERT INTO memories_fts(rowid, fact, entities) "
+              "SELECT id, fact, entities FROM memories")
+    c.execute("PRAGMA user_version=9")
+    zero = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"],
+                        query="onlyinrootcause")
+    assert zero["count"] == 0  # the defect, reproduced against real narrow shape
+    assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "up.db")) \
+        == store.SCHEMA_VERSION
+    found = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"],
+                         query="onlyinrootcause")
+    assert found["count"] == 1 and found["memories"][0]["slug"] == "narrow-era"
+
+
 def test_brief_composition_ranking_and_budget():
     """DES-001 section 7: sections in order, role-relevant doctrine first, own state
     included, other agents' state absent, truncation MARKED never silent."""
