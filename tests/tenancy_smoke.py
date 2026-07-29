@@ -77,6 +77,13 @@ def main():
         assert pol == "no", f"restart policy {pol!r}"
         # the user root is 0700: other host users cannot browse it
         assert (os.stat(os.path.join(data, "ana")).st_mode & 0o777) == 0o700
+        # 8475 gate amendment: the agent dirs belong to the IMAGE's uid, not to
+        # whoever ran the launcher -- on a uid-1000 operator the two coincide
+        # and the marker writes below prove nothing; this assertion does not.
+        for sub in ("claude", "repos"):
+            st = os.stat(os.path.join(data, "ana", "dev", sub))
+            assert st.st_uid == 1000, \
+                f"{sub} owned by uid {st.st_uid}, container writes will EPERM"
 
         # -- cross-user isolation --------------------------------------------
         cexec("rev-ana-dev", "sh", "-c", "echo ana-secret > ~/.claude/marker")
