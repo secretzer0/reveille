@@ -24,6 +24,8 @@ files I processed (rm those specific files, never a glob), then re-arm the same 
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe, a
 ring that lands while unarmed waits in the spool and fires at the next arm. One watcher
 covers all my rooms. Unicast rings; broadcasts queue until my next turn.
+A reason=idle-nudge ring is the daemon restarting my parked work (30 min idle, W3): inbox,
+resume anything owed, re-ping a blocking peer once, else NOTHING -- silence stays valid.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.

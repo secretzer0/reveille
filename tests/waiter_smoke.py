@@ -97,13 +97,29 @@ def drain_discipline(port, tok, base):
         os.unlink(p)
 
 
-def start_waked(port, tok, base):
+def start_waked(port, tok, base, *extra):
     env = dict(os.environ, REVEILLE_TOKEN=tok, REVEILLE_SPOOL=base,
                PYTHONPATH=str(REPO / "src"))
     return subprocess.Popen(
         [sys.executable, "-m", "reveille.waked",
-         "--url", f"ws://127.0.0.1:{port}/wake", "--name", AGENT],
+         "--url", f"ws://127.0.0.1:{port}/wake", "--name", AGENT, *extra],
         env=env, stderr=subprocess.PIPE, text=True)
+
+
+def wait_entry(base, reason, timeout=10):
+    """Poll the spool for the next entry with this reason; return its
+    nanosecond filename stamp and delete it."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for p in spool.entries(AGENT, base=base):
+            with open(p) as f:
+                obj = json.loads(f.read())
+            if obj.get("reason") == reason:
+                ns = int(os.path.basename(p).split(".")[0])
+                os.unlink(p)
+                return ns
+        time.sleep(0.1)
+    raise SystemExit(f"no {reason} entry within {timeout}s")
 
 
 def run_watch(base, timeout=30):
@@ -132,7 +148,7 @@ def main():
                               stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL)
     base1, base2 = tempfile.mkdtemp(), tempfile.mkdtemp()
-    d1 = d2 = d3 = None
+    d1 = d2 = d3 = d4 = None
     try:
         wait_health(port)
         # Both identities join once -- production shape: an agent joins on
@@ -179,13 +195,35 @@ def main():
         r = run_watch(base1, timeout=60)
         assert json.loads(r.stdout)["wake"] is True
         assert d3.poll() is None, "daemon died across the broker restart"
+        drain_discipline(port, toks[AGENT], base1)   # clear the poke gate for 5
+
+        # 5. W3 idle nudge with a LIVE broker: nudges arrive on the interval,
+        # and a real ring RESETS the timer. Sequence: nudge N1 lands; 1.5s
+        # later a real message rings; the next nudge must then land a full
+        # interval (2s) after the REAL ring -- without the reset it would land
+        # ~0.5s after it (2s after N1). The margins clear the nudger's 1s
+        # check granularity.
+        base3 = tempfile.mkdtemp()
+        d4 = start_waked(port, toks[AGENT], base3, "--idle-nudge", "2")
+        rc = d3.wait(timeout=15)          # d4 supersedes d3, by design
+        assert rc == 2
+        wait_entry(base3, "idle-nudge")   # N1: the nudge fires at all
+        time.sleep(1.5)
+        send_to_agent(port, toks[SENDER], "ring five")
+        real_ns = wait_entry(base3, "message")
+        drain_discipline(port, toks[AGENT], base3)   # ack clears the poke gate
+        nudge_ns = wait_entry(base3, "idle-nudge")
+        gap = (nudge_ns - real_ns) / 1e9
+        assert gap >= 1.9, f"nudge {gap:.2f}s after a real ring: timer not reset"
+        d4.terminate()
 
         print("waiter-smoke OK: attach+ring+watch+drain, supersede exits the "
               "old holder (code 2) and rings follow the new one, kill -9 "
               "reclaim via supersede, broker restart absorbed with zero agent "
-              "re-arms")
+              "re-arms, idle nudge fires on the interval and a real ring "
+              "resets its timer")
     finally:
-        for p in (d1, d2, d3):
+        for p in (d1, d2, d3, d4):
             if p and p.poll() is None:
                 p.terminate()
         broker.terminate()

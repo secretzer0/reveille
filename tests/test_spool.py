@@ -78,6 +78,67 @@ def test_drain_then_rearm_does_not_reloop(tmp_path):
     assert json.loads(out)["unread"] == 1     # fresh ring, fresh fire
 
 
+def _waked_nudging(tmp_path, nudge_s, agent="a1"):
+    # The URL resolves nowhere on purpose: the nudge must fire on the daemon's
+    # wall clock even while the broker is unreachable (W3).
+    return subprocess.Popen(
+        [sys.executable, "-m", "reveille.waked",
+         "--url", "ws://127.0.0.1:1/wake", "--name", agent,
+         "--idle-nudge", str(nudge_s)],
+        env=_env(tmp_path), stderr=subprocess.DEVNULL)
+
+
+def test_nudge_due_is_pure_and_zero_disables():
+    S = 10**9
+    assert spool  # keep import obvious
+    from reveille import waked
+    assert waked.nudge_due(0, 3 * S, 3) is True
+    assert waked.nudge_due(0, 2 * S, 3) is False
+    assert waked.nudge_due(0, 10**15, 0) is False      # 0 never nudges
+    assert json.loads(waked.nudge_frame(1800)) == \
+        {"wake": True, "reason": "idle-nudge", "idle_seconds": 1800}
+
+
+def test_idle_nudge_one_per_interval_never_a_burst(tmp_path):
+    # W3 gate: no rings -> exactly one nudge per interval. 3.5s at interval 1
+    # (checker granularity 1s) admits 2-3 entries; a burst would show many.
+    p = _waked_nudging(tmp_path, 1)
+    try:
+        time.sleep(3.5)
+    finally:
+        p.terminate()
+        p.wait(timeout=5)
+    entries = spool.entries("a1", base=str(tmp_path))
+    assert 2 <= len(entries) <= 3, f"{len(entries)} nudges in 3.5s at interval 1"
+    stamps = []
+    for e in entries:
+        with open(e) as f:
+            obj = json.loads(f.read())
+        assert obj["reason"] == "idle-nudge" and obj["idle_seconds"] == 1
+        stamps.append(int(os.path.basename(e).split(".")[0]))
+    for a, b in zip(stamps, stamps[1:]):
+        assert b - a >= 0.9 * 10**9, "nudges closer than the interval: a burst"
+
+
+def test_idle_nudge_zero_writes_none_ever(tmp_path):
+    p = _waked_nudging(tmp_path, 0)
+    try:
+        time.sleep(2.5)
+    finally:
+        p.terminate()
+        p.wait(timeout=5)
+    assert spool.entries("a1", base=str(tmp_path)) == []
+
+
+def test_unarmed_nudge_fires_at_next_arm(tmp_path):
+    # I3 must hold for synthetic rings too: a nudge that landed while no
+    # watcher was armed waits in the spool and fires immediately on arm.
+    from reveille import waked
+    spool.write_ring("a1", waked.nudge_frame(3), base=str(tmp_path))
+    r = _watch(tmp_path)
+    assert r.returncode == 0 and json.loads(r.stdout)["reason"] == "idle-nudge"
+
+
 def test_waked_flock_singleton_second_start_exits_zero(tmp_path):
     # The Stop hook spawns blindly; the loser must exit 0 on its own, before
     # ever touching the network (the URL below resolves nowhere).
