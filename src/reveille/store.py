@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -252,8 +252,14 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_mem_scope ON memories(scope, kind, status);
 CREATE INDEX IF NOT EXISTS idx_mem_super ON memories(supersedes_id);
 CREATE INDEX IF NOT EXISTS idx_mem_slug  ON memories(scope, slug) WHERE slug IS NOT NULL;
+-- v10: the index covers EVERY text field a memory row carries. It shipped as
+-- fact+entities while lessons rode along with four more text columns, which made
+-- three of a lesson's five fields -- including the symptom you can see and the
+-- detection command you would run -- unreachable by search (lesson
+-- search-index-narrower-than-the-data-model). A table that gains columns widens
+-- its search index in the same change.
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-    fact, entities,
+    fact, entities, symptom, root_cause, rule, detection,
     content='memories', content_rowid='id',
     tokenize="unicode61 tokenchars '-_'"
 );
@@ -410,6 +416,10 @@ def migrate(conn, db_path):
         _upgrade_v8(conn, db_path)
     elif v == 8:
         _upgrade_v8(conn, db_path)
+    elif v == 9:
+        _upgrade_v9(conn, db_path)
+    # Chains from <=v8 need no v9 step: _upgrade_v8 lays _MEMORIES_SCHEMA, which
+    # already carries the v10 index shape, and backfills through _memory_insert.
     return SCHEMA_VERSION
 
 
@@ -539,6 +549,32 @@ def _upgrade_v8(conn, db_path):
                     slug=r["slug"], symptom=r["symptom"], root_cause=r["root_cause"],
                     rule=r["rule"], detection=r["detection"], created_ns=r["created_ns"])
             conn.execute("DROP TABLE lessons")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v9(conn, db_path):
+    """v9 -> v10: widen memories_fts to every text column the row carries.
+
+    The v9 index covered fact+entities while lessons rode along with symptom,
+    root_cause, rule and detection -- so a completeness sweep for a term sitting
+    in root_cause returned zero against a row that demonstrably contained it
+    (lesson search-index-narrower-than-the-data-model). An external-content FTS
+    table cannot ALTER its column set: drop, recreate at the new shape, rebuild
+    from the rows that exist now -- same obligation the v0 rebuild states."""
+    snapshot(conn, f"{db_path}.pre-v10-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    with tx(conn):
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        _exec_script(conn, """
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                fact, entities, symptom, root_cause, rule, detection,
+                content='memories', content_rowid='id',
+                tokenize="unicode61 tokenchars '-_'"
+            )
+        """)
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
+            "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
+            "rule, detection FROM memories")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -1618,8 +1654,10 @@ def _memory_insert(conn, *, kind, scope, fact, author, status, entities="",
          slug, symptom, root_cause, rule, detection, author, status,
          occurred_ns, now, expires_ns))
     mid = cur.lastrowid
-    conn.execute("INSERT INTO memories_fts(rowid, fact, entities) VALUES(?,?,?)",
-                 (mid, fact, " ".join(sorted(ents))))
+    conn.execute("INSERT INTO memories_fts(rowid, fact, entities, symptom, "
+                 "root_cause, rule, detection) VALUES(?,?,?,?,?,?,?)",
+                 (mid, fact, " ".join(sorted(ents)), symptom, root_cause, rule,
+                  detection))
     conn.executemany(
         "INSERT OR IGNORE INTO memory_entities(entity, memory_id) VALUES(?,?)",
         [(e, mid) for e in ents])
@@ -1876,16 +1914,18 @@ def sweep_expired_state(conn):
     """Hard-delete expired state memories (they are ephemeral by contract) with the
     FTS old-values delete sync. Joins the hourly sweep; reads already filter on
     expires_ns, so this is hygiene, not the correctness gate."""
-    rows = conn.execute("SELECT id, fact, entities FROM memories WHERE kind='state' "
+    rows = conn.execute("SELECT id, fact, entities, symptom, root_cause, rule, "
+                        "detection FROM memories WHERE kind='state' "
                         "AND expires_ns IS NOT NULL AND expires_ns <= ?",
                         (time.time_ns(),)).fetchall()
     if not rows:
         return 0
     with tx(conn):
         conn.executemany(
-            "INSERT INTO memories_fts(memories_fts, rowid, fact, entities) "
-            "VALUES('delete',?,?,?)",
-            [(r["id"], r["fact"], r["entities"]) for r in rows])
+            "INSERT INTO memories_fts(memories_fts, rowid, fact, entities, "
+            "symptom, root_cause, rule, detection) VALUES('delete',?,?,?,?,?,?,?)",
+            [(r["id"], r["fact"], r["entities"], r["symptom"], r["root_cause"],
+              r["rule"], r["detection"]) for r in rows])
         ids = [r["id"] for r in rows]
         ph = _ph(ids)
         conn.execute(f"DELETE FROM memory_entities WHERE memory_id IN ({ph})", ids)

@@ -154,6 +154,15 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.10 recall() reaches every lesson field (schema v10). The memory search index
+       covered fact+entities only, so a term living in a lesson's symptom,
+       root_cause or detection returned ZERO against a row that contained it --
+       a completeness sweep could "prove" absence the corpus refuted. The index
+       now spans fact, entities, symptom, root_cause, rule and detection; no
+       tool signatures changed. Old rule stands until re-verified: a zero-hit
+       search proves the index lacks the term, never that the corpus does --
+       for exhaustive sweeps still enumerate full rows (lessons()) and match
+       client-side.
 0.2.9  brief() -- the onboarding pack (DES-001 S4). One call after join() returns a
        char-budgeted (default 28000 ~ 7k tokens), ranked composition: lessons,
        doctrine (ranked by entity overlap with your role= string), live contracts,
