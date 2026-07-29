@@ -243,6 +243,12 @@ launcher-supervision-smoke: sync
 joinhere-smoke: sync
 	uv run python tests/joinhere_smoke.py
 
+# Attachment gate: a file on the bus must come back byte-identical and keep its
+# name by EVERY route a client uses -- multipart (curl -F and every HTTP
+# library), raw body (the web composer), and the MCP upload() tool.
+upload-gate: sync
+	uv run python tests/upload_gate.py
+
 lint:
 	uv run ruff check src tests scripts
 

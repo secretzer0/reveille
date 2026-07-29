@@ -27,6 +27,8 @@ task-completion notification wakes the session to pull its mail over MCP and re-
 No keystroke injection anywhere. One held connection, one wake per gate cycle.
 """
 import asyncio
+import base64
+import binascii
 import contextlib
 import html
 import logging
@@ -181,6 +183,20 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.22 ATTACHMENTS: use the new upload() TOOL, and keep the real extension.
+       upload(name="shot.png", data_b64=<base64 of the bytes>) returns the dict
+       you pass in send()'s `attachments` list. One uniform path, so no agent
+       re-derives multipart forms, token headers and room scope by hand.
+       FIXED: POST /upload stored the whole multipart ENVELOPE -- boundary
+       lines, Content-Disposition header and all -- whenever a client sent a
+       form (curl -F, requests, fetch+FormData). The stored blob was not a
+       valid file, and its name fell back to file.bin, which also failed the
+       UI's is-this-an-image test. So one bug broke both the inline preview and
+       the download. Raw-body uploads (?name=) were never affected. If you
+       attached anything via a form before this version, re-upload it.
+       THE EXTENSION IS LOAD-BEARING: /files/* types its response from it and
+       the web UI renders images inline by testing it. blob.bin renders for
+       nobody.
 0.2.21 A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. The
        `shout` parameter is RETIRED -- delete it from anything you send. It
        shipped in 0.1.5 and worked, but its checkbox hid itself whenever a
@@ -475,6 +491,8 @@ CHANGES (newest first; re-read after any broker version bump):
        Messages carry an "attachments" list everywhere (inbox/history/thread).
        The attachments FIELD is the only form -- never write "[file: ...]" markers
        into a body; they are plain text and no consumer parses them.
+       (0.2.22: prefer the upload() TOOL over hand-rolled HTTP, and always keep
+       the file's real extension -- it is what makes an image render inline.)
        Agents: need the content -> fetch <broker><url> with your Bearer token;
        otherwise ignore it. Nothing else changes for you.
 0.1.3  Native wake: the tmux keystroke sidecar is GONE. Arm `wake --once` yourself as a
@@ -981,6 +999,45 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
 
 
 @mcp.tool()
+async def upload(name: str, data_b64: str, room: str = "",
+                 ctx: Context = None) -> dict:
+    """Attach a FILE to the bus: base64 its bytes, pass the real filename, get
+    back the dict you put in send()'s `attachments` list.
+
+    upload(name="shot.png", data_b64=base64.b64encode(open("shot.png","rb").read()).decode())
+    -> {"url": "/files/...", "name": "shot.png", "bytes": n}
+
+    KEEP THE REAL EXTENSION on `name`: /files/* types the response from it and
+    the web UI decides to show an image inline by testing it, so a file called
+    blob.bin downloads as octet-stream and never renders for the human reading
+    the room.
+
+    This exists so every agent uploads the same way. Hand-rolled HTTP works, but
+    each caller then re-derives the multipart form, the token header and the
+    room scope -- and one of those getting it wrong is what corrupted every
+    attachment before 0.2.22. Same size caps as the HTTP route; the cap is on
+    the DECODED bytes, not the base64."""
+    p = _me(ctx.request_context.request)
+    rid = store.resolve_send_room(p.rooms, room=room or None)
+    try:
+        data = base64.b64decode(data_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise store.BusError(f"data_b64 is not valid base64: {e}") from None
+    if not data:
+        raise store.BusError("empty file")
+    used = _files_used() if QUOTA_BYTES else 0
+    if (why := _upload_refusal(used, len(data))):
+        raise store.BusError(why)
+    fname = _FNAME_RE.sub("_", name or "file.bin")[-80:]
+    stored = f"{time.time_ns() // 1_000_000}-{fname}"
+    (_files_dir / stored).write_bytes(data)
+    store.record_file(_conn, stored, rid, p.name)
+    log.info("%s upload(mcp) %s (%s bytes) -> /files/%s",
+             p.name, fname, len(data), stored)
+    return {"url": f"/files/{stored}", "name": fname, "bytes": len(data)}
+
+
+@mcp.tool()
 async def thread(thread_id: int, ctx: Context = None) -> dict:
     """Every message in a thread, oldest first, as {"messages": [...]}. Linear view."""
     p = _me(ctx.request_context.request)
@@ -1403,9 +1460,15 @@ def _upload_refusal(used, size):
 
 @_guard
 async def upload_http(request):
-    """POST /upload?name=<filename>[&room=] with the raw file bytes as the body. Stores it
-    under a unique name, records which room it belongs to, and returns
-    {"url": "/files/<stored>", "name": <original>, "bytes": n}.
+    """POST /upload[?name=<filename>][&room=] -- EITHER raw file bytes as the body
+    (pass ?name= so the extension survives) OR a multipart/form-data file part,
+    which is what curl -F and every HTTP library send; the part's own filename is
+    used. Stores it under a unique name, records which room it belongs to, and
+    returns {"url": "/files/<stored>", "name": <original>, "bytes": n}.
+
+    KEEP THE EXTENSION. It is not cosmetic: /files/* types the response from it,
+    and the web UI decides to render an image inline by testing it. A blob named
+    file.bin downloads as octet-stream and never renders.
 
     413 comes in two flavours and they want different reactions: "too large" is this ONE
     file over the 25MB cap (split it, or link it); "storage full" is the broker's whole
@@ -1430,12 +1493,33 @@ async def upload_http(request):
     declared = int(request.headers.get("content-length") or 0)
     if (why := _upload_refusal(used, declared)):
         return JSONResponse({"error": why}, status_code=413)
-    buf = bytearray()
-    async for chunk in request.stream():
-        buf += chunk
-        if (why := _upload_refusal(used, len(buf))):
-            return JSONResponse({"error": why}, status_code=413)   # hangs up mid-stream
-    data = bytes(buf)
+    if (request.headers.get("content-type") or "").startswith("multipart/form-data"):
+        # A multipart body is an ENVELOPE, not the file: it carries boundary
+        # lines, a Content-Disposition header and the payload. Storing the body
+        # verbatim wrote all of that to disk, so the blob was a few hundred bytes
+        # larger than the source and not a valid image at all -- and the stored
+        # name fell back to file.bin, which then failed the UI's extension test,
+        # so the same bug broke inline rendering AND download. Every standard
+        # client (curl -F, requests, fetch+FormData) posts this way.
+        form = await request.form()
+        part = next((v for v in form.values() if hasattr(v, "read")), None)
+        if part is None:
+            return JSONResponse({"error": "no file part in multipart body"},
+                                status_code=400)
+        data = await part.read()
+        if (why := _upload_refusal(used, len(data))):
+            return JSONResponse({"error": why}, status_code=413)
+        # The sender's own filename wins over ?name= here: it is the more
+        # specific statement, and it is what carries the extension.
+        if part.filename:
+            name = _FNAME_RE.sub("_", part.filename)[-80:]
+    else:
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if (why := _upload_refusal(used, len(buf))):
+                return JSONResponse({"error": why}, status_code=413)  # hangs up mid-stream
+        data = bytes(buf)
     if not data:
         return JSONResponse({"error": "empty body"}, status_code=400)
     stored = f"{time.time_ns() // 1_000_000}-{name}"
