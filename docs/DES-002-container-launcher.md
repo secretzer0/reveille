@@ -27,11 +27,13 @@ nothing. What does not exist:
   artifact happens to live elsewhere (remote git, broker). The launcher makes that a
   guarantee instead of a habit (G5).
 
-Scope boundary: these are the OPERATOR'S containers on the operator's box. DECISIONS
-rejected hosting customers' agents (credential custody, runaway spend, miner magnet)
-— nothing here reverses that; the launcher is homebrew tooling that a customer runs
-on their own hardware, which is the product thesis (the bus is the product; agents
-run on the customer's compute).
+Scope boundary (SUPERSEDED 2026-07-29 by DES-005 §1 — operator reversal): this doc
+was written for the OPERATOR'S containers on the operator's box, and DECISIONS had
+rejected hosting customers' agents (credential custody, runaway spend, miner magnet).
+DES-005 reverses that: signed-up users spawn their own agents from the browser, on
+the reveille host. The three risks are now requirements, not avoidances — users bring
+their own subscription tokens (no billing custody), and quotas/egress/caps are P0
+work. Everything else in this document stands as written.
 
 ## 2. Goals
 
@@ -45,8 +47,8 @@ G4. The broker stays mail-only. Nothing about containers reaches broker code
 G5. Disposable compute: container state that matters lives in the remote (git),
     the broker (mail, hive memory), or volumes — kill and re-provision is routine.
 
-Non-goals: hosting CUSTOMERS' agents (rejected in DECISIONS — custody of their
-credentials, runaway spend, miner magnet); multi-agent containers; worktrees across
+Non-goals: ~~hosting CUSTOMERS' agents~~ (REVERSED 2026-07-29 — see DES-005);
+multi-agent containers; worktrees across
 containers (each container is a full clone; the remote is the shared object store;
 the bus is the coordination layer git lacks).
 
