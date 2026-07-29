@@ -8,25 +8,39 @@ here); the launcher holds NO standing broker credential and launcher.db NEVER pe
 a token or a gate secret (R1) -- env dies with the container and re-provision prompts
 again.
 
-  reveille-launch new <role> <repo-url> [--broker URL] [--mem 4g] [--cpus 2]
-                                        [--network host] [--image IMG] [--timeout 90]
+Tenancy (DES-005 P0): every container belongs to a (user, agent) pair --
+rev-<user>-<agent>, so two users may both run a 'senior-dev'. Persistent state
+is PER AGENT: data/<user>/<agent>/{claude,repos} bind-mounts to ~/.claude and
+~/repos; two agents of one user share NOTHING on disk (want isolation? create
+another agent). Renaming an agent would be a move of that root -- there is no
+rename; destroy+create. Quotas (cpu/mem/pids + container cap) come from
+QUOTA_DEFAULTS overlaid with the user's `quota` overrides. Restart policy is
+`no`: reboot and crash both leave a container down, so 'running' always means
+somebody meant it.
+
+  reveille-launch new <user> <agent> <repo-url> [--broker URL] [--network N]
+                                        [--image IMG] [--timeout 90] [--no-wait]
       Provision one agent container. Token read from stdin (piped) or prompted --
       NEVER argv (argv leaks; the wake-127 lesson is fleet law). Succeeds when the
-      broker's presence shows the role live+connected (health-by-presence, 3.2.5).
+      broker's presence shows the agent live+connected (health-by-presence, 3.2.5).
   reveille-launch ls
-  reveille-launch stop <role> | start <role>
-  reveille-launch destroy <role> [--purge]     --purge also drops the claude-home volume
-  reveille-launch grant <role> <grantee> [--mode viewer|driver] [--ttl 86400]
+  reveille-launch stop <user> <agent> | start <user> <agent>
+  reveille-launch destroy <user> <agent> [--purge]   --purge drops the data root
+  reveille-launch quota <user> [--cpus N] [--mem 8g] [--pids N] [--max-containers N]
+      Show (bare) or override (flags) one user's quotas.
+  reveille-launch grant <user> <agent> <grantee> [--mode viewer|driver] [--ttl 86400]
       Mint a per-grant URL token (docker exec attach-gate mint -- the secret never
       leaves the container) and record the grant. The token is PRINTED ONCE, never
       stored (4.5.2): re-issue is re-mint, never retrieval.
-  reveille-launch grants [role]                 list grant records
-  reveille-launch revoke <role> <grant-id>      kill d-/v-<id> now; audit line exact
-  reveille-launch flip <role> on|off            multi-driver opt-out toggle (4.3)
-  reveille-launch sweep [--loop SECONDS]
+  reveille-launch grants [user] [agent]              list grant records
+  reveille-launch revoke <user> <agent> <grant-id>   kill d-/v-<id> now; audit exact
+  reveille-launch flip <user> <agent> on|off         multi-driver toggle (4.3)
+  reveille-launch sweep [--loop SECONDS] [--idle-hours 24]
       The tick 4.6 assigns the launcher: kill d-*/v-* sessions whose grant is
-      expired/revoked/mode-mismatched, harvest the gate's ATTACH lines, and derive
-      DETACH lines from sessions observed gone (observation time, stated as such).
+      expired/revoked/mode-mismatched, harvest the gate's ATTACH lines, derive
+      DETACH lines from sessions observed gone (observation time, stated as such),
+      and STOP (never destroy) containers idle past the window -- no attached
+      client, no session activity, no waiting ring (DES-005 7.1).
   reveille-launch join-here <role> [--broker URL]
       Bootstrap THIS user's terminal for one agent identity (DES-003 2.4): env
       fragment (0600 -- the ONLY file the token ever touches; stdin, never argv),
@@ -61,7 +75,20 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
 DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.2")
+# Per-agent persistent state (DES-005 sec 4, a7d389b): data/<user>/<agent>/{claude,repos}.
+# The user segment exists for ownership and deletion ONLY -- two agents of one
+# user share NOTHING on disk.
+DEFAULT_DATA = os.environ.get(
+    "REVEILLE_LAUNCH_DATA", os.path.expanduser("~/.reveille/data"))
 ROLE_RE = re.compile(r"\A[a-z0-9][a-z0-9-]{1,63}\Z")
+
+# Tenancy defaults (DES-005 sec 6, sized for an agent that BUILDS): every value
+# per-user overridable via the user_quotas table (`quota` subcommand).
+# disk_gb is RECORDED and surfaced but not yet enforced.
+# ponytail: disk enforcement needs fs project quotas or a storage-opt-capable
+# driver; add at P4 hardening if the host fs cooperates.
+QUOTA_DEFAULTS = {"cpus": 2.0, "mem": "8g", "disk_gb": 50, "pids": 512,
+                  "max_containers": 5}
 
 # Secrets ride the ENVIRONMENT of the docker-run child (docker reads `-e NAME` from the
 # launcher's env), so their VALUES never appear in argv. This is the whole no-argv
@@ -92,28 +119,40 @@ def die(msg, code=2):
     raise SystemExit(code)
 
 
-def container_name(role):
-    return f"rev-{role}"
+def container_name(user, agent):
+    """rev-<user>-<agent> (DES-005 sec 6): namespaced so two users may both run
+    a 'senior-dev'."""
+    return f"rev-{user}-{agent}"
 
 
-def volume_name(role):
-    return f"rev-{role}-claude"
+def data_root(user, agent, base=None):
+    """This AGENT's home on the host. Nothing else ever mounts it: two agents of
+    one user are as separate as two users (sec 4). Renaming an agent would be a
+    MOVE of this path -- there is deliberately no rename; destroy+create."""
+    return os.path.join(base or DEFAULT_DATA, user, agent)
 
 
-def docker_run_argv(role, image, mem, cpus, network, forward_anthropic, boot_cmd=None):
+def docker_run_argv(user, agent, image, network, quotas, forward_anthropic,
+                    boot_cmd=None, data_base=None):
     """The docker-run command as argv. `-e NAME` entries pass values BY NAME from the
     child's env, so no secret is ever a token in this list -- the test asserts exactly
-    that. boot_cmd overrides the image's default (claude reveille) -- for a shell, a
-    diagnostic like `agent-probe`, or any ops need. Pure: no env read, no side effects."""
+    that. quotas is a resolved QUOTA_DEFAULTS-shaped dict. `--restart no` is explicit
+    although it is docker's default: reboot and crash both leave the container down,
+    so 'running' always means somebody meant it (sec 7.1). Pure: no env read, no
+    side effects."""
+    root = data_root(user, agent, base=data_base)
     argv = [
         "docker", "run", "-d",
-        "--name", container_name(role),
-        "--label", f"reveille.role={role}",
-        "--restart", "unless-stopped",
+        "--name", container_name(user, agent),
+        "--label", f"reveille.user={user}",
+        "--label", f"reveille.agent={agent}",
+        "--restart", "no",
         "--network", network,
-        "--memory", mem,
-        "--cpus", str(cpus),
-        "-v", f"{volume_name(role)}:/home/agent/.claude",
+        "--memory", quotas["mem"],
+        "--cpus", str(quotas["cpus"]),
+        "--pids-limit", str(quotas["pids"]),
+        "-v", f"{os.path.join(root, 'claude')}:/home/agent/.claude",
+        "-v", f"{os.path.join(root, 'repos')}:/home/agent/repos",
         "-e", "REVEILLE_AGENT_ROLE",
         "-e", "REVEILLE_URL",
         "-e", "REVEILLE_REPO_URL",
@@ -121,8 +160,8 @@ def docker_run_argv(role, image, mem, cpus, network, forward_anthropic, boot_cmd
     for name in ENV_PASSTHROUGH_SECRET:
         argv += ["-e", name]
     if forward_anthropic:
-        # Headless claude needs its Anthropic credential; the claude-home volume carries
-        # a login (R2), but a fresh volume has none, so forward the operator's key by
+        # Headless claude needs its Anthropic credential; the claude home carries
+        # a login (R2), but a fresh home has none, so forward the operator's key by
         # name if they have one. Not a broker secret, not persisted.
         argv += ["-e", "ANTHROPIC_API_KEY"]
     argv.append(image)
@@ -130,6 +169,29 @@ def docker_run_argv(role, image, mem, cpus, network, forward_anthropic, boot_cmd
         import shlex
         argv += shlex.split(boot_cmd)
     return argv
+
+
+def resolve_quotas(row):
+    """QUOTA_DEFAULTS overlaid with a user's override row (sqlite Row or dict or
+    None); NULL columns keep the default. Pure."""
+    q = dict(QUOTA_DEFAULTS)
+    if row is not None:
+        for k in QUOTA_DEFAULTS:
+            v = row[k] if not isinstance(row, dict) else row.get(k)
+            if v is not None:
+                q[k] = v
+    return q
+
+
+def is_idle(attached, last_activity_ns, last_ring_ns, now_ns, window_ns):
+    """The 24h-idle-stop decision (sec 7.1), pure. Idle = no attached tmux
+    client AND no session activity AND no wake ring inside the window. An agent
+    working autonomously overnight shows session activity (its panes update on
+    every bus turn) and is never reclaimed -- that case is the point."""
+    if window_ns <= 0 or attached:
+        return False
+    newest = max(last_activity_ns or 0, last_ring_ns or 0)
+    return now_ns - newest >= window_ns
 
 
 def health_from_presence(agents, role):
@@ -165,39 +227,81 @@ def wait_healthy(broker_url, role, token, timeout, poll=2.0):
 
 # ---- launcher.db (container records; NEVER a secret) -------------------------------
 
-def _db(path=None):
-    path = path or os.environ.get(
-        "REVEILLE_LAUNCH_DB", os.path.expanduser("~/.reveille/launcher.db"))
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
+def _migrate_launcher_db(conn):
+    """Pre-P0 launcher.db keyed everything by bare role. Clean cutover to
+    (user, agent): old rows become user='operator' -- they were all the
+    operator's -- and the volume column dies with the named volumes."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(containers)")}
+    if "role" not in cols:
+        return
+    conn.executescript("""
+        ALTER TABLE containers RENAME TO c_old;
+        ALTER TABLE grants RENAME TO g_old;
+        ALTER TABLE sessions_seen RENAME TO s_old;
+    """)
+    _launcher_tables(conn)
+    conn.execute("INSERT INTO containers(user, agent, repo_url, container, image, "
+                 "broker_url, created_ns) SELECT 'operator', role, repo_url, "
+                 "'rev-operator-'||role, image, broker_url, created_ns FROM c_old")
+    conn.execute("INSERT INTO grants(id, user, agent, grantee, mode, issued_ns, "
+                 "expiry_ns, revoked_ns) SELECT id, 'operator', role, grantee, "
+                 "mode, issued_ns, expiry_ns, revoked_ns FROM g_old")
+    conn.execute("INSERT INTO sessions_seen(user, agent, session, first_seen_ns) "
+                 "SELECT 'operator', role, session, first_seen_ns FROM s_old")
+    conn.executescript("DROP TABLE c_old; DROP TABLE g_old; DROP TABLE s_old;")
+    conn.commit()
+
+
+def _launcher_tables(conn):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS containers("
-        "role TEXT PRIMARY KEY, repo_url TEXT, container TEXT, volume TEXT, "
-        "image TEXT, broker_url TEXT, created_ns INTEGER)")
+        "user TEXT NOT NULL, agent TEXT NOT NULL, repo_url TEXT, container TEXT, "
+        "image TEXT, broker_url TEXT, created_ns INTEGER, "
+        "PRIMARY KEY(user, agent))")
     # Grant records (4.5.2): metadata ONLY -- the minted token is signable solely
     # with the container's gate secret, which this process never persists. A db
     # that could reproduce a live token would be the standing-credential store
     # 3.1 forbids.
     conn.execute(
         "CREATE TABLE IF NOT EXISTS grants("
-        "id TEXT PRIMARY KEY, role TEXT, grantee TEXT, mode TEXT, "
+        "id TEXT PRIMARY KEY, user TEXT, agent TEXT, grantee TEXT, mode TEXT, "
         "issued_ns INTEGER, expiry_ns INTEGER, revoked_ns INTEGER)")
     # What the sweep saw last tick, so a session OBSERVED GONE yields a DETACH
     # line (4.5.2: observation time, never a fabricated event time).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions_seen("
-        "role TEXT, session TEXT, first_seen_ns INTEGER, "
-        "PRIMARY KEY(role, session))")
+        "user TEXT, agent TEXT, session TEXT, first_seen_ns INTEGER, "
+        "PRIMARY KEY(user, agent, session))")
+    # Per-user quota overrides (DES-005 sec 6): NULL = QUOTA_DEFAULTS value.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_quotas("
+        "user TEXT PRIMARY KEY, cpus REAL, mem TEXT, disk_gb INTEGER, "
+        "pids INTEGER, max_containers INTEGER)")
+
+
+def _db(path=None):
+    path = path or os.environ.get(
+        "REVEILLE_LAUNCH_DB", os.path.expanduser("~/.reveille/launcher.db"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='containers'").fetchone():
+        _migrate_launcher_db(conn)
+    _launcher_tables(conn)
     return conn
 
 
-def _record(conn, role, repo_url, image, broker_url):
+def _quotas_for(conn, user):
+    return resolve_quotas(conn.execute(
+        "SELECT * FROM user_quotas WHERE user=?", (user,)).fetchone())
+
+
+def _record(conn, user, agent, repo_url, image, broker_url):
     conn.execute(
         "INSERT OR REPLACE INTO containers"
-        "(role, repo_url, container, volume, image, broker_url, created_ns) "
+        "(user, agent, repo_url, container, image, broker_url, created_ns) "
         "VALUES(?,?,?,?,?,?,?)",
-        (role, repo_url, container_name(role), volume_name(role), image,
+        (user, agent, repo_url, container_name(user, agent), image,
          broker_url, time.time_ns()))
     conn.commit()
 
@@ -303,21 +407,37 @@ def _ensure_network(net, broker_url):
 # ---- subcommands -------------------------------------------------------------------
 
 def cmd_new(a):
-    if not ROLE_RE.match(a.role):
-        die(f"bad role {a.role!r}: lowercase alnum + dash, 2-64 chars")
+    for label, val in (("user", a.user), ("agent", a.agent)):
+        if not ROLE_RE.match(val):
+            die(f"bad {label} {val!r}: lowercase alnum + dash, 2-64 chars")
+    name = container_name(a.user, a.agent)
     # Re-provision is routine (3.5) but must never be UNPROMPTED: an accidental `new`
-    # on a live role would destroy its session mid-conversation. Refuse unless the
-    # operator says --replace; the volume (login) survives either way.
-    if _exists(container_name(a.role)) and not a.replace:
-        die(f"{container_name(a.role)} already exists -- `destroy {a.role}` first, "
-            f"or pass --replace to re-provision (its claude-home volume is kept)")
-    token = read_secret(f"bound broker token for {a.role}")
+    # on a live agent would destroy its session mid-conversation. Refuse unless the
+    # operator says --replace; the data root (login, repos) survives either way.
+    if _exists(name) and not a.replace:
+        die(f"{name} already exists -- `destroy {a.user} {a.agent}` first, or pass "
+            f"--replace to re-provision (its data root is kept)")
+
+    conn = _db()
+    quotas = _quotas_for(conn, a.user)
+    # The per-user container cap (sec 6). The one being replaced does not count
+    # against itself.
+    others = conn.execute(
+        "SELECT count(*) FROM containers WHERE user=? AND agent!=?",
+        (a.user, a.agent)).fetchone()[0]
+    if others >= quotas["max_containers"]:
+        conn.close()
+        die(f"{a.user} is at their container cap ({quotas['max_containers']}); "
+            f"destroy one or raise it with `quota {a.user} --max-containers N`")
+
+    token = read_secret(f"bound broker token for {a.agent}")
     if not token:
+        conn.close()
         die("no token given (stdin empty and no prompt)")
 
     env = dict(
         os.environ,
-        REVEILLE_AGENT_ROLE=a.role,
+        REVEILLE_AGENT_ROLE=a.agent,
         REVEILLE_URL=a.broker,
         REVEILLE_REPO_URL=a.repo_url,
         REVEILLE_TOKEN=token,
@@ -326,32 +446,42 @@ def cmd_new(a):
         REVEILLE_GATE_SECRET=secrets.token_hex(32),
     )
 
+    # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
+    # host user browses it; the agent dirs under it are plain mkdirs.
+    root = data_root(a.user, a.agent)
+    user_root = os.path.dirname(root)
+    os.makedirs(user_root, mode=0o700, exist_ok=True)
+    os.chmod(user_root, 0o700)
+    for sub in ("claude", "repos"):
+        os.makedirs(os.path.join(root, sub), exist_ok=True)
+
     _ensure_network(a.network, a.broker)
-    _docker("volume", "create", volume_name(a.role), capture=True)
     if a.replace:
-        _docker("rm", "-f", container_name(a.role), check=False, capture=True)
-    argv = docker_run_argv(a.role, a.image, a.mem, a.cpus, a.network,
+        _docker("rm", "-f", name, check=False, capture=True)
+    argv = docker_run_argv(a.user, a.agent, a.image, a.network, quotas,
                            forward_anthropic=bool(os.environ.get("ANTHROPIC_API_KEY")),
                            boot_cmd=a.boot_cmd)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
 
-    conn = _db()
-    _record(conn, a.role, a.repo_url, a.image, a.broker)
+    _record(conn, a.user, a.agent, a.repo_url, a.image, a.broker)
     conn.close()
 
-    print(f"provisioned {container_name(a.role)} on network {a.network}; waiting for "
-          f"presence live+connected (timeout {a.timeout}s)...")
-    if wait_healthy(a.health_url, a.role, token, a.timeout):
-        print(f"OK: {a.role} is live+connected (broker {a.broker})")
+    if a.no_wait:
+        print(f"provisioned {name} on network {a.network} (health wait skipped)")
         return 0
-    print(f"UNHEALTHY: {a.role} never reached live+connected. Inspect:\n"
-          f"  docker logs --tail 20 {container_name(a.role)}", file=sys.stderr)
+    print(f"provisioned {name} on network {a.network}; waiting for "
+          f"presence live+connected (timeout {a.timeout}s)...")
+    if wait_healthy(a.health_url, a.agent, token, a.timeout):
+        print(f"OK: {a.agent} is live+connected (broker {a.broker})")
+        return 0
+    print(f"UNHEALTHY: {a.agent} never reached live+connected. Inspect:\n"
+          f"  docker logs --tail 20 {name}", file=sys.stderr)
     return 1
 
 
 def cmd_ls(a):
     conn = _db()
-    rows = conn.execute("SELECT * FROM containers ORDER BY role").fetchall()
+    rows = conn.execute("SELECT * FROM containers ORDER BY user, agent").fetchall()
     conn.close()
     if not rows:
         print("no containers provisioned")
@@ -360,77 +490,106 @@ def cmd_ls(a):
         st = _docker("inspect", "-f", "{{.State.Status}}", r["container"],
                      check=False, capture=True)
         status = (st.stdout or "").strip() or "absent"
-        print(f"{r['role']:20s} {status:10s} {r['image']:22s} {r['repo_url']}")
+        print(f"{r['user']:14s} {r['agent']:16s} {status:10s} "
+              f"{r['image']:22s} {r['repo_url']}")
     return 0
 
 
 def cmd_stop(a):
-    _docker("stop", container_name(a.role))
+    _docker("stop", container_name(a.user, a.agent))
     return 0
 
 
 def cmd_start(a):
-    _docker("start", container_name(a.role))
+    _docker("start", container_name(a.user, a.agent))
     return 0
 
 
 def cmd_destroy(a):
-    _docker("rm", "-f", container_name(a.role), check=False, capture=True)
+    _docker("rm", "-f", container_name(a.user, a.agent), check=False, capture=True)
+    root = data_root(a.user, a.agent)
     if a.purge:
-        _docker("volume", "rm", volume_name(a.role), check=False, capture=True)
-        print(f"destroyed {a.role} and purged its claude-home volume")
+        import shutil
+        shutil.rmtree(root, ignore_errors=True)
+        print(f"destroyed {a.user}/{a.agent} and purged {root}")
     else:
-        print(f"destroyed {a.role}; kept volume {volume_name(a.role)} (--purge to drop)")
+        print(f"destroyed {a.user}/{a.agent}; kept {root} (--purge to drop -- "
+              f"recreate picks up everything the agent learned)")
     conn = _db()
-    conn.execute("DELETE FROM containers WHERE role=?", (a.role,))
+    conn.execute("DELETE FROM containers WHERE user=? AND agent=?", (a.user, a.agent))
     # Grants die with the container (4.5) -- the gate secret they were signed
     # against is gone, so the records are history, not authority.
-    conn.execute("DELETE FROM grants WHERE role=?", (a.role,))
-    conn.execute("DELETE FROM sessions_seen WHERE role=?", (a.role,))
+    conn.execute("DELETE FROM grants WHERE user=? AND agent=?", (a.user, a.agent))
+    conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
+                 (a.user, a.agent))
     conn.commit()
     conn.close()
     return 0
 
 
-def _grant_row(conn, role, grant_id):
-    row = conn.execute("SELECT * FROM grants WHERE id=? AND role=?",
-                       (grant_id, role)).fetchone()
+def cmd_quota(a):
+    """Show or override one user's quotas. Bare `quota <user>` prints the
+    resolved values; any flag writes an override (NULL columns stay default)."""
+    conn = _db()
+    sets = {k: getattr(a, k) for k in
+            ("cpus", "mem", "disk_gb", "pids", "max_containers")
+            if getattr(a, k) is not None}
+    if sets:
+        conn.execute("INSERT OR IGNORE INTO user_quotas(user) VALUES(?)", (a.user,))
+        for k, v in sets.items():
+            conn.execute(f"UPDATE user_quotas SET {k}=? WHERE user=?", (v, a.user))
+        conn.commit()
+    q = _quotas_for(conn, a.user)
+    used = conn.execute("SELECT count(*) FROM containers WHERE user=?",
+                        (a.user,)).fetchone()[0]
+    conn.close()
+    print(f"{a.user}: cpus={q['cpus']} mem={q['mem']} disk_gb={q['disk_gb']} "
+          f"(recorded, not yet enforced) pids={q['pids']} "
+          f"containers={used}/{q['max_containers']}")
+    return 0
+
+
+def _grant_row(conn, user, agent, grant_id):
+    row = conn.execute("SELECT * FROM grants WHERE id=? AND user=? AND agent=?",
+                       (grant_id, user, agent)).fetchone()
     if row is None:
-        die(f"no grant {grant_id} on {role} (see `grants {role}`)")
+        die(f"no grant {grant_id} on {user}/{agent} (see `grants {user} {agent}`)")
     return row
 
 
-def _known_role(conn, role):
-    if conn.execute("SELECT 1 FROM containers WHERE role=?", (role,)).fetchone() is None:
-        die(f"unknown role {role!r} -- provision it first (`new`)")
+def _known_agent(conn, user, agent):
+    if conn.execute("SELECT 1 FROM containers WHERE user=? AND agent=?",
+                    (user, agent)).fetchone() is None:
+        die(f"unknown agent {user}/{agent} -- provision it first (`new`)")
 
 
 def cmd_grant(a):
     conn = _db()
-    _known_role(conn, a.role)
+    _known_agent(conn, a.user, a.agent)
+    name = container_name(a.user, a.agent)
     gid = secrets.token_hex(4)
     # Mint INSIDE the container: the gate secret never leaves it, re-issue is
     # re-mint (4.5.2). The launcher only ever holds the token long enough to
     # print it once.
-    res = _docker("exec", container_name(a.role),
+    res = _docker("exec", name,
                   "attach-gate", "mint", a.mode, str(a.ttl), gid,
                   check=False, capture=True)
     token = (res.stdout or "").strip()
     if res.returncode != 0 or not token.startswith("v1."):
-        die(f"mint failed in {container_name(a.role)} -- is it running?")
+        die(f"mint failed in {name} -- is it running?")
     now = time.time_ns()
     conn.execute(
-        "INSERT INTO grants(id, role, grantee, mode, issued_ns, expiry_ns, revoked_ns) "
-        "VALUES(?,?,?,?,?,?,NULL)",
-        (gid, a.role, a.grantee, a.mode, now, now + a.ttl * 10**9))
+        "INSERT INTO grants(id, user, agent, grantee, mode, issued_ns, expiry_ns, "
+        "revoked_ns) VALUES(?,?,?,?,?,?,?,NULL)",
+        (gid, a.user, a.agent, a.grantee, a.mode, now, now + a.ttl * 10**9))
     conn.commit()
     conn.close()
     ip = _docker("inspect", "-f",
                  "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-                 container_name(a.role), check=False, capture=True)
-    host = (ip.stdout or "").strip() or container_name(a.role)
+                 name, check=False, capture=True)
+    host = (ip.stdout or "").strip() or name
     exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + a.ttl))
-    print(f"grant {gid}: {a.mode} for {a.grantee} on {a.role}, expires {exp}")
+    print(f"grant {gid}: {a.mode} for {a.grantee} on {a.user}/{a.agent}, expires {exp}")
     print(f"attach: http://{host}:7681/?arg={token}")
     print("token shown once, never stored; lost token = revoke + re-grant")
     return 0
@@ -438,10 +597,16 @@ def cmd_grant(a):
 
 def cmd_grants(a):
     conn = _db()
-    q, args = "SELECT * FROM grants", ()
-    if a.role:
-        q += " WHERE role=?"
-        args = (a.role,)
+    q, args = "SELECT * FROM grants", []
+    conds = []
+    if a.user:
+        conds.append("user=?")
+        args.append(a.user)
+    if a.agent:
+        conds.append("agent=?")
+        args.append(a.agent)
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
     rows = conn.execute(q + " ORDER BY issued_ns", args).fetchall()
     conn.close()
     if not rows:
@@ -453,56 +618,59 @@ def cmd_grants(a):
                  else "expired" if now >= r["expiry_ns"] else "active")
         exp = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                             time.gmtime(r["expiry_ns"] / 1e9))
-        print(f"{r['id']}  {r['role']:16s} {r['grantee']:16s} "
+        print(f"{r['id']}  {r['user']:12s} {r['agent']:14s} {r['grantee']:16s} "
               f"{r['mode']:6s} {state:8s} expires {exp}")
     return 0
 
 
-def _kill_grant_sessions(role, grant_id):
+def _kill_grant_sessions(user, agent, grant_id):
     for prefix in ("d", "v"):  # both: a flip may have left the other-mode name
-        _docker("exec", container_name(role),
+        _docker("exec", container_name(user, agent),
                 "tmux", "kill-session", "-t", f"{prefix}-{grant_id}",
                 check=False, capture=True)
 
 
 def cmd_revoke(a):
     conn = _db()
-    row = _grant_row(conn, a.role, a.grant_id)
+    row = _grant_row(conn, a.user, a.agent, a.grant_id)
     # Kill first, record after: the <1s promise is about the client dropping.
-    _kill_grant_sessions(a.role, a.grant_id)
+    _kill_grant_sessions(a.user, a.agent, a.grant_id)
     conn.execute("UPDATE grants SET revoked_ns=? WHERE id=?",
                  (time.time_ns(), a.grant_id))
     # The killed session must not also read as an observed DETACH next tick.
-    conn.execute("DELETE FROM sessions_seen WHERE role=? AND session IN (?,?)",
-                 (a.role, f"d-{a.grant_id}", f"v-{a.grant_id}"))
+    conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=? AND "
+                 "session IN (?,?)",
+                 (a.user, a.agent, f"d-{a.grant_id}", f"v-{a.grant_id}"))
     conn.commit()
     conn.close()
-    _audit("REVOKE", role=a.role, grant=a.grant_id, mode=row["mode"],
-           grantee=row["grantee"], actor="launcher-cli")
-    print(f"revoked {a.grant_id} ({row['mode']} for {row['grantee']} on {a.role}); "
-          f"its token stays signed until expiry -- the sweep kills any re-attach")
+    _audit("REVOKE", user=a.user, agent=a.agent, grant=a.grant_id,
+           mode=row["mode"], grantee=row["grantee"], actor="launcher-cli")
+    print(f"revoked {a.grant_id} ({row['mode']} for {row['grantee']} on "
+          f"{a.user}/{a.agent}); its token stays signed until expiry -- the "
+          f"sweep kills any re-attach")
     return 0
 
 
 def cmd_flip(a):
     conn = _db()
-    _known_role(conn, a.role)
+    _known_agent(conn, a.user, a.agent)
     conn.close()
+    name = container_name(a.user, a.agent)
     # Runtime toggle rides a marker file the gate checks per-attach: ttyd's
     # children only ever see create-time env, so env alone cannot flip live.
     shell = ("touch ~/.multi-driver" if a.state == "on"
              else "rm -f ~/.multi-driver")
-    res = _docker("exec", container_name(a.role), "sh", "-c", shell,
-                  check=False, capture=True)
+    res = _docker("exec", name, "sh", "-c", shell, check=False, capture=True)
     if res.returncode != 0:
-        die(f"flip failed in {container_name(a.role)} -- is it running?")
-    _audit("FLIP", role=a.role, multi_driver=a.state, actor="launcher-cli")
-    print(f"{a.role}: multi-driver {a.state}")
+        die(f"flip failed in {name} -- is it running?")
+    _audit("FLIP", user=a.user, agent=a.agent, multi_driver=a.state,
+           actor="launcher-cli")
+    print(f"{a.user}/{a.agent}: multi-driver {a.state}")
     return 0
 
 
-def _live_grant_sessions(role):
-    res = _docker("exec", container_name(role),
+def _live_grant_sessions(user, agent):
+    res = _docker("exec", container_name(user, agent),
                   "tmux", "list-sessions", "-F",
                   "#{session_name} #{session_attached}",
                   check=False, capture=True)
@@ -516,7 +684,27 @@ def _live_grant_sessions(role):
     return live
 
 
-def _harvest_gate_audit(role, grants_by_id):
+def _idle_probe(user, agent):
+    """One exec, three observations (sec 7.1): any attached tmux client, the
+    newest session activity, the newest spool entry (a ring that arrived but has
+    not fired yet). Epoch seconds; a stopped container or absent tmux reads as
+    (False, 0, 0) and the caller skips it -- already-stopped needs no stop."""
+    res = _docker("exec", container_name(user, agent), "sh", "-c",
+                  "tmux list-clients -F x 2>/dev/null | wc -l;"
+                  " tmux list-sessions -F '#{session_activity}' 2>/dev/null"
+                  " | sort -rn | head -1;"
+                  " find ~/.reveille/spool -name '*.ring' -printf '%T@\\n'"
+                  " 2>/dev/null | sort -rn | head -1 | cut -d. -f1",
+                  check=False, capture=True)
+    if res.returncode != 0:
+        return False, 0, 0
+    lines = (res.stdout or "").splitlines() + ["", "", ""]
+    def n(s):
+        return int(s.strip()) if s.strip().isdigit() else 0
+    return n(lines[0]) > 0, n(lines[1]), n(lines[2])
+
+
+def _harvest_gate_audit(user, agent, grants_by_id):
     """Pull the gate's ATTACH lines (read-and-truncate) into the host log,
     keeping the gate's own timestamps and resolving grantee from the record."""
     # 4.6.1: move-then-read, never read-then-truncate -- a gate append between
@@ -525,7 +713,7 @@ def _harvest_gate_audit(role, grants_by_id):
     # loses the race lands in a fresh ~/.attach-audit and survives to the next
     # tick. The $$-suffix keeps a crashed harvest's remainder readable (glob),
     # at worst re-reading it -- a duplicate line over a dropped one, always.
-    res = _docker("exec", container_name(role), "sh", "-c",
+    res = _docker("exec", container_name(user, agent), "sh", "-c",
                   "[ -f ~/.attach-audit ] && mv ~/.attach-audit ~/.attach-audit.h.$$;"
                   " cat ~/.attach-audit.h.* 2>/dev/null; rm -f ~/.attach-audit.h.*",
                   check=False, capture=True)
@@ -535,48 +723,69 @@ def _harvest_gate_audit(role, grants_by_id):
             continue
         ts, _, mode, gid = parts
         g = grants_by_id.get(gid)
-        _audit("ATTACH", ts_iso=ts, role=role, grant=gid, mode=mode,
+        _audit("ATTACH", ts_iso=ts, user=user, agent=agent, grant=gid, mode=mode,
                grantee=(g["grantee"] if g else "unknown"), src="gate")
 
 
-def _sweep_once(conn):
+def _sweep_once(conn, idle_window_ns=0):
     now = time.time_ns()
-    for c in conn.execute("SELECT role FROM containers").fetchall():
-        role = c["role"]
+    for c in conn.execute("SELECT user, agent FROM containers").fetchall():
+        user, agent = c["user"], c["agent"]
         grants = {r["id"]: r for r in conn.execute(
-            "SELECT * FROM grants WHERE role=?", (role,)).fetchall()}
-        _harvest_gate_audit(role, grants)
-        live = _live_grant_sessions(role)
+            "SELECT * FROM grants WHERE user=? AND agent=?",
+            (user, agent)).fetchall()}
+        _harvest_gate_audit(user, agent, grants)
+        live = _live_grant_sessions(user, agent)
         seen = {r["session"] for r in conn.execute(
-            "SELECT session FROM sessions_seen WHERE role=?", (role,)).fetchall()}
+            "SELECT session FROM sessions_seen WHERE user=? AND agent=?",
+            (user, agent)).fetchall()}
         kills, detaches = sweep_actions(grants, live, seen, now)
         for session, reason in kills:
-            _docker("exec", container_name(role),
+            _docker("exec", container_name(user, agent),
                     "tmux", "kill-session", "-t", session,
                     check=False, capture=True)
             gid = session[2:]
             g = grants.get(gid)
-            _audit("KILL", role=role, grant=gid, session=session, reason=reason,
-                   grantee=(g["grantee"] if g else "unknown"))
+            _audit("KILL", user=user, agent=agent, grant=gid, session=session,
+                   reason=reason, grantee=(g["grantee"] if g else "unknown"))
         for session in detaches:
             gid = session[2:]
             g = grants.get(gid)
-            _audit("DETACH", role=role, grant=gid,
+            _audit("DETACH", user=user, agent=agent, grant=gid,
                    mode=("driver" if session.startswith("d-") else "viewer"),
                    grantee=(g["grantee"] if g else "unknown"),
                    observed="sweep-tick")  # observation time, not event time
         killed = {s for s, _ in kills}
-        conn.execute("DELETE FROM sessions_seen WHERE role=?", (role,))
+        conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
+                     (user, agent))
         conn.executemany(
-            "INSERT INTO sessions_seen(role, session, first_seen_ns) VALUES(?,?,?)",
-            [(role, s, now) for s in set(live) - killed])
+            "INSERT INTO sessions_seen(user, agent, session, first_seen_ns) "
+            "VALUES(?,?,?,?)",
+            [(user, agent, s, now) for s in set(live) - killed])
+        # 24h idle STOP, never destroy (sec 7.1): data is on bind mounts, so a
+        # restart is one `start` and loses nothing. A stopped container probes
+        # as (False, 0, 0) with an exec error and is skipped above the is_idle
+        # window by construction -- but skip it explicitly: stopping the
+        # stopped is noise.
+        if idle_window_ns > 0:
+            st = _docker("inspect", "-f", "{{.State.Running}}",
+                         container_name(user, agent), check=False, capture=True)
+            if (st.stdout or "").strip() == "true":
+                attached, act_s, ring_s = _idle_probe(user, agent)
+                if is_idle(attached, act_s * 10**9, ring_s * 10**9, now,
+                           idle_window_ns):
+                    _docker("stop", container_name(user, agent),
+                            check=False, capture=True)
+                    _audit("IDLESTOP", user=user, agent=agent,
+                           window_s=idle_window_ns // 10**9)
     conn.commit()
 
 
 def cmd_sweep(a):
     conn = _db()
+    window_ns = int(a.idle_hours * 3600 * 10**9)
     while True:
-        _sweep_once(conn)
+        _sweep_once(conn, idle_window_ns=window_ns)
         if not a.loop:
             break
         time.sleep(a.loop)
@@ -679,8 +888,9 @@ def build_parser():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    n = sub.add_parser("new", help="provision one agent container")
-    n.add_argument("role")
+    n = sub.add_parser("new", help="provision one agent container for one user")
+    n.add_argument("user", help="owning user (namespaces the container + data root)")
+    n.add_argument("agent", help="agent name (the bus identity)")
     n.add_argument("repo_url")
     n.add_argument("--broker", default=DEFAULT_BROKER,
                    help="broker URL the AGENT dials (container DNS; "
@@ -692,12 +902,12 @@ def build_parser():
                    help="docker network for the agent + broker; `host` is an ops "
                         f"escape hatch, never the default (default {DEFAULT_NETWORK})")
     n.add_argument("--replace", action="store_true",
-                   help="re-provision an existing role (destroys its container; the "
-                        "claude-home volume is kept)")
+                   help="re-provision an existing agent (destroys its container; "
+                        "the data root is kept)")
     n.add_argument("--image", default=DEFAULT_IMAGE)
-    n.add_argument("--mem", default="4g")
-    n.add_argument("--cpus", default="2")
     n.add_argument("--timeout", type=int, default=90)
+    n.add_argument("--no-wait", action="store_true",
+                   help="return after docker run without the presence health wait")
     n.add_argument("--boot-cmd", default=None,
                    help="override the image command (default: claude reveille); "
                         "e.g. agent-probe to health-check without an Anthropic login")
@@ -707,17 +917,31 @@ def build_parser():
 
     for name, fn in (("stop", cmd_stop), ("start", cmd_start)):
         s = sub.add_parser(name)
-        s.add_argument("role")
+        s.add_argument("user")
+        s.add_argument("agent")
         s.set_defaults(fn=fn)
 
     d = sub.add_parser("destroy")
-    d.add_argument("role")
+    d.add_argument("user")
+    d.add_argument("agent")
     d.add_argument("--purge", action="store_true",
-                   help="also drop the claude-home volume (default keeps the login)")
+                   help="also drop the data root (default keeps everything the "
+                        "agent learned; recreate picks it back up)")
     d.set_defaults(fn=cmd_destroy)
 
+    q = sub.add_parser("quota", help="show or override one user's quotas (sec 6)")
+    q.add_argument("user")
+    q.add_argument("--cpus", type=float, default=None)
+    q.add_argument("--mem", default=None)
+    q.add_argument("--disk-gb", type=int, default=None, dest="disk_gb")
+    q.add_argument("--pids", type=int, default=None)
+    q.add_argument("--max-containers", type=int, default=None,
+                   dest="max_containers")
+    q.set_defaults(fn=cmd_quota)
+
     g = sub.add_parser("grant", help="mint a per-grant URL token (printed once)")
-    g.add_argument("role")
+    g.add_argument("user")
+    g.add_argument("agent")
     g.add_argument("grantee", help="who this grant names (audit attribution, Q3)")
     g.add_argument("--mode", choices=("viewer", "driver"), default="viewer",
                    help="driver is the agent's whole identity (4.4); default viewer")
@@ -726,22 +950,30 @@ def build_parser():
     g.set_defaults(fn=cmd_grant)
 
     gl = sub.add_parser("grants", help="list grant records")
-    gl.add_argument("role", nargs="?", default=None)
+    gl.add_argument("user", nargs="?", default=None)
+    gl.add_argument("agent", nargs="?", default=None)
     gl.set_defaults(fn=cmd_grants)
 
     r = sub.add_parser("revoke", help="kill the grant's session now (<1s)")
-    r.add_argument("role")
+    r.add_argument("user")
+    r.add_argument("agent")
     r.add_argument("grant_id")
     r.set_defaults(fn=cmd_revoke)
 
     f = sub.add_parser("flip", help="toggle multi-driver on a container (4.3)")
-    f.add_argument("role")
+    f.add_argument("user")
+    f.add_argument("agent")
     f.add_argument("state", choices=("on", "off"))
     f.set_defaults(fn=cmd_flip)
 
-    s = sub.add_parser("sweep", help="expiry/revoke sweep + audit harvest (4.6)")
+    s = sub.add_parser("sweep", help="expiry/revoke sweep + audit harvest (4.6) "
+                                     "+ idle stop (DES-005 7.1)")
     s.add_argument("--loop", type=int, default=0, metavar="SECONDS",
                    help="repeat every N seconds (default: one tick and exit)")
+    s.add_argument("--idle-hours", type=float, default=24.0,
+                   help="stop (never destroy) containers idle this long -- no "
+                        "attached client, no session activity, no waiting ring "
+                        "(default 24; 0 disables)")
     s.set_defaults(fn=cmd_sweep)
 
     j = sub.add_parser("join-here",

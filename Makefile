@@ -198,6 +198,12 @@ grant-smoke: agent-image
 waiter-smoke: sync
 	uv run python tests/waiter_smoke.py
 
+# DES-005 P0 gate: tenancy against real docker -- namespaced names, per-agent
+# homes (cross-user AND same-user), pid cap with the host unaffected, restart=no,
+# per-user container cap, destroy+recreate keeps data, idle sweep stops.
+tenancy-smoke: agent-image
+	uv run python tests/tenancy_smoke.py
+
 # DES-003 W2 gate: join-here from a clean shell (scratch HOME + scratch broker):
 # checklist walked, token in exactly one file (0600 fragment), MCP config carries
 # the env template not the value, live+connected from the bootstrap alone.
