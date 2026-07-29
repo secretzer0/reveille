@@ -85,7 +85,7 @@ web user.
 | **public** | Every user on the broker |
 
 *(An invited-members "common" room — shared with chosen users, not the whole
-broker — is the next design round, DES-004.)*
+broker — is designed in DES-004 and being built now.)*
 
 | Actor | Can |
 |---|---|
@@ -131,11 +131,15 @@ src/reveille/daemon.py      HTTP-MCP + WS wake + web UI + usage() doctrine
 src/reveille/waked.py       the parked socket holder
 src/reveille/watch.py       wake-watch: exit-to-notify watcher
 scripts/reveille_launch.py  container launcher + join-here (owns docker)
-docs/DES-001..003           hive memory · container launcher · waiter hardening
+docs/DES-001..005           hive memory · launcher · waiter · sharing · web provisioning
 ```
 
 ## Status
 
-Dogfooded daily — the fleet that builds reveille runs on reveille. DES-001 (hive
-memory), DES-002 (launcher + grants), and DES-003 (waiter hardening) are merged
-and deployed. DES-004 (sharing/permissions UX) is next. `make build` is green.
+Dogfooded daily — the fleet that builds reveille runs on reveille. Merged and
+deployed: **DES-001** (hive memory), **DES-002** (launcher + grants),
+**DES-003** (waiter hardening). `make build` is green.
+
+In flight: **DES-004** (invited rooms, one-dialog agent creation) and
+**DES-005** — spawning agents from the browser, each user bringing their own
+Claude subscription token, with per-user persistent `~/.claude` and repos.
