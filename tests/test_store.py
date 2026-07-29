@@ -764,7 +764,8 @@ def test_lessons_rebacked_same_shape_and_gate():
     # room lesson promotion = superseding global row by the promoting admin
     store.add_lesson(c, author="dave", slug="room-rule", symptom="s", root_cause="r",
                      rule="local law", detection="d", room_id=room["id"])
-    store.promote_lesson(c, "room-rule", room["id"], promoted_by="travis")
+    store.promote_lesson(c, "room-rule", room["id"], promoted_by="travis",
+                         is_admin=True)
     tips = store.lessons(c, [room["id"]])
     promoted = next(t for t in tips if t["slug"] == "room-rule")
     assert promoted["scope"] == "global" and promoted["author"] == "travis"
@@ -1374,7 +1375,7 @@ def test_promote_lesson_to_global():
     c, admin, room, tok = fixture()
     store.add_lesson(c, author="alice", slug="generalises", symptom="s", root_cause="r",
                      rule="do x", detection="d", room_id=room["id"])
-    store.promote_lesson(c, "generalises", room["id"])
+    store.promote_lesson(c, "generalises", room["id"], is_admin=True)
     assert store.lessons(c, [])[0]["scope"] == "global"   # visible with no rooms at all
 
 
@@ -1392,7 +1393,8 @@ def test_promote_displaces_live_same_slug_global_row():
                      rule="the outdated take", detection="d", room_id=None)
     store.add_lesson(c, author="alice", slug="dup", symptom="s", root_cause="r",
                      rule="the sharper room take", detection="d", room_id=room["id"])
-    out = store.promote_lesson(c, "dup", room["id"], promoted_by="web:travis")
+    out = store.promote_lesson(c, "dup", room["id"], promoted_by="web:travis",
+                               is_admin=True)
     live = _live_global(c, "dup")
     assert len(live) == 1 and live[0]["rule"] == "the sharper room take"
     d = store.memory_detail(c, out["id"])
@@ -1412,7 +1414,7 @@ def test_promote_tolerates_predecessor_already_superseded():
     c.execute("UPDATE memories SET status='superseded' WHERE slug='dup2'")
     store.add_lesson(c, author="alice", slug="dup2", symptom="s", root_cause="r",
                      rule="new", detection="d", room_id=room["id"])
-    store.promote_lesson(c, "dup2", room["id"])
+    store.promote_lesson(c, "dup2", room["id"], is_admin=True)
     live = _live_global(c, "dup2")
     assert len(live) == 1 and live[0]["rule"] == "new"
 
@@ -1442,7 +1444,7 @@ def test_ratify_completes_displacement_not_just_the_chain_edge():
     assert d.get("status") == "draft"            # cross-author replace queues
     store.add_lesson(c, author="alice", slug="raced", symptom="s", root_cause="r",
                      rule="room take", detection="d", room_id=room["id"])
-    store.promote_lesson(c, "raced", room["id"])   # displaces v1 global
+    store.promote_lesson(c, "raced", room["id"], is_admin=True)  # displaces v1
     store.ratify_memory(c, d["id"], tier="ratify", is_admin=True,
                         owned_rooms={room["id"]}, actor="web:travis")
     live = _live_global(c, "raced")

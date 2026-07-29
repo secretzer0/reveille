@@ -2355,7 +2355,7 @@ def _displace_lesson_tips(conn, scope, slug, keep_id):
         "AND slug=? AND status='live' AND id<>?", (scope, slug, keep_id))
 
 
-def promote_lesson(conn, slug, room_id, promoted_by="admin", is_admin=True):
+def promote_lesson(conn, slug, room_id, promoted_by="admin", is_admin=False):
     """Room lesson -> global. Promotion is a superseding row at scope='global'
     authored by the promoting admin (R1-B1) -- the room tip flips to superseded, so
     history keeps who wrote it and when it went global. Global writes are the
