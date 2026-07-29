@@ -133,6 +133,9 @@ Hive memory: recall() before I re-derive a decision or re-litigate a ruling;
 memory_add(source=<msg id>) in the same turn as any ruling I send or receive (draft below
 my tier is the gate working). Contract = an invariant a peer could break; decision = a
 choice with a rationale; lesson (lesson_add) = a defect that taught me something.
+Holding ratify tier: recall(status='draft') is my queue; ratify(id) approves, reject(id,
+reason) declines -- never silently ignore a draft, and never rewrite someone else's text
+then approve it: reject and redraft citing the same source.
 Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
 ws://<broker-host>:8765/wake --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. Its
 task-completion notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. One
@@ -154,6 +157,17 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.12 reject(id, reason) -- the other half of the ratify gesture (DES-001 S6,
+       schema v11). Declining a draft is a real outcome with a REQUIRED reason,
+       distinct from leaving it queued; rejected drafts stay visible to their
+       author and the room's ratifiers via recall(status='rejected'). Both
+       ratify and reject now write an audit row (who, memory, scope, when,
+       reason) that survives every prune -- ratification transfers ownership
+       to the org, so the record of who approved outlives the drafter.
+       Authority unchanged: tier + room ownership, global needs instance admin.
+       Disagree with a draft's wording? reject and redraft citing the same
+       source -- editing another author's text then ratifying launders
+       authorship and is refused by design, not by review.
 0.2.11 brief() fills the budget it is given (DES-001 s7 under-fill). Small
        budgets returned near-empty packs: the budget was silently floored to
        2000, section shares were hard ceilings, and unused share died with its
@@ -689,8 +703,24 @@ async def ratify(id: str, ctx: Context = None) -> dict:
     pending supersession the draft carried."""
     p = _me(ctx.request_context.request)
     _, tier, adm, owned = _mem_ctx(p)
-    out = store.ratify_memory(_conn, id, tier=tier, is_admin=adm, owned_rooms=owned)
+    out = store.ratify_memory(_conn, id, tier=tier, is_admin=adm,
+                              owned_rooms=owned, actor=p.name)
     log.info("%s ratified memory %s", p.name, id)
+    return out
+
+
+@mcp.tool()
+async def reject(id: str, reason: str, ctx: Context = None) -> dict:
+    """draft -> rejected, with a REQUIRED reason (14.2): declining a draft is a
+    real outcome, distinct from leaving it queued -- draft rot is diagnosable
+    only if the two differ. Same authority as ratify (tier + room ownership;
+    global needs an instance admin). Disagree with the wording? Reject and
+    write your own draft citing the same source -- there is no edit-then-ratify."""
+    p = _me(ctx.request_context.request)
+    _, tier, adm, owned = _mem_ctx(p)
+    out = store.reject_memory(_conn, id, tier=tier, is_admin=adm,
+                              owned_rooms=owned, actor=p.name, reason=reason)
+    log.info("%s rejected memory %s: %s", p.name, id, reason)
     return out
 
 

@@ -7,6 +7,8 @@ import sys
 import tempfile
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import store  # noqa: E402
 
@@ -839,6 +841,118 @@ def test_fts_widen_migration_v9_to_v10():
     found = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"],
                          query="onlyinrootcause")
     assert found["count"] == 1 and found["memories"][0]["slug"] == "narrow-era"
+
+
+def _draft(c, room, tok, fact="drafted fact for the queue"):
+    """A room-scoped doctrine draft from a state-tier author -- the queue's
+    common inhabitant."""
+    return store.memory_add(
+        c, author="alice", token_id=tok["id"], agent_bound=True, tier="state",
+        is_admin=False, rooms={room["id"]}, owned_rooms=set(), fact=fact,
+        kind="doctrine", scope=room["id"])
+
+
+def test_reject_requires_reason_and_shared_authority():
+    """14.2: rejection is a real outcome with a REQUIRED reason, gated by the
+    same tier+ownership conjunction as ratify -- declining is the same trust
+    boundary as approving, just the other verdict."""
+    c, admin, room, tok = fixture()
+    d = _draft(c, room, tok)
+    with pytest.raises(store.BusError):
+        store.reject_memory(c, d["id"], tier="ratify", is_admin=False,
+                            owned_rooms={room["id"]}, actor="bob", reason="  ")
+    with pytest.raises(store.AccessError):   # tier without ownership
+        store.reject_memory(c, d["id"], tier="ratify", is_admin=False,
+                            owned_rooms=set(), actor="bob", reason="wrong")
+    with pytest.raises(store.AccessError):   # ownership without tier
+        store.reject_memory(c, d["id"], tier="write", is_admin=False,
+                            owned_rooms={room["id"]}, actor="bob", reason="wrong")
+    out = store.reject_memory(c, d["id"], tier="ratify", is_admin=False,
+                              owned_rooms={room["id"]}, actor="bob",
+                              reason="wording wrong; redraft citing same source")
+    assert out["status"] == "rejected"
+    # decided is decided: neither verdict can run twice
+    with pytest.raises(store.BusError):
+        store.ratify_memory(c, d["id"], tier="ratify", is_admin=False,
+                            owned_rooms={room["id"]}, actor="bob")
+
+
+def test_ratify_and_reject_write_audit_rows_that_survive_prune():
+    """14.4: one audit row per decision -- who approved the org's law -- and the
+    row outlives the drafting agent's prune."""
+    c, admin, room, tok = fixture()
+    d1, d2 = _draft(c, room, tok, "fact one"), _draft(c, room, tok, "fact two")
+    store.ratify_memory(c, d1["id"], tier="ratify", is_admin=False,
+                        owned_rooms={room["id"]}, actor="bob")
+    store.reject_memory(c, d2["id"], tier="ratify", is_admin=False,
+                        owned_rooms={room["id"]}, actor="bob", reason="dup of one")
+    rows = store.memory_audit_rows(c)
+    assert [(r["action"], r["actor"]) for r in rows] == \
+        [("reject", "bob"), ("ratify", "bob")]
+    assert rows[0]["reason"] == "dup of one" and rows[1]["reason"] is None
+    assert rows[0]["memory_uid"] == d2["id"]
+    store.prune_agent(c, "alice", room["id"])   # the drafter is erased...
+    assert len(store.memory_audit_rows(c)) == 2  # ...the decision record is not
+
+
+def test_rejected_visibility_mirrors_draft_gate():
+    c, admin, room, tok = fixture()
+    d = _draft(c, room, tok)
+    store.reject_memory(c, d["id"], tier="ratify", is_admin=False,
+                        owned_rooms={room["id"]}, actor="bob", reason="no")
+    rooms = {room["id"]: "R"}
+    mine = store.recall(c, rooms=rooms, token_id=tok["id"], caller="alice",
+                        status="rejected")
+    assert mine["count"] == 1                    # the author sees the verdict
+    ratifier = store.recall(c, rooms=rooms, token_id=tok["id"], caller="bob",
+                            tier="ratify", owned_rooms={room["id"]},
+                            status="rejected")
+    assert ratifier["count"] == 1                # the decider sees what they declined
+    stranger = store.recall(c, rooms=rooms, token_id=tok["id"], caller="carol",
+                            status="rejected")
+    assert stranger["count"] == 0
+
+
+def test_migration_v10_to_v11_adds_rejected_and_audit():
+    """A v10-era db (no 'rejected' in the CHECK, no audit table) rebuilds: rows
+    survive, the new status is usable, and the rebuilt FTS still searches."""
+    c, admin, room, tok = fixture()
+    d = _draft(c, room, tok, "fact that must survive the rebuild uniquesurvivor")
+    # Rewind to v10 shape: memories with the narrow CHECK, no memory_audit.
+    c.execute("DROP TABLE memories_fts")
+    c.execute("DROP TABLE memory_audit")
+    c.execute("ALTER TABLE memories RENAME TO m_old")
+    c.executescript("""
+        CREATE TABLE memories (
+            id INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+            scope TEXT NOT NULL, fact TEXT NOT NULL, entities TEXT NOT NULL DEFAULT '',
+            source_msg_id INTEGER, supersedes_id INTEGER, slug TEXT,
+            symptom TEXT, root_cause TEXT, rule TEXT, detection TEXT,
+            author TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'live'
+                CHECK (status IN ('live','draft','superseded','retracted')),
+            occurred_ns INTEGER, created_ns INTEGER NOT NULL, expires_ns INTEGER);
+        CREATE VIRTUAL TABLE memories_fts USING fts5(
+            fact, entities, symptom, root_cause, rule, detection,
+            content='memories', content_rowid='id',
+            tokenize="unicode61 tokenchars '-_'");
+    """)
+    c.execute("INSERT INTO memories SELECT id, uid, kind, scope, fact, entities, "
+              "source_msg_id, supersedes_id, slug, symptom, root_cause, rule, "
+              "detection, author, status, occurred_ns, created_ns, expires_ns "
+              "FROM m_old")
+    c.execute("DROP TABLE m_old")
+    c.execute("PRAGMA user_version=10")
+    assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "up.db")) \
+        == store.SCHEMA_VERSION
+    out = store.reject_memory(c, d["id"], tier="ratify", is_admin=False,
+                              owned_rooms={room["id"]}, actor="bob", reason="r")
+    assert out["status"] == "rejected"           # new CHECK admits the status
+    assert store.memory_audit_rows(c)[0]["action"] == "reject"
+    found = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"],
+                         query="uniquesurvivor", status="rejected",
+                         caller="alice")
+    assert found["count"] == 1                   # rebuilt FTS still reaches rows
 
 
 def test_brief_composition_ranking_and_budget():

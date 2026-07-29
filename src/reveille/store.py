@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -244,11 +244,27 @@ CREATE TABLE IF NOT EXISTS memories (
     symptom       TEXT, root_cause TEXT, rule TEXT, detection TEXT,
     author        TEXT NOT NULL,
     status        TEXT NOT NULL DEFAULT 'live'
-                  CHECK (status IN ('live','draft','superseded','retracted')),
+                  CHECK (status IN ('live','draft','superseded','retracted',
+                                    'rejected')),
     occurred_ns   INTEGER,
     created_ns    INTEGER NOT NULL,
     expires_ns    INTEGER
 );
+-- S6 (14.4): one row per ratification/rejection -- who approved the org's law.
+-- No foreign keys ON PURPOSE: ratification transfers ownership to the org, so
+-- this record must survive prune_agent and any future row lifecycle. reason is
+-- required for reject (14.2: declined and undecided are different states) and
+-- absent for ratify.
+CREATE TABLE IF NOT EXISTS memory_audit (
+    id         INTEGER PRIMARY KEY,
+    memory_uid TEXT NOT NULL,
+    action     TEXT NOT NULL CHECK (action IN ('ratify','reject')),
+    actor      TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    reason     TEXT,
+    ts_ns      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memaudit_uid ON memory_audit(memory_uid);
 CREATE INDEX IF NOT EXISTS idx_mem_scope ON memories(scope, kind, status);
 CREATE INDEX IF NOT EXISTS idx_mem_super ON memories(supersedes_id);
 CREATE INDEX IF NOT EXISTS idx_mem_slug  ON memories(scope, slug) WHERE slug IS NOT NULL;
@@ -418,8 +434,12 @@ def migrate(conn, db_path):
         _upgrade_v8(conn, db_path)
     elif v == 9:
         _upgrade_v9(conn, db_path)
-    # Chains from <=v8 need no v9 step: _upgrade_v8 lays _MEMORIES_SCHEMA, which
-    # already carries the v10 index shape, and backfills through _memory_insert.
+        _upgrade_v10(conn, db_path)
+    elif v == 10:
+        _upgrade_v10(conn, db_path)
+    # Chains from <=v8 need no v9/v10 steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
+    # which already carries the current index shape, status set, and audit table,
+    # and backfills through _memory_insert.
     return SCHEMA_VERSION
 
 
@@ -575,6 +595,39 @@ def _upgrade_v9(conn, db_path):
             "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
             "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
             "rule, detection FROM memories")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v10(conn, db_path):
+    """v10 -> v11 (S6 store plane): status gains 'rejected' and the ratify/reject
+    audit table arrives.
+
+    Rejection is a real outcome with a reason, distinct from still-queued (14.2)
+    -- draft rot is only diagnosable if declined and undecided are different
+    states. SQLite cannot ALTER a CHECK constraint, so the memories table is
+    rebuilt (copy, drop, rename); ids are preserved, but the external-content
+    FTS rides the table's identity, so it is dropped first and rebuilt after --
+    the v0 obligation again. memory_audit carries no foreign keys on purpose:
+    the record of who approved the org's law must survive prune_agent and every
+    row lifecycle (14.4)."""
+    snapshot(conn, f"{db_path}.pre-v11-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    with tx(conn):
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute("ALTER TABLE memories RENAME TO memories_old")
+        _exec_script(conn, _MEMORIES_SCHEMA)   # new table, indexes, fts, audit
+        cols = ("id, uid, kind, scope, fact, entities, source_msg_id, "
+                "supersedes_id, slug, symptom, root_cause, rule, detection, "
+                "author, status, occurred_ns, created_ns, expires_ns")
+        conn.execute(f"INSERT INTO memories({cols}) "
+                     f"SELECT {cols} FROM memories_old")
+        conn.execute("DROP TABLE memories_old")
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
+            "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
+            "rule, detection FROM memories")
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise BusError(f"v11 migration left {len(bad)} FK violations")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -1788,12 +1841,14 @@ def recall(conn, *, rooms, token_id, caller="", tier="state", is_admin=False,
     args = list(rooms) + [f"agent:{token_id}"]
     where.append("(m.expires_ns IS NULL OR m.expires_ns > ?)")
     args.append(time.time_ns())
-    if status == "draft" and not is_admin:
+    if status in ("draft", "rejected") and not is_admin:
         # Draft visibility is about the CALLER: own drafts always, PLUS the ratify
         # queue (owned-room drafts) only when the caller's tier can actually act on
         # it. Section 5: ratify-tier callers see the queue; a write/state caller that
         # merely owns the room sees only what it authored, never a queue it cannot
         # clear (msg 8400, disclosure side of the same missing parameter).
+        # 'rejected' rides the same rule (14.2): the author sees their declined
+        # drafts (with the audit reason), the ratifier sees what they declined.
         owned = list(owned_rooms) if tier == "ratify" else []
         cond = "m.author=?"
         dargs = [caller]
@@ -1883,14 +1938,29 @@ def memory_retract(conn, uid, *, actor, is_admin):
     return {"id": uid, "status": "retracted"}
 
 
-def ratify_memory(conn, uid, *, tier="state", is_admin, owned_rooms):
-    """draft -> live. The ratify TIER is the capability; owning the room is only its
-    SCOPE -- both are required, never either (msg 8400: an ownership-only gate lets any
-    owned-room token self-promote its own drafts, making the whole tier ladder
-    cosmetic). scope='global' still requires an instance admin (R1-M3); tier does not
-    grant global. Flipping live also completes any pending supersession (R1-M6).
-    tier defaults to 'state' so a caller that forgets to thread it gets the LEAST
-    privilege, never the most."""
+def _audit_memory(conn, r, action, actor, reason=None):
+    conn.execute(
+        "INSERT INTO memory_audit(memory_uid, action, actor, scope, reason, ts_ns) "
+        "VALUES(?,?,?,?,?,?)",
+        (r["uid"], action, actor, r["scope"], reason, time.time_ns()))
+
+
+def memory_audit_rows(conn, memory_uid=None, limit=200):
+    q, args = "SELECT * FROM memory_audit", []
+    if memory_uid:
+        q += " WHERE memory_uid=?"
+        args.append(memory_uid)
+    rows = conn.execute(q + " ORDER BY ts_ns DESC LIMIT ?",
+                        args + [max(1, min(int(limit), 1000))]).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _ratify_gate(conn, uid, *, tier, is_admin, owned_rooms):
+    """The one authority check for the draft->decided gestures (ratify AND
+    reject share it: declining a draft is the same trust boundary as approving
+    it, just the other verdict). Tier is the capability, room ownership its
+    scope -- BOTH, never either (msg 8400); scope='global' requires an instance
+    admin and tier does not grant global."""
     r = _mem_by_uid(conn, uid)
     if r["status"] != "draft":
         raise BusError(f"memory is {r['status']}, not draft")
@@ -1902,11 +1972,43 @@ def ratify_memory(conn, uid, *, tier="state", is_admin, owned_rooms):
             raise AccessError("ratify requires a ratify-tier token")
         if r["scope"] not in owned_rooms:
             raise AccessError("ratify is per-room: you must own this room")
+    return r
+
+
+def reject_memory(conn, uid, *, tier="state", is_admin, owned_rooms, actor,
+                  reason):
+    """draft -> rejected (14.2): a real outcome with a REQUIRED reason, distinct
+    from still-queued -- draft rot is only diagnosable if declined and undecided
+    are different states. Same authority as ratify: a ratifier who disagrees
+    with a draft's wording rejects and redrafts citing the same source; there is
+    no edit-then-ratify. The audit row is the record (14.4)."""
+    if not (reason or "").strip():
+        raise BusError("reject requires a reason")
+    r = _ratify_gate(conn, uid, tier=tier, is_admin=is_admin,
+                     owned_rooms=owned_rooms)
+    with tx(conn):
+        conn.execute("UPDATE memories SET status='rejected' WHERE id=?",
+                     (r["id"],))
+        _audit_memory(conn, r, "reject", actor, reason.strip())
+    return {"id": uid, "status": "rejected"}
+
+
+def ratify_memory(conn, uid, *, tier="state", is_admin, owned_rooms, actor=""):
+    """draft -> live. The ratify TIER is the capability; owning the room is only its
+    SCOPE -- both are required, never either (msg 8400: an ownership-only gate lets any
+    owned-room token self-promote its own drafts, making the whole tier ladder
+    cosmetic). scope='global' still requires an instance admin (R1-M3); tier does not
+    grant global. Flipping live also completes any pending supersession (R1-M6).
+    tier defaults to 'state' so a caller that forgets to thread it gets the LEAST
+    privilege, never the most. The audit row (14.4) records who approved."""
+    r = _ratify_gate(conn, uid, tier=tier, is_admin=is_admin,
+                     owned_rooms=owned_rooms)
     with tx(conn):
         conn.execute("UPDATE memories SET status='live' WHERE id=?", (r["id"],))
         if r["supersedes_id"] is not None:
             conn.execute("UPDATE memories SET status='superseded' WHERE id=? AND "
                          "status='live'", (r["supersedes_id"],))
+        _audit_memory(conn, r, "ratify", actor)
     return {"id": uid, "status": "live"}
 
 
