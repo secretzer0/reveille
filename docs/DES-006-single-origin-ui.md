@@ -3,6 +3,8 @@
 Status: ACCEPTED — operator directive 2026-07-29 (relayed via msgs 8494/8495).
 Amends DES-005 §2 (two services, two origins) and DES-004 M3's Option-A
 rejection, narrowly and on the record. Does NOT amend DES-002 G4.
+Amended again 2026-07-29 (operator msgs 8542/8549/8552, architect ruling
+8555/8557) — see §6: the Agents page moves into the bus's own content well.
 
 ## 1. Problem
 
@@ -116,6 +118,11 @@ path from the landing page to agent management. The Agents page links back to
 - This is the local form of what DES-002 T4 already plans at the Cloudflare
   edge — the same routing, one layer down.
 
+**Amended by §6**: the proxy's route split is unchanged, but the bus's own
+JS now also renders an embedded presentation of `/agents`'s functionality
+inside the bus's content well, calling the launcher API directly. `/agents`
+itself is untouched — see §6.3.
+
 ## 4. Slices
 
 - **U1 — credentials UI.** A CREDENTIALS block on the Agents page: claude
@@ -153,3 +160,105 @@ the UX; U4 is the largest and fixes remote grants; U5 is polish.
 - The deputy call set stays at its five, bounded by kind (DES-004 M3 ruling).
 - Grant verification stays at the container; the launcher never becomes an
   authority over attachment.
+
+## 6. Amendment (2026-07-29): the Agents page moves into the bus's content well
+
+Operator ask (msgs 8542, 8549, 8552, annotated screenshots): U3 fixed the
+login/origin split, but Agents is still a *navigation away* — a distinct page
+reached by a link, not a view inside the product the operator actually lives
+in. "This entire page should be in the content well of the primary app, not a
+secondary thought." Agent management (create/start/stop/destroy/reconfig) is
+only one piece of it; full tmux interaction per running agent belongs in the
+same content well too.
+
+### 6.1 RULING: merge the UI, keep the services split (architect, msg 8555)
+
+Corrects a framing error in how this was first pitched to the architect: what
+§2.1 actually protects is not "two front-ends" — it is (a) the broker never
+learning docker exists, and (b) no standing machine credential commanding
+provisioning. Neither is about which DOM renders a button. §4 U5's "copied not
+shared" tokens were a runtime-asset-dependency argument (the launcher page
+must not 404 its stylesheet when the broker is down) — never a promise the
+two UIs stay separate artifacts forever.
+
+So: **the bus's own JS may call the launcher's HTTP API directly** (`/agents`,
+`/agents/{agent}`, `/agents/{agent}/{verb}`, `/agents/{agent}/grants`, ...)
+from its content well — same origin behind the proxy, authenticated with the
+SAME session cookie the user already holds. The launcher still runs its own
+two gates (session principal + agent ownership, §2.3) on every call,
+unchanged. What must never happen, on pain of reopening §2.1: broker CODE
+(`daemon.py`) gaining a launcher URL, a docker import, or any docker-adjacent
+knowledge. The browser doing the fetching is not a new authority — it always
+held the user's authority; only where the DOM renders changes.
+
+**REJECTED**: embedding the launcher's existing pages via iframe. Fights the
+proxy/WS work U4 already did, and buys back a separation property that was
+never load-bearing (see above).
+
+### 6.2 `/agents` is kept, not replaced
+
+U6 (below) adds a second, embedded presentation of the same functionality; it
+removes nothing. `/agents` stays fully functional as a direct link and as
+`tests/launcher_api_smoke.py`'s target — that gate exercises the API, not
+either page, so it continues to pass unmodified regardless of what the bus's
+content well does.
+
+### 6.3 Terminal tabs — OPEN, gated on the sweep landing
+
+The operator also wants each running agent's live tmux session reachable as a
+tab inside the same content well, several open at once. Before committing to
+a design, the grant/session lifecycle was read directly (`docker/attach-gate`,
+`sweep_actions`, `_sweep_once`, DES-002 §4.6) rather than assumed:
+
+1. **Mint once per (browser session, agent), cache client-side** (e.g.
+   `sessionStorage`), reconnect the cached token on reload, and re-mint only
+   on rejection. Minting fresh on every tab-open is wrong: attach-gate's
+   per-container driver exclusivity (`docker/attach-gate` attach(), the
+   create-race re-check included) refuses a second `d-*` session for the same
+   agent regardless of who holds the first — so a browser's own earlier tab
+   would lock out its own new one.
+2. **Driver exclusivity is per-container tmux state**, indifferent to which
+   browser or grantee holds the grant. Unaffected by one browser holding
+   several concurrent driver grants for *different* agents. A second driver
+   tab for the *same* agent is correctly refused today, same as it would be
+   from two separate humans; the manager must surface that refusal (today it
+   arrives as literal terminal text, since attach-gate's `die()` is ttyd's
+   stdout) rather than swallow it.
+3. What was expected to be the hard part — a crashed/closed tab's session
+   lingering until the sweep tick reclaims it — turned out to be gated on a
+   bigger, pre-existing gap: **the sweep tick has never been scheduled
+   anywhere** (confirmed by the architect on three axes, msg 8557: not in a
+   deploy unit, not started by `cmd_serve`, not in any crontab). Consequences
+   land beyond this feature — grant TTLs are decorative for already-attached
+   sessions, and DES-005 §7.1's idle-container-stop policy has never once
+   executed. That fix is owned by the architect and routed to senior-dev; it
+   is **not part of this slice**. See lesson
+   `periodic-task-proven-correct-never-scheduled`.
+
+This section stays open until the sweep is actually scheduled and running.
+Once it is, findings 1 and 2 above are the whole design — a crashed tab's
+orphaned session dies within one tick, and terminal tabs become the layout
+change they were originally pitched as.
+
+### 6.4 Slices (extends §4)
+
+- **U6 — embedded agent manager.** The bus's content well gains a view that
+  renders agent cards (create/start/stop/destroy/creds) via direct fetches to
+  the launcher's existing API, reusing `/agents`'s request shapes unchanged.
+  `/agents` itself is untouched (§6.2). Gate: from the bus, reach
+  create/start/stop/destroy/creds without leaving `/`; the existing
+  `launcher-api-smoke` gate passes unmodified.
+- **U7 — terminal tabs.** BLOCKED on the sweep fix (§6.3). Gate once
+  unblocked: N tabs across 2+ agents attach concurrently with no cross-agent
+  interference; a second driver tab for an already-held agent is refused and
+  the manager shows the refusal rather than a blank tab; killing a tab's
+  browser process (no cleanup handler run) results in the session being
+  reclaimed within one sweep tick.
+
+### 6.5 What does not change (extends §5)
+
+- Everything in §5 still holds.
+- The launcher's two-gate check (session principal + agent ownership) runs on
+  every call U6 makes — U6 adds a caller, never a bypass.
+- Grant verification stays at the container (`attach-gate`); U6/U7 never
+  become a new authority over attachment.
