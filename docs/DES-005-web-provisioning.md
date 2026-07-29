@@ -110,11 +110,26 @@ its text into the repo-level `CLAUDE.md` block, and its name into the agent's
 
 ## 6. Tenancy and safety (P0 — before any non-invited user)
 
-- **Quotas per container:** CPU, memory, pids, disk. Defaults conservative;
-  operator-settable per user.
-- **Container cap per user.** A number, enforced at provision.
-- **Egress policy:** deny-by-default with an allowlist (github, anthropic,
-  package registries), the `limited` networking DES-002 already implements.
+**Host:** 48 cores, 512 GB RAM, 18 TB disk (operator, 2026-07-29).
+
+**Per-container defaults** — sized for an agent that *builds*, not just chats:
+`claude` alone idles near 1 GB, but a test suite, a compiler or a
+`node_modules` install is the real workload.
+
+| Resource | Default | Reasoning |
+|---|---|---|
+| CPU | 2 cores | ~24 concurrent agents before CPU is the binding limit |
+| Memory | 8 GB | Comfortable for builds; 64 agents fits in RAM |
+| Disk | 50 GB | Repos + build artifacts + `~/.claude` history |
+| PIDs | 512 | Fork-bomb ceiling; well above any real toolchain |
+| Containers/user | 5 | Beta number, per-user overridable |
+
+Binding limit is CPU at ~24 agents — comfortably beyond an invite-only beta.
+Every value is per-user overridable by the operator.
+
+- **Egress:** unrestricted for now (operator ruling: not a concern at this
+  stage). The `limited` policy DES-002 implements stays available and becomes
+  the default before public signup — revisit at P4, not P0.
 - **No host mounts** beyond the user's own data root. No docker socket. Never
   `--privileged`, never `--network host`.
 - **Names are namespaced:** `rev-<userid>-<agent>`, so two users may both have
@@ -146,14 +161,18 @@ P0 gates everything. P1–P3 are the product; P4 opens the door.
 
 ## 8. Open questions
 
-- **Q1. ToS.** Anthropic does not document whether a third party may host
-  Claude Code for signed-up users, even on the users' own subscription tokens.
-  Invite-only sidesteps it for the beta. **Ask before P4 ships.**
+- **Q1. ToS — RESOLVED (operator ruling 2026-07-29).** The token belongs to the
+  logged-in user and is used only for that user's own work; reveille is a web
+  interface to what they could do by SSH-ing into the box and running the CLI
+  by hand. Shell accounts on shared hardware are not a licensing question, and
+  this is the same relationship with a nicer front door. Not a blocker.
+  *Residual, custody not licensing:* unlike an SSH user who holds their own
+  credential, reveille **stores** the token to reuse it — so the profile page
+  states where it lives, and P2's byte-scan gate proves it lives nowhere else.
 - **Q2. Token revocation.** Whether re-running `setup-token` invalidates the
   prior token is undocumented. Until known, the profile page must not promise
   "rotating revokes the old one".
-- **Q3. Quota defaults.** Numbers need the operator's judgement about the box
-  (cores, RAM, disk) — P0 needs concrete values, not "conservative".
+- **Q3. Quota defaults — RESOLVED**, see §6.
 
 ## 9. Draft role prompts (operator edits before P3)
 
