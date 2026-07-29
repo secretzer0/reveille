@@ -5,6 +5,7 @@ no secret in launcher.db, the health-by-presence decision, and the tenancy rules
 namespaced names, per-agent data roots, quota resolution, idle decision."""
 
 import importlib.util
+import json
 import pathlib
 import sqlite3
 
@@ -140,6 +141,60 @@ def test_launcher_db_migrates_old_role_shape(tmp_path):
     assert conn2.execute("SELECT count(*) FROM containers").fetchone()[0] == 1
     conn.close()
     conn2.close()
+
+
+def test_credential_resolution_override_beats_global_beats_nothing():
+    prof = {"claude_token": "sk-ant-oat01-global", "github_token": "ghp_global",
+            "repo_url": "https://g/global",
+            "agents": {"dev": {"github_token": "ghp_dev"}}}
+    c = rl.resolve_credentials(prof, "dev")
+    assert c["github_token"] == "ghp_dev"            # override wins
+    assert c["claude_token"] == "sk-ant-oat01-global"  # global fills the rest
+    assert c["repo_url"] == "https://g/global"
+    # an explicit request repo_url is the most specific statement of intent
+    assert rl.resolve_credentials(prof, "dev", "https://g/req")["repo_url"] \
+        == "https://g/req"
+    assert rl.resolve_credentials({}, "dev") == \
+        {"claude_token": None, "github_token": None, "repo_url": ""}
+
+
+def test_claude_env_name_by_prefix():
+    # sec 3: one field, two credential kinds, told apart by prefix.
+    assert rl.claude_env_name("sk-ant-api03-xyz") == "ANTHROPIC_API_KEY"
+    assert rl.claude_env_name("sk-ant-oat01-xyz") == "CLAUDE_CODE_OAUTH_TOKEN"
+
+
+def test_masked_profile_never_carries_a_value():
+    prof = {"claude_token": "sk-ant-oat01-SECRET", "github_token": "ghp_SECRET",
+            "repo_url": "https://g/r",
+            "agents": {"dev": {"claude_token": "sk-ant-api03-SECRET2"}}}
+    m = json.dumps(rl.masked_profile(prof))
+    assert "SECRET" not in m
+    assert '"claude_token": "set"' in m and '"repo_url": "https://g/r"' in m
+    assert json.loads(m)["agents"]["dev"]["claude_token"] == "set"
+
+
+def test_merge_profile_sets_clears_and_scopes_to_agent():
+    prof = rl.merge_profile({}, {"github_token": "ghp_x", "repo_url": "https://r"})
+    prof = rl.merge_profile(prof, {"claude_token": "sk-ant-oat01-y"}, agent="dev")
+    assert prof["github_token"] == "ghp_x"
+    assert prof["agents"]["dev"]["claude_token"] == "sk-ant-oat01-y"
+    prof = rl.merge_profile(prof, {"github_token": ""})   # empty clears
+    assert "github_token" not in prof
+    assert prof["agents"]["dev"]["claude_token"] == "sk-ant-oat01-y"  # untouched
+
+
+def test_profile_file_is_0600_and_holds_the_only_copy(tmp_path):
+    rl.save_profile("acme", {"github_token": "ghp_ONLY_HERE"}, base=str(tmp_path))
+    p = pathlib.Path(rl.profile_path("acme", base=str(tmp_path)))
+    import stat as stat_mod
+    assert stat_mod.S_IMODE(p.stat().st_mode) == 0o600
+    assert (p.parent.stat().st_mode & 0o777) == 0o700   # user root closed
+    assert rl.load_profile("acme", base=str(tmp_path))["github_token"] \
+        == "ghp_ONLY_HERE"
+    # the profile is a SIBLING of agent data roots: no data_root path ever
+    # contains it, so no container bind can reach it
+    assert not rl.data_root("acme", "dev", base=str(tmp_path)).startswith(str(p))
 
 
 def test_principal_from_me_shapes():

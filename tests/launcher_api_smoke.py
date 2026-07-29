@@ -133,6 +133,33 @@ def main():
         rows = json.loads(req(L, "/agents/dev/grants", ana))["grants"]
         assert rows[0]["revoked_ns"] is not None
 
+        # -- P2: credential profiles -----------------------------------------
+        CLAUDE_TOK = "sk-ant-oat01-FAKE-CLAUDE-MUST-NOT-LEAK"
+        GH_TOK = "ghp_FAKE-GITHUB-MUST-NOT-LEAK"
+        GH_OVERRIDE = "ghp_FAKE-OVERRIDE-MUST-NOT-LEAK"
+        prof = req(L, "/profile", ana, "PUT",
+                   {"claude_token": CLAUDE_TOK, "github_token": GH_TOK,
+                    "repo_url": "https://x/profile-default"})
+        responses.append(prof)
+        d = json.loads(prof)
+        assert d["credentials"]["claude_token"] == "set"       # masked...
+        assert CLAUDE_TOK not in prof and GH_TOK not in prof   # ...and absent
+        assert "Rotation is user-side" in d["notes"]
+        assert "do not assume" in d["notes"]                   # Q2: no promise
+        responses.append(req(L, "/agents/dev/profile", ana, "PUT",
+                             {"github_token": GH_OVERRIDE}))
+        # re-provision with NO repo_url: the profile default fills it, and the
+        # container env carries the resolved credentials (override wins for
+        # github, global for claude)
+        responses.append(req(L, "/agents", ana, "POST",
+                             {"agent": "dev", "token": TOKEN, "network": NET,
+                              "boot_cmd": "sleep infinity", "replace": True}))
+        env_out = subprocess.run(
+            ["docker", "exec", "rev-ana-dev", "sh", "-c",
+             "printenv GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN REVEILLE_REPO_URL"],
+            capture_output=True, text=True).stdout.splitlines()
+        assert env_out == [GH_OVERRIDE, CLAUDE_TOK, "https://x/profile-default"]
+
         # -- cross-user: bob's world is empty and ana's agent unreachable ----
         assert json.loads(req(L, "/agents", bob))["agents"] == []
         responses.append(req(L, "/agents/dev", bob, "DELETE", want=400))
@@ -150,21 +177,34 @@ def main():
         responses.append(req(L, "/agents/dev", ana, "DELETE"))
         assert json.loads(req(L, "/agents", ana))["agents"] == []
 
-        # -- the provision token leaked nowhere ------------------------------
-        assert all(TOKEN not in r for r in responses), "token in a response"
-        for root, _dirs, files in os.walk(tmp):
-            for f in files:
-                if f == "broker.db":
-                    continue
-                with open(os.path.join(root, f), "rb") as fh:
-                    assert TOKEN.encode() not in fh.read(), \
-                        f"token in {os.path.join(root, f)}"
+        # -- no secret leaked anywhere (P1 provision token: no file, no
+        # response; P2 profile tokens: exactly ONE file -- profile.json --
+        # and no response) ---------------------------------------------------
+        for secret in (TOKEN, CLAUDE_TOK, GH_TOK, GH_OVERRIDE):
+            assert all(secret not in r for r in responses), \
+                f"{secret[:12]}... in a response"
+        prof_file = os.path.join(tmp, "data", "ana", "profile.json")
+        for secret, expect in ((TOKEN, 0), (CLAUDE_TOK, 1), (GH_TOK, 1),
+                               (GH_OVERRIDE, 1)):
+            holders = []
+            for root, _dirs, files in os.walk(tmp):
+                for f in files:
+                    if f == "broker.db":
+                        continue
+                    with open(os.path.join(root, f), "rb") as fh:
+                        if secret.encode() in fh.read():
+                            holders.append(os.path.join(root, f))
+            assert len(holders) == expect and all(h == prof_file for h in holders), \
+                f"{secret[:12]}... in {holders} (expected {expect}x profile.json)"
 
         print("launcher-api-smoke OK: 401 without session, full lifecycle "
               "(provision/status/mint/revoke/stop/destroy) with a cookie alone, "
               "attach URL in exactly one response, cross-user unreachable by "
               "construction, provision token absent from every response and "
-              "every launcher file")
+              "every launcher file; P2 profile: masked GET with the custody/"
+              "rotation notes, override>global>request resolution proven in "
+              "the container env, each stored secret in EXACTLY one file "
+              "(0600 profile.json) and no response")
     finally:
         subprocess.run(["docker", "rm", "-f", "rev-ana-dev"], capture_output=True)
         subprocess.run(["docker", "network", "rm", NET], capture_output=True)
