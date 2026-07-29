@@ -103,7 +103,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.3")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.4")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -117,6 +117,12 @@ AGENT_GID = 1000
 DEFAULT_DATA = os.environ.get(
     "REVEILLE_LAUNCH_DATA", os.path.expanduser("~/.reveille/data"))
 ROLE_RE = re.compile(r"\A[a-z0-9][a-z0-9-]{1,63}\Z")
+
+# Suggestions only -- the field takes any string, because a hardcoded list ages
+# the day a model ships and an agent must never be blocked on this file being
+# current. Blank means the account default, which is the right answer for most.
+MODEL_SUGGESTIONS = ("claude-fable-5", "claude-opus-5", "claude-sonnet-5",
+                     "claude-haiku-4-5-20251001")
 
 # Tenancy defaults (DES-005 sec 6, sized for an agent that BUILDS): every value
 # per-user overridable via the user_quotas table (`quota` subcommand).
@@ -618,7 +624,7 @@ def _ensure_network(net, broker_url):
 
 def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                     network=DEFAULT_NETWORK, broker=DEFAULT_BROKER,
-                    boot_cmd=None, replace=False, role_prompt=None):
+                    boot_cmd=None, replace=False, role_prompt=None, model=None):
     """The one provisioning path (CLI and HTTP share it). Validates, enforces
     the per-user cap, lays the per-agent data root, runs the container. The
     token exists only in this frame and the docker-run child's env -- never
@@ -671,6 +677,12 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         # writes it into ~/.claude/CLAUDE.md (marker-guarded, once).
         extra_env.append("REVEILLE_ROLE_PROMPT")
         env["REVEILLE_ROLE_PROMPT"] = role_prompt
+    if model:
+        # The user's model choice for THIS agent. Env, not a config file: it is
+        # per-container and must not be baked into the persisted home, where it
+        # would outlive the choice and quietly override the next one.
+        extra_env.append("ANTHROPIC_MODEL")
+        env["ANTHROPIC_MODEL"] = model
 
     # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
     # host user browses it; the agent dirs under it belong to the AGENT.
@@ -1229,6 +1241,9 @@ a{color:#8cf}
 <div class="row" id="rooms"></div>
 <div class="row"><input id="repo" size="40"
  placeholder="repo URL (blank = your profile default)"></div>
+<div class="row"><input id="model" size="40" list="models"
+ placeholder="model (blank = the account default)">
+<datalist id="models"></datalist></div>
 <details class="row"><summary class="dim">advanced</summary>
 <div class="row"><input id="bootCmd" size="40"
  placeholder="boot command override (ops/diagnostics)"></div>
@@ -1323,6 +1338,9 @@ async function refresh(){
  sel.onchange=()=>{const t=(meta.role_prompts||{})[sel.value]||'';
   const el=document.getElementById('roleText');
   el.textContent=t;el.style.display=t?'':'none';};
+ const dl=document.getElementById('models');
+ if(!dl.options.length)for(const m of (meta.models||[])){
+  const o=document.createElement('option');o.value=m;dl.appendChild(o);}
  // M3 first-run chain: zero rooms -> name one inline; the launcher creates it
  // through the broker (the deputy's fifth and last call) and the new room
  // arrives pre-ticked so the form continues without a context switch.
@@ -1381,6 +1399,7 @@ document.getElementById('create').onclick=async()=>{
    agent:name,rooms:rooms,role:document.getElementById('role').value,
    append:document.getElementById('append').value.trim(),
    repo_url:document.getElementById('repo').value.trim(),
+   model:document.getElementById('model').value.trim(),
    boot_cmd:document.getElementById('bootCmd').value.trim()||undefined,
    image:document.getElementById('image').value.trim()||undefined})});
   st.textContent='container up; waiting for the agent to reach the bus...';
@@ -1447,7 +1466,8 @@ def build_api(auth_url):
                 network=d.get("network") or DEFAULT_NETWORK,
                 broker=d.get("broker") or DEFAULT_BROKER,
                 boot_cmd=d.get("boot_cmd"), replace=bool(d.get("replace")),
-                role_prompt=prompt or None)
+                role_prompt=prompt or None,
+                model=(d.get("model") or "").strip() or None)
         except (LaunchError, subprocess.CalledProcessError):
             if minted_id:
                 # A failed provision must not leave a live orphaned credential.
@@ -1493,7 +1513,8 @@ def build_api(auth_url):
         # secrets, they land in the container's CLAUDE.md verbatim.
         return JSONResponse({"rooms": rooms,
                              "roles": sorted(ROLE_PROMPTS),
-                             "role_prompts": ROLE_PROMPTS})
+                             "role_prompts": ROLE_PROMPTS,
+                             "models": MODEL_SUGGESTIONS})
 
     @guarded
     async def rooms_create(request, p, conn):
