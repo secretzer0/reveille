@@ -204,6 +204,12 @@ waiter-smoke: sync
 tenancy-smoke: agent-image
 	uv run python tests/tenancy_smoke.py
 
+# DES-005 P1 gate: full lifecycle over the launcher HTTP API behind a real
+# broker session -- 401 without cookie, cross-user unreachable, attach URL in
+# exactly one response, provision token in no response and no file.
+launcher-api-smoke: agent-image
+	uv run python tests/launcher_api_smoke.py
+
 # DES-003 W2 gate: join-here from a clean shell (scratch HOME + scratch broker):
 # checklist walked, token in exactly one file (0600 fragment), MCP config carries
 # the env template not the value, live+connected from the bootstrap alone.
