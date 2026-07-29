@@ -201,11 +201,14 @@ def main():
         assert any(r["id"] == room["id"] for r in meta["rooms"])
         assert meta["roles"] == ["architect", "senior-dev", "senior-devops",
                                  "senior-ui-ux"]
+        # U1: the form can SHOW a role's prompt before the user appends to it
+        assert "feature branches" in meta["role_prompts"]["senior-dev"]
         # the launcher UI page serves (content sanity only; the real-browser
         # pass is the P3 gate proper)
         ui = req(L, "/ui", ana)
         assert "NEW AGENT" in ui and "never shown" in ui
         assert "name your first" in ui   # M3: the first-run chain ships
+        assert "CREDENTIALS" in ui and "clear overrides" in ui   # U1 ships
 
         # -- stop, destroy, profile ------------------------------------------
         responses.append(req(L, "/agents/dev/stop", ana, "POST", {}))

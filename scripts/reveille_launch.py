@@ -1159,6 +1159,9 @@ a{color:#8cf}
 <h2>NEW AGENT</h2>
 <div class="row"><input id="name" placeholder="agent name (e.g. senior-dev)">
 <select id="role"><option value="">no role template</option></select></div>
+<pre id="roleText" class="dim" style="display:none;white-space:pre-wrap;
+ max-height:12rem;overflow:auto;border:1px solid #333;border-radius:4px;
+ padding:.5rem"></pre>
 <div class="row"><textarea id="append" rows="2" cols="60"
  placeholder="anything to append to the role prompt (optional)"></textarea></div>
 <div class="row" id="rooms"></div>
@@ -1172,6 +1175,17 @@ a{color:#8cf}
 <div class="row"><button id="create">create agent</button>
  <span class="dim">the token is minted from your session and never shown</span></div>
 <div id="status" class="row dim"></div>
+<h2>CREDENTIALS</h2>
+<div id="credState" class="row dim"></div>
+<div class="row"><input id="cClaude" size="40"
+ placeholder="claude token (setup-token or API key)">
+ <button id="cClaudeClear">clear</button></div>
+<div class="row"><input id="cGithub" size="40" placeholder="github token">
+ <button id="cGithubClear">clear</button></div>
+<div class="row"><input id="cRepo" size="40" placeholder="default repo URL"></div>
+<div class="row"><button id="cSave">save credentials</button>
+ <span class="dim">stored 0600 on the launcher host; values are never echoed back</span></div>
+<div id="credNotes" class="row dim"></div>
 </div>
 <script>
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,
@@ -1193,7 +1207,14 @@ async function refresh(){
    '<span class="dim">'+esc(a.status)+' &middot; '+esc(a.image)+'</span> '+
    '<button data-watch="'+esc(a.agent)+'">watch</button>'+
    '<button data-stop="'+esc(a.agent)+'">stop</button>'+
-   '<button data-del="'+esc(a.agent)+'">destroy</button></div>').join('');
+   '<button data-del="'+esc(a.agent)+'">destroy</button>'+
+   '<button data-creds="'+esc(a.agent)+'">creds</button>'+
+   '<div data-ovr="'+esc(a.agent)+'" style="display:none;margin-top:.4rem">'+
+    '<span class="dim" data-ostate></span><br>'+
+    '<input data-oc size="26" placeholder="claude token override"> '+
+    '<input data-og size="26" placeholder="github token override"> '+
+    '<button data-osave>save</button> '+
+    '<button data-owipe>clear overrides</button></div></div>').join('');
  for(const b of list.querySelectorAll('[data-watch]'))b.onclick=async()=>{
   const g=await api('/agents/'+encodeURIComponent(b.dataset.watch)+'/grants',
    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
@@ -1205,11 +1226,41 @@ async function refresh(){
   if(!confirm('Destroy '+b.dataset.del+'? Its data root is kept.'))return;
   await api('/agents/'+encodeURIComponent(b.dataset.del),{method:'DELETE'});
   refresh();};
+ // U1 per-agent overrides: PUT /agents/<name>/profile (P2 backend, unchanged).
+ // Masked state only -- the page never sees a stored value.
+ for(const b of list.querySelectorAll('[data-creds]'))b.onclick=async()=>{
+  const box=list.querySelector('[data-ovr="'+CSS.escape(b.dataset.creds)+'"]');
+  const on=box.style.display==='none';
+  box.style.display=on?'':'none';
+  if(on){const p=await api('/profile');
+   const o=(p.credentials.agents||{})[b.dataset.creds]||{};
+   box.querySelector('[data-ostate]').textContent=
+    'override: claude '+(o.claude_token||'absent')+' / github '+(o.github_token||'absent');}
+ };
+ for(const b of list.querySelectorAll('[data-osave]'))b.onclick=async()=>{
+  const box=b.closest('[data-ovr]'),body={};
+  const c=box.querySelector('[data-oc]').value.trim();if(c)body.claude_token=c;
+  const g=box.querySelector('[data-og]').value.trim();if(g)body.github_token=g;
+  if(!Object.keys(body).length)return;
+  try{await api('/agents/'+encodeURIComponent(box.dataset.ovr)+'/profile',
+   {method:'PUT',body:JSON.stringify(body)});refresh();}catch(e){alert(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-owipe]'))b.onclick=async()=>{
+  const box=b.closest('[data-ovr]');
+  try{await api('/agents/'+encodeURIComponent(box.dataset.ovr)+'/profile',
+   {method:'PUT',body:JSON.stringify({claude_token:'',github_token:''})});
+   refresh();}catch(e){alert(e.message);}
+ };
  const meta=await api('/rooms-mine');
  const sel=document.getElementById('role');
  if(sel.options.length===1)for(const r of meta.roles){
   const o=document.createElement('option');o.value=o.textContent=r;
   sel.appendChild(o);}
+ // Show the selected role's full prompt text (textContent -- never HTML), so
+ // the user sees exactly what is supplied and what the append box adds to.
+ sel.onchange=()=>{const t=(meta.role_prompts||{})[sel.value]||'';
+  const el=document.getElementById('roleText');
+  el.textContent=t;el.style.display=t?'':'none';};
  // M3 first-run chain: zero rooms -> name one inline; the launcher creates it
  // through the broker (the deputy's fifth and last call) and the new room
  // arrives pre-ticked so the form continues without a context switch.
@@ -1230,7 +1281,33 @@ async function refresh(){
     '" checked> '+esc(r.name)+' <span class="dim">(owned)</span></label>';
   }catch(e){alert(e.message);}
  };
+ await loadCreds();   // authed by here -- refresh() already returned on a 401
 }
+// U1 globals: masked set/absent from GET /profile; PUT sends only touched
+// fields (empty repo field clears the default deliberately -- it is prefilled).
+async function loadCreds(){
+ const p=await api('/profile');const c=p.credentials||{};
+ document.getElementById('credState').textContent=
+  'claude token: '+(c.claude_token||'absent')+' / github token: '+
+  (c.github_token||'absent');
+ document.getElementById('cRepo').value=c.repo_url||'';
+ document.getElementById('credNotes').textContent=p.notes||'';
+}
+document.getElementById('cSave').onclick=async()=>{
+ const b={repo_url:document.getElementById('cRepo').value.trim()};
+ const cl=document.getElementById('cClaude').value.trim();if(cl)b.claude_token=cl;
+ const gh=document.getElementById('cGithub').value.trim();if(gh)b.github_token=gh;
+ try{await api('/profile',{method:'PUT',body:JSON.stringify(b)});
+  document.getElementById('cClaude').value='';
+  document.getElementById('cGithub').value='';
+  loadCreds();}catch(e){alert(e.message);}
+};
+document.getElementById('cClaudeClear').onclick=async()=>{
+ if(!confirm('Clear the stored claude token?'))return;
+ await api('/profile',{method:'PUT',body:'{"claude_token":""}'});loadCreds();};
+document.getElementById('cGithubClear').onclick=async()=>{
+ if(!confirm('Clear the stored github token?'))return;
+ await api('/profile',{method:'PUT',body:'{"github_token":""}'});loadCreds();};
 document.getElementById('create').onclick=async()=>{
  const st=document.getElementById('status');
  const rooms=[...document.querySelectorAll('#rooms input:checked')]
@@ -1349,8 +1426,12 @@ def build_api(auth_url):
         for key in ("owned", "member", "public"):
             for r in me.get(key) or []:
                 rooms.append({"id": r["id"], "name": r["name"], "kind": key})
+        # role_prompts: full text, so the form can SHOW what a role supplies
+        # before the user augments it (operator ask, U1) -- prompts are not
+        # secrets, they land in the container's CLAUDE.md verbatim.
         return JSONResponse({"rooms": rooms,
-                             "roles": sorted(ROLE_PROMPTS)})
+                             "roles": sorted(ROLE_PROMPTS),
+                             "role_prompts": ROLE_PROMPTS})
 
     @guarded
     async def rooms_create(request, p, conn):
