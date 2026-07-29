@@ -81,6 +81,7 @@ whoever happened to start the process, and every agent's home would move the
 day someone else ran the command (msg 8499).
 """
 import argparse
+import asyncio
 import contextlib
 import json
 import os
@@ -740,13 +741,26 @@ def mint_grant(conn, user, agent, grantee, mode, ttl):
         "revoked_ns) VALUES(?,?,?,?,?,?,?,NULL)",
         (gid, user, agent, grantee, mode, now, now + ttl * 10**9))
     conn.commit()
+    # RELATIVE, and that is the fix (DES-006 2.3): this used to be the
+    # container's docker-network address, which resolves on the host and
+    # NOWHERE else -- so every grant handed to a remote human was born broken.
+    # A path resolves against whatever origin the recipient opened, which is
+    # the proxy, which is reachable from wherever they are.
+    return {"id": gid, "mode": mode, "grantee": grantee,
+            "expiry_ns": now + ttl * 10**9,
+            "attach_url": f"/attach/{agent}/?arg={token}"}
+
+
+def container_addr(user, agent, port=7681):
+    """Where THIS agent's ttyd lives, resolved by the launcher from its own
+    records -- never from anything a client sent (DES-006 2.3: never an open
+    proxy). Returns "ip:port", or None when the container is not running."""
+    name = container_name(user, agent)
     ip = _docker("inspect", "-f",
                  "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
                  name, check=False, capture=True)
-    host = (ip.stdout or "").strip() or name
-    return {"id": gid, "mode": mode, "grantee": grantee,
-            "expiry_ns": now + ttl * 10**9,
-            "attach_url": f"http://{host}:7681/?arg={token}"}
+    host = (ip.stdout or "").strip()
+    return f"{host}:{port}" if host else None
 
 
 def revoke_grant(conn, user, agent, grant_id, actor):
@@ -896,7 +910,10 @@ def cmd_grant(a):
     exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(out["expiry_ns"] / 1e9))
     print(f"grant {out['id']}: {a.mode} for {a.grantee} on {a.user}/{a.agent}, "
           f"expires {exp}")
-    print(f"attach: {out['attach_url']}")
+    # A PATH, not an address: it resolves against the reveille origin the
+    # recipient opens (the proxy), which is reachable from anywhere they are --
+    # the container-network address it used to print never was.
+    print(f"attach: {out['attach_url']}  (on your reveille origin)")
     print("token shown once, never stored; lost token = revoke + re-grant")
     return 0
 
@@ -1301,6 +1318,8 @@ async function refresh(){
  for(const b of list.querySelectorAll('[data-watch]'))b.onclick=async()=>{
   const g=await api('/agents/'+encodeURIComponent(b.dataset.watch)+'/grants',
    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
+  // Relative on purpose (U4): resolves against THIS origin -- the proxy --
+  // so the same URL works for a remote human, which it never did before.
   window.open(g.attach_url,'_blank');};   // shown once, never retrievable
  for(const b of list.querySelectorAll('[data-stop]'))b.onclick=async()=>{
   await api('/agents/'+encodeURIComponent(b.dataset.stop)+'/stop',
@@ -1427,7 +1446,7 @@ def build_api(auth_url):
     box that only ever uses the launcher as a CLI."""
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
-    from starlette.routing import Route
+    from starlette.routing import Route, WebSocketRoute
 
     def guarded(fn):
         async def wrapped(request):
@@ -1603,6 +1622,115 @@ def build_api(auth_url):
             {"agent": request.path_params["agent"],
              "credentials": masked_profile(load_profile(p["user"]))})
 
+    # ---- attach-through-proxy (DES-006 U4) ---------------------------------
+    # The launcher is a DUMB PIPE BETWEEN TWO CHECKS, never an authority over
+    # attachment: it refuses unless the request carries a session principal AND
+    # that agent belongs to that user, and the grant token is still verified AT
+    # THE CONTAINER by attach-gate, untouched. The forward target is resolved
+    # here from our own records -- no client-supplied host, port or scheme ever
+    # reaches it.
+    def _attach_target(cookie, agent):
+        """(target, principal) or (None, None). Both gates, in one place."""
+        p = _broker_me(auth_url, cookie)
+        if p is None:
+            return None, None
+        conn = _db()
+        try:
+            _known_agent(conn, p["user"], agent)   # ownership; raises otherwise
+        except LaunchError:
+            return None, None
+        finally:
+            conn.close()
+        return container_addr(p["user"], agent), p
+
+    async def attach_http(request):
+        """ttyd's page and its assets. Only the sub-path under /attach/<agent>/
+        is forwarded, and it is joined onto an address we resolved -- a path
+        that tries to name a host is refused rather than dialled."""
+        from starlette.responses import PlainTextResponse, RedirectResponse, Response
+        agent = request.path_params["agent"]
+        sub = request.path_params.get("path", "")
+        if "://" in sub or sub.startswith("//"):
+            return PlainTextResponse("bad path", status_code=400)
+        target, _p = _attach_target(request.headers.get("cookie"), agent)
+        if target is None:
+            # One message for "not signed in", "not yours" and "no such agent":
+            # a distinguishable refusal is an ownership oracle.
+            return PlainTextResponse("no attachable agent by that name",
+                                     status_code=403)
+        if not request.url.path.startswith(f"/attach/{agent}/"):
+            # ttyd builds its websocket URL RELATIVE to the document, so the
+            # trailing slash is load-bearing: without it /ws resolves one level
+            # too high and the terminal never connects.
+            q = f"?{request.url.query}" if request.url.query else ""
+            return RedirectResponse(f"/attach/{agent}/{q}", status_code=307)
+        url = f"http://{target}/{sub}"
+        if request.url.query:
+            url += f"?{request.url.query}"
+
+        def fetch():
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read(), r.headers.get("Content-Type", "")
+        try:
+            status, body, ctype = await asyncio.to_thread(fetch)
+        except urllib.error.HTTPError as e:
+            return Response(e.read(), status_code=e.code)
+        except OSError:
+            return PlainTextResponse("agent terminal unreachable",
+                                     status_code=502)
+        return Response(body, status_code=status, media_type=ctype or None)
+
+    async def attach_ws(websocket):
+        """The terminal itself. Same two gates before a single byte moves."""
+        import websockets
+        agent = websocket.path_params["agent"]
+        target, _p = _attach_target(websocket.headers.get("cookie"), agent)
+        if target is None:
+            await websocket.close(code=4403)
+            return
+        subs = list(websocket.scope.get("subprotocols") or [])
+        q = websocket.scope.get("query_string", b"").decode()
+        upstream_url = f"ws://{target}/ws" + (f"?{q}" if q else "")
+        try:
+            up = await websockets.connect(upstream_url,
+                                          subprotocols=subs or None,
+                                          max_size=None, open_timeout=10)
+        except Exception:
+            await websocket.close(code=1011)
+            return
+        await websocket.accept(subprotocol=subs[0] if subs else None)
+
+        async def to_upstream():
+            while True:
+                msg = await websocket.receive()
+                if msg["type"] == "websocket.disconnect":
+                    return
+                data = msg.get("text")
+                await up.send(data if data is not None else msg.get("bytes", b""))
+
+        async def to_client():
+            async for data in up:
+                if isinstance(data, str):
+                    await websocket.send_text(data)
+                else:
+                    await websocket.send_bytes(data)
+
+        pump = [asyncio.create_task(to_upstream()),
+                asyncio.create_task(to_client())]
+        try:
+            done, pending = await asyncio.wait(
+                pump, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+            for t in done:
+                with contextlib.suppress(Exception):
+                    t.result()
+        finally:
+            await up.close()
+            with contextlib.suppress(Exception):
+                await websocket.close()
+
     async def health(_request):
         from starlette.responses import PlainTextResponse
         return PlainTextResponse("ok")
@@ -1629,6 +1757,12 @@ def build_api(auth_url):
         Route("/agents/{agent}/profile", agent_profile, methods=["PUT"]),
         Route("/agents/{agent}/{verb:str}", agent_lifecycle, methods=["POST"]),
         Route("/profile", profile, methods=["GET", "PUT"]),
+        # /ws BEFORE the catch-all: the terminal's socket must never be served
+        # as a static asset. WebSocketRoute and Route do not collide (different
+        # scope types), so both /attach/{agent}/ws entries can coexist.
+        WebSocketRoute("/attach/{agent}/ws", attach_ws),
+        Route("/attach/{agent}", attach_http),
+        Route("/attach/{agent}/{path:path}", attach_http),
     ])
 
 

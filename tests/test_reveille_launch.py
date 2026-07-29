@@ -336,3 +336,40 @@ def test_model_suggestions_are_suggestions_not_a_gate():
     # an agent from a model that shipped after this file was written.
     assert "claude-fable-5" in rl.MODEL_SUGGESTIONS
     assert isinstance(rl.MODEL_SUGGESTIONS, tuple)
+
+
+# ---- U4: attach through the launcher, never an open proxy -------------------
+
+def test_attach_url_is_a_path_not_a_container_address():
+    # The defect this slice fixes: the URL used to carry the docker-network
+    # address, which resolves on the host and nowhere else, so every grant
+    # handed to a remote human was born broken.
+    url = "/attach/dev/?arg=v1.deadbeef.driver.1.abc"
+    assert url.startswith("/attach/")
+    assert "172." not in url and ":7681" not in url
+
+
+def test_container_addr_is_derived_from_our_own_records(monkeypatch):
+    seen = {}
+
+    class R:
+        stdout = "172.21.0.9\n"
+        returncode = 0
+
+    def fake_docker(*args, **kw):
+        seen["args"] = args
+        return R()
+
+    monkeypatch.setattr(rl, "_docker", fake_docker)
+    assert rl.container_addr("acme", "dev") == "172.21.0.9:7681"
+    # the container NAME comes from (user, agent) -- never from a request
+    assert rl.container_name("acme", "dev") in seen["args"]
+
+
+def test_container_addr_is_none_when_not_running(monkeypatch):
+    class R:
+        stdout = ""
+        returncode = 1
+
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k: R())
+    assert rl.container_addr("acme", "dev") is None
