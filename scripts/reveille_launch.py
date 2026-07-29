@@ -42,6 +42,9 @@ somebody meant it.
   reveille-launch grants [user] [agent]              list grant records
   reveille-launch revoke <user> <agent> <grant-id>   kill d-/v-<id> now; audit exact
   reveille-launch flip <user> <agent> on|off         multi-driver toggle (4.3)
+  reveille-launch pin [--path ~/.reveille/launcher-src]
+      Create or fast-forward the tree `serve` is SPAWNED from. Never a
+      developer's checkout: spawning from one makes `git checkout` a deployment.
   reveille-launch sweep [--idle-hours 24]        ONE tick, now (the recurring
       one runs inside serve -- see --sweep-seconds there).
       The tick 4.6 assigns the launcher: kill d-*/v-* sessions whose grant is
@@ -1123,6 +1126,101 @@ def cmd_sweep(a):
     return 0
 
 
+DEFAULT_PIN = os.path.expanduser("~/.reveille/launcher-src")
+
+
+def pin_refusal(dirty, has_upstream, is_ff):
+    """Why this pinned tree must not be moved to origin/main, or None. Pure.
+
+    The pin is a DEPLOYMENT, so it refuses anything it cannot describe: local
+    edits (whose are they? nobody's -- this tree is not for editing) and any
+    move that is not a fast-forward (a rewritten main is a decision, not a
+    routine update). Both refusals leave the running code exactly where it was,
+    which is the safe direction for a service."""
+    if dirty:
+        return ("the pinned tree has local changes. Nothing edits this tree -- "
+                "it exists to be a known commit. Inspect it, then `git -C <path>"
+                " checkout -- .` if the changes are junk.")
+    if not has_upstream:
+        return "no origin/main to pin to (is the clone's remote reachable?)"
+    if not is_ff:
+        return ("origin/main is not a fast-forward from the pinned commit -- "
+                "main was rewritten or this tree was moved by hand. Deleting "
+                "the pinned tree and pinning again is the honest fix; a forced "
+                "move would silently change what is serving.")
+    return None
+
+
+def _git(path, *args, check=True):
+    return subprocess.run(["git", "-C", path, *args], check=check,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True)
+
+
+def source_stamp(path):
+    """(commit, branch, version) of the tree the RUNNING code came from, as
+    strings that are safe to print. A service that cannot say what it is running
+    can only be identified by asking a person, which is how a developer's
+    checkout ended up serving the operator (msg 8568)."""
+    commit = branch = "unknown"
+    r = _git(path, "rev-parse", "--short", "HEAD", check=False)
+    if r.returncode == 0:
+        commit = r.stdout.strip()
+        b = _git(path, "rev-parse", "--abbrev-ref", "HEAD", check=False)
+        branch = b.stdout.strip() or "detached"
+        if _git(path, "status", "--porcelain", check=False).stdout.strip():
+            branch += "+dirty"
+    version = "unknown"
+    with contextlib.suppress(OSError):
+        with open(os.path.join(path, "pyproject.toml")) as f:
+            m = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.M)
+            version = m.group(1) if m else "unknown"
+    return commit, branch, version
+
+
+def cmd_pin(a):
+    """Create or fast-forward the tree the launcher is SERVED from.
+
+    Not the developer's checkout: that tree changes under the service every time
+    someone reviews a branch, which makes `git checkout` a deployment and leaves
+    "what is serving?" answerable only by a person. This one only ever moves
+    forward along main."""
+    path, src = os.path.abspath(a.path), os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))
+    if not os.path.isdir(os.path.join(path, ".git")):
+        origin = a.origin or _git(src, "remote", "get-url", "origin").stdout.strip()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        r = subprocess.run(["git", "clone", "--branch", "main", origin, path],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            die(f"clone of {origin} failed: {r.stderr.strip()}")
+        print(f"cloned {origin} -> {path}")
+    _git(path, "fetch", "--quiet", "origin", "main", check=False)
+    head = _git(path, "rev-parse", "HEAD").stdout.strip()
+    up = _git(path, "rev-parse", "origin/main", check=False)
+    upstream = up.stdout.strip() if up.returncode == 0 else ""
+    if (why := pin_refusal(
+            bool(_git(path, "status", "--porcelain").stdout.strip()),
+            bool(upstream),
+            upstream and _git(path, "merge-base", "--is-ancestor", head,
+                              upstream, check=False).returncode == 0)):
+        die(f"reveille-launch pin: {why}")
+    _git(path, "checkout", "--quiet", "main", check=False)
+    _git(path, "merge", "--ff-only", "--quiet", "origin/main")
+    # The venv is part of the artifact: serve imports uvicorn and starlette, and
+    # a pinned tree without them falls back to system python and dies at import.
+    r = subprocess.run(["uv", "sync", "--quiet"], cwd=path, capture_output=True,
+                       text=True)
+    if r.returncode != 0:
+        die(f"uv sync in {path} failed: {r.stderr.strip()}")
+    commit, branch, version = source_stamp(path)
+    print(f"pinned {path} -> {commit} ({branch}), reveille {version}\n"
+          f"declare it so the supervisor uses it:\n"
+          f"  echo 'REVEILLE_LAUNCH_REPO={path}' >> ~/.reveille/launcher.env\n"
+          f"then stop the running launcher; the Stop hook respawns it from here.")
+    return 0
+
+
 def _sweep_forever(interval_s, idle_window_ns, stop):
     """The sweep's ONLY scheduler, run as a thread inside serve.
 
@@ -1891,7 +1989,15 @@ def cmd_serve(a):
     lock = _singleton(os.path.join(os.path.dirname(db_path), ".launcher.lock"))
     app = build_api(a.auth_url)
     idle_ns = int(a.idle_hours * 3600 * 10**9)
-    print(f"reveille-launch api on {a.host}:{a.port} (auth: {a.auth_url}/me)\n"
+    # WHAT IS SERVING, in the log, at boot. This process used to be started from
+    # whichever tree the spawn line pointed at, and the answer lived in a
+    # person's head (msg 8568). A commit + branch here is what makes "the
+    # operator is on unreviewed code" something you can SEE.
+    src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    commit, branch, version = source_stamp(src)
+    print(f"reveille-launch {version} ({commit} {branch}) "
+          f"api on {a.host}:{a.port} (auth: {a.auth_url}/me)\n"
+          f"  source  {src}\n"
           f"  docker  {server}\n  data    {DEFAULT_DATA}\n  db      {db_path}\n"
           f"  sweep   every {a.sweep_seconds}s"
           + (f", idle stop after {a.idle_hours}h" if idle_ns else ", idle stop OFF"),
@@ -2125,6 +2231,15 @@ def build_parser():
                     help="the sweep stops (never destroys) containers idle this "
                          "long (default 24; 0 disables the idle stop only)")
     sv.set_defaults(fn=cmd_serve)
+
+    pn = sub.add_parser("pin", help="create/fast-forward the tree the launcher "
+                                    "is SERVED from (never your checkout)")
+    pn.add_argument("--path", default=DEFAULT_PIN,
+                    help=f"where the served clone lives (default {DEFAULT_PIN})")
+    pn.add_argument("--origin", default="",
+                    help="clone URL for a first pin (default: this checkout's "
+                         "origin)")
+    pn.set_defaults(fn=cmd_pin)
 
     j = sub.add_parser("join-here",
                        help="bootstrap THIS terminal for one agent (DES-003 2.4)")

@@ -289,3 +289,41 @@ The property §2.1 protects has always been *the broker never depends on the
 launcher*. Merging the UI is allowed precisely because the browser — not the
 broker — does the fetching; that stays true only if a failed fetch degrades
 one view instead of the product.
+
+### 6.7 The serving launcher is not a working tree (drafted per architect ruling, msg 8568)
+
+U2 gave the launcher the waiter's supervision — flock-guarded, hook-spawned, no
+systemd — and left one thing unstated: *which tree it is spawned from*. The Stop
+hook spawned `$repo/scripts/reveille_launch.py`, where `$repo` is the hook's own
+location, i.e. a developer's checkout. Consequences, both observed on the live
+box: the operator's launcher was running an unreviewed feature branch, and
+`git checkout` — a read-only act, performed while REVIEWING a branch — was
+silently a deployment. Nobody could answer *what is serving?* without asking a
+person which branch they were on.
+
+Binding:
+
+- **`~/.reveille/launcher.env` must declare `REVEILLE_LAUNCH_REPO`**, and the
+  supervisor spawns from that path only. It is deliberately not defaulted to the
+  hook's own repo: the default is what caused this. Undeclared → no spawn, said
+  plainly in `launcher.log`, because a launcher serving unreviewed code is worse
+  than a launcher that is down.
+- **`reveille-launch pin` maintains that path** as a clone that only ever
+  fast-forwards `main`, syncing its venv (the venv is part of the artifact:
+  `serve` imports uvicorn and starlette). It refuses a tree with local edits and
+  refuses any move that is not a fast-forward — a pin is a deployment, so it
+  refuses what it cannot describe, and both refusals leave the running code
+  exactly where it was.
+- **The startup banner names version, commit, branch and source path**, so
+  *what is serving?* is answerable from the log rather than from a person. A
+  `+dirty` suffix is deliberate: an operator seeing it knows the tree was
+  touched by hand.
+- **Gate (`make launcher-pin-smoke`)**: with the service up, rewrite the dev
+  tree's launcher and assert the serving process is unaffected — same pid, still
+  answering, same commit. That property is the whole point.
+
+The broker already had this discipline — it runs from `reveille-server:<version>`,
+an immutable image — and it was simply never extended to the second service.
+Containerising the launcher is the other honest answer; it needs the docker
+socket, which is a security decision that has not been made, so the pinned clone
+is the shape until it is.
