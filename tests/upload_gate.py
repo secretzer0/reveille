@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Attachment gate (operator msg 8525 + reveille-senior-ui-ux 8526): a file put
-on the bus must come back BYTE-IDENTICAL and keep its name, by every route a
-client actually uses -- raw body, multipart form, and the MCP upload() tool.
+"""Attachment gate (operator msg 8525, reveille-senior-ui-ux 8526,
+reveille-architect 8536/8554). Three claims, proven from the CALLER's side --
+what the client receives, not what the code reads like:
 
-The corruption this proves gone: the multipart ENVELOPE (boundary lines,
-Content-Disposition, trailing boundary) was being stored as the file, so the
-blob was larger than the source, was not a valid PNG, and was named file.bin --
-which also failed the UI's is-this-an-image test, breaking inline preview and
-download with one bug.
+1. A file put on the bus comes back BYTE-IDENTICAL and keeps its name, by both
+   routes a client actually uses: raw body and the MCP upload() tool.
+2. A multipart form is REFUSED with a message naming the right call. It used to
+   be stored verbatim -- boundary lines, Content-Disposition and all -- so the
+   blob was bigger than the source, was not a valid PNG, and was named file.bin,
+   which also failed the UI's is-this-an-image test. One bug, two symptoms, and
+   neither surfaced at upload time.
+3. /files/* does not invite a browser to RENDER what it serves unless the type
+   is on the allowlist. An uploaded .html came back as text/html on the broker's
+   own origin -- the one holding the session cookie -- which made any attachment
+   stored XSS. Reading the code is not the gate; the response header is.
 """
 import base64
 import contextlib
@@ -20,10 +26,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zlib
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 from reveille import store  # noqa: E402
@@ -63,11 +69,30 @@ def wait_health(port, timeout=25):
     raise SystemExit("broker never came up")
 
 
-def get(url, token, want=200):
+def post(url, token, data, want=200):
+    """Raw-body upload. Returns the decoded JSON and the status."""
+    r = urllib.request.Request(url, data=data, method="POST",
+                               headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            status, body = resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read()
+    assert status == want, (status, body[:200])
+    return json.loads(body)
+
+
+def fetch(url, token):
+    """GET an attachment back. Returns (bytes, headers) -- the headers ARE the
+    subject of claim 3, so they do not get thrown away here."""
     r = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     with urllib.request.urlopen(r, timeout=10) as resp:
-        assert resp.status == want, resp.status
-        return resp.read(), resp.headers.get("Content-Type", "")
+        assert resp.status == 200, resp.status
+        # resp.headers, not a dict of it: HTTP header names are
+        # case-insensitive and the server sends them lowercase, so a plain dict
+        # would answer "missing" to every lookup below and the gate would pass
+        # or fail for the wrong reason.
+        return resp.read(), resp.headers
 
 
 def main():
@@ -93,61 +118,94 @@ def main():
     try:
         wait_health(port)
 
-        # -- 1. multipart, the way curl -F and every HTTP library send ------
+        # -- 1. raw body (?name=): the one supported HTTP shape ---------------
+        raw = post(f"{base}/upload?name=pasted.png", secret, src)
+        assert raw["bytes"] == len(src) and raw["name"] == "pasted.png", raw
+        body, hdrs = fetch(base + raw["url"], secret)
+        assert body == src, "raw upload came back CORRUPTED"
+        assert hdrs.get("Content-Type", "").startswith("image/png"), hdrs.get("Content-Type", "")
+        assert hdrs.get("Content-Disposition", "").startswith("inline"), hdrs
+        assert raw["url"].endswith(".png"), raw["url"]  # UI renders inline on this
+
+        # -- 2. multipart is REFUSED, and the refusal names the right call ----
         src_path = os.path.join(tmp, "02_after_login.png")
         pathlib.Path(src_path).write_bytes(src)
         out = subprocess.run(
-            ["curl", "-sS", "-H", f"Authorization: Bearer {secret}",
+            ["curl", "-sS", "-w", "\n%{http_code}",
+             "-H", f"Authorization: Bearer {secret}",
              "-F", f"file=@{src_path};type=image/png", f"{base}/upload"],
             capture_output=True, text=True, check=True).stdout
-        got = json.loads(out)
-        assert got["name"] == "02_after_login.png", got   # not file.bin
-        assert got["bytes"] == len(src), (got["bytes"], len(src))  # no envelope
-        body, ctype = get(base + got["url"], secret)
-        assert body == src, "multipart upload came back CORRUPTED"
-        assert ctype.startswith("image/png"), ctype       # typed from the name
-        assert got["url"].endswith(".png"), got["url"]    # UI renders inline on this
+        payload, _, code = out.rpartition("\n")
+        assert code.strip() == "400", (code, payload)
+        err = json.loads(payload)["error"]
+        assert "RAW BYTES" in err and "--data-binary" in err, err
+        # Refused means refused: nothing was written, so nothing to clean up.
+        assert not any(f.name.endswith("02_after_login.png")
+                       for f in os.scandir(pathlib.Path(db).parent / "files")), \
+            "a refused multipart upload still landed on disk"
 
-        # -- 2. raw body (?name=), the path the web composer uses ----------
-        r = urllib.request.Request(
-            f"{base}/upload?name=pasted.png", data=src, method="POST",
-            headers={"Authorization": f"Bearer {secret}"})
-        with urllib.request.urlopen(r, timeout=10) as resp:
-            raw = json.loads(resp.read())
-        assert raw["bytes"] == len(src) and raw["name"] == "pasted.png", raw
-        body, ctype = get(base + raw["url"], secret)
-        assert body == src and ctype.startswith("image/png")
+        # A form whose Content-Type was lost is the same envelope, same refusal.
+        boundary = b"--xyz"
+        formish = (boundary + b"\r\nContent-Disposition: form-data; name=\"file\"; "
+                   b"filename=\"a.png\"\r\n\r\n" + src + b"\r\n" + boundary + b"--\r\n")
+        err = post(f"{base}/upload?name=a.png", secret, formish, want=400)["error"]
+        assert "RAW BYTES" in err, err
 
-        # -- 3. the MCP upload() tool: same bytes, same shape ---------------
+        # -- 3. served attachments do not invite rendering --------------------
+        evil = b"<script>fetch('/tokens').then(r=>r.text()).then(alert)</script>"
+        ev = post(f"{base}/upload?name=note.html", secret, evil)
+        body, hdrs = fetch(base + ev["url"], secret)
+        assert body == evil, "the .html did not round-trip"   # stored fine...
+        ctype = hdrs.get("Content-Type", "")
+        disp = hdrs.get("Content-Disposition", "")
+        assert "html" not in ctype.lower(), f"served as renderable HTML: {ctype}"
+        assert ctype.startswith("application/octet-stream"), ctype
+        assert disp.startswith("attachment"), disp
+        assert hdrs.get("X-Content-Type-Options") == "nosniff", hdrs
+        # SVG is an image to a human and a script host to a browser.
+        sv = post(f"{base}/upload?name=logo.svg", secret,
+                  b"<svg xmlns='http://www.w3.org/2000/svg'><script>1</script></svg>")
+        _, hdrs = fetch(base + sv["url"], secret)
+        assert hdrs.get("Content-Disposition", "").startswith("attachment"), hdrs
+        assert "svg" not in hdrs.get("Content-Type", "").lower(), hdrs.get("Content-Type", "")
+
+        # -- 4. the MCP upload() tool: same bytes, and a context-sized cap ----
         import asyncio
 
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
 
         async def via_mcp():
-            hdrs = {"Authorization": f"Bearer {secret}", "X-Agent": "ana"}
-            async with streamablehttp_client(f"{base}/mcp", headers=hdrs) as (r_, w_, _):
+            hdrs_ = {"Authorization": f"Bearer {secret}", "X-Agent": "ana"}
+            async with streamablehttp_client(f"{base}/mcp", headers=hdrs_) as (r_, w_, _):
                 async with ClientSession(r_, w_) as s:
                     await s.initialize()
-                    res = await s.call_tool("upload", {
+                    ok = await s.call_tool("upload", {
                         "name": "tool.png",
                         "data_b64": base64.b64encode(src).decode()})
-                    return res.structuredContent or json.loads(res.content[0].text)
+                    big = await s.call_tool("upload", {
+                        "name": "big.bin",
+                        "data_b64": base64.b64encode(b"\0" * (300 * 1024)).decode()})
+                    return (ok.structuredContent or json.loads(ok.content[0].text),
+                            big.isError, big.content[0].text)
 
-        mcp_out = asyncio.run(via_mcp())
+        mcp_out, over_is_error, over_msg = asyncio.run(via_mcp())
         assert mcp_out["name"] == "tool.png" and mcp_out["bytes"] == len(src), mcp_out
-        body, ctype = get(base + mcp_out["url"], secret)
+        body, hdrs = fetch(base + mcp_out["url"], secret)
         assert body == src, "MCP upload came back CORRUPTED"
-        assert ctype.startswith("image/png"), ctype
+        assert hdrs.get("Content-Type", "").startswith("image/png"), hdrs.get("Content-Type", "")
+        # Over the tool cap: refused, and pointed at the route that still takes it.
+        assert over_is_error, over_msg
+        assert "tool cap" in over_msg and "--data-binary" in over_msg, over_msg
 
-        # -- 4. the three routes agree, byte for byte ----------------------
-        assert len({got["bytes"], raw["bytes"], mcp_out["bytes"]}) == 1
+        assert raw["bytes"] == mcp_out["bytes"] == len(src)
 
-        print("upload-gate OK: multipart, raw-body and the MCP upload() tool all "
-              "store the FILE and not the envelope -- bytes identical to the "
-              f"source ({len(src)}), original filename kept, image/png served "
-              "from the extension, and the URL ends in .png so the UI renders it "
-              "inline")
+        print("upload-gate OK: raw body and the MCP upload() tool store the FILE "
+              f"({len(src)} bytes, identical), name kept, image/png inline from the "
+              "extension; a multipart form is refused 400 with the right curl line "
+              "and leaves nothing on disk; .html and .svg come back as "
+              "attachment/octet-stream with nosniff, so an attachment cannot script "
+              "the broker's origin; the 256KB tool cap refuses and names the HTTP route")
     finally:
         proc.terminate()
         with contextlib.suppress(Exception):

@@ -183,20 +183,27 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
-0.2.22 ATTACHMENTS: use the new upload() TOOL, and keep the real extension.
-       upload(name="shot.png", data_b64=<base64 of the bytes>) returns the dict
-       you pass in send()'s `attachments` list. One uniform path, so no agent
-       re-derives multipart forms, token headers and room scope by hand.
-       FIXED: POST /upload stored the whole multipart ENVELOPE -- boundary
-       lines, Content-Disposition header and all -- whenever a client sent a
-       form (curl -F, requests, fetch+FormData). The stored blob was not a
-       valid file, and its name fell back to file.bin, which also failed the
-       UI's is-this-an-image test. So one bug broke both the inline preview and
-       the download. Raw-body uploads (?name=) were never affected. If you
-       attached anything via a form before this version, re-upload it.
-       THE EXTENSION IS LOAD-BEARING: /files/* types its response from it and
-       the web UI renders images inline by testing it. blob.bin renders for
-       nobody.
+0.2.22 ATTACHMENTS: use the upload() TOOL. upload(name="shot.png",
+       data_b64=<base64 of the bytes>) returns the dict you pass in send()'s
+       `attachments` list -- one uniform path, so no agent re-derives an HTTP
+       call, its auth header and its room scope. Cap 256KB after decoding, not
+       for storage but because base64 rides YOUR context at ~133% of the file;
+       bigger files go over HTTP, which still takes 25MB.
+       POST /upload NOW REFUSES A MULTIPART FORM (400) instead of storing it.
+       It always took RAW BYTES -- `curl --data-binary @f.png '.../upload
+       ?name=f.png'` -- and a form's envelope stored verbatim is not your file:
+       it is boundary lines wrapped around it, named file.bin. That corruption
+       surfaced hours later as an image nobody could open. If you attached
+       anything with `curl -F` before this version, re-upload it.
+       KEEP THE REAL EXTENSION: /files/* types its response from it, and the
+       web UI decides to render an image inline by testing it. blob.bin renders
+       for nobody.
+       SERVED ATTACHMENTS NO LONGER RENDER ARBITRARY TYPES. Images and plain
+       text come back inline; everything else downloads as an opaque stream
+       with nosniff. An uploaded .html used to be served as text/html on the
+       broker's own origin -- the one holding your session cookie -- which made
+       any attachment a stored-XSS vector against whoever clicked it. SVG is
+       deliberately not inline: an image to you, a script host to a browser.
 0.2.21 A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. The
        `shout` parameter is RETIRED -- delete it from anything you send. It
        shipped in 0.1.5 and worked, but its checkbox hid itself whenever a
@@ -1012,11 +1019,15 @@ async def upload(name: str, data_b64: str, room: str = "",
     blob.bin downloads as octet-stream and never renders for the human reading
     the room.
 
-    This exists so every agent uploads the same way. Hand-rolled HTTP works, but
-    each caller then re-derives the multipart form, the token header and the
-    room scope -- and one of those getting it wrong is what corrupted every
-    attachment before 0.2.22. Same size caps as the HTTP route; the cap is on
-    the DECODED bytes, not the base64."""
+    This exists so every agent uploads the same way, instead of each one
+    re-deriving an HTTP call, its auth header and its room scope -- one of those
+    going wrong is what put a multipart envelope on disk instead of a PNG.
+
+    CAP: 256KB after decoding. Not a storage limit -- base64 lands in YOUR
+    context at ~133% of the file, so a large attachment costs you the room you
+    need to think. Over it, this refuses and points at the raw-bytes HTTP route,
+    which still takes up to 25MB:
+      curl --data-binary @big.zip '<broker>/upload?name=big.zip'"""
     p = _me(ctx.request_context.request)
     rid = store.resolve_send_room(p.rooms, room=room or None)
     try:
@@ -1025,6 +1036,12 @@ async def upload(name: str, data_b64: str, room: str = "",
         raise store.BusError(f"data_b64 is not valid base64: {e}") from None
     if not data:
         raise store.BusError("empty file")
+    if len(data) > TOOL_UPLOAD_MAX:
+        raise store.BusError(
+            f"{len(data)} bytes is over the {TOOL_UPLOAD_MAX} byte tool cap "
+            f"(base64 would cost ~{len(data) * 4 // 3} bytes of your context). "
+            f"Send it over HTTP instead: curl --data-binary @{name} "
+            f"'<broker>/upload?name={name}'")
     used = _files_used() if QUOTA_BYTES else 0
     if (why := _upload_refusal(used, len(data))):
         raise store.BusError(why)
@@ -1425,9 +1442,52 @@ async def send_http(request):
                          "delivered_to": res["wake"]})
 
 
+_MULTIPART_HELP = (
+    "this endpoint takes RAW BYTES, not a multipart form -- storing the form's "
+    "envelope would corrupt your file. Send the bytes: "
+    "curl --data-binary @shot.png '<broker>/upload?name=shot.png'  "
+    "(agents: use the upload() tool instead)")
+
+
+def _looks_multipart(content_type):
+    """Pure: is the caller posting a form to a raw-bytes endpoint?"""
+    return (content_type or "").lower().startswith("multipart/")
+
+
+# Types the broker will let a browser RENDER on its own origin. Everything else
+# is served as a download. This is an allowlist because the dangerous set is
+# open-ended: .html is the obvious one, but SVG carries script too, and so does
+# anything the browser is willing to sniff. Rendering happens on the origin that
+# holds the session cookie, so a wrong entry here is stored XSS against every
+# logged-in user who clicks an attachment.
+_INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                 ".gif": "image/gif", ".webp": "image/webp", ".txt": "text/plain",
+                 ".log": "text/plain", ".md": "text/plain", ".json": "application/json",
+                 ".csv": "text/plain"}
+
+
+def file_headers(fname):
+    """(media_type, content_disposition) for a stored attachment. Pure.
+
+    Images and plain text render inline -- that is what makes a screenshot show
+    up in the room. Everything else downloads, typed as a stream so the browser
+    never sniffs its way into executing it. SVG is DELIBERATELY not inline: it
+    is an image to a user and a script host to a browser."""
+    ext = os.path.splitext(fname)[1].lower()
+    inline = _INLINE_TYPES.get(ext)
+    if inline:
+        return inline, "inline"
+    return "application/octet-stream", "attachment"
+
+
 _files_dir = None  # set in main(): <db dir>/files -- attachments live next to the broker db
 _FNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 MAX_UPLOAD = 25 * 1024 * 1024
+# The upload() TOOL's cap is far tighter than the HTTP route's, and for a
+# different reason: base64 rides the calling agent's context at ~133% of the
+# file, so an uncapped tool spends the caller's room to think rather than the
+# broker's disk. Big files go over HTTP, where nobody's context pays.
+TOOL_UPLOAD_MAX = 256 * 1024
 
 # Total bytes of attachments this broker will hold. 0 = unlimited, because a homebrew box
 # must not surprise its owner with a cap he never asked for. A hosted free tier sets it per
@@ -1460,11 +1520,14 @@ def _upload_refusal(used, size):
 
 @_guard
 async def upload_http(request):
-    """POST /upload[?name=<filename>][&room=] -- EITHER raw file bytes as the body
-    (pass ?name= so the extension survives) OR a multipart/form-data file part,
-    which is what curl -F and every HTTP library send; the part's own filename is
-    used. Stores it under a unique name, records which room it belongs to, and
-    returns {"url": "/files/<stored>", "name": <original>, "bytes": n}.
+    """POST /upload?name=<filename>[&room=] -- RAW file bytes as the body:
+        curl --data-binary @shot.png '<broker>/upload?name=shot.png'
+    Stores it under a unique name, records which room it belongs to, and returns
+    {"url": "/files/<stored>", "name": <original>, "bytes": n}.
+
+    A MULTIPART FORM (curl -F, and the default of most HTTP libraries) IS
+    REFUSED, 400. There is no form parser here on purpose -- see the comment at
+    the check below.
 
     KEEP THE EXTENSION. It is not cosmetic: /files/* types the response from it,
     and the web UI decides to render an image inline by testing it. A blob named
@@ -1493,35 +1556,28 @@ async def upload_http(request):
     declared = int(request.headers.get("content-length") or 0)
     if (why := _upload_refusal(used, declared)):
         return JSONResponse({"error": why}, status_code=413)
-    if (request.headers.get("content-type") or "").startswith("multipart/form-data"):
-        # A multipart body is an ENVELOPE, not the file: it carries boundary
-        # lines, a Content-Disposition header and the payload. Storing the body
-        # verbatim wrote all of that to disk, so the blob was a few hundred bytes
-        # larger than the source and not a valid image at all -- and the stored
-        # name fell back to file.bin, which then failed the UI's extension test,
-        # so the same bug broke inline rendering AND download. Every standard
-        # client (curl -F, requests, fetch+FormData) posts this way.
-        form = await request.form()
-        part = next((v for v in form.values() if hasattr(v, "read")), None)
-        if part is None:
-            return JSONResponse({"error": "no file part in multipart body"},
-                                status_code=400)
-        data = await part.read()
-        if (why := _upload_refusal(used, len(data))):
-            return JSONResponse({"error": why}, status_code=413)
-        # The sender's own filename wins over ?name= here: it is the more
-        # specific statement, and it is what carries the extension.
-        if part.filename:
-            name = _FNAME_RE.sub("_", part.filename)[-80:]
-    else:
-        buf = bytearray()
-        async for chunk in request.stream():
-            buf += chunk
-            if (why := _upload_refusal(used, len(buf))):
-                return JSONResponse({"error": why}, status_code=413)  # hangs up mid-stream
-        data = bytes(buf)
+    # REFUSE WHAT WE CANNOT UNDERSTAND. This endpoint takes RAW BYTES. A
+    # multipart form is an envelope -- boundary lines, a Content-Disposition
+    # header, the payload -- and storing it verbatim is what a raw-bytes
+    # endpoint is told to do, so the corruption did not surface here: it
+    # surfaced hours later as an image that would not open. Refusing at the
+    # door costs the caller one error message; accepting costs them a debugging
+    # session. Same rule the launcher's docker probe follows: a component that
+    # cannot do the thing says so instead of producing a plausible wrong result.
+    if _looks_multipart(request.headers.get("content-type")):
+        return JSONResponse({"error": _MULTIPART_HELP}, status_code=400)
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if (why := _upload_refusal(used, len(buf))):
+            return JSONResponse({"error": why}, status_code=413)  # hangs up mid-stream
+    data = bytes(buf)
     if not data:
         return JSONResponse({"error": "empty body"}, status_code=400)
+    # A body that opens with a boundary is a form whose Content-Type was lost or
+    # never set -- same envelope, same silent corruption, so same refusal.
+    if data[:2] == b"--" and b"Content-Disposition: form-data" in data[:4096]:
+        return JSONResponse({"error": _MULTIPART_HELP}, status_code=400)
     stored = f"{time.time_ns() // 1_000_000}-{name}"
     (_files_dir / stored).write_bytes(data)
     store.record_file(_conn, stored, rid, p.name)
@@ -1541,7 +1597,16 @@ async def files_http(request):
     path = _files_dir / fname
     if not path.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(path)
+    # Serving an attachment with a guessed content type is stored XSS: an
+    # uploaded .html came back as text/html ON THIS ORIGIN, the one holding the
+    # session cookie, so any logged-in user who clicked the link ran the
+    # uploader's script. Allowlist what may render; everything else downloads as
+    # an opaque stream, with nosniff so the browser cannot second-guess us.
+    media, disp = file_headers(fname)
+    return FileResponse(path, media_type=media, headers={
+        "Content-Disposition": f'{disp}; filename="{fname}"',
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox"})
 
 
 @_guard
@@ -2167,6 +2232,12 @@ let filterMode='from';
 const recip=new Set();          // empty = ALL (broadcast); else one unicast per member
 let replyTo=null;               // message id the composer is replying to
 const attachments=[];           // [{name,url}] pending on the composer
+// Which attachments the UI tries to show inline. This list MUST stay a subset
+// of what /files/* is willing to serve inline (file_headers): an <img> pointed
+// at an octet-stream download renders as a broken tile, which reads as a
+// corrupt upload. SVG is served as a download on purpose -- image to a human,
+// script host to a browser -- so it is not here.
+const IMG_RE=/\.(png|jpe?g|gif|webp)$/i;
 
 async function uploadFile(f){
  const r=await fetch('/upload'+qs()+'&name='+encodeURIComponent(f.name),
@@ -2180,7 +2251,7 @@ function renderAttchips(){
  const w=$('attchips');w.innerHTML='';
  attachments.forEach((a,i)=>{
   const t=document.createElement('div');t.className='attTile';t.title=a.name;
-  if(/\.(png|jpe?g|gif|webp|svg)$/i.test(a.url)){
+  if(IMG_RE.test(a.url)){
    t.innerHTML='<img src="'+a.url+qs()+'" alt="">';
   }else{
    const ext=(a.name.includes('.')?a.name.split('.').pop():'').toUpperCase().slice(0,4)||'FILE';
@@ -2277,7 +2348,7 @@ function attHtml(list){
  if(!list||!list.length)return '';
  return '<div class="atts">'+list.map(a=>{
   const safe=a.url+qs();
-  if(/\.(png|jpe?g|gif|webp|svg)$/i.test(a.url))
+  if(IMG_RE.test(a.url))
    return '<a href="'+safe+'" target="_blank" rel="noopener" title="open full size">'
      +'<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'"></a>';
   const link='<a class="attlink" href="'+safe+'" download>'+esc(a.name||a.url)+'</a>';

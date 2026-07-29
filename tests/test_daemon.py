@@ -2,6 +2,7 @@
 """Pure-function checks for the daemon (no server). Run: uv run pytest.
 The live HTTP/WS path is covered by tests/smoke_ws.py."""
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -261,7 +262,42 @@ def test_shout_parameter_is_gone_from_the_served_surface():
 
 def test_boot_doctrine_states_the_broadcast_rule():
     # A capability absent from the boot text does not exist (ratified lesson).
-    for text in (daemon.USAGE, daemon.CHANGES):
-        pass
     assert "HUMAN" in daemon.USAGE and "broadcast" in daemon.USAGE
     assert "direct" in daemon.USAGE
+
+
+def test_only_allowlisted_types_render_in_the_browser():
+    # The dangerous set is open-ended, so the safe set is the enumerated one.
+    for name in ("shot.png", "SHOT.PNG", "log.txt", "notes.md"):
+        media, disp = daemon.file_headers(name)
+        assert disp == "inline", name
+        assert not media.startswith("application/octet-stream"), name
+    for name in ("note.html", "page.htm", "logo.svg", "app.js", "data.xml",
+                 "file.bin", "noext"):
+        media, disp = daemon.file_headers(name)
+        assert (media, disp) == ("application/octet-stream", "attachment"), name
+
+
+def test_the_ui_only_tries_to_render_what_the_server_serves_inline():
+    # An <img> pointed at an octet-stream download is a broken tile, and a
+    # broken tile reads as a corrupt upload -- which is the exact bug this
+    # slice exists to kill. So the UI's list is checked against the server's.
+    m = re.search(r"const IMG_RE=/\\\.\(([^)]+)\)\$/i;", daemon.WEBCHAT)
+    assert m, "the UI's inline-image test moved; this invariant needs re-aiming"
+    for alt in m.group(1).split("|"):
+        for ext in ("." + alt.replace("jpe?g", "jpeg"), "." + alt.replace("?", "")):
+            assert daemon.file_headers("x" + ext)[1] == "inline", ext
+
+
+def test_multipart_is_detected_by_content_type_whatever_its_case():
+    assert daemon._looks_multipart("multipart/form-data; boundary=x")
+    assert daemon._looks_multipart("MULTIPART/FORM-DATA; boundary=x")
+    assert not daemon._looks_multipart("application/octet-stream")
+    assert not daemon._looks_multipart("")
+    assert not daemon._looks_multipart(None)
+
+
+def test_the_multipart_refusal_names_the_call_that_works():
+    # A refusal that does not say what to do instead is a dead end, not a gate.
+    assert "--data-binary" in daemon._MULTIPART_HELP
+    assert "upload()" in daemon._MULTIPART_HELP
