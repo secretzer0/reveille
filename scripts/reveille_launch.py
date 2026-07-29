@@ -28,6 +28,13 @@ somebody meant it.
   reveille-launch destroy <user> <agent> [--purge]   --purge drops the data root
   reveille-launch quota <user> [--cpus N] [--mem 8g] [--pids N] [--max-containers N]
       Show (bare) or override (flags) one user's quotas.
+  reveille-launch profile <user> [--agent A] [--claude-token] [--github-token]
+                                 [--repo-url URL] [--clear-claude] [--clear-github]
+      Show (masked) or set stored credentials (DES-005 P2): claude setup-token
+      or API key (told apart by prefix), github token, default repo URL --
+      per-user globals, --agent for a per-agent override. Values arrive on
+      stdin/prompt, land 0600 in data/<user>/profile.json (a sibling of the
+      agent dirs, so no container mounts it), and are echoed by nothing.
   reveille-launch grant <user> <agent> <grantee> [--mode viewer|driver] [--ttl 86400]
       Mint a per-grant URL token (docker exec attach-gate mint -- the secret never
       leaves the container) and record the grant. The token is PRINTED ONCE, never
@@ -153,7 +160,7 @@ def data_root(user, agent, base=None):
 
 
 def docker_run_argv(user, agent, image, network, quotas, forward_anthropic,
-                    boot_cmd=None, data_base=None):
+                    boot_cmd=None, data_base=None, extra_env=()):
     """The docker-run command as argv. `-e NAME` entries pass values BY NAME from the
     child's env, so no secret is ever a token in this list -- the test asserts exactly
     that. quotas is a resolved QUOTA_DEFAULTS-shaped dict. `--restart no` is explicit
@@ -184,6 +191,10 @@ def docker_run_argv(user, agent, image, network, quotas, forward_anthropic,
         # a login (R2), but a fresh home has none, so forward the operator's key by
         # name if they have one. Not a broker secret, not persisted.
         argv += ["-e", "ANTHROPIC_API_KEY"]
+    for name in extra_env:
+        # P2 profile credentials: NAMES here, values in the child env -- the
+        # same no-argv discipline as ENV_PASSTHROUGH_SECRET.
+        argv += ["-e", name]
     argv.append(image)
     if boot_cmd:
         import shlex
@@ -412,6 +423,101 @@ def _exists(name):
     return _docker("inspect", name, check=False, capture=True).returncode == 0
 
 
+# ---- credential profiles (DES-005 P2) ----------------------------------------------
+# Per-user globals + per-agent overrides for the CLAUDE credential, the GITHUB
+# token, and the default repo URL. Stored launcher-side at
+# data/<user>/profile.json -- 0600, and a SIBLING of the agent dirs, so no
+# container ever mounts it. The broker db never sees it; no API response ever
+# echoes a value (masked to set/absent). A container still receives its own
+# user's credentials via env (sec 7.1: the user's own credential doing the
+# user's own work -- stated, not hidden).
+
+def profile_path(user, base=None):
+    return os.path.join(base or DEFAULT_DATA, user, "profile.json")
+
+
+def load_profile(user, base=None):
+    try:
+        with open(profile_path(user, base)) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_profile(user, prof, base=None):
+    """0600 at open (never chmod-after), user root 0700 first -- the same
+    discipline as join-here's env fragment."""
+    path = profile_path(user, base)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    os.chmod(os.path.dirname(path), 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(prof, f)
+
+
+def merge_profile(prof, updates, agent=None):
+    """Apply updates (None value = clear) to the globals, or to one agent's
+    override block. Pure; returns the new profile."""
+    prof = json.loads(json.dumps(prof))   # deep copy, no surprises
+    target = prof
+    if agent is not None:
+        target = prof.setdefault("agents", {}).setdefault(agent, {})
+    for k in ("claude_token", "github_token", "repo_url"):
+        if k in updates:
+            if updates[k]:
+                target[k] = updates[k]
+            else:
+                target.pop(k, None)
+    return prof
+
+
+def resolve_credentials(prof, agent, repo_url_req=""):
+    """Per-agent override > user global; an explicit repo_url on the request
+    outranks both (it is the most specific statement of intent). Pure."""
+    a = (prof.get("agents") or {}).get(agent) or {}
+
+    def pick(k):
+        return a.get(k) or prof.get(k) or None
+
+    return {"claude_token": pick("claude_token"),
+            "github_token": pick("github_token"),
+            "repo_url": repo_url_req or pick("repo_url") or ""}
+
+
+def claude_env_name(token):
+    """API keys and setup-token OAuth tokens share one profile field, told
+    apart by prefix (sec 3): sk-ant-api... is a key, anything else rides
+    CLAUDE_CODE_OAUTH_TOKEN. Pure."""
+    return ("ANTHROPIC_API_KEY" if token.startswith("sk-ant-api")
+            else "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def masked_profile(prof):
+    """What the API may say about a profile: WHICH fields are set, never what
+    they hold. repo_url is not a secret and passes through. Pure."""
+    def mask(d):
+        out = {}
+        for k in ("claude_token", "github_token"):
+            out[k] = "set" if d.get(k) else "absent"
+        if d.get("repo_url"):
+            out["repo_url"] = d["repo_url"]
+        return out
+    body = mask(prof)
+    body["agents"] = {name: mask(o) for name, o in
+                      (prof.get("agents") or {}).items()}
+    return body
+
+
+PROFILE_NOTES = (
+    "Credentials are stored 0600 in your profile file on the launcher host and "
+    "injected only into your own containers' environment -- your agents can "
+    "read your own tokens, the same as on your laptop. Claude spend and rate "
+    "limits are your subscription's own; N agents share them. Rotation is "
+    "user-side: run `claude setup-token` again and paste the new value. "
+    "Whether rotating revokes the previous token is not documented; do not "
+    "assume it does.")
+
+
 def own_dirs_argv(root, image):
     """The chown container's argv, pure so the uid-critical shape is unit-
     testable anywhere (msg 8479: our one smoke host is uid 1000, where BOTH
@@ -479,16 +585,25 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     if not token:
         raise LaunchError("no token given")
 
+    # P2: the user's stored credentials, override > global > request repo_url.
+    creds = resolve_credentials(load_profile(user), agent, repo_url)
     env = dict(
         os.environ,
         REVEILLE_AGENT_ROLE=agent,
         REVEILLE_URL=broker,
-        REVEILLE_REPO_URL=repo_url,
+        REVEILLE_REPO_URL=creds["repo_url"],
         REVEILLE_TOKEN=token,
         # Per-container gate secret (T1 4.3), minted HERE at provision, injected by
         # name, never stored -- dies with the container, re-provision mints a new one.
         REVEILLE_GATE_SECRET=secrets.token_hex(32),
     )
+    extra_env = []
+    if creds["claude_token"]:
+        extra_env.append(claude_env_name(creds["claude_token"]))
+        env[extra_env[-1]] = creds["claude_token"]
+    if creds["github_token"]:
+        extra_env.append("GITHUB_TOKEN")
+        env["GITHUB_TOKEN"] = creds["github_token"]
 
     # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
     # host user browses it; the agent dirs under it belong to the AGENT.
@@ -503,11 +618,14 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     _ensure_network(network, broker)
     if replace:
         _docker("rm", "-f", name, check=False, capture=True)
+    # forward_anthropic is the no-profile fallback (operator's own env key);
+    # a profile claude token supersedes it -- one credential, no ambiguity.
     argv = docker_run_argv(user, agent, image, network, quotas,
-                           forward_anthropic=bool(os.environ.get("ANTHROPIC_API_KEY")),
-                           boot_cmd=boot_cmd)
+                           forward_anthropic=(not creds["claude_token"] and
+                                              bool(os.environ.get("ANTHROPIC_API_KEY"))),
+                           boot_cmd=boot_cmd, extra_env=extra_env)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
-    _record(conn, user, agent, repo_url, image, broker)
+    _record(conn, user, agent, creds["repo_url"], image, broker)
     return name
 
 
@@ -632,6 +750,27 @@ def cmd_destroy(a):
     else:
         print(f"destroyed {a.user}/{a.agent}; kept {root} (--purge to drop -- "
               f"recreate picks up everything the agent learned)")
+    return 0
+
+
+def cmd_profile(a):
+    """Show (masked) or set one user's stored credentials. Token values come
+    from stdin/prompt via read_secret -- never argv; --clear-* drops a field."""
+    prof = load_profile(a.user)
+    updates = {}
+    if a.claude_token:
+        updates["claude_token"] = read_secret(f"claude credential for {a.user}")
+    if a.github_token:
+        updates["github_token"] = read_secret(f"github token for {a.user}")
+    if a.repo_url is not None:
+        updates["repo_url"] = a.repo_url
+    if a.clear_claude:
+        updates["claude_token"] = ""
+    if a.clear_github:
+        updates["github_token"] = ""
+    if updates:
+        save_profile(a.user, merge_profile(prof, updates, agent=a.agent))
+    print(json.dumps(masked_profile(load_profile(a.user)), indent=2))
     return 0
 
 
@@ -1003,12 +1142,35 @@ def build_api(auth_url):
 
     @guarded
     async def profile(request, p, conn):
+        """GET: quotas + usage + MASKED credentials (set/absent, never values)
+        + the custody/rotation notes stated out loud (sec 3 / Q1 / Q2).
+        PUT {claude_token?, github_token?, repo_url?}: set globals; empty
+        string clears a field. Values land in the 0600 profile file and are
+        echoed by nothing, this response included."""
+        if request.method == "PUT":
+            d = await request.json()
+            save_profile(p["user"],
+                         merge_profile(load_profile(p["user"]), d))
         q = _quotas_for(conn, p["user"])
         used = conn.execute("SELECT count(*) FROM containers WHERE user=?",
                             (p["user"],)).fetchone()[0]
         return JSONResponse({"user": p["user"], "quotas": q,
                              "containers": used,
+                             "credentials": masked_profile(load_profile(p["user"])),
+                             "notes": PROFILE_NOTES,
                              "disk_note": "disk_gb recorded, not yet enforced"})
+
+    @guarded
+    async def agent_profile(request, p, conn):
+        """PUT: per-agent credential overrides (sec 3 table). Same masking,
+        same file, nested under agents.<name>."""
+        d = await request.json()
+        save_profile(p["user"],
+                     merge_profile(load_profile(p["user"]), d,
+                                   agent=request.path_params["agent"]))
+        return JSONResponse(
+            {"agent": request.path_params["agent"],
+             "credentials": masked_profile(load_profile(p["user"]))})
 
     async def health(_request):
         from starlette.responses import PlainTextResponse
@@ -1022,8 +1184,9 @@ def build_api(auth_url):
         Route("/agents/{agent}", agent, methods=["GET", "DELETE"]),
         Route("/agents/{agent}/grants", agent_grants, methods=["GET", "POST"]),
         Route("/agents/{agent}/grants/{gid}", agent_grant, methods=["DELETE"]),
+        Route("/agents/{agent}/profile", agent_profile, methods=["PUT"]),
         Route("/agents/{agent}/{verb:str}", agent_lifecycle, methods=["POST"]),
-        Route("/profile", profile),
+        Route("/profile", profile, methods=["GET", "PUT"]),
     ])
 
 
@@ -1170,6 +1333,22 @@ def build_parser():
                    help="also drop the data root (default keeps everything the "
                         "agent learned; recreate picks it back up)")
     d.set_defaults(fn=cmd_destroy)
+
+    pr = sub.add_parser("profile", help="show (masked) or set stored credentials "
+                                        "(DES-005 P2); token values via stdin, "
+                                        "never argv")
+    pr.add_argument("user")
+    pr.add_argument("--agent", default=None,
+                    help="set a per-agent override instead of the user global")
+    pr.add_argument("--claude-token", action="store_true",
+                    help="read a claude credential (setup-token or API key, "
+                         "detected by prefix) from stdin/prompt")
+    pr.add_argument("--github-token", action="store_true",
+                    help="read a github token from stdin/prompt")
+    pr.add_argument("--repo-url", default=None)
+    pr.add_argument("--clear-claude", action="store_true")
+    pr.add_argument("--clear-github", action="store_true")
+    pr.set_defaults(fn=cmd_profile)
 
     q = sub.add_parser("quota", help="show or override one user's quotas (sec 6)")
     q.add_argument("user")
