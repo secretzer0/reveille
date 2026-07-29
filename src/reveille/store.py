@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -265,6 +265,20 @@ CREATE TABLE IF NOT EXISTS memory_audit (
     ts_ns      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memaudit_uid ON memory_audit(memory_uid);
+-- S6b (msg 8448): a tier flip is an AUTHORITY change and is audited like the
+-- verdicts -- who flipped whose token, from what to what, when. Same no-FK
+-- discipline as memory_audit: the record outlives the token it describes.
+CREATE TABLE IF NOT EXISTS token_audit (
+    id         INTEGER PRIMARY KEY,
+    token_id   TEXT NOT NULL,
+    agent_name TEXT,
+    action     TEXT NOT NULL CHECK (action IN ('tier')),
+    actor      TEXT NOT NULL,
+    old_value  TEXT,
+    new_value  TEXT,
+    ts_ns      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tokaudit_tok ON token_audit(token_id);
 CREATE INDEX IF NOT EXISTS idx_mem_scope ON memories(scope, kind, status);
 CREATE INDEX IF NOT EXISTS idx_mem_super ON memories(supersedes_id);
 CREATE INDEX IF NOT EXISTS idx_mem_slug  ON memories(scope, slug) WHERE slug IS NOT NULL;
@@ -435,11 +449,15 @@ def migrate(conn, db_path):
     elif v == 9:
         _upgrade_v9(conn, db_path)
         _upgrade_v10(conn, db_path)
+        _upgrade_v11(conn, db_path)
     elif v == 10:
         _upgrade_v10(conn, db_path)
-    # Chains from <=v8 need no v9/v10 steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
-    # which already carries the current index shape, status set, and audit table,
-    # and backfills through _memory_insert.
+        _upgrade_v11(conn, db_path)
+    elif v == 11:
+        _upgrade_v11(conn, db_path)
+    # Chains from <=v8 need no v9+ steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
+    # which already carries the current index shape, status set, and audit
+    # tables, and backfills through _memory_insert.
     return SCHEMA_VERSION
 
 
@@ -628,6 +646,16 @@ def _upgrade_v10(conn, db_path):
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
             raise BusError(f"v11 migration left {len(bad)} FK violations")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v11(conn, db_path):
+    """v11 -> v12 (S6b): token_audit arrives. A tier flip is an authority change
+    (msg 8448) and gets the same audit discipline as the memory verdicts.
+    Additive only: _MEMORIES_SCHEMA is idempotent and creates just what is
+    missing."""
+    with tx(conn):
+        _exec_script(conn, _MEMORIES_SCHEMA)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -930,9 +958,45 @@ def list_tokens(conn, owner_id):
     for r in conn.execute(
             "SELECT * FROM tokens WHERE owner_id=? ORDER BY created_ns", (owner_id,)):
         out.append({"id": r["id"], "label": r["label"], "agent_name": r["agent_name"],
+                    "mem_tier": r["mem_tier"],  # visible AND mutable (DES-001 sec 6)
                     "created_ns": r["created_ns"], "last_used_ns": r["last_used_ns"],
                     "rooms": rooms_for_token(conn, r["id"])})
     return out
+
+
+def set_token_tier(conn, token_id, actor_user_id, tier, *, actor, is_admin=False):
+    """Flip a token's memory tier. A tier flip is an AUTHORITY change (S6b,
+    msg 8448) and is audited like the verdicts: who flipped whose token, from
+    what to what, when. Owner-or-admin, the same scoping as revoke. A flip to
+    the tier the token already holds is a no-op and writes no row -- no change,
+    no event."""
+    if tier not in TIERS:
+        raise BusError(f"bad mem_tier {tier!r}: one of {TIERS}")
+    r = conn.execute("SELECT * FROM tokens WHERE id=?", (token_id,)).fetchone()
+    if r is None:
+        raise BusError(f"no such token: {token_id}")
+    if r["owner_id"] != actor_user_id and not is_admin:
+        raise AccessError("only the token's owner or an admin sets its tier")
+    old = r["mem_tier"]
+    if old != tier:
+        with tx(conn):
+            conn.execute("UPDATE tokens SET mem_tier=? WHERE id=?",
+                         (tier, token_id))
+            conn.execute(
+                "INSERT INTO token_audit(token_id, agent_name, action, actor, "
+                "old_value, new_value, ts_ns) VALUES(?,?,'tier',?,?,?,?)",
+                (token_id, r["agent_name"], actor, old, tier, time.time_ns()))
+    return {"id": token_id, "mem_tier": tier}
+
+
+def token_audit_rows(conn, token_id=None, limit=200):
+    q, args = "SELECT * FROM token_audit", []
+    if token_id:
+        q += " WHERE token_id=?"
+        args.append(token_id)
+    rows = conn.execute(q + " ORDER BY ts_ns DESC LIMIT ?",
+                        args + [max(1, min(int(limit), 1000))]).fetchall()
+    return [dict(r) for r in rows]
 
 
 def revoke_token(conn, token_id, owner_id):
@@ -1953,6 +2017,59 @@ def memory_audit_rows(conn, memory_uid=None, limit=200):
     rows = conn.execute(q + " ORDER BY ts_ns DESC LIMIT ?",
                         args + [max(1, min(int(limit), 1000))]).fetchall()
     return [dict(r) for r in rows]
+
+
+def _provenance(conn, r):
+    """The 14.2 package for one memory row: the claim, the evidence inline (source
+    message), and -- for a supersede -- the displaced text and author side by side.
+    The ratifier reads all of it without leaving the page; rubber-stamping is a
+    choice, never a UI default."""
+    depth, fork = _chain_info(conn, r)
+    item = _mem_dict(r, chain=depth, fork=fork)
+    if r["source_msg_id"]:
+        m = conn.execute(
+            "SELECT id, sender, subject, body, ts_ns FROM messages WHERE id=?",
+            (r["source_msg_id"],)).fetchone()
+        if m:
+            item["source_message"] = dict(m)
+    if r["supersedes_id"]:
+        old = conn.execute("SELECT * FROM memories WHERE id=?",
+                           (r["supersedes_id"],)).fetchone()
+        if old:
+            item["supersedes_tip"] = {
+                "uid": old["uid"], "fact": old["fact"], "author": old["author"],
+                "status": old["status"], "slug": old["slug"], "rule": old["rule"]}
+    return item
+
+
+def ratify_queue(conn, *, owned_rooms, is_admin, limit=100):
+    """The drafts the caller can actually decide: owned rooms, plus global for an
+    instance admin -- the same scoping the verdict gate enforces, so the queue
+    never shows a draft its viewer cannot clear. Each item carries full
+    provenance (14.2)."""
+    conds, args = [], []
+    owned = sorted(owned_rooms or ())
+    if owned:
+        conds.append(f"scope IN ({_ph(owned)})")
+        args += owned
+    if is_admin:
+        conds.append("scope='global'")
+    if not conds:
+        return []
+    rows = conn.execute(
+        f"SELECT * FROM memories WHERE status='draft' AND ({' OR '.join(conds)}) "
+        f"ORDER BY created_ns LIMIT ?", args + [max(1, min(int(limit), 500))]
+    ).fetchall()
+    return [_provenance(conn, r) for r in rows]
+
+
+def memory_detail(conn, uid):
+    """One memory with full provenance and its decision history. Read access is
+    the CALLER's problem (route-side room check); this returns the row whole."""
+    r = _mem_by_uid(conn, uid)
+    item = _provenance(conn, r)
+    item["audit"] = memory_audit_rows(conn, uid)
+    return item
 
 
 def _ratify_gate(conn, uid, *, tier, is_admin, owned_rooms):

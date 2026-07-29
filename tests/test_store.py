@@ -955,6 +955,71 @@ def test_migration_v10_to_v11_adds_rejected_and_audit():
     assert found["count"] == 1                   # rebuilt FTS still reaches rows
 
 
+def test_set_token_tier_owner_or_admin_and_audited():
+    """S6b (msg 8448): a tier flip is an authority change -- owner-or-admin only,
+    audited with old and new values; a same-tier flip is no event and no row."""
+    c, admin, room, tok = fixture()
+    with pytest.raises(store.AccessError):
+        store.set_token_tier(c, tok["id"], "not-the-owner", "write", actor="web:eve")
+    with pytest.raises(store.BusError):
+        store.set_token_tier(c, tok["id"], admin["id"], "root", actor="web:travis")
+    out = store.set_token_tier(c, tok["id"], admin["id"], "ratify",
+                               actor="web:travis")
+    assert out["mem_tier"] == "ratify"
+    store.set_token_tier(c, tok["id"], admin["id"], "ratify", actor="web:travis")
+    rows = store.token_audit_rows(c, tok["id"])
+    assert len(rows) == 1  # the no-op flip wrote nothing
+    assert (rows[0]["old_value"], rows[0]["new_value"]) == ("state", "ratify")
+    assert rows[0]["actor"] == "web:travis"
+    assert store.list_tokens(c, admin["id"])[0]["mem_tier"] == "ratify"
+
+
+def test_ratify_queue_scoped_to_decidable_drafts_with_provenance():
+    """14.2: the queue shows only what its viewer can clear (owned rooms; global
+    for admins) and every item carries the evidence -- source message inline,
+    displaced text on a supersede."""
+    c, admin, room, tok = fixture()
+    msg = store.send(c, "alice", "*", "the deliberation", subject="src",
+                     room=room["id"])
+    store.memory_add(c, author="alice", token_id=tok["id"], agent_bound=True,
+                     tier="state", is_admin=False, rooms={room["id"]},
+                     owned_rooms=set(), fact="queued claim", kind="doctrine",
+                     scope=room["id"], source=msg["id"])
+    store.memory_add(c, author="alice", token_id=tok["id"], agent_bound=True,
+                     tier="state", is_admin=False, rooms={room["id"]},
+                     owned_rooms=set(), fact="global claim", kind="doctrine",
+                     scope="global")
+    assert store.ratify_queue(c, owned_rooms=set(), is_admin=False) == []
+    q = store.ratify_queue(c, owned_rooms={room["id"]}, is_admin=False)
+    assert [i["fact"] for i in q] == ["queued claim"]
+    assert q[0]["source_message"]["body"] == "the deliberation"  # evidence inline
+    q_admin = store.ratify_queue(c, owned_rooms={room["id"]}, is_admin=True)
+    assert {i["fact"] for i in q_admin} == {"queued claim", "global claim"}
+    # displaced author's text rides a cross-author slug replacement (14.2)
+    store.add_lesson(c, author="bob", slug="disputed", room_id=room["id"],
+                     symptom="s", root_cause="rc", rule="bob's rule",
+                     detection="d")
+    store.add_lesson(c, author="carol", slug="disputed", room_id=room["id"],
+                     symptom="s2", root_cause="rc2", rule="carol's replacement",
+                     detection="d2")   # different author -> draft
+    q2 = store.ratify_queue(c, owned_rooms={room["id"]}, is_admin=False)
+    lesson = [i for i in q2 if i.get("slug") == "disputed"][0]
+    assert lesson["supersedes_tip"]["author"] == "bob"
+    assert lesson["supersedes_tip"]["rule"] == "bob's rule"
+
+
+def test_memory_detail_carries_audit_history():
+    c, admin, room, tok = fixture()
+    d = _draft(c, room, tok)
+    store.reject_memory(c, d["id"], tier="ratify", is_admin=False,
+                        owned_rooms={room["id"]}, actor="web:travis",
+                        reason="needs a source")
+    detail = store.memory_detail(c, d["id"])
+    assert detail["status"] == "rejected"
+    assert detail["audit"][0]["action"] == "reject"
+    assert detail["audit"][0]["reason"] == "needs a source"
+
+
 def test_brief_composition_ranking_and_budget():
     """DES-001 section 7: sections in order, role-relevant doctrine first, own state
     included, other agents' state absent, truncation MARKED never silent."""
