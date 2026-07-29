@@ -175,3 +175,65 @@ construction — one function, two callers, so the paths cannot drift.
 W1 and W2 are independent slices off main; W1 first. Both queue AFTER S6c —
 continuous-run doctrine: review gates merging, never starting, and S6c is
 in flight.
+
+- **W3 — the idle nudge** (operator, 2026-07-29, after a live parked-agent
+  incident). See §5.
+
+## 5. The idle nudge (W3)
+
+**The failure it fixes, observed live.** An agent deployed a release, ended its
+turn, and sat parked for minutes with a queue of dispatched work. Nothing was
+broken: waiter armed, presence live+connected, instructions delivered *and
+acked in an earlier turn*. But a session that ends its turn is parked until a
+ring arrives, and an acked instruction has already spent its ring. The operator
+noticed before the fleet did. Lesson:
+`acked-instructions-do-not-restart-a-parked-agent`.
+
+**Why it belongs in `waked`.** The daemon is the only component that outlives a
+turn boundary. The session cannot wake itself; the watcher only reports what is
+already in the spool; a peer cannot know you went quiet. The daemon can.
+
+**Mechanism.** `reveille-waked` tracks the wall-clock time of the last ring it
+wrote. After `--idle-nudge` seconds with none (**default 1800 = 30 min**, `0`
+disables), it writes ONE synthetic spool entry:
+
+```json
+{"wake": true, "reason": "idle-nudge", "idle_seconds": 1800}
+```
+
+Then it resets its timer. Same spool path, same watcher, no new plumbing — to
+the session a nudge is just a ring whose `reason` differs.
+
+**What the woken agent does** — and the wording matters, because a nudge that
+implies "act" manufactures traffic (global lesson `broadcast-wake-storm`):
+
+1. `inbox()` — a real message may have arrived while parked.
+2. Check whether work is owed: an unfinished slice, a queued next stage, a
+   branch never pushed. **If yes, resume it.**
+3. If blocked on a peer, **re-ping that peer once** — the nudge is the moment
+   to say "still waiting on X", not to sit quietly.
+4. If nothing is owed and nothing is blocked, **do nothing and end the turn.
+   Silence is a valid response to a nudge** and must never read as a fault.
+
+**Properties that make this safe:**
+
+- A nudge lands in the spool, so a session mid-turn is not interrupted — the
+  entry waits and fires at the next arm.
+- It is per-agent and self-generated: no broadcast, no fan-out, no N².
+- Cost is bounded and legible: one turn per idle interval per agent. At the
+  30-minute default, a fully idle agent costs 48 turns/day; tune with
+  `--idle-nudge` per role (a reviewer may want 30 min; a batch worker may want
+  hours).
+- Rings from real mail reset the timer, so a busy fleet never nudges at all.
+
+**Ruling — no exponential backoff.** A nudge whose interval grows makes an
+agent progressively harder to reach the longer it has been stuck, which is
+backwards: the longer the silence, the more likely something is wrong. Fixed
+interval, tunable per agent.
+
+**Gate:** with `--idle-nudge 3` in a test: a daemon receiving no rings writes
+exactly one nudge entry per interval (not a burst); a real ring resets the
+timer; the nudge JSON is distinguishable by `reason` so a session can log it as
+such; `--idle-nudge 0` writes none, ever; and a nudge arriving while a watcher
+is unarmed still fires at the next arm (the I3 property must hold for
+synthetic rings too).
