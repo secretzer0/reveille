@@ -319,3 +319,20 @@ def test_docker_probe_falls_back_when_daemon_is_simply_down():
 
 def test_docker_probe_reports_bare_exit_code_with_no_stderr():
     assert "exit 127" in rl.docker_probe_error(127, "")
+
+
+# ---- unattended agent: the model choice rides env, never argv ---------------
+
+def test_model_choice_is_env_by_name_never_a_value_in_argv():
+    argv = rl.docker_run_argv("acme", "dev", "img", "net", rl.QUOTA_DEFAULTS,
+                              False, extra_env=("ANTHROPIC_MODEL",))
+    assert "-e" in argv and "ANTHROPIC_MODEL" in argv
+    # the NAME is in argv; the value never is (same discipline as the secrets)
+    assert not any("claude-" in a for a in argv if a != "img")
+
+
+def test_model_suggestions_are_suggestions_not_a_gate():
+    # The field takes any string: a hardcoded list must never be able to block
+    # an agent from a model that shipped after this file was written.
+    assert "claude-fable-5" in rl.MODEL_SUGGESTIONS
+    assert isinstance(rl.MODEL_SUGGESTIONS, tuple)

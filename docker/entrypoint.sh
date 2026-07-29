@@ -36,6 +36,80 @@ if [ -n "${REVEILLE_ROLE_PROMPT:-}" ] \
     >> /home/agent/.claude/CLAUDE.md
 fi
 
+# Claude Code first-run wizard: a provisioned agent boots into `claude` with no
+# human at the keyboard, so an interactive theme picker is a hang, not a prompt
+# -- the operator's first agent sat on "Choose the text style" forever and never
+# reached the bus. Seed only the keys that are ABSENT (the CLAUDE.md marker
+# discipline): an agent that has evolved its own config keeps it, and a restart
+# never rewrites a choice someone made. ~/.claude.json is container-local (the
+# bind covers ~/.claude and ~/repos), so every new container needs this.
+python3 - <<'PY'
+import json, os, pathlib
+home = pathlib.Path.home()
+
+
+def patch(path, updates):
+    """setdefault-merge one JSON file, atomically. Only ABSENT keys are written:
+    an agent that changed a setting keeps its choice across restarts."""
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        d = {}
+    def merge(dst, src):
+        for k, v in src.items():
+            if isinstance(v, dict):
+                merge(dst.setdefault(k, {}), v)
+            else:
+                dst.setdefault(k, v)
+    merge(d, updates)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(d, indent=2))
+    os.replace(tmp, path)   # atomic: a torn config is a wizard on next boot
+
+
+patch(home / ".claude.json", {
+    "hasCompletedOnboarding": True,
+    "theme": "dark",
+    "autoMode": True,
+    "autoModeOptInDismissed": True,
+    # The cwd's trust dialog is the same class of hang, one step later.
+    "projects": {p: {"hasTrustDialogAccepted": True}
+                 for p in ("/home/agent/repos", "/home/agent")},
+})
+# settings.json lives in the PERSISTED home, so this must never clobber: same
+# setdefault discipline, and the agent may edit it freely afterwards.
+#
+# skipDangerousModePermissionPrompt is Claude Code's OWN record of the bypass
+# acknowledgement -- it is what the CLI writes here when a human accepts the
+# warning, found by accepting it once and diffing the home. Seeding it is the
+# operator declaring that acceptance for containers they own, once, instead of
+# per agent: without it every new agent boots into a modal nobody is watching
+# and never reaches the bus. What justifies it is the container itself -- own
+# fs, own data root, cpu/memory/pid caps, and NO docker socket (that stays with
+# the launcher), so the sandbox the warning asks for is the thing the agent is
+# already inside.
+patch(home / ".claude" / "settings.json",
+      {"permissions": {"defaultMode": "bypassPermissions"},
+       "skipDangerousModePermissionPrompt": True})
+PY
+
+# Unattended git: permission mode silences the PROMPTS, but these three are
+# what actually fail a commit or a push, and no permission setting fixes them.
+git config --global --get user.email >/dev/null 2>&1 || \
+  git config --global user.email "${REVEILLE_GIT_EMAIL:-${REVEILLE_AGENT_ROLE}@reveille.local}"
+git config --global --get user.name >/dev/null 2>&1 || \
+  git config --global user.name "${REVEILLE_GIT_NAME:-${REVEILLE_AGENT_ROLE}}"
+git config --global --get safe.directory >/dev/null 2>&1 || \
+  git config --global --add safe.directory '*'
+# gh reads GH_TOKEN first; the P2 profile supplies GITHUB_TOKEN. Wiring gh as
+# git's credential helper is what makes `git push` over HTTPS non-interactive --
+# without it the push asks for a username on a terminal nobody is watching.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+  gh auth setup-git >/dev/null 2>&1 || true
+fi
+
 # Per-container gate secret (DES-002 4.3): injected by the launcher at provision
 # (T2); a hand-run container gets a random one, never printed -- mint grant
 # tokens from inside: `docker exec <name> attach-gate mint viewer`.
