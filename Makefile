@@ -243,11 +243,18 @@ launcher-supervision-smoke: sync
 joinhere-smoke: sync
 	uv run python tests/joinhere_smoke.py
 
-# Attachment gate: a file on the bus must come back byte-identical and keep its
-# name by EVERY route a client uses -- multipart (curl -F and every HTTP
-# library), raw body (the web composer), and the MCP upload() tool.
+# Attachment gate: a file on the bus comes back byte-identical over the raw-body
+# route and the MCP upload() tool, a multipart form is refused rather than stored
+# as an envelope, and /files/* serves nothing the browser will render on our own
+# origin. Headers asserted off the wire, not read out of the source.
 upload-gate: sync
 	uv run python tests/upload_gate.py
+
+# Sweep SCHEDULER gate: proves the 4.6 tick runs by itself. Starts serve, plants
+# an expired grant, and waits -- calling nothing. The gates that call _sweep_once
+# by hand all passed while the sweep had never run in production once.
+sweep-scheduler-smoke: sync
+	uv run python tests/sweep_scheduler_smoke.py
 
 lint:
 	uv run ruff check src tests scripts
