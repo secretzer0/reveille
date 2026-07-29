@@ -262,3 +262,30 @@ change they were originally pitched as.
   every call U6 makes — U6 adds a caller, never a bypass.
 - Grant verification stays at the container (`attach-gate`); U6/U7 never
   become a new authority over attachment.
+
+### 6.6 REQUIRED by §6.1: the bus degrades when the launcher is down
+
+§6.1 relaxes *where the DOM renders*, and in doing so it moves the launcher
+from "a page you navigate to" into "a fetch inside the page you live in".
+That relocates a failure: previously a dead launcher meant one link 404'd and
+the bus was untouched. Embedded, a dead launcher is a failing fetch **inside
+the bus's own content well**, and the naive rendering makes the whole product
+look broken when only agent management is.
+
+So this is a condition of the ruling, not a nicety:
+
+- The embedded view **fails soft**. A launcher that is down, refusing, or
+  absent renders as an inline message in that view — *agent management is
+  unavailable* — while chat, rooms, memory and presence continue to work
+  untouched. No global error state, no blocking modal, no spinner that never
+  resolves.
+- **A broker deployment with no launcher at all is a supported configuration**
+  and must look deliberate rather than broken: with the nav link unset (§2.2)
+  the view is never reachable, and if it is reached anyway it says so plainly.
+- U6's gate therefore includes: **stop the launcher, load `/`, and confirm the
+  bus is fully usable** with the agent view showing its unavailable state.
+
+The property §2.1 protects has always been *the broker never depends on the
+launcher*. Merging the UI is allowed precisely because the browser — not the
+broker — does the fetching; that stays true only if a failed fetch degrades
+one view instead of the product.
