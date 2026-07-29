@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -144,6 +144,27 @@ CREATE TABLE IF NOT EXISTS token_rooms (
     room_id  TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
     PRIMARY KEY (token_id, room_id)
 );
+-- USER membership (DES-004): who may attach this room to a token, beyond the
+-- owner and beyond public. Distinct from `members` below, which is AGENT
+-- presence. Reach, never rule: ratification stays with room ownership.
+CREATE TABLE IF NOT EXISTS room_members (
+    room_id  TEXT NOT NULL,
+    user_id  TEXT NOT NULL,
+    added_ns INTEGER NOT NULL,
+    added_by TEXT NOT NULL,
+    PRIMARY KEY (room_id, user_id)
+);
+-- Membership changes are authority changes (the S6b tier-flip precedent):
+-- no FKs, the record outlives the membership, the user, and the room.
+CREATE TABLE IF NOT EXISTS room_audit (
+    id      INTEGER PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    action  TEXT NOT NULL CHECK (action IN ('invite','remove')),
+    actor   TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    ts_ns   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
 -- One row per (room, agent). Names are unique WITHIN a room -- that is all bus
 -- routing needs, and it lets one agent hold the same name in several rooms.
 CREATE TABLE IF NOT EXISTS members (
@@ -451,15 +472,21 @@ def migrate(conn, db_path):
         _upgrade_v10(conn, db_path)
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
+        _upgrade_v13(conn, db_path)
     elif v == 10:
         _upgrade_v10(conn, db_path)
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
+        _upgrade_v13(conn, db_path)
     elif v == 11:
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
+        _upgrade_v13(conn, db_path)
     elif v == 12:
         _upgrade_v12(conn, db_path)
+        _upgrade_v13(conn, db_path)
+    elif v == 13:
+        _upgrade_v13(conn, db_path)
     # Chains from <=v8 need no v9+ steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
     # which already carries the current index shape, status set, and audit
     # tables, and backfills through _memory_insert.
@@ -681,6 +708,14 @@ def _upgrade_v12(conn, db_path):
             "    AND n.scope=m.scope AND n.slug=m.slug AND "
             "    (n.created_ns>m.created_ns OR "
             "     (n.created_ns=m.created_ns AND n.id>m.id))))")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v13(conn, db_path):
+    """v13 -> v14 (DES-004 M1): room_members + room_audit arrive. Additive only:
+    _SCHEMA's CREATE IF NOT EXISTS lays down exactly what is missing."""
+    with tx(conn):
+        _exec_script(conn, _SCHEMA)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -907,6 +942,9 @@ def delete_user(conn, user_id):
         conn.execute("DELETE FROM tokens WHERE owner_id=?", (user_id,))
         conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
         conn.execute("UPDATE rooms SET owner_id=NULL WHERE owner_id=?", (user_id,))
+        # Their memberships die with them (the token_rooms rows those memberships
+        # justified are already gone above); room_audit keeps the history.
+        conn.execute("DELETE FROM room_members WHERE user_id=?", (user_id,))
         conn.execute("DELETE FROM users WHERE id=?", (user_id,))
 
 
@@ -1047,15 +1085,17 @@ def revoke_token(conn, token_id, owner_id):
 
 
 def assign_room(conn, token_id, room_id, actor_id):
-    """Put a room on a token. Allowed if the actor owns the room, or the room is
-    public. Public is what lets other users' tokens join it."""
+    """Put a room on a token. The ONE reach check (DES-004 I1): allowed if the
+    actor owns the room, the room is public, or the actor is an invited member.
+    No route re-derives this."""
     room = conn.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
     if not room:
         raise BusError("no such room")
     tok = conn.execute("SELECT owner_id FROM tokens WHERE id=?", (token_id,)).fetchone()
     if not tok or tok["owner_id"] != actor_id:
         raise AccessError("not your token")
-    if room["owner_id"] != actor_id and not room["public"]:
+    if room["owner_id"] != actor_id and not room["public"] \
+            and not is_member(conn, room_id, actor_id):
         raise AccessError("room is private")
     conn.execute("INSERT OR IGNORE INTO token_rooms(token_id, room_id) VALUES(?,?)",
                  (token_id, room_id))
@@ -1136,9 +1176,11 @@ def rename_room(conn, room_id, owner_id, name):
 
 
 def set_public(conn, room_id, owner_id, public):
-    """Flip a room's visibility. Going private REVOKES it from every other user's
-    tokens; the owner's own keep it. Their past MESSAGES stay -- authorship is
-    history, and deleting it would silently rewrite threads others are reading."""
+    """Flip a room's visibility. Going non-public REVOKES it from every token
+    whose owner is neither the owner nor an invited member (DES-004: members
+    lose nothing on the flip -- to make a shared room fully private, remove the
+    members). Past MESSAGES stay -- authorship is history, and deleting it
+    would silently rewrite threads others are reading."""
     r = conn.execute("SELECT owner_id FROM rooms WHERE id=?", (room_id,)).fetchone()
     if not r:
         raise BusError("no such room")
@@ -1149,7 +1191,99 @@ def set_public(conn, room_id, owner_id, public):
         if not public:
             conn.execute(
                 "DELETE FROM token_rooms WHERE room_id=? AND token_id IN "
-                "(SELECT id FROM tokens WHERE owner_id != ?)", (room_id, owner_id))
+                "(SELECT id FROM tokens WHERE owner_id != ? AND owner_id NOT IN "
+                "(SELECT user_id FROM room_members WHERE room_id=?))",
+                (room_id, owner_id, room_id))
+
+
+# ---- membership (DES-004: reach, never rule) ---------------------------------
+
+def is_member(conn, room_id, user_id):
+    return conn.execute("SELECT 1 FROM room_members WHERE room_id=? AND user_id=?",
+                        (room_id, user_id)).fetchone() is not None
+
+
+def _audit_room(conn, room_id, action, actor_name, subject_name):
+    conn.execute("INSERT INTO room_audit(room_id, action, actor, subject, ts_ns) "
+                 "VALUES(?,?,?,?,?)",
+                 (room_id, action, actor_name, subject_name, time.time_ns()))
+
+
+def _owned_room(conn, room_id, owner_id):
+    r = conn.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise BusError("no such room")
+    if r["owner_id"] != owner_id:
+        raise AccessError("not your room")
+    return r
+
+
+def invite_member(conn, room_id, owner_id, user_name, actor_name):
+    """Owner invites a user BY EXACT NAME (DES-004 Q2: name entry, no picker --
+    a picker leaks the instance's user list to every room owner). Unknown name,
+    the owner themselves, and an existing member all fail with the SAME text,
+    so a failed invite confirms nothing about who exists."""
+    _owned_room(conn, room_id, owner_id)
+    u = conn.execute("SELECT id, name FROM users WHERE name=?",
+                     (user_name,)).fetchone()
+    if u is None or u["id"] == owner_id or is_member(conn, room_id, u["id"]):
+        raise BusError("nothing to invite for that name")
+    with tx(conn):
+        conn.execute("INSERT INTO room_members(room_id, user_id, added_ns, added_by) "
+                     "VALUES(?,?,?,?)", (room_id, u["id"], time.time_ns(), owner_id))
+        _audit_room(conn, room_id, "invite", actor_name, u["name"])
+    return {"room_id": room_id, "user": u["name"]}
+
+
+def remove_member(conn, room_id, owner_id, user_name, actor_name):
+    """Removal is a revoke, not a hide (DES-004 G2/I2): the member's token_rooms
+    rows for this room die in the SAME transaction, so reach ends on their very
+    next call. Their past messages stay. Non-member and unknown name fail with
+    the same text as invite's failures."""
+    _owned_room(conn, room_id, owner_id)
+    u = conn.execute("SELECT id, name FROM users WHERE name=?",
+                     (user_name,)).fetchone()
+    if u is None or not is_member(conn, room_id, u["id"]):
+        raise BusError("nothing to remove for that name")
+    with tx(conn):
+        conn.execute("DELETE FROM room_members WHERE room_id=? AND user_id=?",
+                     (room_id, u["id"]))
+        conn.execute("DELETE FROM token_rooms WHERE room_id=? AND token_id IN "
+                     "(SELECT id FROM tokens WHERE owner_id=?)", (room_id, u["id"]))
+        _audit_room(conn, room_id, "remove", actor_name, u["name"])
+    return {"room_id": room_id, "user": u["name"]}
+
+
+def member_list(conn, room_id, owner_id):
+    """Who is invited, owner's eyes only. Names resolved live; a deleted user's
+    membership dies with them, so every row here names a real user."""
+    _owned_room(conn, room_id, owner_id)
+    return [{"name": r["name"], "added_ns": r["added_ns"]} for r in conn.execute(
+        "SELECT u.name, m.added_ns FROM room_members m JOIN users u ON u.id=m.user_id "
+        "WHERE m.room_id=? ORDER BY m.added_ns", (room_id,))]
+
+
+def member_rooms(conn, user_id):
+    """Rooms shared WITH this user. Kept separate from list_rooms on purpose:
+    list_rooms is the authority scope for ratification (owned rooms), and
+    folding member rooms into it would hand every member the owner's decide
+    power one call site at a time (I3)."""
+    return [_room_dict(r, r["owner_name"]) for r in conn.execute(
+        "SELECT ro.*, u.name AS owner_name FROM room_members m "
+        "JOIN rooms ro ON ro.id=m.room_id LEFT JOIN users u ON u.id=ro.owner_id "
+        "WHERE m.user_id=? ORDER BY ro.name", (user_id,))]
+
+
+def member_count(conn, room_id):
+    return conn.execute("SELECT count(*) FROM room_members WHERE room_id=?",
+                        (room_id,)).fetchone()[0]
+
+
+def room_audit_rows(conn, room_id, limit=200):
+    rows = conn.execute("SELECT * FROM room_audit WHERE room_id=? "
+                        "ORDER BY ts_ns DESC LIMIT ?",
+                        (room_id, max(1, min(int(limit), 1000)))).fetchall()
+    return [dict(r) for r in rows]
 
 
 def set_retention(conn, room_id, owner_id, retention_ns):
@@ -1196,6 +1330,7 @@ def purge_room(conn, room_id, owner_id):
         _delete_messages(conn, ids)
         conn.execute("DELETE FROM files WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM members WHERE room_id=?", (room_id,))
+        conn.execute("DELETE FROM room_members WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM token_rooms WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM rooms WHERE id=?", (room_id,))
     return len(ids)

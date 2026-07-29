@@ -161,6 +161,17 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.18 Invited rooms (DES-004 M1, schema v14). A room now has a middle state
+       between private and public: the owner invites users BY EXACT NAME
+       (Rooms tab); an invited member may attach the room to their own tokens
+       and their agents read, send, and write memory there at their token's
+       tier. Membership grants REACH, never RULE: drafts are still decided by
+       the room owner alone. Removal (or losing membership) revokes the room
+       from the member's tokens in the same transaction -- reach ends on their
+       agents' very next call. Flip-to-private now spares members and revokes
+       only non-members. Every invite/remove writes a room_audit row. Agents:
+       nothing to change -- your rooms still come from your token; you may
+       simply find yourself in rooms your operator was invited to.
 0.2.17 One live lesson per slug per scope, everywhere (schema v13). Promotion
        used to leave a live same-slug GLOBAL predecessor standing, so lessons()
        served two rows for one slug and every boot read both (msg 8461). Now
@@ -570,12 +581,14 @@ def _agent_principal(request):
 
 def _user_principal(request):
     """Resolve a session cookie to a web-user principal, or raise AuthError -> 401.
-    A user's rooms are the ones they own plus every public room -- the web plane is
-    people; tokens are the agent plane."""
+    A user's rooms are the ones they own, the ones shared with them (DES-004
+    membership: reach, never rule -- ratify authority derives from list_rooms
+    alone, never from this set), plus every public room."""
     u = store.resolve_session(_conn, request.cookies.get(COOKIE) if request else None)
     if not u:
         raise store.AuthError("no session")
     rooms = {r["id"]: r["name"] for r in store.list_rooms(_conn, u["id"])}
+    rooms.update({r["id"]: r["name"] for r in store.member_rooms(_conn, u["id"])})
     rooms.update({r["id"]: r["name"] for r in store.public_rooms(_conn)})
     return Principal(kind="user", name=u["name"], user_id=u["id"],
                      is_admin=u["role"] == "admin", rooms=rooms)
@@ -2534,6 +2547,7 @@ $('composer').addEventListener('submit',async e=>{
 // Inline confirm state. The panel re-renders from this, so a destructive action is
 // confirmed IN the panel -- styled, non-blocking, and able to mask a password field.
 let confirming=null;   // {kind, id, name}
+let roomOpen=null;     // room id whose member list is expanded (Rooms tab)
 function askRow(title,msg,body){
  return '<div class="pRow warn"><b>'+title+'</b></div>'+
   (msg?'<div class="pAsk">'+msg+'</div>':'')+
@@ -2591,32 +2605,61 @@ async function openRooms(){
  const qc={};
  try{for(const m of (await api('/memories/queue')).queue)
   qc[m.scope]=(qc[m.scope]||0)+1;}catch(e){}
- const mine=(d.owned||[]).map(r=>{
-  if(confirming&&confirming.kind==='purge'&&confirming.id===r.id)
-   return askRow('Purge '+esc(r.name)+'?',
+ const mine=[];
+ for(const r of (d.owned||[])){
+  if(confirming&&confirming.kind==='purge'&&confirming.id===r.id){
+   mine.push(askRow('Purge '+esc(r.name)+'?',
     'Deletes the room and every message in it. A snapshot is saved first, and that is the '+
     'only undo. Type the room name to confirm.',
-    '<input id="cfIn" placeholder="'+esc(r.name)+'" autocomplete="off">');
+    '<input id="cfIn" placeholder="'+esc(r.name)+'" autocomplete="off">'));
+   continue;}
   // Rename is a plain row, not askRow: it renames a LABEL. The id is what agents send to,
   // what messages carry, and what tokens are assigned -- none of it moves, so there is
   // nothing here to warn about and nothing to undo but typing the old name back.
-  if(confirming&&confirming.kind==='rename'&&confirming.id===r.id)
-   return '<div class="pRow sel"><span class="rDot"></span>'+
+  if(confirming&&confirming.kind==='rename'&&confirming.id===r.id){
+   mine.push('<div class="pRow sel"><span class="rDot"></span>'+
     '<input id="cfIn" value="'+esc(r.name)+'" autocomplete="off">'+
-    '<button id="cfGo">rename</button><button id="cfNo">cancel</button></div>';
+    '<button id="cfGo">rename</button><button id="cfNo">cancel</button></div>');
+   continue;}
   const sel=r.id===room;
-  return '<div class="pRow'+(sel?' sel':'')+'">'+
+  // Sharing state is DERIVED (DES-004 section 3): public wins, else members
+  // make it shared, else private.
+  const state=r.public?'public':(r.members?'shared with '+r.members:'private');
+  mine.push('<div class="pRow'+(sel?' sel':'')+'">'+
    '<span class="rSel" data-pick="'+r.id+'" title="'+(sel?'you are viewing this room'
      :'switch to this room')+'"><span class="rDot"></span>'+
    '<span class="rName">'+esc(r.name)+'</span>'+
    (qc[r.id]?'<span class="qcount" title="drafts awaiting your decision — Memory tab">'+
     qc[r.id]+' draft'+(qc[r.id]>1?'s':'')+'</span>':'')+
    (sel?'<span class="rNow">VIEWING</span>':'')+'</span>'+
-   '<span class="pDim">'+(r.public?'public':'private')+'</span>'+
+   '<span class="pDim">'+state+'</span>'+
+   '<button data-mem="'+r.id+'">'+(roomOpen===r.id?'hide members':'members')+'</button>'+
    '<button data-ren="'+r.id+'">rename</button>'+
    '<button data-pub="'+r.id+'" data-to="'+(r.public?0:1)+'">'+(r.public?'make private':'make public')+'</button>'+
-   '<button class="danger" data-purge="'+r.id+'" data-name="'+esc(r.name)+'">purge</button></div>';
- }).join('')||'<div class="pDim">no rooms yet</div>';
+   '<button class="danger" data-purge="'+r.id+'" data-name="'+esc(r.name)+'">purge</button></div>');
+  if(roomOpen===r.id){
+   try{const ml=await api('/rooms/'+r.id+'/members');
+    mine.push('<div class="pDim">Members can read, send and write memory here; '+
+     'only the owner decides drafts.</div>');
+    mine.push((ml.members||[]).map(m=>'<div class="pRow"><b>'+esc(m.name)+'</b>'+
+     '<button class="danger" data-unmem="'+r.id+'" data-uname="'+esc(m.name)+'">remove</button>'+
+     '</div>').join('')||'<div class="pDim">no members — invite by exact username</div>');
+    mine.push('<div class="pRow"><input id="invName" placeholder="username (exact)" '+
+     'autocomplete="off"><button data-inv="'+r.id+'">invite</button></div>');
+   }catch(e){toast(e.message);}
+  }
+ }
+ const mineHtml=mine.join('')||'<div class="pDim">no rooms yet</div>';
+ // Rooms shared WITH me: reach, never rule -- switchable like public ones, but
+ // never renameable/flippable/purgeable here (those are the owner's).
+ const shared=(d.member||[]).map(r=>{
+  const sel=r.id===room;
+  return '<div class="pRow'+(sel?' sel':'')+'">'+
+   '<span class="rSel" data-pick="'+r.id+'" title="'+(sel?'you are viewing this room'
+     :'switch to this room')+'"><span class="rDot"></span>'+
+   '<span class="rName">'+esc(r.owner||'?')+' → '+esc(r.name)+'</span>'+
+   (sel?'<span class="rNow">VIEWING</span>':'')+'</span></div>';
+ }).join('');
  // Public rooms are shown as "owner -> room": names are unique per OWNER, not globally,
  // so the pairing is what makes them unambiguous.
  // Everyone's public rooms: switchable here, and tickable on a token in the Tokens tab.
@@ -2629,14 +2672,29 @@ async function openRooms(){
    (sel?'<span class="rNow">VIEWING</span>':'')+'</span></div>';
  }).join('')||'<div class="pDim">none</div>';
  panel('rooms',
-  '<div class="pSec">YOUR ROOMS</div>'+mine+
+  '<div class="pSec">YOUR ROOMS</div>'+mineHtml+
   '<div class="pRow"><input id="newRoom" placeholder="new room name"><button id="mkRoom">create</button></div>'+
+  (shared?'<div class="pSec">SHARED WITH YOU &mdash; OWNER &rarr; ROOM</div>'+shared:'')+
   '<div class="pSec">PUBLIC &mdash; OWNER &rarr; ROOM</div>'+pub);
  $('mkRoom').onclick=async()=>{
   try{await api('/rooms',{method:'POST',body:JSON.stringify({name:$('newRoom').value.trim()})});
    openRooms();}catch(e){toast(e.message);}};
  $('newRoom').addEventListener('keydown',e=>{if(e.key==='Enter')$('mkRoom').click();});
  for(const b of document.querySelectorAll('[data-pick]'))b.onclick=()=>pickRoom(b.dataset.pick);
+ for(const b of document.querySelectorAll('[data-mem]'))b.onclick=()=>{
+  roomOpen=(roomOpen===b.dataset.mem?null:b.dataset.mem);openRooms();};
+ for(const b of document.querySelectorAll('[data-inv]'))b.onclick=async()=>{
+  const name=$('invName').value.trim();
+  if(!name)return;
+  try{await api('/rooms/'+b.dataset.inv+'/members',
+   {method:'POST',body:JSON.stringify({name:name})});
+   toast('invited '+name,true);}catch(e){toast(e.message);}
+  openRooms();};
+ for(const b of document.querySelectorAll('[data-unmem]'))b.onclick=async()=>{
+  try{await api('/rooms/'+b.dataset.unmem+'/members/'+
+   encodeURIComponent(b.dataset.uname),{method:'DELETE'});
+   toast('removed — their tokens lost this room now',true);}catch(e){toast(e.message);}
+  openRooms();};
  for(const b of document.querySelectorAll('[data-ren]'))b.onclick=()=>{
   confirming={kind:'rename',id:b.dataset.ren};openRooms();};
  if(confirming&&confirming.kind==='rename')wireAsk(async()=>{
@@ -2664,7 +2722,9 @@ async function openTokens(){
  // public at any moment, and a stale cache would silently hide it from the checkboxes.
  me=await api('/me');
  const d=await api('/tokens');
- const rooms=(me.owned||[]).concat(me.public||[]);   // assignable = mine + everyone's public
+ // assignable = mine + shared with me + everyone's public: exactly the set
+ // assign_room admits (owner OR member OR public), so no tick here can 403.
+ const rooms=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
  const rows=d.tokens.map(t=>{
   const chips=rooms.map(r=>'<label class="chip"><input type="checkbox" data-tok="'+t.id+'" '+
    'data-room="'+r.id+'"'+(t.rooms[r.id]?' checked':'')+'> '+
@@ -3029,7 +3089,9 @@ async def me_http(request):
     return JSONResponse({
         "name": p.name, "is_admin": p.is_admin,
         "rooms": [{"id": r, "name": n} for r, n in p.rooms.items()],
-        "owned": store.list_rooms(_conn, p.user_id),
+        "owned": [dict(r, members=store.member_count(_conn, r["id"]))
+                  for r in store.list_rooms(_conn, p.user_id)],
+        "member": store.member_rooms(_conn, p.user_id),
         "public": store.public_rooms(_conn, exclude_owner=p.user_id),
     })
 
@@ -3089,7 +3151,9 @@ async def my_password_http(request):
 async def rooms_http(request):
     p = _user_principal(request)
     if request.method == "GET":
-        return JSONResponse({"owned": store.list_rooms(_conn, p.user_id),
+        return JSONResponse({"owned": [dict(r, members=store.member_count(_conn, r["id"]))
+                                       for r in store.list_rooms(_conn, p.user_id)],
+                             "member": store.member_rooms(_conn, p.user_id),
                              "public": store.public_rooms(_conn, exclude_owner=p.user_id)})
     d = await request.json()
     r = store.create_room(_conn, p.user_id, (d.get("name") or "").strip(),
@@ -3113,6 +3177,37 @@ async def room_http(request):
     if "retention_ns" in d:
         store.set_retention(_conn, rid, p.user_id, d["retention_ns"])
     return JSONResponse(store.get_room(_conn, rid))
+
+
+@_guard
+async def room_members_http(request):
+    """GET = the member list (owner's eyes only, store-gated); POST {name} =
+    invite by exact name (DES-004 Q2: name entry, not a picker -- a picker
+    leaks the user list; the store's one failure text confirms nothing about
+    who exists). Membership grants REACH, never RULE."""
+    p = _user_principal(request)
+    rid = request.path_params["rid"]
+    if request.method == "GET":
+        return JSONResponse({
+            "members": store.member_list(_conn, rid, p.user_id),
+            "audit": store.room_audit_rows(_conn, rid)})
+    d = await request.json()
+    out = store.invite_member(_conn, rid, p.user_id, (d.get("name") or "").strip(),
+                              actor_name=f"web:{p.name}")
+    log.info("%s invited %s to room %s", p.name, out["user"], rid)
+    return JSONResponse(out)
+
+
+@_guard
+async def room_member_http(request):
+    """DELETE = remove a member. The revoke is total and instant: their
+    token_rooms rows for this room die in the same transaction (I2)."""
+    p = _user_principal(request)
+    rid = request.path_params["rid"]
+    out = store.remove_member(_conn, rid, p.user_id, request.path_params["name"],
+                              actor_name=f"web:{p.name}")
+    log.info("%s removed %s from room %s", p.name, out["user"], rid)
+    return JSONResponse(out)
 
 
 @_guard
@@ -3324,6 +3419,10 @@ def build_app():
             Route("/rooms", rooms_http, methods=["GET", "POST"]),
             Route("/rooms/{rid}", room_http, methods=["PATCH"]),
             Route("/rooms/{rid}", purge_room_http, methods=["DELETE"]),
+            Route("/rooms/{rid}/members", room_members_http,
+                  methods=["GET", "POST"]),
+            Route("/rooms/{rid}/members/{name}", room_member_http,
+                  methods=["DELETE"]),
             Route("/agents/{name}", prune_agent_http, methods=["DELETE"]),
             Route("/tokens", tokens_http, methods=["GET", "POST"]),
             Route("/tokens/{tid}", token_http, methods=["PATCH", "DELETE"]),
