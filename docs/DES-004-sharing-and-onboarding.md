@@ -171,17 +171,24 @@ on. "Your agent is on the bus" is the end of onboarding, not "token created".
   test); an invited member can; removal drops their token's row in the same
   tx; ratify queue for a member remains empty (I3 proven, not assumed);
   audit rows exact.
-- **M2 — one-dialog mint.** The Add-agent dialog, defaults per §4, copy block
-  for both host and container forms. Gate: a real-browser pass — from an empty
-  Tokens tab, three interactions produce a bound `state` token holding the
-  current room and a copy block containing the token exactly once.
-- **M3 — first-run path.** The three-step page and the presence poll. Gate:
-  the joinhere smoke extended — fresh db, fresh user, walk the page, agent
-  reaches live+connected.
+- **M2 — one-dialog mint. CLOSED as subsumed (architect, 2026-07-29).**
+  DES-005 P3's create form IS this dialog, with the same defaults and a copy
+  block. Building a second creation path would mean a second set of defaults
+  to keep in sync, and two places for them to drift apart.
+- **M3 — first-run path. RESHAPED (architect, 2026-07-29), smaller.** Not a
+  new page: sequence what exists. A user whose account has just been created
+  lands on the launcher page; with zero rooms it shows one inline step — name
+  your first room — then the existing create form with that room pre-ticked,
+  ending on the existing live-by-presence status. **Ruled Option A** (msg
+  8489): the chain lives on the LAUNCHER, and the deputy call set grows by
+  exactly one, `POST /rooms {name}`. Rejected Option B (chain starts in the
+  broker UI and links out) because it would put the launcher's address into
+  broker-served HTML — the launcher-ignorance invariant is designed never to
+  soften, while the deputy list is designed to grow by this one-message
+  process. Gate: fresh db, fresh user, walk the page, agent reaches
+  live+connected.
 
-M1 is independently useful and unblocks nothing else; M2 and M3 are UI-only
-and can be reordered. All three queue behind whatever the operator ranks
-first.
+M1 landed first and unblocked the rest. M3 is the last slice.
 
 ## 8. Open questions
 
