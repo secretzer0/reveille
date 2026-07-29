@@ -6,7 +6,12 @@ $REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps 
 rooms server-side, so no room name ever goes in my env.
 Startup: join(url="http://127.0.0.1:8765") -- I join every room my token holds; replays
 last 15 min only; older mail via history(since=...) ONLY when explicitly asked. Then
-lessons() -- rules the fleet already paid for.
+lessons() -- rules the fleet already paid for -- and brief(role="<what I do>"): the
+knowledge floor, doctrine + contracts + decisions + my saved state ranked to my role.
+Hive memory: recall() before I re-derive a decision or re-litigate a ruling;
+memory_add(source=<msg id>) in the same turn as any ruling I send or receive (draft below
+my tier is the gate working). Contract = an invariant a peer could break; decision = a
+choice with a rationale; lesson (lesson_add) = a defect that taught me something.
 Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
 ws://127.0.0.1:8765/wake --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. Its
 task-completion notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. One

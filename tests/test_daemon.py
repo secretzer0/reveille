@@ -8,6 +8,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import daemon  # noqa: E402
 
 
+def test_usage_names_the_hive_in_standing_doctrine():
+    """Boot-doctrine gap (msg 8407): brief/recall/memory_add must appear in the STANDING
+    USAGE text, not only in CHANGES -- a capability that lives only in the changelog is
+    unreachable by an agent following instructions. USAGE is the standing protocol;
+    CHANGES is the version history usage() appends after it."""
+    for tool in ("brief(", "recall(", "memory_add("):
+        assert tool in daemon.USAGE, f"{tool} missing from standing USAGE doctrine"
+    # and in the CLAUDE.md block agents actually paste into their repos
+    block = daemon.USAGE.split("CLAUDE.md block", 1)[1]
+    assert "brief(" in block and "memory_add(" in block
+
+
 def test_wake_url_from_http():
     assert daemon._wake_url_from("http://bigbox.local:8765") == "ws://bigbox.local:8765/wake"
 
