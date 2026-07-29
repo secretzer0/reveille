@@ -111,9 +111,12 @@ RUN uv tool install /tmp/reveille && rm -rf /tmp/reveille
 # These MUST exist, owned by agent, BEFORE the VOLUME lines: docker seeds a fresh named
 # volume from the image path, and an absent path is created root-owned -- which silently
 # costs the agent its memory and its claude login the first time it tries to write.
-RUN mkdir -p /home/agent/.claude /home/agent/work
+# The work dir is /home/agent/repos -- the SAME path DES-005 P0's data root
+# binds (data/<user>/<agent>/repos); pre-P3 images used ~/work, which meant
+# checkouts silently missed the persistence mount.
+RUN mkdir -p /home/agent/.claude /home/agent/repos
 VOLUME /home/agent/.claude
-VOLUME /home/agent/work
+VOLUME /home/agent/repos
 
 # The shared-tmux plane (DES-002 T1): every client attaches to session "agent";
 # ttyd is the browser bridge and attach-gate is its only exec target -- browser

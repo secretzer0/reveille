@@ -15,13 +15,25 @@ claude mcp add --transport http --scope user reveille "${REVEILLE_URL}/mcp" \
   --header "Authorization: Bearer ${REVEILLE_TOKEN}" \
   --header "X-Agent: ${REVEILLE_AGENT_ROLE}" >/dev/null
 
-# Provision step 3.2.4: clone the repo the launcher named, into the work dir, if it
-# is empty. Best-effort -- a private repo with no creds in the volume fails here and
-# the agent clones it by hand; the health gate is join+arm, not the checkout. Auth
-# rides whatever the claude-home volume carries (gh/git creds), same as a laptop.
-if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/work 2>/dev/null)" ]; then
-  git clone "${REVEILLE_REPO_URL}" /home/agent/work \
+# Provision step 3.2.4: clone the repo the launcher named, into ~/repos -- the
+# path the DES-005 data root persists (pre-P3 this was ~/work, which the bind
+# never covered, so checkouts silently died with the container). Best-effort --
+# a private repo with no creds fails here and the agent clones it by hand; the
+# health gate is join+arm, not the checkout. Auth rides the claude home
+# (gh/git creds) or $GITHUB_TOKEN from the user's P2 profile.
+if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/repos 2>/dev/null)" ]; then
+  git clone "${REVEILLE_REPO_URL}" /home/agent/repos/work \
     || echo "reveille: repo clone failed (${REVEILLE_REPO_URL}) -- clone by hand" >&2
+fi
+
+# DES-005 P3: the chosen role's prompt becomes standing doctrine in the agent's
+# own CLAUDE.md -- marker-guarded so a container restart never duplicates it,
+# and never touching a home that already carries one (the agent may have
+# evolved it; a template must not clobber learned doctrine).
+if [ -n "${REVEILLE_ROLE_PROMPT:-}" ] \
+    && ! grep -q "# reveille role" /home/agent/.claude/CLAUDE.md 2>/dev/null; then
+  printf '\n# reveille role\n%s\n' "${REVEILLE_ROLE_PROMPT}" \
+    >> /home/agent/.claude/CLAUDE.md
 fi
 
 # Per-container gate secret (DES-002 4.3): injected by the launcher at provision
@@ -68,7 +80,7 @@ echo "reveille: ${REVEILLE_AGENT_ROLE} -> ${REVEILLE_URL} (tmux: agent, ttyd: ${
 if [ -t 0 ]; then
   # Interactive run: the operator lands straight in the session (created if
   # absent). Laptop parity holds -- same claude, just inside tmux.
-  exec tmux new-session -A -s agent -c /home/agent/work "$@"
+  exec tmux new-session -A -s agent -c /home/agent/repos "$@"
 fi
 
 # Detached run (the launcher's path): this shell is PID 1. On `docker stop` PID 1
@@ -77,7 +89,7 @@ fi
 # inbox, manufacturing exactly the stale-presence confusion the fleet keeps paying
 # for. So: trap TERM, forward it to the agent process in the pane, and let docker's
 # grace window give claude a clean shutdown before the eventual SIGKILL.
-tmux new-session -d -s agent -c /home/agent/work "$@"
+tmux new-session -d -s agent -c /home/agent/repos "$@"
 
 forward_term() {
   pid="$(tmux list-panes -t agent -F '#{pane_pid}' 2>/dev/null | head -1)"

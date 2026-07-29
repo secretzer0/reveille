@@ -199,13 +199,21 @@ def test_profile_file_is_0600_and_holds_the_only_copy(tmp_path):
 
 def test_principal_from_me_shapes():
     # P1 authn: only a real logged-in body yields a principal. First-run
-    # ({'setup': true}), errors, and nameless bodies are all refusals.
+    # ({'setup': true}), errors, and nameless bodies are all refusals. is_admin
+    # is deliberately ABSENT (8477: a dormant privilege field must not sit in
+    # an auth path; deleted at P3 as ruled).
     assert rl.principal_from_me({"name": "ana", "is_admin": True}) == \
-        {"user": "ana", "is_admin": True}
-    assert rl.principal_from_me({"name": "bob"}) == \
-        {"user": "bob", "is_admin": False}
+        {"user": "ana"}
+    assert rl.principal_from_me({"name": "bob"}) == {"user": "bob"}
     for bad in ({"setup": True}, {}, {"name": ""}, None, "x", 7, []):
         assert rl.principal_from_me(bad) is None
+
+
+def test_role_prompts_are_the_four_sec9_drafts():
+    assert sorted(rl.ROLE_PROMPTS) == \
+        ["architect", "senior-dev", "senior-devops", "senior-ui-ux"]
+    for text in rl.ROLE_PROMPTS.values():
+        assert text and "\n" not in text[:1]   # non-empty prose blocks
 
 
 def test_idle_decision_matrix():

@@ -80,13 +80,17 @@ def main():
     db = os.path.join(tmp, "broker.db")
     conn = store.connect(db)
     store.migrate(conn, db)
-    store.setup_first_admin(conn, "ana", "hunter2hunter2")
+    ana_u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
     store.create_user(conn, "bob", "hunter2hunter2")
+    room = store.create_room(conn, ana_u["id"], "smoke")
     conn.close()
+    # PATH fallback so the smoke also runs under sudo (uid-0 review host),
+    # where the venv's bin is not on the inherited PATH.
+    benv = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(bport),
+                REVEILLE_HOST="127.0.0.1")
+    benv["PATH"] = str(REPO / ".venv" / "bin") + os.pathsep + benv["PATH"]
     broker = subprocess.Popen(
-        ["reveille-daemon"],
-        env=dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(bport),
-                 REVEILLE_HOST="127.0.0.1"),
+        ["reveille-daemon"], env=benv,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     lenv = dict(os.environ,
                 REVEILLE_LAUNCH_DB=os.path.join(tmp, "launcher.db"),
@@ -166,6 +170,29 @@ def main():
         st = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}",
                              "rev-ana-dev"], capture_output=True, text=True)
         assert st.stdout.strip() == "true", "bob's DELETE touched ana's agent"
+
+        # -- P3: tokenless provision -- the LAUNCHER mints via the broker
+        # with the forwarded cookie; the secret never enters a response and
+        # never reaches the browser at all --------------------------------
+        responses.append(req(L, "/agents", ana, "POST",
+                             {"agent": "dev", "rooms": [room["id"]],
+                              "role": "senior-dev", "append": "smoke agent",
+                              "network": NET, "boot_cmd": "sleep infinity",
+                              "replace": True}))
+        env_role = subprocess.run(
+            ["docker", "exec", "rev-ana-dev", "sh", "-c",
+             "printenv REVEILLE_TOKEN | wc -c; printenv REVEILLE_ROLE_PROMPT"],
+            capture_output=True, text=True).stdout
+        assert int(env_role.splitlines()[0]) > 10, "no minted token in env"
+        assert "smoke agent" in env_role and "feature branches" in env_role
+        meta = json.loads(req(L, "/rooms-mine", ana))
+        assert any(r["id"] == room["id"] for r in meta["rooms"])
+        assert meta["roles"] == ["architect", "senior-dev", "senior-devops",
+                                 "senior-ui-ux"]
+        # the launcher UI page serves (content sanity only; the real-browser
+        # pass is the P3 gate proper)
+        ui = req(L, "/ui", ana)
+        assert "NEW AGENT" in ui and "never shown" in ui
 
         # -- stop, destroy, profile ------------------------------------------
         responses.append(req(L, "/agents/dev/stop", ana, "POST", {}))
