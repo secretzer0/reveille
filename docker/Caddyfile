@@ -1,0 +1,37 @@
+# DES-006 U3: one front door. The PROXY knows both addresses; neither service
+# learns the other's, so the broker still has no idea a launcher exists and a
+# deployment without one is unaffected.
+#
+#   /          -> broker UI (the daily surface: chat, rooms, memory, presence)
+#   /agents    -> launcher Agents page (prefix stripped; the page puts it back
+#                 on its own fetches)
+#   /attach/*  -> launcher, which forwards to the right container's ttyd (U4;
+#                 the route is here now so U4 needs no proxy change)
+#
+# Both upstreams are 127.0.0.1: the launcher binds loopback only and this runs
+# with --network host, so the proxy is the only way in.
+# Port and upstreams come from the environment with production defaults, so the
+# SAME file the deployment runs is the one the gate exercises on scratch ports.
+:{$PROXY_PORT:80} {
+	handle_path /agents* {
+		reverse_proxy {$LAUNCHER_UPSTREAM:127.0.0.1:8766}
+	}
+
+	handle /attach/* {
+		reverse_proxy {$LAUNCHER_UPSTREAM:127.0.0.1:8766}
+	}
+
+	# The landing page IS the bus. The broker serves its UI at /ui and keeps
+	# doing so -- the rewrite lives here because the PROXY owns the URL layout;
+	# putting it in the broker would change what an unproxied deployment serves.
+	handle / {
+		rewrite * /ui
+		reverse_proxy {$BROKER_UPSTREAM:127.0.0.1:8765}
+	}
+
+	# Everything else is the bus, websockets included -- reverse_proxy upgrades
+	# /wake and /feed without extra configuration.
+	handle {
+		reverse_proxy {$BROKER_UPSTREAM:127.0.0.1:8765}
+	}
+}

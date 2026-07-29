@@ -28,6 +28,7 @@ No keystroke injection anywhere. One held connection, one wake per gate cycle.
 """
 import asyncio
 import contextlib
+import html
 import logging
 import os
 import pathlib
@@ -171,6 +172,17 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.20 ONE FRONT DOOR (DES-006 U3). Nothing changes for agents -- this is a
+       WEB-UI and deployment change, listed so the version bump is not a
+       mystery. The broker gained ONE optional nav link, from configuration:
+       REVEILLE_NAV_LABEL + REVEILLE_NAV_PATH render a single link in the
+       rail, and with either unset nothing renders at all. The broker learns
+       "there is a link" and never what is behind it -- no second service is
+       named in broker code, and a deployment that sets neither behaves
+       exactly as before. Deployments may now front the broker and the
+       launcher with one proxy (docker/Caddyfile: / is the bus, /agents the
+       launcher) so a human types one address and never a port; the bus keeps
+       working unproxied and unaware.
 0.2.19 THE IDLE NUDGE (DES-003 W3). An agent that ends its turn is parked
        until a ring arrives -- and instructions acked in an earlier turn have
        already spent theirs, so a full queue could sit still (the operator
@@ -1486,6 +1498,9 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  #status{width:.55em;height:.55em;border-radius:50%;background:var(--faint)}
  #status.on{background:var(--green)}
  #rail h2{font-size:.68rem;letter-spacing:.14em;color:var(--faint);padding:.9rem 1rem .4rem}
+ a.navlink{display:block;margin:.55rem 1rem 0;padding:.4rem .6rem;border:1px solid
+  var(--line);border-radius:7px;color:var(--fg);text-decoration:none;font-size:.85rem}
+ a.navlink:hover{border-color:var(--accent)}
  #fmode{display:flex;margin:0 1rem .45rem;border:1px solid var(--line);border-radius:7px;
   overflow:hidden}
  #fmode button{flex:1;background:none;border:0;color:var(--faint);font:inherit;
@@ -1867,6 +1882,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
 <nav id="rail">
  <div id="brand"><h1>REVEILLE</h1>
   <small><span id="status"></span><span id="ver">bus</span></small></div>
+ <!--NAVLINK-->
  <h2>AGENTS</h2>
  <div id="fmode" title="filter selected agents by messages they sent, or messages sent to them">
   <button type="button" id="fmFrom" class="on">FROM</button>
@@ -3395,8 +3411,24 @@ async def memory_verdict_http(request):
     return JSONResponse(out)
 
 
+def nav_link_html(label, path):
+    """ONE optional nav link, from configuration (DES-006 2.2). The broker learns
+    'there is a link', never what is behind it: no second service is named here,
+    nothing is special-cased, and with either value empty this renders nothing at
+    all -- an unconfigured deployment is byte-identical to one that never had the
+    feature, which is what keeps 'the broker never depends on the launcher' true.
+    Both values are operator-supplied text landing in HTML, so both are escaped.
+    Pure."""
+    if not (label or "").strip() or not (path or "").strip():
+        return ""
+    return (f'<a class="navlink" href="{html.escape(path.strip(), quote=True)}">'
+            f'{html.escape(label.strip())}</a>')
+
+
 async def chat_http(_request):
-    return HTMLResponse(WEBCHAT)
+    return HTMLResponse(WEBCHAT.replace(
+        "<!--NAVLINK-->", nav_link_html(os.environ.get("REVEILLE_NAV_LABEL", ""),
+                                        os.environ.get("REVEILLE_NAV_PATH", ""))))
 
 
 async def _sweeper():

@@ -1226,6 +1226,8 @@ button{cursor:pointer}label.chip{display:inline-block;margin:.15rem .4rem .15rem
 a{color:#8cf}
 </style></head><body>
 <h1>REVEILLE — your agents</h1>
+<div class="row dim"><a href="/">&larr; back to the bus</a> &middot;
+ signed in via your broker session &mdash; no second login</div>
 <div id="login" class="err" style="display:none">Not signed in. Log in at the
  <a href="" id="brokerLink">broker UI</a> first, then reload.</div>
 <div id="app" style="display:none">
@@ -1267,7 +1269,11 @@ a{color:#8cf}
 <script>
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,
  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const api=async(p,o)=>{const r=await fetch(p,Object.assign({headers:
+// Single origin (DES-006 U3): behind the proxy this page is served under /agents
+// and the proxy strips that prefix, so every fetch must put it back. Served
+// directly on loopback the prefix is empty and nothing changes.
+const B=location.pathname.indexOf('/agents')===0?'/agents':'';
+const api=async(p,o)=>{const r=await fetch(B+p,Object.assign({headers:
  {'Content-Type':'application/json'}},o));
  if(r.status===401){throw new Error('401');}
  const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d;};
@@ -1610,6 +1616,10 @@ def build_api(auth_url):
     return Starlette(routes=[
         Route("/health", health),
         Route("/ui", ui),
+        # Behind the proxy /agents is stripped to "/", so the page must answer
+        # there too -- same handler, no redirect to a path the browser cannot
+        # see (DES-006 U3).
+        Route("/", ui),
         Route("/rooms-mine", my_rooms),
         Route("/rooms", rooms_create, methods=["POST"]),
         Route("/agents", agents, methods=["GET", "POST"]),
