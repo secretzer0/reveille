@@ -60,3 +60,67 @@ def test_db_holds_no_token_bytes(tmp_path):
 def test_names_derive_from_role():
     assert rl.container_name("roc-ui") == "rev-roc-ui"
     assert rl.volume_name("roc-ui") == "rev-roc-ui-claude"
+
+
+# ---- T3: grant records + sweep decisions (pure paths; docker/tmux is the smoke) ----
+
+def test_grants_table_holds_metadata_only(tmp_path):
+    # 4.5.2: grant id, container, grantee, mode, issued, expiry -- NEVER the
+    # minted token. No column could even hold one.
+    db = tmp_path / "launcher.db"
+    conn = rl._db(str(db))
+    conn.close()
+    cols = {r[1] for r in sqlite3.connect(str(db)).execute(
+        "PRAGMA table_info(grants)")}
+    assert cols == {"id", "role", "grantee", "mode",
+                    "issued_ns", "expiry_ns", "revoked_ns"}
+
+
+def _g(mode="driver", expiry_ns=10**19, revoked_ns=None):
+    return {"mode": mode, "expiry_ns": expiry_ns, "revoked_ns": revoked_ns}
+
+
+def test_sweep_kills_expired_revoked_orphaned_and_flipped():
+    now = 1000
+    grants = {
+        "aaaa": _g("driver"),                      # healthy
+        "bbbb": _g("driver", expiry_ns=999),       # expired
+        "cccc": _g("viewer", revoked_ns=5),        # revoked
+        "dddd": _g("viewer"),                      # record says viewer...
+    }
+    live = {"d-aaaa": True, "d-bbbb": True, "v-cccc": True,
+            "d-dddd": True, "v-eeee": True}        # ...session is d-
+    kills, detaches = rl.sweep_actions(grants, live, set(), now)
+    assert dict(kills) == {"d-bbbb": "expired", "v-cccc": "revoked",
+                           "d-dddd": "mode-mismatch", "v-eeee": "no-grant"}
+    assert detaches == []
+
+
+def test_sweep_reaps_orphan_only_after_a_full_tick():
+    # A session unattached for a full tick is a failed attach's leftover -- it
+    # holds driver exclusivity until expiry if nothing reaps it. Fresh
+    # unattached sessions (pre-attach window, sub-second) are left alone.
+    grants = {"aaaa": _g("driver")}
+    fresh = rl.sweep_actions(grants, {"d-aaaa": False}, set(), 0)[0]
+    assert fresh == []
+    stale = rl.sweep_actions(grants, {"d-aaaa": False}, {"d-aaaa"}, 0)[0]
+    assert stale == [("d-aaaa", "orphan")]
+    attached = rl.sweep_actions(grants, {"d-aaaa": True}, {"d-aaaa"}, 0)[0]
+    assert attached == []
+
+
+def test_sweep_detach_is_observed_disappearance_only():
+    grants = {"aaaa": _g("driver")}
+    kills, detaches = rl.sweep_actions(
+        grants, live={"d-aaaa": True}, seen={"d-aaaa", "v-gone"}, now_ns=0)
+    assert kills == []
+    assert detaches == ["v-gone"]  # gone since last tick -> DETACH line
+    # still-live session is not a detach; nothing invents events
+
+
+def test_audit_line_format():
+    line = rl.audit_line("2026-07-28T00:00:00Z", "DETACH",
+                         role="roc-ui", grant="aaaa", observed="sweep-tick")
+    # Greppable k=v; the DETACH line must confess it is an observation (4.5.2)
+    assert line == ("2026-07-28T00:00:00Z DETACH role=roc-ui grant=aaaa "
+                    "observed=sweep-tick")

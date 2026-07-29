@@ -69,3 +69,63 @@ def test_unknown_subcommand_refused():
     res = gate(token)
     assert res.returncode != 0
     assert "v1." not in res.stdout
+
+
+# ---- 4.6 driver exclusivity: pre-exec refusal logic, testable with a tmux
+# stub on PATH (the real exec/attach behavior stays in the T3 smoke). The stub
+# reports an existing d-aaaa session; everything else it swallows with exit 0.
+
+def gate_with_tmux(tmp_path, *args, env_extra=None):
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    fake = stub / "tmux"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in list-sessions) printf "agent\\nd-aaaa\\n" ;; *) exit 0 ;; esac\n')
+    fake.chmod(0o755)
+    env = {
+        "PATH": f"{stub}:/usr/bin:/bin",
+        "REVEILLE_GATE_SECRET": SECRET,
+        "HOME": str(tmp_path),
+    }
+    env.update(env_extra or {})
+    return subprocess.run([GATE, *args], capture_output=True, text=True, env=env)
+
+
+def test_second_driver_refused_naming_holder(tmp_path):
+    token = gate("mint", "driver", "60", "bbbb").stdout.strip()
+    res = gate_with_tmux(tmp_path, "attach", token)
+    assert res.returncode != 0
+    assert "aaaa" in res.stderr  # 4.3: readable refusal names the holding grant
+    assert not (tmp_path / ".attach-audit").exists()  # refused attach is no attach
+
+
+def test_same_grant_reconnect_allowed(tmp_path):
+    token = gate("mint", "driver", "60", "aaaa").stdout.strip()
+    assert gate_with_tmux(tmp_path, "attach", token).returncode == 0
+
+
+def test_multi_driver_env_allows_second_driver(tmp_path):
+    token = gate("mint", "driver", "60", "bbbb").stdout.strip()
+    res = gate_with_tmux(tmp_path, "attach", token,
+                         env_extra={"REVEILLE_MULTI_DRIVER": "1"})
+    assert res.returncode == 0
+
+
+def test_multi_driver_marker_file_allows_second_driver(tmp_path):
+    (tmp_path / ".multi-driver").touch()  # what `reveille-launch flip on` does
+    token = gate("mint", "driver", "60", "bbbb").stdout.strip()
+    assert gate_with_tmux(tmp_path, "attach", token).returncode == 0
+
+
+def test_viewer_unaffected_by_existing_driver(tmp_path):
+    token = gate("mint", "viewer", "60", "cccc").stdout.strip()
+    assert gate_with_tmux(tmp_path, "attach", token).returncode == 0
+
+
+def test_attach_writes_gate_audit_line(tmp_path):
+    token = gate("mint", "driver", "60", "aaaa").stdout.strip()
+    gate_with_tmux(tmp_path, "attach", token)
+    line = (tmp_path / ".attach-audit").read_text().strip()
+    # 4.5.2: the gate's line carries the verified mode + grant id, timestamped
+    assert "ATTACH driver aaaa" in line

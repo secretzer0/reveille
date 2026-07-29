@@ -184,6 +184,11 @@ launch:
 launch-smoke: agent-image
 	uv run python tests/launch_smoke.py
 
+# T3 gate: grants end to end -- mirror, -r server-side, revoke <1s, exclusivity
+# race named, expiry sweep, audit lines, kill-and-reprovision (section 5).
+grant-smoke: agent-image
+	uv run python tests/grant_smoke.py
+
 lint:
 	uv run ruff check src tests scripts
 
