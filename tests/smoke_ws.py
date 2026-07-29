@@ -118,6 +118,46 @@ async def run(port, secrets):
         print("presence (cross-machine, with urls):",
               {k: v["url"] for k, v in pres.items()})
 
+        # ---- who wakes whom (msg 8496) -----------------------------------
+        # Two waiters armed at once. An AGENT broadcast must reach both inboxes
+        # and ring NEITHER socket; the same broadcast sent by a HUMAN over the
+        # web plane must ring BOTH, carrying the facts that let each decide
+        # whether it is owed anything.
+        aw = f"{j['wake_url']}?name=alice&token={secrets['alice']}"
+        bw = f"{j['wake_url']}?name=bob&token={secrets['bob']}"
+        async with websockets.connect(aw) as wsa, websockets.connect(bw) as wsb:
+            await asyncio.sleep(0.3)
+            await alice.call_tool("send", {"to": "*", "body": "agent broadcast",
+                                           "subject": "fyi"})
+            for who, ws in (("alice", wsa), ("bob", wsb)):
+                with contextlib.suppress(asyncio.TimeoutError):
+                    frame = await asyncio.wait_for(ws.recv(), timeout=2)
+                    raise SystemExit(
+                        f"agent broadcast RANG {who} -- that is the N^2 storm "
+                        f"this rule exists to prevent: {frame}")
+            got = data(await bob.call_tool("inbox", {}))["messages"]
+            assert any(m["body"] == "agent broadcast" for m in got), got
+            print("agent broadcast: delivered to inbox, rang nobody")
+
+            # Same shape, human plane: the web composer's broadcast.
+            urllib.request.urlopen(urllib.request.Request(
+                f"{base}/send", method="POST",
+                data=json.dumps({"from": "operator", "to": "*",
+                                 "subject": "page", "body": "human broadcast"}).encode(),
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {secrets['alice']}"}), timeout=5)
+            for who, ws in (("alice", wsa), ("bob", wsb)):
+                frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                assert frame["wake"], (who, frame)
+                # the ring carries the facts, so a woken agent can apply the
+                # reply test without a round trip
+                assert frame["from"] == "operator", (who, frame)
+                assert frame["subject"] == "page", (who, frame)
+                assert frame["direct"] == 0, (who, frame)   # nothing addressed to me
+                assert frame["unread"] >= 1, (who, frame)
+            print("human broadcast: rang BOTH waiters, frames carry "
+                  "from/subject/direct=0")
+
     print("\nWS + HTTP-MCP smoke OK")
 
 

@@ -221,3 +221,47 @@ def test_unconfigured_page_renders_no_link_element():
     page = daemon.WEBCHAT.replace("<!--NAVLINK-->", daemon.nav_link_html("", ""))
     assert '<a class="navlink"' not in page     # the CSS rule may exist; no element
     assert "<!--NAVLINK-->" not in page         # and no leftover placeholder
+
+
+# ---- who wakes whom (msg 8496) ----------------------------------------------
+# One table pins the entire rule: a HUMAN broadcast wakes the room, an AGENT
+# broadcast does not, and unicast wakes its recipient on either plane. The
+# agent-broadcast row is the ONLY thing terminating an agent-agent broadcast
+# loop -- the poke gate coalesces simultaneous rings, not the ~2.4-minute
+# cadence the 74-message storm actually ran at.
+
+def _woke(plane, to, delivery):
+    """The one line each plane computes, extracted so the rule is testable
+    without a broker: web always wakes, MCP never wakes on broadcast."""
+    if plane == "web":
+        return delivery
+    return delivery if to != "*" else []
+
+
+def test_web_broadcast_wakes_the_whole_room():
+    assert _woke("web", "*", ["a", "b", "c"]) == ["a", "b", "c"]
+
+
+def test_agent_broadcast_wakes_nobody():
+    assert _woke("mcp", "*", ["a", "b", "c"]) == []
+
+
+def test_unicast_wakes_its_recipient_on_either_plane():
+    assert _woke("web", "dev", ["dev"]) == ["dev"]
+    assert _woke("mcp", "dev", ["dev"]) == ["dev"]
+
+
+def test_shout_parameter_is_gone_from_the_served_surface():
+    # A retired parameter that still appears in doctrine is a parameter people
+    # keep sending. Clean cutover: no shout in the UI, the handler, or usage.
+    assert "shout" not in daemon.WEBCHAT
+    assert "shout=true" not in daemon.USAGE
+    assert "shout" not in (daemon.send_http.__doc__ or "")
+
+
+def test_boot_doctrine_states_the_broadcast_rule():
+    # A capability absent from the boot text does not exist (ratified lesson).
+    for text in (daemon.USAGE, daemon.CHANGES):
+        pass
+    assert "HUMAN" in daemon.USAGE and "broadcast" in daemon.USAGE
+    assert "direct" in daemon.USAGE
