@@ -157,6 +157,18 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.13 The memory plane's web surface (DES-001 S6b, schema v12). Web routes:
+       GET /memories (recall with filters), GET /memories/queue (the drafts the
+       caller can actually decide, each with source message inline and the
+       displaced author's text on a supersede), GET /memories/<uid> (provenance
+       + decision history), POST /memories/<uid>/ratify|reject. Web principals
+       act at ratify tier exactly in rooms they OWN (14.1) -- the same store
+       gate as the agent plane, nothing re-derived. Token tier is now visible
+       in GET /tokens and mutable via PATCH (mem_tier); every flip is audited
+       (token_audit: who flipped whose token, from what to what, when). Agents:
+       nothing changed for you -- same tools, same tiers; your token's tier may
+       now change under you mid-session, so re-probe rather than cite an old
+       tier observation (already fleet law).
 0.2.12 reject(id, reason) -- the other half of the ratify gesture (DES-001 S6,
        schema v11). Declining a draft is a real outcome with a REQUIRED reason,
        distinct from leaving it queued; rejected drafts stay visible to their
@@ -2922,12 +2934,100 @@ async def token_http(request):
         log.info("%s revoked token %s", p.name, tid)
         return JSONResponse({"revoked": tid})
     d = await request.json()
+    if d.get("mem_tier"):
+        # Tier flip is an authority change (S6b, msg 8448): owner-or-admin, and
+        # the flip itself is audited -- who, whose token, from what to what.
+        out = store.set_token_tier(_conn, tid, p.user_id, d["mem_tier"],
+                                   actor=f"web:{p.name}", is_admin=p.is_admin)
+        log.info("%s set token %s tier -> %s", p.name, tid, d["mem_tier"])
+        return JSONResponse(out)
     rid = d.get("room") or ""
     if d.get("attach"):
         store.assign_room(_conn, tid, rid, p.user_id)
     else:
         store.unassign_room(_conn, tid, rid, p.user_id)
     return JSONResponse({"rooms": store.rooms_for_token(_conn, tid)})
+
+
+# ---- S6: the memory plane's web surface (DES-001 section 14) -----------------------
+# Routes RESOLVE the principal and THREAD it to the same store gate the agent plane
+# uses -- never a second authority check, never a route-level convenience like
+# "admin implies ratify" (14.5; msg 8448). The web plane's capability IS room
+# ownership (14.1): a web principal acts at ratify tier exactly in the rooms it
+# owns, which the store gate enforces per room. ONE derivation, used by every
+# memory route below.
+
+def _web_mem_authority(p):
+    owned = {r["id"] for r in store.list_rooms(_conn, p.user_id)}
+    return "ratify", owned
+
+
+@_guard
+async def memories_http(request):
+    """The browser: recall() with its filters made visible (14.4). Same read
+    scoping as the agent plane; drafts/rejected follow the same visibility gate."""
+    p = _user_principal(request)
+    tier, owned = _web_mem_authority(p)
+    q = request.query_params
+    out = store.recall(
+        _conn, rooms=p.rooms, token_id="", caller=f"web:{p.name}", tier=tier,
+        is_admin=p.is_admin, owned_rooms=owned,
+        query=q.get("query", ""), kind=q.get("kind", ""),
+        scope=q.get("scope", ""), entity=q.get("entity", ""),
+        author=q.get("author", ""), status=q.get("status", "live"),
+        limit=int(q.get("limit", "50")))
+    return JSONResponse(out)
+
+
+@_guard
+async def memory_queue_http(request):
+    """The ratify queue (14.2): only drafts the caller can actually decide --
+    owned rooms, plus global for an instance admin -- each with provenance."""
+    p = _user_principal(request)
+    _, owned = _web_mem_authority(p)
+    return JSONResponse({"queue": store.ratify_queue(
+        _conn, owned_rooms=owned, is_admin=p.is_admin)})
+
+
+@_guard
+async def memory_http(request):
+    """One memory, whole: provenance package + decision history (14.2/14.4)."""
+    p = _user_principal(request)
+    _, owned = _web_mem_authority(p)
+    d = store.memory_detail(_conn, request.path_params["uid"])
+    scope = d["scope"]
+    if scope != "global" and scope not in p.rooms:
+        raise store.AccessError("no access to this memory's room")
+    if d["status"] in ("draft", "rejected") and not p.is_admin \
+            and scope not in owned and d["author"] != f"web:{p.name}":
+        # Same visibility class recall() enforces: undecided/declined drafts are
+        # the author's and the deciders', not the room's.
+        raise store.AccessError("draft visibility is author/ratifier/admin only")
+    return JSONResponse(d)
+
+
+@_guard
+async def memory_verdict_http(request):
+    """POST-only by construction (14.6: no ratify-by-URL -- a link someone can be
+    socially engineered into clicking must not carry the gesture; the samesite
+    session cookie keeps cross-site POSTs out). The verdict goes through the
+    STORE's gate with the principal's authority threaded, nothing re-derived."""
+    p = _user_principal(request)
+    tier, owned = _web_mem_authority(p)
+    uid = request.path_params["uid"]
+    verdict = request.path_params["verdict"]
+    if verdict == "ratify":
+        out = store.ratify_memory(_conn, uid, tier=tier, is_admin=p.is_admin,
+                                  owned_rooms=owned, actor=f"web:{p.name}")
+    elif verdict == "reject":
+        d = await request.json()
+        out = store.reject_memory(_conn, uid, tier=tier, is_admin=p.is_admin,
+                                  owned_rooms=owned, actor=f"web:{p.name}",
+                                  reason=(d.get("reason") or ""))
+    else:
+        raise store.BusError(f"unknown verdict {verdict!r}")
+    log.info("web:%s %s memory %s", p.name, verdict, uid)
+    return JSONResponse(out)
 
 
 async def chat_http(_request):
@@ -2983,6 +3083,11 @@ def build_app():
             Route("/agents/{name}", prune_agent_http, methods=["DELETE"]),
             Route("/tokens", tokens_http, methods=["GET", "POST"]),
             Route("/tokens/{tid}", token_http, methods=["PATCH", "DELETE"]),
+            Route("/memories", memories_http),
+            Route("/memories/queue", memory_queue_http),
+            Route("/memories/{uid}", memory_http),
+            Route("/memories/{uid}/{verdict}", memory_verdict_http,
+                  methods=["POST"]),
             Route("/messages", messages_http),
             Route("/search", search_http),
             Route("/presence", presence_http),
