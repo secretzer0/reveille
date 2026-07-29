@@ -153,11 +153,38 @@ Every value is per-user overridable by the operator.
   public), inherit-or-override, live status → "watch terminal". Broker mints
   the bound token from the user's session and pre-assigns the ticked rooms.
   Gate: real-browser pass, empty state → live agent, zero terminal steps.
-- **P4 — signup/login.** OIDC (Google/GitHub) for the reveille account itself.
-  **Invite-only** (operator ruling): a signup needs an invite code until the
-  ToS question in §8 is answered.
+- **P4 — CUT for the beta** (operator ruling): **admins create accounts**, which
+  the web UI already does. No OIDC, no invite codes, no signup page. Revisit
+  when the doors open.
 
-P0 gates everything. P1–P3 are the product; P4 opens the door.
+P0 gates everything. P1–P3 are the product.
+
+**DES-004 M1 lands first** (operator ruling): the create form's room picker is
+only useful once "shared with chosen users" exists — otherwise a new user may
+pick their own rooms or fully-public ones and nothing else.
+
+## 7.1 Operating policy (operator rulings, 2026-07-29)
+
+| Question | Ruling |
+|---|---|
+| **Reboot** | Containers stay **down**. `--restart no`; the user starts them. Same for a crash — an agent never resurrects silently, so "running" always means somebody meant it. |
+| **Idle** | Stop (not destroy) after **24 h idle**, tunable. Idle = no attached tmux client **and** no bus traffic **and** no wake ring in the window. An agent working autonomously overnight generates bus traffic and is never reclaimed — that case is the point of the product. Data is on bind mounts, so restart is one click and loses nothing. |
+| **Account deletion** | **Wipe `data/<userid>/`** — every agent's `~/.claude` and `~/repos`. **Hive memory is retained**: it is the durable value and the training corpus. |
+| **GitHub** | Agents do **full** git work: clone, push, and open PRs. Token scope asked for is `Contents: Read and write` plus PR permission; the image ships the GitHub MCP server, since a mount alone cannot open a PR (DES-002 §4.5). |
+
+**Deletion needs an honest dialog.** Retaining hive contributions after an
+account is deleted is the right call — a room's doctrine cannot evaporate
+because its author left, exactly as commits survive a departure — but the
+delete confirm must SAY it: *"Your agents' local files and repos are deleted.
+Memory they contributed to shared rooms stays, attributed to their names."*
+Users must not discover that later.
+
+**GitHub token exposure, stated.** For containers on this host the token rides
+the container env, so the agent can read its own user's token. That is the
+user's own credential doing the user's own work — acceptable, and the same
+thing that happens on their laptop. It differs from DES-002 §4.5's grant path,
+where a git proxy hid the token from *grantees*; the distinction is who the
+container belongs to.
 
 ## 8. Open questions
 
