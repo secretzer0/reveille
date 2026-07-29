@@ -19,7 +19,7 @@ def test_no_secret_in_docker_argv():
     # R1/wake-127: the token and gate secret must ride env by NAME, never appear as a
     # value on the command line. The argv carries the NAMES; that is fine and required.
     argv = rl.docker_run_argv(
-        "roc-ui", "reveille-agent:0.2.1", "4g", "2", "host", forward_anthropic=True)
+        "roc-ui", "reveille-agent:0.2.2", "4g", "2", "host", forward_anthropic=True)
     joined = " ".join(argv)
     assert "REVEILLE_TOKEN" in joined  # the NAME is passed
     # no VALUE-shaped secret: every -e is immediately followed by a bare NAME, not NAME=val
@@ -44,7 +44,7 @@ def test_db_holds_no_token_bytes(tmp_path):
     # scan every byte of the db file for the secret we deliberately did NOT pass in.
     db = tmp_path / "launcher.db"
     conn = rl._db(str(db))
-    rl._record(conn, "roc-ui", "https://example/repo", "reveille-agent:0.2.1",
+    rl._record(conn, "roc-ui", "https://example/repo", "reveille-agent:0.2.2",
                "http://127.0.0.1:8765")
     conn.close()
     secret = "tok-THIS-MUST-NOT-APPEAR-anywhere"

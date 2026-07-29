@@ -86,6 +86,17 @@ RUN git clone https://github.com/JuliusBrussee/caveman /home/agent/caveman-marke
     && claude plugin install caveman@caveman
 ENV CAVEMAN_DEFAULT_MODE=ultra
 
+# Ponytail (lazy-senior-dev mode), same discipline as caveman: clone at a pinned
+# commit, add the local checkout as a marketplace, install -- enabled at boot via
+# the plugin's own SessionStart hook. Mode default is env, launcher-overridable
+# per container without an image fork.
+ARG PONYTAIL_REF=16f29800fd2681bdf24f3eb4ccffe38be3baec6b
+RUN git clone https://github.com/DietrichGebert/ponytail /home/agent/ponytail-marketplace \
+    && git -C /home/agent/ponytail-marketplace checkout ${PONYTAIL_REF} \
+    && claude plugin marketplace add /home/agent/ponytail-marketplace \
+    && claude plugin install ponytail@ponytail
+ENV PONYTAIL_DEFAULT_MODE=full
+
 # The wake client. Without it a containerised agent has no waiter, so unicast rings never
 # arrive and it is deaf between turns -- it would only ever see mail by polling inbox() on
 # its next turn, which is the degraded mode, not the design. Shipped from THIS repo's
