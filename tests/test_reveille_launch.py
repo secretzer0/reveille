@@ -293,3 +293,29 @@ def test_audit_line_format():
     # Greppable k=v; the DETACH line must confess it is an observation (4.5.2)
     assert line == ("2026-07-28T00:00:00Z DETACH user=acme agent=roc-ui "
                     "grant=aaaa observed=sweep-tick")
+
+
+# ---- U2: the launcher refuses to serve without the docker socket -------------
+# Pure verdict so the refusal is provable without breaking docker on the host
+# (msg 8499: the launcher that was serving the operator could not provision at
+# all, and its /health still said ok).
+
+def test_docker_probe_passes_only_on_rc_zero():
+    assert rl.docker_probe_error(0, "") is None
+
+
+def test_docker_probe_names_the_group_on_permission_denied():
+    msg = rl.docker_probe_error(1, "permission denied while trying to connect "
+                                   "to the Docker daemon socket")
+    assert msg and "docker group" in msg and "usermod -aG docker" in msg
+    assert "permission denied" in msg   # docker's own words survive
+
+
+def test_docker_probe_falls_back_when_daemon_is_simply_down():
+    msg = rl.docker_probe_error(1, "Cannot connect to the Docker daemon")
+    assert msg and "docker daemon running" in msg
+    assert "usermod" not in msg         # wrong advice is worse than none
+
+
+def test_docker_probe_reports_bare_exit_code_with_no_stderr():
+    assert "exit 127" in rl.docker_probe_error(127, "")
