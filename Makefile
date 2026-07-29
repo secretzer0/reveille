@@ -250,6 +250,13 @@ joinhere-smoke: sync
 upload-gate: sync
 	uv run python tests/upload_gate.py
 
+# Pinned-source gate: the serving launcher does not live in a working tree.
+# pin clones to a declared path on main and refuses a dirty tree, the supervisor
+# spawns from THAT path (and refuses loudly when none is declared), and
+# rewriting the dev tree's launcher mid-flight changes nothing about what serves.
+launcher-pin-smoke: sync
+	uv run python tests/launcher_pin_smoke.py
+
 # Sweep SCHEDULER gate: proves the 4.6 tick runs by itself. Starts serve, plants
 # an expired grant, and waits -- calling nothing. The gates that call _sweep_once
 # by hand all passed while the sweep had never run in production once.

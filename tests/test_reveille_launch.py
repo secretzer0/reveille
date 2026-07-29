@@ -410,3 +410,25 @@ def test_a_failing_tick_does_not_end_the_loop(monkeypatch):
     monkeypatch.setattr(rl, "_sweep_once", boom)
     rl._sweep_forever(0, 42, stop)
     assert len(calls) == 3 and calls == [42, 42, 42]
+
+
+def test_pin_refuses_what_it_cannot_describe():
+    # A pin is a deployment. Both refusals leave the running code where it is.
+    assert rl.pin_refusal(dirty=False, has_upstream=True, is_ff=True) is None
+    assert "local changes" in rl.pin_refusal(True, True, True)
+    assert "no origin/main" in rl.pin_refusal(False, False, False)
+    assert "fast-forward" in rl.pin_refusal(False, True, False)
+    # Dirty wins the report: it is the one a human can act on immediately.
+    assert "local changes" in rl.pin_refusal(True, True, False)
+
+
+def test_source_stamp_survives_a_tree_that_is_not_a_checkout(tmp_path):
+    # The banner must never be the reason the launcher fails to start.
+    commit, branch, version = rl.source_stamp(str(tmp_path))
+    assert (commit, branch, version) == ("unknown", "unknown", "unknown")
+
+
+def test_source_stamp_reads_this_repo(tmp_path):
+    commit, branch, version = rl.source_stamp(str(pathlib.Path(__file__).parent.parent))
+    assert len(commit) >= 7 and commit != "unknown"
+    assert version[0].isdigit()
