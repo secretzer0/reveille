@@ -84,6 +84,22 @@ def test_names_and_data_roots_derive_from_user_and_agent():
     assert a == "/d/acme/dev" and b == "/d/acme/dev2" and a != b
 
 
+def test_own_dirs_argv_runs_chown_as_root():
+    # 8479, the standing change: anything depending on the launcher-uid /
+    # container-uid relationship gets an argv-shaped test, because the docker
+    # smoke's one host is uid 1000 and both ownership defects were invisible
+    # there. --user 0:0 is the load-bearing flag (the image sets USER agent;
+    # --entrypoint does not change the user), and the -R targets are the two
+    # agent dirs.
+    argv = rl.own_dirs_argv("/d/acme/dev", "img")
+    assert argv[:5] == ["docker", "run", "--rm", "--user", "0:0"]
+    assert "--entrypoint" in argv and argv[argv.index("--entrypoint") + 1] == "chown"
+    i = argv.index("-R")
+    assert argv[i + 1] == f"{rl.AGENT_UID}:{rl.AGENT_GID}"
+    assert argv[i + 2:] == ["/own/claude", "/own/repos"]
+    assert "-v" in argv and argv[argv.index("-v") + 1] == "/d/acme/dev:/own"
+
+
 def test_quota_resolution_defaults_and_overrides():
     assert rl.resolve_quotas(None) == rl.QUOTA_DEFAULTS
     q = rl.resolve_quotas({"cpus": 4.0, "mem": None, "disk_gb": None,

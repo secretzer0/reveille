@@ -399,16 +399,26 @@ def _exists(name):
     return _docker("inspect", name, check=False, capture=True).returncode == 0
 
 
+def own_dirs_argv(root, image):
+    """The chown container's argv, pure so the uid-critical shape is unit-
+    testable anywhere (msg 8479: our one smoke host is uid 1000, where BOTH
+    ownership defects were invisible -- the argv test is where the accident
+    cannot hide). --user 0:0 is load-bearing: the image sets USER agent and
+    --entrypoint does not change the user, so without it the chown runs as
+    uid 1000 and cannot take ownership of dirs a root launcher created."""
+    return ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "chown",
+            "-v", f"{root}:/own", image,
+            "-R", f"{AGENT_UID}:{AGENT_GID}", "/own/claude", "/own/repos"]
+
+
 def _own_agent_dirs(root, image):
     """Hand the agent dirs to the image's uid (msg 8475). A plain os.chown
     needs CAP_CHOWN the launcher's own uid may not have; its actual privilege
     is the docker socket, so the chown rides a throwaway container of the very
     image about to use the dirs. -R heals pre-existing wrong-uid files from a
     launcher that ran before this fix, not just fresh mkdirs."""
-    _docker("run", "--rm", "--entrypoint", "chown",
-            "-v", f"{root}:/own", image,
-            "-R", f"{AGENT_UID}:{AGENT_GID}", "/own/claude", "/own/repos",
-            capture=True)
+    subprocess.run(own_dirs_argv(root, image), check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def _ensure_network(net, broker_url):
