@@ -159,6 +159,10 @@ Every value is per-user overridable by the operator.
 
 P0 gates everything. P1–P3 are the product.
 
+**Wording is not a gate.** The deletion-dialog sentence (§7.1) and the token
+page's phrasing are one-line copy edits, done when the screen is built and
+never a reason to hold a slice. Build the capability; the sentence follows it.
+
 **DES-004 M1 lands first** (operator ruling): the create form's room picker is
 only useful once "shared with chosen users" exists — otherwise a new user may
 pick their own rooms or fully-public ones and nothing else.
