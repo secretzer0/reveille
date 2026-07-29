@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -450,11 +450,16 @@ def migrate(conn, db_path):
         _upgrade_v9(conn, db_path)
         _upgrade_v10(conn, db_path)
         _upgrade_v11(conn, db_path)
+        _upgrade_v12(conn, db_path)
     elif v == 10:
         _upgrade_v10(conn, db_path)
         _upgrade_v11(conn, db_path)
+        _upgrade_v12(conn, db_path)
     elif v == 11:
         _upgrade_v11(conn, db_path)
+        _upgrade_v12(conn, db_path)
+    elif v == 12:
+        _upgrade_v12(conn, db_path)
     # Chains from <=v8 need no v9+ steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
     # which already carries the current index shape, status set, and audit
     # tables, and backfills through _memory_insert.
@@ -656,6 +661,26 @@ def _upgrade_v11(conn, db_path):
     missing."""
     with tx(conn):
         _exec_script(conn, _MEMORIES_SCHEMA)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
+def _upgrade_v12(conn, db_path):
+    """v12 -> v13: data-only. promote_lesson used to leave a live same-slug
+    global predecessor standing (msg 8461), so a db may carry several live
+    rows per (scope, slug). Keep the newest per pair (created_ns, id as the
+    tiebreak -- promotion inserts later), supersede the rest. Matches nothing
+    on a db the interim store-side fix already cleaned."""
+    snapshot(conn, f"{db_path}.pre-v13-{time.strftime('%Y%m%dT%H%M%S')}.bak")
+    with tx(conn):
+        conn.execute(
+            "UPDATE memories SET status='superseded' WHERE kind='lesson' AND "
+            "slug IS NOT NULL AND status='live' AND id NOT IN ("
+            "  SELECT id FROM memories m WHERE kind='lesson' AND slug IS NOT NULL "
+            "  AND status='live' AND NOT EXISTS ("
+            "    SELECT 1 FROM memories n WHERE n.kind='lesson' AND n.status='live' "
+            "    AND n.scope=m.scope AND n.slug=m.slug AND "
+            "    (n.created_ns>m.created_ns OR "
+            "     (n.created_ns=m.created_ns AND n.id>m.id))))")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -2125,6 +2150,12 @@ def ratify_memory(conn, uid, *, tier="state", is_admin, owned_rooms, actor=""):
         if r["supersedes_id"] is not None:
             conn.execute("UPDATE memories SET status='superseded' WHERE id=? AND "
                          "status='live'", (r["supersedes_id"],))
+        if r["kind"] == "lesson" and r["slug"]:
+            # The draft's direct ancestor may ALREADY be superseded (a promotion
+            # crossed it while the draft sat queued) -- flipping only
+            # supersedes_id would then re-introduce a duplicate live slug. The
+            # invariant, not the edge, is what ratify completes.
+            _displace_lesson_tips(conn, r["scope"], r["slug"], r["id"])
         _audit_memory(conn, r, "ratify", actor)
     return {"id": uid, "status": "live"}
 
@@ -2286,9 +2317,10 @@ def add_lesson(conn, *, author, slug, symptom, root_cause, rule, detection, room
             status=status, supersedes_id=tip["id"] if tip is not None else None,
             slug=slug, symptom=symptom, root_cause=root_cause, rule=rule,
             detection=detection)
-        if tip is not None and status == "live":
-            conn.execute("UPDATE memories SET status='superseded' WHERE id=? AND "
-                         "status='live'", (tip["id"],))
+        if status == "live":
+            # Not just the tip we chained to: EVERY other live same-slug row in
+            # the scope (the invariant survives duplicates that predate v13).
+            _displace_lesson_tips(conn, scope, slug, out["id"])
     return {"id": out["uid"], "slug": slug, "room": room_id,
             **({"status": "draft"} if status == "draft" else {})}
 
@@ -2313,10 +2345,23 @@ def lessons(conn, rooms=()):
     return [_lesson(r) for r in rows]
 
 
-def promote_lesson(conn, slug, room_id, promoted_by="admin"):
+def _displace_lesson_tips(conn, scope, slug, keep_id):
+    """The one-live-row-per-slug invariant, enforced at the moment a lesson goes
+    LIVE in a scope: every OTHER live same-slug row there flips to superseded.
+    Idempotent and tolerant of rows already superseded out-of-band (msg 8461's
+    interim store-side fix). Caller holds the transaction."""
+    conn.execute(
+        "UPDATE memories SET status='superseded' WHERE kind='lesson' AND scope=? "
+        "AND slug=? AND status='live' AND id<>?", (scope, slug, keep_id))
+
+
+def promote_lesson(conn, slug, room_id, promoted_by="admin", is_admin=False):
     """Room lesson -> global. Promotion is a superseding row at scope='global'
     authored by the promoting admin (R1-B1) -- the room tip flips to superseded, so
-    history keeps who wrote it and when it went global."""
+    history keeps who wrote it and when it went global. Global writes are the
+    instance admin's alone (R1-M3), same rule as ratify's global gate."""
+    if not is_admin:
+        raise AccessError("promotion writes global law: instance admin only")
     tip = conn.execute(
         "SELECT * FROM memories WHERE kind='lesson' AND scope=? AND slug=? AND "
         "status='live'", (room_id, slug)).fetchone()
@@ -2328,12 +2373,20 @@ def promote_lesson(conn, slug, room_id, promoted_by="admin"):
         # promotion's provenance is dropped -- history would answer WHAT went global
         # but never WHERE it came from. memory_add's same-scope constraint stands for
         # every other path; only this function may cross, and only room -> global.
-        _memory_insert(
+        out = _memory_insert(
             conn, kind="lesson", scope="global", fact=tip["rule"][:1000],
             author=promoted_by, status="live", supersedes_id=tip["id"],
             slug=tip["slug"], symptom=tip["symptom"], root_cause=tip["root_cause"],
             rule=tip["rule"], detection=tip["detection"])
         conn.execute("UPDATE memories SET status='superseded' WHERE id=?", (tip["id"],))
+        # A live same-slug GLOBAL predecessor is displaced in the same tx (msg
+        # 8461: without this, promotion into a scope already carrying the slug
+        # DUPLICATES -- lessons() served two rows for one slug and every agent's
+        # boot read both). supersedes_id is single-valued and doctrine assigns it
+        # to the room ancestor; the displaced global row needs no second edge --
+        # same slug + scope + newer live row IS the displacement record.
+        _displace_lesson_tips(conn, "global", tip["slug"], out["id"])
+    return {"id": out["uid"], "slug": tip["slug"], "scope": "global"}
 
 
 def record_file(conn, stored, room_id, uploaded_by):

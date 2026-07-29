@@ -764,7 +764,8 @@ def test_lessons_rebacked_same_shape_and_gate():
     # room lesson promotion = superseding global row by the promoting admin
     store.add_lesson(c, author="dave", slug="room-rule", symptom="s", root_cause="r",
                      rule="local law", detection="d", room_id=room["id"])
-    store.promote_lesson(c, "room-rule", room["id"], promoted_by="travis")
+    store.promote_lesson(c, "room-rule", room["id"], promoted_by="travis",
+                         is_admin=True)
     tips = store.lessons(c, [room["id"]])
     promoted = next(t for t in tips if t["slug"] == "room-rule")
     assert promoted["scope"] == "global" and promoted["author"] == "travis"
@@ -1374,8 +1375,115 @@ def test_promote_lesson_to_global():
     c, admin, room, tok = fixture()
     store.add_lesson(c, author="alice", slug="generalises", symptom="s", root_cause="r",
                      rule="do x", detection="d", room_id=room["id"])
-    store.promote_lesson(c, "generalises", room["id"])
+    store.promote_lesson(c, "generalises", room["id"], is_admin=True)
     assert store.lessons(c, [])[0]["scope"] == "global"   # visible with no rooms at all
+
+
+def _live_global(c, slug):
+    return [les for les in store.lessons(c, []) if les["slug"] == slug]
+
+
+def test_promote_displaces_live_same_slug_global_row():
+    """Msg 8461: promotion into a scope already carrying the slug must DISPLACE,
+    not duplicate -- the old hole left lessons() serving two rows per slug and
+    every agent's boot read both. Chain provenance stays on the room ancestor
+    (S3 F1: the one sanctioned cross-scope link)."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(c, author="architect", slug="dup", symptom="s", root_cause="r",
+                     rule="the outdated take", detection="d", room_id=None)
+    store.add_lesson(c, author="alice", slug="dup", symptom="s", root_cause="r",
+                     rule="the sharper room take", detection="d", room_id=room["id"])
+    out = store.promote_lesson(c, "dup", room["id"], promoted_by="web:travis",
+                               is_admin=True)
+    live = _live_global(c, "dup")
+    assert len(live) == 1 and live[0]["rule"] == "the sharper room take"
+    d = store.memory_detail(c, out["id"])
+    assert d["supersedes_tip"]["rule"] == "the sharper room take"  # room ancestor
+    old = c.execute("SELECT status FROM memories WHERE kind='lesson' AND "
+                    "scope='global' AND slug='dup' AND rule='the outdated take'"
+                    ).fetchone()
+    assert old["status"] == "superseded"
+
+
+def test_promote_tolerates_predecessor_already_superseded():
+    """The operator's interim store-side fix may land first (8461): a global
+    predecessor already flipped out-of-band must not break promotion."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(c, author="architect", slug="dup2", symptom="s", root_cause="r",
+                     rule="old", detection="d", room_id=None)
+    c.execute("UPDATE memories SET status='superseded' WHERE slug='dup2'")
+    store.add_lesson(c, author="alice", slug="dup2", symptom="s", root_cause="r",
+                     rule="new", detection="d", room_id=room["id"])
+    store.promote_lesson(c, "dup2", room["id"], is_admin=True)
+    live = _live_global(c, "dup2")
+    assert len(live) == 1 and live[0]["rule"] == "new"
+
+
+def test_promote_requires_instance_admin():
+    """Global writes are the instance admin's alone (R1-M3) -- promotion mints
+    global law and gets the same gate as global ratify."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(c, author="alice", slug="gated", symptom="s", root_cause="r",
+                     rule="x", detection="d", room_id=room["id"])
+    with pytest.raises(store.AccessError):
+        store.promote_lesson(c, "gated", room["id"], promoted_by="web:eve",
+                             is_admin=False)
+    assert _live_global(c, "gated") == []
+
+
+def test_ratify_completes_displacement_not_just_the_chain_edge():
+    """A queued draft's direct ancestor can be superseded by a promotion that
+    crossed it while it waited. Ratify must enforce the one-live-row-per-slug
+    invariant, not just flip its supersedes_id target -- otherwise the ratified
+    draft goes live BESIDE the promoted row and the duplicate returns."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(c, author="architect", slug="raced", symptom="s", root_cause="r",
+                     rule="v1 global", detection="d", room_id=None)
+    d = store.add_lesson(c, author="bob", slug="raced", symptom="s", root_cause="r",
+                         rule="bob's rewrite", detection="d", room_id=None)
+    assert d.get("status") == "draft"            # cross-author replace queues
+    store.add_lesson(c, author="alice", slug="raced", symptom="s", root_cause="r",
+                     rule="room take", detection="d", room_id=room["id"])
+    store.promote_lesson(c, "raced", room["id"], is_admin=True)  # displaces v1
+    store.ratify_memory(c, d["id"], tier="ratify", is_admin=True,
+                        owned_rooms={room["id"]}, actor="web:travis")
+    live = _live_global(c, "raced")
+    assert len(live) == 1 and live[0]["rule"] == "bob's rewrite"
+
+
+def test_add_lesson_sweeps_stray_duplicate_tips():
+    """Belt for dbs that carried pre-v13 duplicates: a same-author re-add flips
+    EVERY other live same-slug row in the scope, not only the one it chained to."""
+    c, admin, room, tok = fixture()
+    for rule in ("stray one", "stray two"):      # simulate the pre-v13 hole
+        store._memory_insert(c, kind="lesson", scope="global", fact=rule,
+                             author="alice", status="live", slug="stray",
+                             symptom="s", root_cause="r", rule=rule, detection="d")
+    store.add_lesson(c, author="alice", slug="stray", symptom="s", root_cause="r",
+                     rule="the one", detection="d", room_id=None)
+    live = _live_global(c, "stray")
+    assert len(live) == 1 and live[0]["rule"] == "the one"
+
+
+def test_migration_v12_to_v13_dedupes_live_slugs():
+    """A db the old promote_lesson hole touched carries several live rows per
+    (scope, slug). v13 keeps the newest and supersedes the rest; a db the
+    interim fix already cleaned matches nothing."""
+    c, admin, room, tok = fixture()
+    for i, rule in enumerate(("oldest", "middle", "newest")):
+        store._memory_insert(c, kind="lesson", scope="global", fact=rule,
+                             author="a", status="live", slug="deduped",
+                             symptom="s", root_cause="r", rule=rule,
+                             detection="d", created_ns=1000 + i)
+    store.add_lesson(c, author="a", slug="untouched", symptom="s", root_cause="r",
+                     rule="single stays live", detection="d", room_id=None)
+    c.execute("PRAGMA user_version=12")
+    assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "v13.db")) \
+        == store.SCHEMA_VERSION
+    assert [les["rule"] for les in _live_global(c, "deduped")] == ["newest"]
+    assert len(_live_global(c, "untouched")) == 1
+    assert c.execute("SELECT count(*) FROM memories WHERE slug='deduped' AND "
+                     "status='superseded'").fetchone()[0] == 2
 
 
 def test_last_admin_guard_holds_inside_the_transaction():

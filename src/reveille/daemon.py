@@ -161,6 +161,16 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.17 One live lesson per slug per scope, everywhere (schema v13). Promotion
+       used to leave a live same-slug GLOBAL predecessor standing, so lessons()
+       served two rows for one slug and every boot read both (msg 8461). Now
+       every path that takes a lesson LIVE -- lesson_add same-scope replace,
+       promote_lesson, ratifying a draft replacement -- displaces EVERY other
+       live same-slug row in that scope in the same transaction. v13 migration
+       dedupes rows the old hole left behind (keeps the newest). Web: admins
+       promote a live room lesson to global from the Memory tab (per-item
+       confirm; POST /memories/{uid}/promote) -- store-side surgery retired.
+       Agents: nothing to change; lessons() simply stops serving stale twins.
 0.2.16 Host bootstrap (DES-003 W2). `reveille-launch join-here <role>` walks
        the same provisioning checklist a container gets, on the operator's own
        shell: env fragment ~/.reveille/<role>.env (0600, the ONLY file the
@@ -2769,10 +2779,22 @@ async function openMemories(){
  }).join('')||'<div class="pDim">nothing awaiting your decision</div>';
  const list=[];
  for(const m of res.memories||[]){
+  if(confirming&&confirming.kind==='mprom'&&confirming.id===m.id){
+   list.push(askRow('Promote this room lesson to GLOBAL?',
+    'A superseding global row authored by you goes live for EVERY agent at boot; '+
+    'the room tip and any live global lesson with the same slug flip to '+
+    'superseded. Per-item only.',''));
+   continue;
+  }
+  // Promotion is admin-only and only meaningful on a live room-scoped lesson;
+  // offering it anywhere else is a button that can only error.
+  const canProm=me&&me.is_admin&&m.kind==='lesson'&&m.status==='live'&&
+   m.scope!=='global';
   list.push('<div class="pRow"><b>'+memText(m.author)+'</b> <span class="memMeta">'+
    memText(m.kind)+' &middot; '+memText(scopeName(m.scope))+' &middot; '+
    memText(m.status)+(m.chain?' &middot; chain '+m.chain:'')+
    (m.fork?' &middot; <b>FORK</b>':'')+'</span>'+
+   (canProm?'<button data-mprom="'+memText(m.id)+'">promote&hellip;</button>':'')+
    '<button data-mdet="'+memText(m.id)+'">'+
    (memOpen===m.id?'hide':'details')+'</button></div>'+
    '<div class="quote">'+memText(m.fact)+'</div>');
@@ -2812,6 +2834,8 @@ async function openMemories(){
   confirming={kind:'mrat',id:b.dataset.mrat};openMemories();};
  for(const b of document.querySelectorAll('[data-mrej]'))b.onclick=()=>{
   confirming={kind:'mrej',id:b.dataset.mrej};openMemories();};
+ for(const b of document.querySelectorAll('[data-mprom]'))b.onclick=()=>{
+  confirming={kind:'mprom',id:b.dataset.mprom};openMemories();};
  if(confirming&&confirming.kind==='mrat')wireAsk(async()=>{
   const id=confirming.id;confirming=null;
   try{await api('/memories/'+encodeURIComponent(id)+'/ratify',
@@ -2824,6 +2848,12 @@ async function openMemories(){
   const id=confirming.id;confirming=null;
   try{await api('/memories/'+encodeURIComponent(id)+'/reject',
    {method:'POST',body:JSON.stringify({reason:reason})});}
+  catch(e){toast(e.message);}
+  openMemories();},openMemories);
+ if(confirming&&confirming.kind==='mprom')wireAsk(async()=>{
+  const id=confirming.id;confirming=null;
+  try{await api('/memories/'+encodeURIComponent(id)+'/promote',
+   {method:'POST',body:'{}'});toast('promoted — global law now',true);}
   catch(e){toast(e.message);}
   openMemories();},openMemories);
 }
@@ -3227,6 +3257,17 @@ async def memory_verdict_http(request):
         out = store.reject_memory(_conn, uid, tier=tier, is_admin=p.is_admin,
                                   owned_rooms=owned, actor=f"web:{p.name}",
                                   reason=(d.get("reason") or ""))
+    elif verdict == "promote":
+        # Room lesson -> global, the last workflow that needed store-side
+        # surgery. The store gate enforces instance-admin (global writes,
+        # R1-M3) and the one-live-row-per-slug displacement (msg 8461).
+        d = store.memory_detail(_conn, uid)
+        if d["kind"] != "lesson" or d["scope"] == "global" \
+                or d["status"] != "live":
+            raise store.BusError("promote takes a LIVE room-scoped lesson")
+        out = store.promote_lesson(_conn, d["slug"], d["scope"],
+                                   promoted_by=f"web:{p.name}",
+                                   is_admin=p.is_admin)
     else:
         raise store.BusError(f"unknown verdict {verdict!r}")
     log.info("web:%s %s memory %s", p.name, verdict, uid)
