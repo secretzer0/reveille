@@ -874,6 +874,48 @@ def test_brief_composition_ranking_and_budget():
     assert small["truncated"] or small["sections"]["lessons"] <= 1
 
 
+def test_brief_small_budget_fills_not_starves():
+    """s7 under-fill: a section whose first row exceeds its share must still show
+    it when the global remainder fits -- and the caller's budget is honored as
+    given, never silently floored to 2000."""
+    c, admin, room, tok = fixture()
+    long_rule = "x" * 900  # bigger than any share of a small budget
+    store.add_lesson(c, author="alice", slug="big-lesson", room_id=room["id"],
+                     symptom="s", root_cause="rc", rule=long_rule, detection="d")
+    got = store.brief(c, rooms={room["id"]: "R"}, token_id=tok["id"], budget=2500)
+    # pre-fix: lessons cap was 0.30*2500=750 < the line -> zero shown, share dead
+    assert "big-lesson" in got["text"], "first row starved despite global room"
+    assert got["chars"] <= 2500
+
+    # asked-budget honored: no silent 2000 floor. 700 cannot fit the 900-char
+    # lesson, so the skeleton comes back marked truncated -- within budget.
+    small = store.brief(c, rooms={room["id"]: "R"}, token_id=tok["id"], budget=700)
+    assert small["chars"] <= 700
+    assert "big-lesson" not in small["text"]
+    assert "lessons" in small["truncated"]
+
+
+def test_brief_carry_flows_unused_share_forward():
+    """A short lessons section leaves most of its 30% share unused; doctrine must
+    inherit it rather than stopping at its own 25%."""
+    c, admin, room, tok = fixture()
+    store.add_lesson(c, author="alice", slug="tiny", room_id=room["id"],
+                     symptom="s", root_cause="rc", rule="short", detection="d")
+    for i in range(8):
+        store.memory_add(
+            c, author="alice", token_id=tok["id"], agent_bound=True, tier="ratify",
+            is_admin=False, rooms={room["id"]}, owned_rooms={room["id"]},
+            fact=f"doctrine number {i}: " + "y" * 180, kind="doctrine",
+            scope=room["id"])
+    got = store.brief(c, rooms={room["id"]: "R"}, token_id=tok["id"], budget=2000)
+    # doctrine's own share is 500 (~2 rows of ~200); lessons used ~60 of 600,
+    # so carry must lift doctrine to 4+ rows. Pre-fix this stops at 2.
+    shown = sum(1 for ln in got["text"].splitlines()
+                if ln.startswith("- doctrine number"))
+    assert shown >= 4, f"carry did not flow: only {shown} doctrine rows"
+    assert got["chars"] <= 2000
+
+
 def test_state_expiry_sweep():
     c, admin, room, tok = fixture()
     kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731

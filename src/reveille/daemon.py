@@ -154,6 +154,14 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.11 brief() fills the budget it is given (DES-001 s7 under-fill). Small
+       budgets returned near-empty packs: the budget was silently floored to
+       2000, section shares were hard ceilings, and unused share died with its
+       section. Now the caller's budget is honored as given, unused share
+       carries forward to the next section, and a section whose first row
+       exceeds its share still shows it when the global remainder fits -- one
+       lesson beats zero. The global budget stays the one hard promise;
+       truncation marks are unchanged.
 0.2.10 recall() reaches every lesson field (schema v10). The memory search index
        covered fact+entities only, so a term living in a lesson's symptom,
        root_cause or detection returned ZERO against a row that contained it --
