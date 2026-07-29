@@ -495,8 +495,15 @@ def _live_grant_sessions(role):
 def _harvest_gate_audit(role, grants_by_id):
     """Pull the gate's ATTACH lines (read-and-truncate) into the host log,
     keeping the gate's own timestamps and resolving grantee from the record."""
+    # 4.6.1: move-then-read, never read-then-truncate -- a gate append between
+    # cat and truncate would be dropped, and a boundary log with a known drop
+    # window is not a boundary. rename is atomic within the fs; an append that
+    # loses the race lands in a fresh ~/.attach-audit and survives to the next
+    # tick. The $$-suffix keeps a crashed harvest's remainder readable (glob),
+    # at worst re-reading it -- a duplicate line over a dropped one, always.
     res = _docker("exec", container_name(role), "sh", "-c",
-                  "cat ~/.attach-audit 2>/dev/null && : > ~/.attach-audit",
+                  "[ -f ~/.attach-audit ] && mv ~/.attach-audit ~/.attach-audit.h.$$;"
+                  " cat ~/.attach-audit.h.* 2>/dev/null; rm -f ~/.attach-audit.h.*",
                   check=False, capture=True)
     for line in (res.stdout or "").splitlines():
         parts = line.split()  # <ts> ATTACH <mode> <id>

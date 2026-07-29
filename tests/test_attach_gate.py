@@ -129,3 +129,65 @@ def test_attach_writes_gate_audit_line(tmp_path):
     line = (tmp_path / ".attach-audit").read_text().strip()
     # 4.5.2: the gate's line carries the verified mode + grant id, timestamped
     assert "ATTACH driver aaaa" in line
+
+
+# ---- 4.6.1 TOCTOU closure: the pre-check races check-then-create, so the gate
+# re-checks AFTER creating d-<id> and the later-created session self-destructs.
+# This stub simulates exactly that window: the name-only list (pre-check) shows
+# no d-*, the created-time list (post-create re-check) shows a rival d-aaaa at
+# t=100, and our own creation time comes from FAKE_OWN_CREATED.
+
+def gate_racing_tmux(tmp_path, *args, own_created="200"):
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    fake = stub / "tmux"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo "$*" >> "$STUBLOG"\n'
+        'case "$1" in\n'
+        "  list-sessions)\n"
+        '    case "$*" in\n'
+        "      *session_created*) printf '100 d-aaaa\\n50 agent\\n' ;;\n"
+        "      *) printf 'agent\\n' ;;\n"
+        "    esac ;;\n"
+        '  display-message) echo "$FAKE_OWN_CREATED" ;;\n'
+        "  *) exit 0 ;;\n"
+        "esac\n")
+    fake.chmod(0o755)
+    log = tmp_path / "stub.log"
+    env = {
+        "PATH": f"{stub}:/usr/bin:/bin",
+        "REVEILLE_GATE_SECRET": SECRET,
+        "HOME": str(tmp_path),
+        "STUBLOG": str(log),
+        "FAKE_OWN_CREATED": own_created,
+    }
+    res = subprocess.run([GATE, *args], capture_output=True, text=True, env=env)
+    return res, log.read_text() if log.exists() else ""
+
+
+def test_race_loser_kills_own_session_and_refuses(tmp_path):
+    token = gate("mint", "driver", "60", "bbbb").stdout.strip()
+    res, log = gate_racing_tmux(tmp_path, "attach", token, own_created="200")
+    assert res.returncode != 0
+    assert "aaaa" in res.stderr  # refusal names the surviving driver
+    assert "kill-session -t d-bbbb" in log  # loser removed ITSELF
+    assert not (tmp_path / ".attach-audit").exists()  # no ATTACH line for a loser
+
+
+def test_race_winner_proceeds(tmp_path):
+    token = gate("mint", "driver", "60", "bbbb").stdout.strip()
+    res, log = gate_racing_tmux(tmp_path, "attach", token, own_created="50")
+    assert res.returncode == 0  # rival at 100 came later; we persist
+    assert "kill-session" not in log
+    assert "ATTACH driver bbbb" in (tmp_path / ".attach-audit").read_text()
+
+
+def test_race_tie_broken_by_name(tmp_path):
+    # Same creation second (tmux granularity): lexically smaller name wins, and
+    # both racers apply the same rule, so exactly one persists. d-aaaa < d-bbbb.
+    token = gate("mint", "driver", "60", "bbbb").stdout.strip()
+    res, log = gate_racing_tmux(tmp_path, "attach", token, own_created="100")
+    assert res.returncode != 0
+    assert "aaaa" in res.stderr
+    assert "kill-session -t d-bbbb" in log
