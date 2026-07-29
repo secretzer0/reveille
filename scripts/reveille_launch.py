@@ -42,7 +42,8 @@ somebody meant it.
   reveille-launch grants [user] [agent]              list grant records
   reveille-launch revoke <user> <agent> <grant-id>   kill d-/v-<id> now; audit exact
   reveille-launch flip <user> <agent> on|off         multi-driver toggle (4.3)
-  reveille-launch sweep [--loop SECONDS] [--idle-hours 24]
+  reveille-launch sweep [--idle-hours 24]        ONE tick, now (the recurring
+      one runs inside serve -- see --sweep-seconds there).
       The tick 4.6 assigns the launcher: kill d-*/v-* sessions whose grant is
       expired/revoked/mode-mismatched, harvest the gate's ATTACH lines, derive
       DETACH lines from sessions observed gone (observation time, stated as such),
@@ -90,6 +91,7 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import typing
 import urllib.error
@@ -1052,6 +1054,14 @@ def _sweep_once(conn, idle_window_ns=0):
     now = time.time_ns()
     for c in conn.execute("SELECT user, agent FROM containers").fetchall():
         user, agent = c["user"], c["agent"]
+        # Expired grant ROWS are kept on purpose. The row is the only thing that
+        # answers "whose session was that" for an audit line, and the gate's
+        # ATTACH lines are harvested a tick LATE -- delete on expiry and the
+        # harvest that follows writes grantee=unknown, turning the audit trail
+        # into a record of anonymous attaches. The row holds no secret (4.5.2:
+        # metadata only, never anything a token could be reproduced from) and is
+        # ~100 bytes per attach. Expiry is enforced by killing the SESSION, which
+        # is the thing that grants access; the row is history.
         grants = {r["id"]: r for r in conn.execute(
             "SELECT * FROM grants WHERE user=? AND agent=?",
             (user, agent)).fetchall()}
@@ -1103,15 +1113,42 @@ def _sweep_once(conn, idle_window_ns=0):
 
 
 def cmd_sweep(a):
+    """ONE tick, then exit -- for an operator who wants the sweep to happen now.
+    The recurring one is not here: it runs inside serve (see _sweep_forever).
+    A loop mode on a CLI nobody schedules is what let expiry go unenforced for
+    the whole life of the deployment."""
     conn = _db()
-    window_ns = int(a.idle_hours * 3600 * 10**9)
-    while True:
-        _sweep_once(conn, idle_window_ns=window_ns)
-        if not a.loop:
-            break
-        time.sleep(a.loop)
+    _sweep_once(conn, idle_window_ns=int(a.idle_hours * 3600 * 10**9))
     conn.close()
     return 0
+
+
+def _sweep_forever(interval_s, idle_window_ns, stop):
+    """The sweep's ONLY scheduler, run as a thread inside serve.
+
+    It lives here and not in a systemd timer or a crontab because a periodic
+    task whose scheduler is a separate deployment step is a task that does not
+    run: `sweep --loop` existed, worked, was covered by two smoke gates, and had
+    never once executed on the live box -- so grant expiry was enforced only at
+    the doorway (a session attached when its grant expired ran forever) and the
+    24h idle stop had never fired. serve is already supervised, flock-guarded
+    and running; anything hung off it inherits all three.
+
+    Own connection because sqlite connections belong to one thread. Own
+    try/except around each tick because a sweep that dies takes expiry
+    enforcement with it silently -- and the tick shells out to docker, which is
+    exactly the kind of thing that fails at 3am for reasons that resolve
+    themselves by the next tick."""
+    conn = _db()
+    while True:
+        try:
+            _sweep_once(conn, idle_window_ns=idle_window_ns)
+        except Exception as e:  # noqa: BLE001 -- a bad tick must not end the loop
+            print(f"reveille-launch: sweep tick failed ({e.__class__.__name__}:"
+                  f" {e}) -- retrying in {interval_s}s", file=sys.stderr,
+                  flush=True)
+        if stop.wait(interval_s):
+            return
 
 
 # ---- role templates (DES-005 sec 9) ------------------------------------------------
@@ -1853,12 +1890,23 @@ def cmd_serve(a):
         "REVEILLE_LAUNCH_DB", os.path.expanduser("~/.reveille/launcher.db"))
     lock = _singleton(os.path.join(os.path.dirname(db_path), ".launcher.lock"))
     app = build_api(a.auth_url)
+    idle_ns = int(a.idle_hours * 3600 * 10**9)
     print(f"reveille-launch api on {a.host}:{a.port} (auth: {a.auth_url}/me)\n"
-          f"  docker  {server}\n  data    {DEFAULT_DATA}\n  db      {db_path}",
+          f"  docker  {server}\n  data    {DEFAULT_DATA}\n  db      {db_path}\n"
+          f"  sweep   every {a.sweep_seconds}s"
+          + (f", idle stop after {a.idle_hours}h" if idle_ns else ", idle stop OFF"),
           flush=True)
+    # Daemon thread: it holds nothing that must be flushed, so it dies with the
+    # process rather than delaying a restart by up to one interval. The Event is
+    # what makes the interval interruptible -- time.sleep would keep the thread
+    # alive past shutdown for no benefit.
+    stop = threading.Event()
+    threading.Thread(target=_sweep_forever, name="sweep",
+                     args=(a.sweep_seconds, idle_ns, stop), daemon=True).start()
     try:
         uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
     finally:
+        stop.set()
         lock.close()
     return 0
 
@@ -2052,10 +2100,9 @@ def build_parser():
     f.add_argument("state", choices=("on", "off"))
     f.set_defaults(fn=cmd_flip)
 
-    s = sub.add_parser("sweep", help="expiry/revoke sweep + audit harvest (4.6) "
-                                     "+ idle stop (DES-005 7.1)")
-    s.add_argument("--loop", type=int, default=0, metavar="SECONDS",
-                   help="repeat every N seconds (default: one tick and exit)")
+    s = sub.add_parser("sweep", help="ONE expiry/revoke tick + audit harvest "
+                                     "(4.6) + idle stop (DES-005 7.1); the "
+                                     "recurring one runs inside serve")
     s.add_argument("--idle-hours", type=float, default=24.0,
                    help="stop (never destroy) containers idle this long -- no "
                         "attached client, no session activity, no waiting ring "
@@ -2069,6 +2116,14 @@ def build_parser():
     sv.add_argument("--auth-url", default=DEFAULT_HEALTH,
                     help="broker URL whose /me resolves the session cookie "
                          f"(default {DEFAULT_HEALTH})")
+    sv.add_argument("--sweep-seconds", type=int, default=300, metavar="N",
+                    help="how often the 4.6 sweep tick runs INSIDE this process "
+                         "-- grant expiry, orphan sessions, idle stop. Serve is "
+                         "the scheduler; there is no unit or crontab to install "
+                         "(default 300)")
+    sv.add_argument("--idle-hours", type=float, default=24.0,
+                    help="the sweep stops (never destroys) containers idle this "
+                         "long (default 24; 0 disables the idle stop only)")
     sv.set_defaults(fn=cmd_serve)
 
     j = sub.add_parser("join-here",

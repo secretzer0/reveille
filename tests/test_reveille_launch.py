@@ -9,6 +9,8 @@ import json
 import pathlib
 import sqlite3
 
+import pytest
+
 _spec = importlib.util.spec_from_file_location(
     "reveille_launch",
     pathlib.Path(__file__).resolve().parent.parent / "scripts" / "reveille_launch.py")
@@ -373,3 +375,38 @@ def test_container_addr_is_none_when_not_running(monkeypatch):
 
     monkeypatch.setattr(rl, "_docker", lambda *a, **k: R())
     assert rl.container_addr("acme", "dev") is None
+
+
+def test_serve_schedules_the_sweep_by_default():
+    # The interval is a default, not a deployment step. A launcher started with
+    # no flags must already be enforcing expiry and the idle stop.
+    a = rl.build_parser().parse_args(["serve"])
+    assert a.sweep_seconds == 300
+    assert a.idle_hours == 24.0
+
+
+def test_sweep_subcommand_no_longer_pretends_to_be_a_scheduler():
+    # Clean cutover: --loop existed, worked, and was never invoked by anything.
+    # Leaving it is leaving the answer that looks right to the next operator.
+    with pytest.raises(SystemExit):
+        rl.build_parser().parse_args(["sweep", "--loop", "60"])
+    assert not hasattr(rl.build_parser().parse_args(["sweep"]), "loop")
+
+
+def test_a_failing_tick_does_not_end_the_loop(monkeypatch):
+    # The tick shells out to docker. A daemon blip must cost one tick, not
+    # expiry enforcement for the rest of the process's life.
+    import threading
+    calls = []
+
+    def boom(conn, idle_window_ns=0):
+        calls.append(idle_window_ns)
+        if len(calls) < 3:
+            raise RuntimeError("docker daemon went away")
+        stop.set()
+
+    stop = threading.Event()
+    monkeypatch.setattr(rl, "_db", lambda *a, **k: None)
+    monkeypatch.setattr(rl, "_sweep_once", boom)
+    rl._sweep_forever(0, 42, stop)
+    assert len(calls) == 3 and calls == [42, 42, 42]

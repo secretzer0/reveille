@@ -388,6 +388,39 @@ that touches these paths:
   Changing a GRANT's mode is revoke + re-grant — the mode is signed into the
   token and there is no retrieval, so there is nothing to flip.
 
+### 4.6.2 What runs the tick (drafted per architect ruling, msg 8558)
+
+4.6 says the launcher kills expired sessions "on its regular tick" and never says
+what makes the tick happen. It shipped as `sweep --loop SECONDS`, a CLI mode
+nothing invoked: not `serve`, no unit file, no crontab, no process on the live
+box. So for the whole life of the deployment, grant expiry was enforced at the
+doorway only — a client attached when its grant expired ran forever, which is
+precisely the state 4.6 exists to forbid — and DES-005 7.1's 24h idle stop had
+never once executed. Two smoke gates covered the sweep and both passed, because
+both called it.
+
+Binding, and it follows the no-systemd ruling (DES-003): **the sweep's scheduler
+is `serve` itself** — a thread inside the already-supervised, already-flock'd
+process, interval `--sweep-seconds` (default 300), idle window `--idle-hours`
+(default 24). Not a unit, not a crontab: an interval that depends on a separate
+deployment step is an interval that does not run. The one-shot `sweep` subcommand
+remains for an operator who wants a tick now; its `--loop` is deleted, because a
+loop mode nobody schedules is the answer that looks right to the next reader.
+
+Two rules generalise from this and apply to anything periodic added later:
+
+- Anything expressed as "every N" names its scheduler in the same slice.
+- Its gate must assert the SCHEDULER, not the task: start the process, create the
+  condition, wait, and assert the reaction with nothing calling the task by hand
+  (`make sweep-scheduler-smoke`). A gate that invokes the task itself is the gate
+  that missed this.
+
+Expired grant ROWS are retained deliberately. The row is what resolves an audit
+line's `grantee`, and the gate's ATTACH lines are harvested a tick late — delete
+on expiry and the next harvest records anonymous attaches. The row carries no
+secret (4.5.2: metadata only). Expiry is enforced by killing the session, which
+is the thing that grants access; the row is history.
+
 ## 5. Staging — each stage shippable, green gate, starts after DES-001 S4
 (ruled parallel: S5/S6 interleave with T-stages; F3 still lands before S5)
 
