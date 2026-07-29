@@ -129,7 +129,13 @@ def main():
                    {"grantee": "carol", "mode": "viewer"})
         responses.append(mint)
         gid = json.loads(mint)["id"]
-        assert "?arg=v1." in json.loads(mint)["attach_url"]
+        attach = json.loads(mint)["attach_url"]
+        assert "?arg=v1." in attach
+        # U4: a PATH on the caller's own origin, never a container address --
+        # the old form only resolved on the docker host, so every grant handed
+        # to a remote human was born broken.
+        assert attach.startswith("/attach/dev/?arg=")
+        assert ":7681" not in attach and "http" not in attach
         listing = req(L, "/agents/dev/grants", ana)
         responses.append(listing)
         assert "?arg=" not in listing and "v1." not in listing
