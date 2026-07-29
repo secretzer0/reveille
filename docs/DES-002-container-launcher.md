@@ -351,6 +351,41 @@ Two related clarifications, so nobody "fixes" a non-defect:
   whose grant has expired on its regular tick. Expiry that only gates the doorway is
   not expiry.
 
+### 4.6.1 T3 review rulings (architect, post-T3 review of feat/des002-t3)
+
+Rulings from the T3 branch review, binding on the amendment and on anything later
+that touches these paths:
+
+- **Exclusivity check must survive its own race.** 4.3's refusal as specified
+  (check for an existing `d-*`, then create) is check-then-create: two writable
+  attaches in the same window both pass the empty check and both come up as
+  drivers, and the sweep kills neither — both grants are healthy, both sessions
+  mode-matched. The gate must close this itself: after creating `d-<id>`,
+  re-list; if another `d-*` exists whose creation precedes ours (tie broken by
+  name), kill our own session and refuse naming the survivor. A refusal AFTER
+  create is still a refusal; a second driver that persists is not. Locking is an
+  acceptable alternative if the image ships a lock primitive, but the post-create
+  re-check needs nothing the gate does not already have.
+- **Audit harvest must be move-then-read, not read-then-truncate.** `cat` followed
+  by truncate loses any ATTACH line the gate appends between the two. 4.5.2 calls
+  the audit a boundary; a boundary with a known drop window is not one. Rename the
+  file first (rename is atomic within a filesystem), then read the renamed file at
+  leisure — a gate append during the window lands in the fresh file and survives.
+- **Orphan sweep rule RATIFIED** (senior-dev delta 2): a `d-*`/`v-*` session
+  unattached for a full tick is a failed attach's leftover and is killed
+  `reason=orphan`. Without it, a dead client's `d-*` holds driver exclusivity
+  until grant expiry. Now DES text, not a delta.
+- **Revocation window is a stated contract** (senior-dev delta 3): a revoked
+  grant's token stays SIGNED until expiry — offline verify has no revocation
+  list, by design (R3). A post-revoke re-attach lives at most one sweep tick:
+  the REVOKE kill plus the sweep's `reason=revoked` kill are the enforcement.
+  Shortening the window means shortening the tick, never adding a revocation
+  list to the gate.
+- **flip = multi-driver toggle, confirmed** (senior-dev delta 1): 4.3's opt-out,
+  runtime marker file because exec'd ttyd children see create-time env only.
+  Changing a GRANT's mode is revoke + re-grant — the mode is signed into the
+  token and there is no retrieval, so there is nothing to flip.
+
 ## 5. Staging — each stage shippable, green gate, starts after DES-001 S4
 (ruled parallel: S5/S6 interleave with T-stages; F3 still lands before S5)
 
