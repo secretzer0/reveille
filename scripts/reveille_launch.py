@@ -41,6 +41,13 @@ somebody meant it.
       DETACH lines from sessions observed gone (observation time, stated as such),
       and STOP (never destroy) containers idle past the window -- no attached
       client, no session activity, no waiting ring (DES-005 7.1).
+  reveille-launch serve [--host 127.0.0.1] [--port 8766] [--auth-url URL]
+      The browser's path to the launcher (DES-005 P1). Every request's session
+      cookie is forwarded to the BROKER's /me; the resolved name is the only
+      user the request can touch -- no user parameter exists on the wire, so
+      cross-user access is unrepresentable. Provision takes the bound broker
+      token in the request body: that frame and the docker-run child env only,
+      echoed nowhere, stored nowhere (P2 owns credential profiles).
   reveille-launch join-here <role> [--broker URL]
       Bootstrap THIS user's terminal for one agent identity (DES-003 2.4): env
       fragment (0600 -- the ONLY file the token ever touches; stdin, never argv),
@@ -62,6 +69,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import typing
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -121,7 +129,12 @@ PROVISION_CHECKLIST = (
 )
 
 
-def die(msg, code=2):
+class LaunchError(Exception):
+    """One operator-facing failure. The CLI turns it into die(); the HTTP API
+    (P1) turns it into a 400 body -- same message, two front doors."""
+
+
+def die(msg, code=2) -> typing.NoReturn:
     print(f"reveille-launch: {msg}", file=sys.stderr)
     raise SystemExit(code)
 
@@ -435,40 +448,42 @@ def _ensure_network(net, broker_url):
 
 # ---- subcommands -------------------------------------------------------------------
 
-def cmd_new(a):
-    for label, val in (("user", a.user), ("agent", a.agent)):
-        if not ROLE_RE.match(val):
-            die(f"bad {label} {val!r}: lowercase alnum + dash, 2-64 chars")
-    name = container_name(a.user, a.agent)
-    # Re-provision is routine (3.5) but must never be UNPROMPTED: an accidental `new`
-    # on a live agent would destroy its session mid-conversation. Refuse unless the
-    # operator says --replace; the data root (login, repos) survives either way.
-    if _exists(name) and not a.replace:
-        die(f"{name} already exists -- `destroy {a.user} {a.agent}` first, or pass "
-            f"--replace to re-provision (its data root is kept)")
-
-    conn = _db()
-    quotas = _quotas_for(conn, a.user)
+def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
+                    network=DEFAULT_NETWORK, broker=DEFAULT_BROKER,
+                    boot_cmd=None, replace=False):
+    """The one provisioning path (CLI and HTTP share it). Validates, enforces
+    the per-user cap, lays the per-agent data root, runs the container. The
+    token exists only in this frame and the docker-run child's env -- never
+    argv, never any store. Raises LaunchError; returns the container name."""
+    for label, val in (("user", user), ("agent", agent)):
+        if not ROLE_RE.match(val or ""):
+            raise LaunchError(f"bad {label} {val!r}: lowercase alnum + dash, "
+                              f"2-64 chars")
+    name = container_name(user, agent)
+    # Re-provision is routine (3.5) but must never be UNPROMPTED: an accidental
+    # re-provision of a live agent would destroy its session mid-conversation.
+    # Refuse unless replace is explicit; the data root survives either way.
+    if _exists(name) and not replace:
+        raise LaunchError(f"{name} already exists -- destroy first, or pass "
+                          f"replace to re-provision (its data root is kept)")
+    quotas = _quotas_for(conn, user)
     # The per-user container cap (sec 6). The one being replaced does not count
     # against itself.
     others = conn.execute(
         "SELECT count(*) FROM containers WHERE user=? AND agent!=?",
-        (a.user, a.agent)).fetchone()[0]
+        (user, agent)).fetchone()[0]
     if others >= quotas["max_containers"]:
-        conn.close()
-        die(f"{a.user} is at their container cap ({quotas['max_containers']}); "
-            f"destroy one or raise it with `quota {a.user} --max-containers N`")
-
-    token = read_secret(f"bound broker token for {a.agent}")
+        raise LaunchError(
+            f"{user} is at their container cap ({quotas['max_containers']}); "
+            f"destroy one or raise it with `quota {user} --max-containers N`")
     if not token:
-        conn.close()
-        die("no token given (stdin empty and no prompt)")
+        raise LaunchError("no token given")
 
     env = dict(
         os.environ,
-        REVEILLE_AGENT_ROLE=a.agent,
-        REVEILLE_URL=a.broker,
-        REVEILLE_REPO_URL=a.repo_url,
+        REVEILLE_AGENT_ROLE=agent,
+        REVEILLE_URL=broker,
+        REVEILLE_REPO_URL=repo_url,
         REVEILLE_TOKEN=token,
         # Per-container gate secret (T1 4.3), minted HERE at provision, injected by
         # name, never stored -- dies with the container, re-provision mints a new one.
@@ -477,25 +492,97 @@ def cmd_new(a):
 
     # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
     # host user browses it; the agent dirs under it belong to the AGENT.
-    root = data_root(a.user, a.agent)
+    root = data_root(user, agent)
     user_root = os.path.dirname(root)
     os.makedirs(user_root, mode=0o700, exist_ok=True)
     os.chmod(user_root, 0o700)
     for sub in ("claude", "repos"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
-    _own_agent_dirs(root, a.image)
+    _own_agent_dirs(root, image)
 
-    _ensure_network(a.network, a.broker)
-    if a.replace:
+    _ensure_network(network, broker)
+    if replace:
         _docker("rm", "-f", name, check=False, capture=True)
-    argv = docker_run_argv(a.user, a.agent, a.image, a.network, quotas,
+    argv = docker_run_argv(user, agent, image, network, quotas,
                            forward_anthropic=bool(os.environ.get("ANTHROPIC_API_KEY")),
-                           boot_cmd=a.boot_cmd)
+                           boot_cmd=boot_cmd)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
+    _record(conn, user, agent, repo_url, image, broker)
+    return name
 
-    _record(conn, a.user, a.agent, a.repo_url, a.image, a.broker)
+
+def destroy_agent(conn, user, agent, purge=False):
+    """Shared destroy path. Grants die with the container (4.5) -- the gate
+    secret they were signed against is gone, so the records are history, not
+    authority. The data root survives unless purge."""
+    _docker("rm", "-f", container_name(user, agent), check=False, capture=True)
+    if purge:
+        import shutil
+        shutil.rmtree(data_root(user, agent), ignore_errors=True)
+    conn.execute("DELETE FROM containers WHERE user=? AND agent=?", (user, agent))
+    conn.execute("DELETE FROM grants WHERE user=? AND agent=?", (user, agent))
+    conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
+                 (user, agent))
+    conn.commit()
+
+
+def mint_grant(conn, user, agent, grantee, mode, ttl):
+    """Shared grant-mint path. The token is RETURNED once, never stored
+    (4.5.2): re-issue is re-mint, never retrieval."""
+    _known_agent(conn, user, agent)
+    name = container_name(user, agent)
+    gid = secrets.token_hex(4)
+    res = _docker("exec", name, "attach-gate", "mint", mode, str(ttl), gid,
+                  check=False, capture=True)
+    token = (res.stdout or "").strip()
+    if res.returncode != 0 or not token.startswith("v1."):
+        raise LaunchError(f"mint failed in {name} -- is it running?")
+    now = time.time_ns()
+    conn.execute(
+        "INSERT INTO grants(id, user, agent, grantee, mode, issued_ns, expiry_ns, "
+        "revoked_ns) VALUES(?,?,?,?,?,?,?,NULL)",
+        (gid, user, agent, grantee, mode, now, now + ttl * 10**9))
+    conn.commit()
+    ip = _docker("inspect", "-f",
+                 "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                 name, check=False, capture=True)
+    host = (ip.stdout or "").strip() or name
+    return {"id": gid, "mode": mode, "grantee": grantee,
+            "expiry_ns": now + ttl * 10**9,
+            "attach_url": f"http://{host}:7681/?arg={token}"}
+
+
+def revoke_grant(conn, user, agent, grant_id, actor):
+    row = conn.execute("SELECT * FROM grants WHERE id=? AND user=? AND agent=?",
+                       (grant_id, user, agent)).fetchone()
+    if row is None:
+        raise LaunchError(f"no grant {grant_id} on {user}/{agent}")
+    # Kill first, record after: the <1s promise is about the client dropping.
+    _kill_grant_sessions(user, agent, grant_id)
+    conn.execute("UPDATE grants SET revoked_ns=? WHERE id=?",
+                 (time.time_ns(), grant_id))
+    # The killed session must not also read as an observed DETACH next tick.
+    conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=? AND "
+                 "session IN (?,?)",
+                 (user, agent, f"d-{grant_id}", f"v-{grant_id}"))
+    conn.commit()
+    _audit("REVOKE", user=user, agent=agent, grant=grant_id, mode=row["mode"],
+           grantee=row["grantee"], actor=actor)
+    return dict(row)
+
+
+def cmd_new(a):
+    conn = _db()
+    try:
+        token = read_secret(f"bound broker token for {a.agent}")
+        name = provision_agent(conn, a.user, a.agent, a.repo_url, token,
+                               image=a.image, network=a.network,
+                               broker=a.broker, boot_cmd=a.boot_cmd,
+                               replace=a.replace)
+    except LaunchError as e:
+        conn.close()
+        die(str(e))
     conn.close()
-
     if a.no_wait:
         print(f"provisioned {name} on network {a.network} (health wait skipped)")
         return 0
@@ -536,24 +623,15 @@ def cmd_start(a):
 
 
 def cmd_destroy(a):
-    _docker("rm", "-f", container_name(a.user, a.agent), check=False, capture=True)
+    conn = _db()
+    destroy_agent(conn, a.user, a.agent, purge=a.purge)
+    conn.close()
     root = data_root(a.user, a.agent)
     if a.purge:
-        import shutil
-        shutil.rmtree(root, ignore_errors=True)
         print(f"destroyed {a.user}/{a.agent} and purged {root}")
     else:
         print(f"destroyed {a.user}/{a.agent}; kept {root} (--purge to drop -- "
               f"recreate picks up everything the agent learned)")
-    conn = _db()
-    conn.execute("DELETE FROM containers WHERE user=? AND agent=?", (a.user, a.agent))
-    # Grants die with the container (4.5) -- the gate secret they were signed
-    # against is gone, so the records are history, not authority.
-    conn.execute("DELETE FROM grants WHERE user=? AND agent=?", (a.user, a.agent))
-    conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
-                 (a.user, a.agent))
-    conn.commit()
-    conn.close()
     return 0
 
 
@@ -579,48 +657,28 @@ def cmd_quota(a):
     return 0
 
 
-def _grant_row(conn, user, agent, grant_id):
-    row = conn.execute("SELECT * FROM grants WHERE id=? AND user=? AND agent=?",
-                       (grant_id, user, agent)).fetchone()
-    if row is None:
-        die(f"no grant {grant_id} on {user}/{agent} (see `grants {user} {agent}`)")
-    return row
-
-
 def _known_agent(conn, user, agent):
+    # LaunchError, not die: mint_grant runs under both front doors (CLI + HTTP).
     if conn.execute("SELECT 1 FROM containers WHERE user=? AND agent=?",
                     (user, agent)).fetchone() is None:
-        die(f"unknown agent {user}/{agent} -- provision it first (`new`)")
+        raise LaunchError(f"unknown agent {user}/{agent} -- provision it first")
 
 
 def cmd_grant(a):
     conn = _db()
-    _known_agent(conn, a.user, a.agent)
-    name = container_name(a.user, a.agent)
-    gid = secrets.token_hex(4)
-    # Mint INSIDE the container: the gate secret never leaves it, re-issue is
-    # re-mint (4.5.2). The launcher only ever holds the token long enough to
-    # print it once.
-    res = _docker("exec", name,
-                  "attach-gate", "mint", a.mode, str(a.ttl), gid,
-                  check=False, capture=True)
-    token = (res.stdout or "").strip()
-    if res.returncode != 0 or not token.startswith("v1."):
-        die(f"mint failed in {name} -- is it running?")
-    now = time.time_ns()
-    conn.execute(
-        "INSERT INTO grants(id, user, agent, grantee, mode, issued_ns, expiry_ns, "
-        "revoked_ns) VALUES(?,?,?,?,?,?,?,NULL)",
-        (gid, a.user, a.agent, a.grantee, a.mode, now, now + a.ttl * 10**9))
-    conn.commit()
+    try:
+        # Mint INSIDE the container: the gate secret never leaves it, re-issue
+        # is re-mint (4.5.2). The launcher only ever holds the token long
+        # enough to print it once.
+        out = mint_grant(conn, a.user, a.agent, a.grantee, a.mode, a.ttl)
+    except LaunchError as e:
+        conn.close()
+        die(str(e))
     conn.close()
-    ip = _docker("inspect", "-f",
-                 "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-                 name, check=False, capture=True)
-    host = (ip.stdout or "").strip() or name
-    exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + a.ttl))
-    print(f"grant {gid}: {a.mode} for {a.grantee} on {a.user}/{a.agent}, expires {exp}")
-    print(f"attach: http://{host}:7681/?arg={token}")
+    exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(out["expiry_ns"] / 1e9))
+    print(f"grant {out['id']}: {a.mode} for {a.grantee} on {a.user}/{a.agent}, "
+          f"expires {exp}")
+    print(f"attach: {out['attach_url']}")
     print("token shown once, never stored; lost token = revoke + re-grant")
     return 0
 
@@ -662,19 +720,13 @@ def _kill_grant_sessions(user, agent, grant_id):
 
 def cmd_revoke(a):
     conn = _db()
-    row = _grant_row(conn, a.user, a.agent, a.grant_id)
-    # Kill first, record after: the <1s promise is about the client dropping.
-    _kill_grant_sessions(a.user, a.agent, a.grant_id)
-    conn.execute("UPDATE grants SET revoked_ns=? WHERE id=?",
-                 (time.time_ns(), a.grant_id))
-    # The killed session must not also read as an observed DETACH next tick.
-    conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=? AND "
-                 "session IN (?,?)",
-                 (a.user, a.agent, f"d-{a.grant_id}", f"v-{a.grant_id}"))
-    conn.commit()
+    try:
+        row = revoke_grant(conn, a.user, a.agent, a.grant_id,
+                           actor="launcher-cli")
+    except LaunchError as e:
+        conn.close()
+        die(str(e))
     conn.close()
-    _audit("REVOKE", user=a.user, agent=a.agent, grant=a.grant_id,
-           mode=row["mode"], grantee=row["grantee"], actor="launcher-cli")
     print(f"revoked {a.grant_id} ({row['mode']} for {row['grantee']} on "
           f"{a.user}/{a.agent}); its token stays signed until expiry -- the "
           f"sweep kills any re-attach")
@@ -683,8 +735,12 @@ def cmd_revoke(a):
 
 def cmd_flip(a):
     conn = _db()
-    _known_agent(conn, a.user, a.agent)
-    conn.close()
+    try:
+        _known_agent(conn, a.user, a.agent)
+    except LaunchError as e:
+        die(str(e))
+    finally:
+        conn.close()
     name = container_name(a.user, a.agent)
     # Runtime toggle rides a marker file the gate checks per-attach: ttyd's
     # children only ever see create-time env, so env alone cannot flip live.
@@ -820,6 +876,162 @@ def cmd_sweep(a):
             break
         time.sleep(a.loop)
     conn.close()
+    return 0
+
+
+# ---- HTTP API (DES-005 P1): the browser's path to the launcher --------------------
+# The broker stays docker-free (G4); the LAUNCHER grows the web surface. AuthN is
+# the broker's: every request's session cookie is forwarded to broker /me and the
+# principal's own name becomes the ONLY user the request can touch -- cross-user
+# isolation by construction, no user parameter exists on the wire.
+
+def principal_from_me(body):
+    """Resolve broker /me JSON to a principal name, or None. Pure. A first-run
+    broker ({'setup': true}) has no users and therefore no principals."""
+    if not isinstance(body, dict) or body.get("setup") or not body.get("name"):
+        return None
+    return {"user": body["name"], "is_admin": bool(body.get("is_admin"))}
+
+
+def _broker_me(auth_url, cookie_header):
+    if not cookie_header:
+        return None
+    req = urllib.request.Request(auth_url.rstrip("/") + "/me",
+                                 headers={"Cookie": cookie_header})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return principal_from_me(json.load(r))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
+
+
+def _agent_status(conn, user):
+    rows = conn.execute(
+        "SELECT * FROM containers WHERE user=? ORDER BY agent", (user,)).fetchall()
+    out = []
+    for r in rows:
+        st = _docker("inspect", "-f", "{{.State.Status}}", r["container"],
+                     check=False, capture=True)
+        out.append({"agent": r["agent"], "container": r["container"],
+                    "status": (st.stdout or "").strip() or "absent",
+                    "image": r["image"], "repo_url": r["repo_url"],
+                    "created_ns": r["created_ns"]})
+    return out
+
+
+def build_api(auth_url):
+    """The starlette app. Deferred imports: the CLI paths must keep working on a
+    box that only ever uses the launcher as a CLI."""
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    def guarded(fn):
+        async def wrapped(request):
+            p = _broker_me(auth_url, request.headers.get("cookie"))
+            if p is None:
+                return JSONResponse({"error": "no session"}, status_code=401)
+            conn = _db()
+            try:
+                return await fn(request, p, conn)
+            except LaunchError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            finally:
+                conn.close()
+        return wrapped
+
+    @guarded
+    async def agents(request, p, conn):
+        if request.method == "GET":
+            return JSONResponse({"agents": _agent_status(conn, p["user"])})
+        d = await request.json()
+        # The bound broker token rides the body and this frame only -- the
+        # response echoes NOTHING back and nothing stores it (P2 owns
+        # credential profiles; until then the browser supplies it per provision).
+        name = provision_agent(
+            conn, p["user"], (d.get("agent") or "").strip(),
+            (d.get("repo_url") or "").strip(), d.get("token") or "",
+            image=d.get("image") or DEFAULT_IMAGE,
+            network=d.get("network") or DEFAULT_NETWORK,
+            broker=d.get("broker") or DEFAULT_BROKER,
+            boot_cmd=d.get("boot_cmd"), replace=bool(d.get("replace")))
+        return JSONResponse({"container": name, "agent": d.get("agent")})
+
+    @guarded
+    async def agent(request, p, conn):
+        name = request.path_params["agent"]
+        if request.method == "DELETE":
+            _known_agent(conn, p["user"], name)
+            destroy_agent(conn, p["user"], name,
+                          purge=request.query_params.get("purge") == "1")
+            return JSONResponse({"destroyed": name})
+        _known_agent(conn, p["user"], name)
+        rows = _agent_status(conn, p["user"])
+        return JSONResponse(next(r for r in rows if r["agent"] == name))
+
+    @guarded
+    async def agent_lifecycle(request, p, conn):
+        name = request.path_params["agent"]
+        verb = request.path_params["verb"]
+        if verb not in ("start", "stop"):
+            raise LaunchError(f"unknown verb {verb!r}")
+        _known_agent(conn, p["user"], name)
+        _docker(verb, container_name(p["user"], name), check=False, capture=True)
+        return JSONResponse({verb: name})
+
+    @guarded
+    async def agent_grants(request, p, conn):
+        name = request.path_params["agent"]
+        if request.method == "GET":
+            rows = conn.execute(
+                "SELECT id, grantee, mode, issued_ns, expiry_ns, revoked_ns "
+                "FROM grants WHERE user=? AND agent=? ORDER BY issued_ns",
+                (p["user"], name)).fetchall()
+            return JSONResponse({"grants": [dict(r) for r in rows]})
+        d = await request.json()
+        out = mint_grant(conn, p["user"], name,
+                         (d.get("grantee") or "someone").strip(),
+                         d.get("mode") or "viewer",
+                         int(d.get("ttl") or 86400))
+        return JSONResponse(out)   # the attach URL appears here ONCE, never again
+
+    @guarded
+    async def agent_grant(request, p, conn):
+        revoke_grant(conn, p["user"], request.path_params["agent"],
+                     request.path_params["gid"], actor=f"web:{p['user']}")
+        return JSONResponse({"revoked": request.path_params["gid"]})
+
+    @guarded
+    async def profile(request, p, conn):
+        q = _quotas_for(conn, p["user"])
+        used = conn.execute("SELECT count(*) FROM containers WHERE user=?",
+                            (p["user"],)).fetchone()[0]
+        return JSONResponse({"user": p["user"], "quotas": q,
+                             "containers": used,
+                             "disk_note": "disk_gb recorded, not yet enforced"})
+
+    async def health(_request):
+        from starlette.responses import PlainTextResponse
+        return PlainTextResponse("ok")
+
+    # grants routes BEFORE the {verb} catch-all: starlette matches in order, and
+    # POST /agents/x/grants must be a mint, never an "unknown verb 'grants'".
+    return Starlette(routes=[
+        Route("/health", health),
+        Route("/agents", agents, methods=["GET", "POST"]),
+        Route("/agents/{agent}", agent, methods=["GET", "DELETE"]),
+        Route("/agents/{agent}/grants", agent_grants, methods=["GET", "POST"]),
+        Route("/agents/{agent}/grants/{gid}", agent_grant, methods=["DELETE"]),
+        Route("/agents/{agent}/{verb:str}", agent_lifecycle, methods=["POST"]),
+        Route("/profile", profile),
+    ])
+
+
+def cmd_serve(a):
+    import uvicorn
+    app = build_api(a.auth_url)
+    print(f"reveille-launch api on {a.host}:{a.port} (auth: {a.auth_url}/me)")
+    uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
     return 0
 
 
@@ -1005,6 +1217,15 @@ def build_parser():
                         "attached client, no session activity, no waiting ring "
                         "(default 24; 0 disables)")
     s.set_defaults(fn=cmd_sweep)
+
+    sv = sub.add_parser("serve", help="HTTP API for the browser (DES-005 P1); "
+                                      "auth = broker session cookie via /me")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8766)
+    sv.add_argument("--auth-url", default=DEFAULT_HEALTH,
+                    help="broker URL whose /me resolves the session cookie "
+                         f"(default {DEFAULT_HEALTH})")
+    sv.set_defaults(fn=cmd_serve)
 
     j = sub.add_parser("join-here",
                        help="bootstrap THIS terminal for one agent (DES-003 2.4)")
