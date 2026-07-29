@@ -1210,10 +1210,26 @@ async function refresh(){
  if(sel.options.length===1)for(const r of meta.roles){
   const o=document.createElement('option');o.value=o.textContent=r;
   sel.appendChild(o);}
+ // M3 first-run chain: zero rooms -> name one inline; the launcher creates it
+ // through the broker (the deputy's fifth and last call) and the new room
+ // arrives pre-ticked so the form continues without a context switch.
  document.getElementById('rooms').innerHTML=meta.rooms.map(r=>
   '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"> '+
   esc(r.name)+' <span class="dim">('+esc(r.kind)+')</span></label>').join('')||
-  '<span class="dim">no rooms — create one in the broker UI</span>';
+  '<span class="dim">no rooms yet — name your first:</span> '+
+  '<input id="firstRoom" placeholder="room name"> '+
+  '<button id="mkRoom">create room</button>';
+ const mk=document.getElementById('mkRoom');
+ if(mk)mk.onclick=async()=>{
+  const n=document.getElementById('firstRoom').value.trim();
+  if(!n)return;
+  try{
+   const r=await api('/rooms',{method:'POST',body:JSON.stringify({name:n})});
+   document.getElementById('rooms').innerHTML=
+    '<label class="chip"><input type="checkbox" value="'+esc(r.id)+
+    '" checked> '+esc(r.name)+' <span class="dim">(owned)</span></label>';
+  }catch(e){alert(e.message);}
+ };
 }
 document.getElementById('create').onclick=async()=>{
  const st=document.getElementById('status');
@@ -1337,6 +1353,23 @@ def build_api(auth_url):
                              "roles": sorted(ROLE_PROMPTS)})
 
     @guarded
+    async def rooms_create(request, p, conn):
+        """POST {name}: the deputy's FIFTH call (M3 ruling, msg 8489) -- create
+        the room the user just named in the first-run chain. Create and nothing
+        else: the bound on the deputy is on KIND, not count -- rename, delete,
+        retention, public-flip and invite/remove stay broker-UI actions, and if
+        the launcher ever needs them the answer is a link, not a sixth call."""
+        d = await request.json()
+        name = (d.get("name") or "").strip()
+        if not name:
+            raise LaunchError("room name required")
+        r = _broker_json(auth_url, request.headers.get("cookie"),
+                         "POST", "/rooms", {"name": name})
+        if not isinstance(r, dict) or not r.get("id"):
+            raise LaunchError("broker refused the room create")
+        return JSONResponse({"id": r["id"], "name": r["name"]})
+
+    @guarded
     async def agent_lifecycle(request, p, conn):
         name = request.path_params["agent"]
         verb = request.path_params["verb"]
@@ -1414,6 +1447,7 @@ def build_api(auth_url):
         Route("/health", health),
         Route("/ui", ui),
         Route("/rooms-mine", my_rooms),
+        Route("/rooms", rooms_create, methods=["POST"]),
         Route("/agents", agents, methods=["GET", "POST"]),
         Route("/agents/{agent}", agent, methods=["GET", "DELETE"]),
         Route("/agents/{agent}/grants", agent_grants, methods=["GET", "POST"]),

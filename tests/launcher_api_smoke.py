@@ -171,6 +171,18 @@ def main():
                              "rev-ana-dev"], capture_output=True, text=True)
         assert st.stdout.strip() == "true", "bob's DELETE touched ana's agent"
 
+        # -- M3: first-run room create -- the deputy's fifth call. bob has no
+        # rooms; he names one through the LAUNCHER and it lands owned by HIM
+        # on the broker (forwarded cookie, not a launcher credential) --------
+        req(L, "/rooms", method="POST", body={"name": "x"}, want=401)
+        req(L, "/rooms", bob, "POST", {"name": "  "}, want=400)
+        made = req(L, "/rooms", bob, "POST", {"name": "bobs-first"})
+        responses.append(made)
+        rid = json.loads(made)["id"]
+        mine = json.loads(req(L, "/rooms-mine", bob))["rooms"]
+        assert [(r["id"], r["kind"]) for r in mine if r["id"] == rid] == \
+            [(rid, "owned")], "created room not owned by bob"
+
         # -- P3: tokenless provision -- the LAUNCHER mints via the broker
         # with the forwarded cookie; the secret never enters a response and
         # never reaches the browser at all --------------------------------
@@ -193,6 +205,7 @@ def main():
         # pass is the P3 gate proper)
         ui = req(L, "/ui", ana)
         assert "NEW AGENT" in ui and "never shown" in ui
+        assert "name your first" in ui   # M3: the first-run chain ships
 
         # -- stop, destroy, profile ------------------------------------------
         responses.append(req(L, "/agents/dev/stop", ana, "POST", {}))
@@ -231,7 +244,8 @@ def main():
               "every launcher file; P2 profile: masked GET with the custody/"
               "rotation notes, override>global>request resolution proven in "
               "the container env, each stored secret in EXACTLY one file "
-              "(0600 profile.json) and no response")
+              "(0600 profile.json) and no response; M3 room create through "
+              "the deputy lands owned by the caller, 401 bare, 400 blank")
     finally:
         subprocess.run(["docker", "rm", "-f", "rev-ana-dev"], capture_output=True)
         subprocess.run(["docker", "network", "rm", NET], capture_output=True)
