@@ -17,7 +17,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-from agentbus import store  # noqa: E402
+from reveille import store  # noqa: E402
 
 HEAD_RE = re.compile(r"^##\s+(\S+)\s+(\S+)\s*$")          # "## <date> <slug>"
 FIELDS = {"Symptom": "symptom", "Root cause": "root_cause",

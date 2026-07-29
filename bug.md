@@ -2,7 +2,7 @@
 
 **Reporter:** roc-ui-dev
 **Date:** 2026-06-28
-**Component:** `src/agentbus/daemon.py` (`wake_ws`) + `src/agentbus/wake.py`
+**Component:** `src/reveille/daemon.py` (`wake_ws`) + `src/reveille/wake.py`
 **Severity:** medium (no data loss; costs real debugging time, misleads operators during onboarding/migration)
 
 ---
@@ -17,7 +17,7 @@ wake error: server rejected WebSocket connection: HTTP 403
 ```
 
 The response carries `content-length: 0` and no body, so there is no way for the
-operator to tell *which* precondition failed. During the fleet migration onto agentbus
+operator to tell *which* precondition failed. During the fleet migration onto reveille
 this sent me down a long blind-debug path: I could not distinguish "bad token" from
 "missing name" from "daemon misconfigured," and had to read the daemon source and write
 a one-off probe script to discover that a correct `name` + correct `token` actually
@@ -57,7 +57,7 @@ no-name          ERR InvalidStatus 403
 `wake_ws` deliberately uses distinct WS close codes to signal the failure mode:
 
 ```python
-# src/agentbus/daemon.py
+# src/reveille/daemon.py
 async def wake_ws(ws: WebSocket):
     token = ws.query_params.get("token")
     if TOKEN and token != TOKEN:
@@ -79,7 +79,7 @@ HTTP 403` -- the intended differentiation is lost end to end.
 
 ## Impact
 
-- Operators onboarding agents (exactly the agentbus migration this doc lives next to)
+- Operators onboarding agents (exactly the reveille migration this doc lives next to)
   cannot tell a token mismatch from a missing/garbled `name`. Both look identical.
 - The `4401`/`4400` codes in the source read as if they reach the client; they do not.
   The comments ("unauthorized" / "bad request") are misleading about observable behavior.
@@ -109,11 +109,11 @@ on a bad/missing token sends `{"error":"bad_token", ...}` and on a missing name 
 `{"error":...}` frame is printed to stderr (`wake rejected: <error> (<detail>)`) and exits
 1; a real `{"wake":true}` frame exits 0. `tests/smoke_ws.py::check_auth` now asserts both
 reasons are received distinctly. Secondary note (exit 144 reaping) handled in
-`docs/migrate-to-agentbus.md` Phase 7.
+`docs/migrate-to-reveille.md` Phase 7.
 
 ---
 
-## Secondary note (environment, NOT an agentbus bug)
+## Secondary note (environment, NOT an reveille bug)
 
 Separately, arming `wake` as a long-blocking **background** process from the Claude Code
 Bash tool is reaped by the sandbox with `exit 144` (SIGSTKFLT) before it can park on the

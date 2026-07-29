@@ -1,5 +1,5 @@
 [project]
-name = "agentbus"
+name = "reveille"
 version = "0.2.9"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
@@ -11,8 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
-agentbus-daemon = "agentbus.daemon:main"
-wake = "agentbus.wake:main"
+reveille-daemon = "reveille.daemon:main"
+wake = "reveille.wake:main"
 
 [dependency-groups]
 dev = [
@@ -25,7 +25,7 @@ requires = ["uv_build>=0.8,<0.9"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "agentbus"
+module-name = "reveille"
 module-root = "src"
 
 [tool.pytest.ini_options]

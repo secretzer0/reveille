@@ -26,7 +26,7 @@ Environment=REVEILLE_UDS=/srv/reveille/%i/broker.sock
 #   zfs create -o quota=2G Pool0/reveille/<tenant>
 # ENOSPC on the DB is a far worse day than a refused upload.
 Environment=REVEILLE_QUOTA_BYTES=1073741824
-ExecStart=/opt/reveille/.venv/bin/agentbus-daemon
+ExecStart=/opt/reveille/.venv/bin/reveille-daemon
 Restart=on-failure
 RestartSec=2
 

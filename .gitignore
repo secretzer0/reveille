@@ -1,8 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
-agentbus.log
-agentbus.pid
+reveille.log
+reveille.pid
 .envrc
 .ruff_cache/
 .mypy_cache/
@@ -16,3 +16,4 @@ build/
 
 # migration snapshots are operational artifacts, never source
 *.bak
+.ropeproject/

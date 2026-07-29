@@ -1,7 +1,7 @@
 REPO := $(abspath .)
 PREFIX ?= $(HOME)/.local/bin
-LOG  := $(REPO)/agentbus.log
-PID  := $(REPO)/agentbus.pid
+LOG  := $(REPO)/reveille.log
+PID  := $(REPO)/reveille.pid
 
 AGENT_IMAGE ?= reveille-agent:0.2.0
 
@@ -13,14 +13,14 @@ help:
 	@echo "make smoke          end-to-end smoke: real daemon, HTTP-MCP + WS wake + auth"
 	@echo "make build          sync + test + smoke"
 	@echo "make daemon         run the broker in the FOREGROUND (Ctrl-C to stop)"
-	@echo "make start          start the broker in the background -> agentbus.log. Env: REVEILLE_PORT, REVEILLE_DB"
+	@echo "make start          start the broker in the background -> reveille.log. Env: REVEILLE_PORT, REVEILLE_DB"
 	@echo "make stop           stop the background broker"
 	@echo "make restart        stop + start"
 	@echo "make status         is the background broker running?"
-	@echo "make logs           tail -f agentbus.log"
-	@echo "make register [URL=] register agentbus once (user scope); identity = per-session \$$REVEILLE_AGENT_ROLE"
+	@echo "make logs           tail -f reveille.log"
+	@echo "make register [URL=] register reveille once (user scope); identity = per-session \$$REVEILLE_AGENT_ROLE"
 	@echo "make install-agent  install the 'agent <name>' launcher into $(PREFIX)"
-	@echo "make unregister      remove the agentbus MCP registration"
+	@echo "make unregister      remove the reveille MCP registration"
 	@echo "make lint           ruff check"
 	@echo "make agent-image    build the agent container image ($(AGENT_IMAGE))"
 	@echo "make agent-container ROLE=<name> [WORK=<dir>] [URL=]  run one agent in a container"
@@ -43,20 +43,20 @@ smoke:
 # REVEILLE_PORT to change the port (default 8765); REVEILLE_DB to move the database.
 # Auth is no longer an env var: users and tokens live in the database (see /ui).
 daemon:
-	uv run agentbus-daemon
+	uv run reveille-daemon
 
-# Background lifecycle. Logs go to agentbus.log next to this Makefile; PID in
-# agentbus.pid. Pass env through make, e.g.:  REVEILLE_PORT=9000 make start
+# Background lifecycle. Logs go to reveille.log next to this Makefile; PID in
+# reveille.pid. Pass env through make, e.g.:  REVEILLE_PORT=9000 make start
 start: sync
 	@if [ -f "$(PID)" ] && kill -0 `cat "$(PID)"` 2>/dev/null; then \
-	  echo "agentbus already running (pid `cat $(PID)`)"; \
+	  echo "reveille already running (pid `cat $(PID)`)"; \
 	else \
-	  nohup "$(REPO)/.venv/bin/agentbus-daemon" >> "$(LOG)" 2>&1 & echo $$! > "$(PID)"; \
+	  nohup "$(REPO)/.venv/bin/reveille-daemon" >> "$(LOG)" 2>&1 & echo $$! > "$(PID)"; \
 	  sleep 1; \
 	  if kill -0 `cat "$(PID)"` 2>/dev/null; then \
-	    echo "agentbus started (pid `cat $(PID)`) -> $(LOG)"; \
+	    echo "reveille started (pid `cat $(PID)`) -> $(LOG)"; \
 	  else \
-	    echo "agentbus FAILED to start -- last log lines:"; tail -3 "$(LOG)"; rm -f "$(PID)"; exit 1; \
+	    echo "reveille FAILED to start -- last log lines:"; tail -3 "$(LOG)"; rm -f "$(PID)"; exit 1; \
 	  fi; \
 	fi
 
@@ -65,9 +65,9 @@ stop:
 	  p=`cat "$(PID)"`; kill $$p 2>/dev/null; \
 	  for i in 1 2 3 4 5 6; do kill -0 $$p 2>/dev/null || break; sleep 0.5; done; \
 	  kill -9 $$p 2>/dev/null || true; \
-	  echo "agentbus stopped (pid $$p)"; \
+	  echo "reveille stopped (pid $$p)"; \
 	else \
-	  echo "no live pid; clearing any stray daemon"; pkill -f "$(REPO)/.venv/bin/agentbus-daemon" 2>/dev/null || true; \
+	  echo "no live pid; clearing any stray daemon"; pkill -f "$(REPO)/.venv/bin/reveille-daemon" 2>/dev/null || true; \
 	fi; \
 	rm -f "$(PID)"
 
@@ -86,8 +86,8 @@ logs:
 # each pane just exports its own $REVEILLE_AGENT_ROLE (see `agent` launcher / install-agent).
 # URL is 127.0.0.1 on the daemon host, the LAN name elsewhere (override: URL=...).
 register:
-	-claude mcp remove agentbus --scope user 2>/dev/null
-	claude mcp add --transport http --scope user agentbus "$(or $(URL),http://127.0.0.1:8765)/mcp" \
+	-claude mcp remove reveille --scope user 2>/dev/null
+	claude mcp add --transport http --scope user reveille "$(or $(URL),http://127.0.0.1:8765)/mcp" \
 	  --header 'Authorization: Bearer $${REVEILLE_TOKEN:-}' \
 	  --header 'X-Agent: $${REVEILLE_AGENT_ROLE:-unset-agent}'
 	python3 scripts/install-hook
@@ -101,7 +101,7 @@ install-agent:
 	@echo "installed $(PREFIX)/agent  (ensure $(PREFIX) is on PATH)"
 
 unregister:
-	claude mcp remove agentbus --scope user || true
+	claude mcp remove reveille --scope user || true
 
 # ---- the standalone server --------------------------------------------------------
 # The broker as a container: built from this source, run from anywhere. One bind mount
@@ -171,8 +171,21 @@ agent-spike:
 	  -v "$(REPO)/docker/spike_join.py:/tmp/spike_join.py:ro" \
 	  --entrypoint bash $(AGENT_IMAGE) -c 'uv run --quiet --with mcp python /tmp/spike_join.py'
 
+# ---- the launcher (DES-002 T2) ----------------------------------------------------
+# The ONLY thing that touches docker; a normal bus client for its health check. Runs
+# from the repo env so it stays lockstep with the broker it reads.
+launch:
+	@uv run python scripts/reveille_launch.py $(ARGS)
+
+# End-to-end gate: real broker on a scratch db, provision one container through the
+# launcher (agent-probe stands in for claude, no Anthropic login needed), assert the
+# launcher sees it live+connected, then destroy. Proves provision + health-by-presence
+# + destroy against a real broker, and that launcher.db holds no token bytes.
+launch-smoke: agent-image
+	uv run python tests/launch_smoke.py
+
 lint:
-	uv run ruff check src tests
+	uv run ruff check src tests scripts
 
 clean:
-	rm -rf src/agentbus/__pycache__ tests/__pycache__ .ruff_cache .mypy_cache .pytest_cache
+	rm -rf src/reveille/__pycache__ tests/__pycache__ .ruff_cache .mypy_cache .pytest_cache

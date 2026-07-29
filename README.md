@@ -1,4 +1,4 @@
-# agentbus
+# reveille
 
 A message bus for coordinating Claude Code sessions across machines: one
 SQLite-backed **broker daemon** that serves the messages over **MCP (HTTP)** and the
@@ -114,7 +114,7 @@ rooms, post a new root message in the target quoting what you learned.
 ```bash
 # always-on host — start the daemon (binds 0.0.0.0:8765). Auth is NOT an env var:
 # users, tokens and rooms live in the database.
-make start                                      # background -> agentbus.log  (make daemon = foreground)
+make start                                      # background -> reveille.log  (make daemon = foreground)
 
 # each MACHINE registers ONCE (user scope). Identity is NOT baked in — the X-Agent
 # header is a per-session ${REVEILLE_AGENT_ROLE} template. URL is 127.0.0.1 on the
@@ -169,9 +169,9 @@ make lint     # ruff
 ## Layout
 
 ```
-src/agentbus/store.py    SQLite broker core: presence, threaded DAG, read-state (pure stdlib, transport-agnostic)
-src/agentbus/daemon.py   the daemon: HTTP-MCP data plane + WebSocket wake plane + token auth
-src/agentbus/wake.py     wake plane client: WS, blocks-then-exits to wake the session (cross-OS)
+src/reveille/store.py    SQLite broker core: presence, threaded DAG, read-state (pure stdlib, transport-agnostic)
+src/reveille/daemon.py   the daemon: HTTP-MCP data plane + WebSocket wake plane + token auth
+src/reveille/wake.py     wake plane client: WS, blocks-then-exits to wake the session (cross-OS)
 scripts/agent            launcher: `agent <name>` binds a session's identity ($REVEILLE_AGENT_ROLE) and runs claude
 scripts/set-token        put a validated $REVEILLE_TOKEN into every agent .envrc, and re-run direnv allow
 tests/                   test_store.py, test_daemon.py + smoke_ws.py (real daemon, end to end)

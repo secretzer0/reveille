@@ -3,8 +3,8 @@
 # layer, because published layers are forever and `docker history` shows build args.
 .git
 .venv
-agentbus.log
-agentbus.pid
+reveille.log
+reveille.pid
 *.db
 *.bak
 __pycache__

@@ -5,7 +5,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from agentbus import daemon  # noqa: E402
+from reveille import daemon  # noqa: E402
 
 
 def test_wake_url_from_http():
@@ -29,7 +29,7 @@ def test_wake_url_empty():
 def test_when_ns_relative_iso_and_bad():
     import time
     from datetime import datetime, timezone
-    from agentbus import store
+    from reveille import store
     assert daemon._when_ns("") is None
     rel = daemon._when_ns("2h")
     assert abs(rel - (time.time_ns() - 2 * 3600 * 1_000_000_000)) < int(2e9)
@@ -65,7 +65,7 @@ def test_notify_rings_named_agents_holding_that_room(tmp_path):
     # its TOKEN carries that room. The room side is looked up per call, which is what
     # makes an unassign take effect without the waiter reconnecting.
     import asyncio
-    from agentbus import store
+    from reveille import store
     db = str(tmp_path / "notify.db")
     conn = store.connect(db)
     store.migrate(conn, db)
@@ -129,7 +129,7 @@ def test_send_room_comes_from_the_query_scope():
     # A 2-room web user must NOT get room_required for a room they are looking at,
     # and the send -- shout included -- must land in THAT room only.
     from types import SimpleNamespace
-    from agentbus import store
+    from reveille import store
     p = SimpleNamespace(rooms={"r1": "Private Talk", "r2": "Reveille"})
 
     req = SimpleNamespace(query_params={"room": "r2"})
@@ -155,7 +155,7 @@ def test_mem_ctx_never_inherits_owner_admin(tmp_path):
     carry the admin bit onto the MCP plane -- otherwise every fleet token bypasses
     the global doctrine gate. Admin memory powers are web-principal only (S6)."""
     from types import SimpleNamespace
-    from agentbus import store
+    from reveille import store
     db = str(tmp_path / "f3.db")
     c = store.connect(db)
     store.migrate(c, db)

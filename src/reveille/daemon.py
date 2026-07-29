@@ -38,12 +38,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from agentbus import __version__, store
+from reveille import __version__, store
 
 COOKIE = "rev_session"
 SWEEP_SECS = 3600
@@ -106,7 +107,7 @@ USE:
    (This replaced the per-repo LESSONS.md, which only worked while every agent shared one
    filesystem. Containerised agents do not.)
 
---- CLAUDE.md block (replace any old agentbus section) ---
+--- CLAUDE.md block (replace any old reveille section) ---
 ## Agent bus
 Identity/token from env, never hardcode: $REVEILLE_AGENT_ROLE = my bus name,
 $REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps it to my
@@ -306,7 +307,7 @@ CHANGES (newest first; re-read after any broker version bump):
        only the last 15 min of backlog (fresh=True skips even that).
 """
 
-log = logging.getLogger("agentbus")  # logs client name + thread id per op; level via AGENTBUS_LOG
+log = logging.getLogger("reveille")  # logs client name + thread id per op; level via REVEILLE_LOG
 
 _conn = None  # one connection, used only from the event-loop thread (async tools)
 
@@ -331,7 +332,16 @@ def _poke_ok(key):
     ts = _poke_pending.get(key)
     return ts is None or time.time_ns() - ts > POKE_TTL_NS
 
-mcp = FastMCP("agentbus", stateless_http=True, json_response=True)
+# DNS-rebinding Host validation is OFF: it defaults on with an empty allow-list, so the
+# transport 421s any request whose Host is not localhost -- which rejects every remote
+# agent reaching the broker by LAN name (a documented feature) and every containerised
+# agent reaching it by docker-DNS name (DES-002 4.2, the reveille network). That check
+# guards UNAUTHENTICATED localhost services against malicious web pages; the broker is a
+# multi-host API where the bearer TOKEN is the security boundary, checked on every call,
+# so Host validation adds nothing and only breaks legitimate addressing.
+mcp = FastMCP("reveille", stateless_http=True, json_response=True,
+              transport_security=TransportSecuritySettings(
+                  enable_dns_rebinding_protection=False))
 
 
 def _notify(room_id, names):
@@ -2925,11 +2935,12 @@ def build_app():
 
 def _setup_logging():
     # Own handler + no propagation, so uvicorn's logging config can't silence us.
-    # Level via AGENTBUS_LOG (default INFO). Lines show: time, client name, op, thread/id.
+    # Level via REVEILLE_LOG (default INFO). Lines show: time, client name, op, thread/id.
     h = logging.StreamHandler()
-    h.setFormatter(logging.Formatter("%(asctime)s agentbus %(message)s", "%H:%M:%S"))
+    h.setFormatter(logging.Formatter("%(asctime)s reveille %(message)s",
+                                     "%Y-%m-%d %H:%M:%S"))
     log.handlers[:] = [h]
-    log.setLevel(os.environ.get("AGENTBUS_LOG", "INFO").upper())
+    log.setLevel(os.environ.get("REVEILLE_LOG", "INFO").upper())
     log.propagate = False
     logging.getLogger("mcp").setLevel(logging.WARNING)  # drop per-request "Processing request" noise
 

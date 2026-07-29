@@ -56,8 +56,15 @@ RUN curl -fsSL https://astral.sh/uv/${UV_VERSION}/install.sh | sh
 # Caveman comms plugin, baked into the image-side claude home so a FRESH volume is
 # seeded with it (docker copies the image path into an empty named volume). Ultra is
 # the fleet default for containerised agents -- env, so the launcher can override
-# per-container without an image fork.
-RUN claude plugin marketplace add JuliusBrussee/caveman \
+# per-container without an image fork. PINNED to a commit like everything else here:
+# the plugin CLI can only pin a marketplace by branch/tag, so we clone the source at
+# the exact SHA and add THAT as a local marketplace -- an unpinned third-party GitHub
+# source pulled at build time is a supply-chain hole. The clone stays in the image so
+# `claude plugin marketplace` can still resolve the source.
+ARG CAVEMAN_REF=c2ed24b3e5d412cd0c25197b2bc9af587621fd99
+RUN git clone https://github.com/JuliusBrussee/caveman /home/agent/caveman-marketplace \
+    && git -C /home/agent/caveman-marketplace checkout ${CAVEMAN_REF} \
+    && claude plugin marketplace add /home/agent/caveman-marketplace \
     && claude plugin install caveman@caveman
 ENV CAVEMAN_DEFAULT_MODE=ultra
 
@@ -66,9 +73,9 @@ ENV CAVEMAN_DEFAULT_MODE=ultra
 # its next turn, which is the degraded mode, not the design. Shipped from THIS repo's
 # source (one source for the protocol, no second implementation to drift), which is why the
 # build context is the repo root, not docker/.
-COPY --chown=${UID}:${GID} pyproject.toml uv.lock README.md /tmp/agentbus/
-COPY --chown=${UID}:${GID} src /tmp/agentbus/src
-RUN uv tool install /tmp/agentbus && rm -rf /tmp/agentbus
+COPY --chown=${UID}:${GID} pyproject.toml uv.lock README.md /tmp/reveille/
+COPY --chown=${UID}:${GID} src /tmp/reveille/src
+RUN uv tool install /tmp/reveille && rm -rf /tmp/reveille
 
 # Two mounts, different lifecycles: what the agent knows vs what it is working on.
 # Conflating them means you cannot throw away a bad checkout without burning the memory.
@@ -84,6 +91,7 @@ VOLUME /home/agent/work
 # clients never reach tmux except through a verified grant token.
 COPY --chown=${UID}:${GID} docker/tmux.conf /home/agent/.tmux.conf
 COPY docker/attach-gate /usr/local/bin/attach-gate
+COPY docker/agent-probe /usr/local/bin/agent-probe
 COPY --chown=${UID}:${GID} docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # Interactive claude with "reveille" queued as the first prompt: the agent joins the

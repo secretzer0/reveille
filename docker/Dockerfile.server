@@ -5,7 +5,7 @@
 #   REVEILLE_DB    where the SQLite lives  (set here to /data/broker.db -- the mount)
 #   REVEILLE_HOST  bind address            (daemon default is already 0.0.0.0)
 #   REVEILLE_PORT  port                    (default 8765)
-#   AGENTBUS_LOG   log level               (default INFO, stdout -> `docker logs`)
+#   REVEILLE_LOG   log level               (default INFO, stdout -> `docker logs`)
 #
 # Attachments live at <db dir>/files, so the single /data mount carries both.
 FROM python:3.14-slim
@@ -29,4 +29,4 @@ ENV REVEILLE_DB=/data/broker.db
 VOLUME /data
 EXPOSE 8765
 
-CMD ["/app/.venv/bin/agentbus-daemon"]
+CMD ["/app/.venv/bin/reveille-daemon"]
