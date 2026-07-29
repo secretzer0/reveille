@@ -89,7 +89,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.2")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.3")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -556,7 +556,7 @@ def _ensure_network(net, broker_url):
 
 def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                     network=DEFAULT_NETWORK, broker=DEFAULT_BROKER,
-                    boot_cmd=None, replace=False):
+                    boot_cmd=None, replace=False, role_prompt=None):
     """The one provisioning path (CLI and HTTP share it). Validates, enforces
     the per-user cap, lays the per-agent data root, runs the container. The
     token exists only in this frame and the docker-run child's env -- never
@@ -604,6 +604,11 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     if creds["github_token"]:
         extra_env.append("GITHUB_TOKEN")
         env["GITHUB_TOKEN"] = creds["github_token"]
+    if role_prompt:
+        # Sec 5: the role's text lands in the container via env; the entrypoint
+        # writes it into ~/.claude/CLAUDE.md (marker-guarded, once).
+        extra_env.append("REVEILLE_ROLE_PROMPT")
+        env["REVEILLE_ROLE_PROMPT"] = role_prompt
 
     # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
     # host user browses it; the agent dirs under it belong to the AGENT.
@@ -1018,6 +1023,41 @@ def cmd_sweep(a):
     return 0
 
 
+# ---- role templates (DES-005 sec 9) ------------------------------------------------
+# DRAFTS: the operator edits these before public use (8469 ruling -- do not
+# treat as final text). The chosen role's text rides REVEILLE_ROLE_PROMPT into
+# the container, where the entrypoint writes it into ~/.claude/CLAUDE.md; its
+# NAME is what the agent passes to brief(role=...) so hive doctrine ranks to it.
+ROLE_PROMPTS = {
+    "architect": (
+        "You design and review; you do not implement. Produce design docs and "
+        "rulings, review branches, and merge as acceptance. Verify gates "
+        "yourself rather than trusting a report. When you rule, say what is "
+        "binding and why; record durable rulings in the hive so the fleet "
+        "reads them at boot. Prefer one clear invariant over three special "
+        "cases."),
+    "senior-dev": (
+        "You implement slices on feature branches and ship them green. One "
+        "slice = one branch = one ship message naming branch and head. Run "
+        "the full gate before shipping and state what you ran. Flag deltas "
+        "from the design rather than slipping them. Amendments append "
+        "commits; never force-push over a reviewed head."),
+    "senior-ui-ux": (
+        "You own interface, interaction and accessibility. Design for the "
+        "least-privilege default: the easy path should be the correct one. "
+        "Every destructive or authority-changing action gets an explicit "
+        "per-item confirm. Escape all untrusted text at render. State the "
+        "keyboard and screen-reader path for anything you add, and prefer "
+        "removing a control over explaining it."),
+    "senior-devops": (
+        "You own deploy, infrastructure and observability. Deploy follows "
+        "main; a deploy that cannot be rolled back is not done. Snapshot "
+        "before migrations. Instrument what you ship: if it breaks at 3am, "
+        "the log line that explains it must already exist. Never signal a "
+        "process by name on a host that also runs it in a container."),
+}
+
+
 # ---- HTTP API (DES-005 P1): the browser's path to the launcher --------------------
 # The broker stays docker-free (G4); the LAUNCHER grows the web surface. AuthN is
 # the broker's: every request's session cookie is forwarded to broker /me and the
@@ -1026,22 +1066,58 @@ def cmd_sweep(a):
 
 def principal_from_me(body):
     """Resolve broker /me JSON to a principal name, or None. Pure. A first-run
-    broker ({'setup': true}) has no users and therefore no principals."""
+    broker ({'setup': true}) has no users and therefore no principals.
+    (is_admin was captured here through P2 and never used; deleted per the
+    8477 ruling -- a dormant privilege field must not sit in an auth path.)"""
     if not isinstance(body, dict) or body.get("setup") or not body.get("name"):
         return None
-    return {"user": body["name"], "is_admin": bool(body.get("is_admin"))}
+    return {"user": body["name"]}
+
+
+def _broker_json(auth_url, cookie_header, method, path, body=None):
+    """One session-forwarded broker call (the _broker_me pattern, generalized
+    for P3's server-side compose). Returns parsed JSON or None on any failure
+    -- fails closed, exactly like authn."""
+    if not cookie_header:
+        return None
+    req = urllib.request.Request(
+        auth_url.rstrip("/") + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Cookie": cookie_header, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.load(r)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None
 
 
 def _broker_me(auth_url, cookie_header):
-    if not cookie_header:
-        return None
-    req = urllib.request.Request(auth_url.rstrip("/") + "/me",
-                                 headers={"Cookie": cookie_header})
-    try:
-        with urllib.request.urlopen(req, timeout=5) as r:
-            return principal_from_me(json.load(r))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
+    return principal_from_me(_broker_json(auth_url, cookie_header, "GET", "/me"))
+
+
+def mint_bound_token(auth_url, cookie_header, agent, rooms):
+    """P3: mint the agent's bound state-tier token THROUGH the broker's
+    existing session routes, server-side with the user's own forwarded cookie
+    -- the browser never holds the secret, the launcher holds it for this
+    call's lifetime only, and the broker learns nothing new (same POST /tokens
+    + PATCH room-attach the Tokens tab issues). Raises LaunchError."""
+    t = _broker_json(auth_url, cookie_header, "POST", "/tokens",
+                     {"label": agent, "agent_name": agent, "mem_tier": "state"})
+    if not isinstance(t, dict) or not t.get("secret"):
+        raise LaunchError("broker refused the token mint")
+    for rid in rooms:
+        out = _broker_json(auth_url, cookie_header, "PATCH",
+                           f"/tokens/{t['id']}", {"room": rid, "attach": True})
+        if out is None:
+            raise LaunchError(f"broker refused room attach for {rid}")
+    return t["id"], t["secret"]
+
+
+def revoke_minted_token(auth_url, cookie_header, token_id):
+    """Best-effort cleanup when a provision fails AFTER its mint succeeded --
+    otherwise every failed create leaves a live orphaned credential (observed
+    on the P3 gate's own first run)."""
+    _broker_json(auth_url, cookie_header, "DELETE", f"/tokens/{token_id}")
 
 
 def _agent_status(conn, user):
@@ -1056,6 +1132,114 @@ def _agent_status(conn, user):
                     "image": r["image"], "repo_url": r["repo_url"],
                     "created_ns": r["created_ns"]})
     return out
+
+
+# The Agents tab (DES-005 sec 2: served by the LAUNCHER). One static page; the
+# broker's session cookie reaches this origin for free (cookies are host-
+# scoped, not port-scoped), so every fetch below is same-origin and authed.
+# All dynamic text goes through esc() -- agent names and room names are user
+# input.
+LAUNCH_UI = """<!doctype html><html><head><meta charset="utf-8">
+<title>Reveille agents</title><style>
+body{font-family:system-ui,sans-serif;background:#111;color:#ddd;max-width:44rem;
+ margin:2rem auto;padding:0 1rem}
+h1{font-size:1.2rem}h2{font-size:1rem;margin-top:1.6rem}
+input,select,textarea,button{background:#222;color:#ddd;border:1px solid #444;
+ border-radius:4px;padding:.35rem .5rem;font:inherit}
+button{cursor:pointer}label.chip{display:inline-block;margin:.15rem .4rem .15rem 0}
+.row{margin:.5rem 0}.dim{color:#888;font-size:.85rem}.err{color:#f88}
+.card{border:1px solid #333;border-radius:6px;padding:.6rem .8rem;margin:.5rem 0}
+a{color:#8cf}
+</style></head><body>
+<h1>REVEILLE — your agents</h1>
+<div id="login" class="err" style="display:none">Not signed in. Log in at the
+ <a href="" id="brokerLink">broker UI</a> first, then reload.</div>
+<div id="app" style="display:none">
+<div id="list"></div>
+<h2>NEW AGENT</h2>
+<div class="row"><input id="name" placeholder="agent name (e.g. senior-dev)">
+<select id="role"><option value="">no role template</option></select></div>
+<div class="row"><textarea id="append" rows="2" cols="60"
+ placeholder="anything to append to the role prompt (optional)"></textarea></div>
+<div class="row" id="rooms"></div>
+<div class="row"><input id="repo" size="40"
+ placeholder="repo URL (blank = your profile default)"></div>
+<details class="row"><summary class="dim">advanced</summary>
+<div class="row"><input id="bootCmd" size="40"
+ placeholder="boot command override (ops/diagnostics)"></div>
+<div class="row"><input id="image" size="40" placeholder="image override"></div>
+</details>
+<div class="row"><button id="create">create agent</button>
+ <span class="dim">the token is minted from your session and never shown</span></div>
+<div id="status" class="row dim"></div>
+</div>
+<script>
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,
+ c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api=async(p,o)=>{const r=await fetch(p,Object.assign({headers:
+ {'Content-Type':'application/json'}},o));
+ if(r.status===401){throw new Error('401');}
+ const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d;};
+async function refresh(){
+ let d;try{d=await api('/agents');}catch(e){
+  if(e.message==='401'){document.getElementById('login').style.display='';
+   document.getElementById('brokerLink').href=
+    location.protocol+'//'+location.hostname+':8765/ui';return;}
+  throw e;}
+ document.getElementById('app').style.display='';
+ const list=document.getElementById('list');
+ list.innerHTML=(d.agents.length?'':'<div class="dim">no agents yet</div>')+
+  d.agents.map(a=>'<div class="card"><b>'+esc(a.agent)+'</b> '+
+   '<span class="dim">'+esc(a.status)+' &middot; '+esc(a.image)+'</span> '+
+   '<button data-watch="'+esc(a.agent)+'">watch</button>'+
+   '<button data-stop="'+esc(a.agent)+'">stop</button>'+
+   '<button data-del="'+esc(a.agent)+'">destroy</button></div>').join('');
+ for(const b of list.querySelectorAll('[data-watch]'))b.onclick=async()=>{
+  const g=await api('/agents/'+encodeURIComponent(b.dataset.watch)+'/grants',
+   {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
+  window.open(g.attach_url,'_blank');};   // shown once, never retrievable
+ for(const b of list.querySelectorAll('[data-stop]'))b.onclick=async()=>{
+  await api('/agents/'+encodeURIComponent(b.dataset.stop)+'/stop',
+   {method:'POST',body:'{}'});refresh();};
+ for(const b of list.querySelectorAll('[data-del]'))b.onclick=async()=>{
+  if(!confirm('Destroy '+b.dataset.del+'? Its data root is kept.'))return;
+  await api('/agents/'+encodeURIComponent(b.dataset.del),{method:'DELETE'});
+  refresh();};
+ const meta=await api('/rooms-mine');
+ const sel=document.getElementById('role');
+ if(sel.options.length===1)for(const r of meta.roles){
+  const o=document.createElement('option');o.value=o.textContent=r;
+  sel.appendChild(o);}
+ document.getElementById('rooms').innerHTML=meta.rooms.map(r=>
+  '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"> '+
+  esc(r.name)+' <span class="dim">('+esc(r.kind)+')</span></label>').join('')||
+  '<span class="dim">no rooms — create one in the broker UI</span>';
+}
+document.getElementById('create').onclick=async()=>{
+ const st=document.getElementById('status');
+ const rooms=[...document.querySelectorAll('#rooms input:checked')]
+  .map(c=>c.value);
+ const name=document.getElementById('name').value.trim();
+ try{
+  st.textContent='provisioning...';
+  await api('/agents',{method:'POST',body:JSON.stringify({
+   agent:name,rooms:rooms,role:document.getElementById('role').value,
+   append:document.getElementById('append').value.trim(),
+   repo_url:document.getElementById('repo').value.trim(),
+   boot_cmd:document.getElementById('bootCmd').value.trim()||undefined,
+   image:document.getElementById('image').value.trim()||undefined})});
+  st.textContent='container up; waiting for the agent to reach the bus...';
+  for(let i=0;i<60;i++){
+   await new Promise(r=>setTimeout(r,2000));
+   const a=await api('/agents/'+encodeURIComponent(name));
+   if(a.live){st.textContent='LIVE: '+name+' is on the bus.';refresh();return;}
+  }
+  st.textContent='container is up but not live yet — check its logs.';
+  refresh();
+ }catch(e){st.textContent='';alert(e.message);}
+};
+refresh();
+</script></body></html>"""
 
 
 def build_api(auth_url):
@@ -1084,16 +1268,37 @@ def build_api(auth_url):
         if request.method == "GET":
             return JSONResponse({"agents": _agent_status(conn, p["user"])})
         d = await request.json()
-        # The bound broker token rides the body and this frame only -- the
-        # response echoes NOTHING back and nothing stores it (P2 owns
-        # credential profiles; until then the browser supplies it per provision).
-        name = provision_agent(
-            conn, p["user"], (d.get("agent") or "").strip(),
-            (d.get("repo_url") or "").strip(), d.get("token") or "",
-            image=d.get("image") or DEFAULT_IMAGE,
-            network=d.get("network") or DEFAULT_NETWORK,
-            broker=d.get("broker") or DEFAULT_BROKER,
-            boot_cmd=d.get("boot_cmd"), replace=bool(d.get("replace")))
+        # P3: no token in the body + rooms ticked -> the LAUNCHER mints the
+        # bound state-tier token through the broker's session routes with THIS
+        # request's forwarded cookie. The secret exists in this frame and the
+        # docker-run child env only -- the browser never sees it at all. A
+        # token in the body (the P1/CLI path) is still honored.
+        token, minted_id = d.get("token") or "", None
+        if not token and d.get("rooms"):
+            minted_id, token = mint_bound_token(
+                auth_url, request.headers.get("cookie"),
+                (d.get("agent") or "").strip(), list(d["rooms"]))
+        role = (d.get("role") or "").strip()
+        try:
+            if role and role not in ROLE_PROMPTS:
+                raise LaunchError(f"unknown role {role!r}")
+            prompt = ROLE_PROMPTS.get(role, "")
+            if d.get("append"):
+                prompt = (prompt + "\n\n" + str(d["append"])).strip()
+            name = provision_agent(
+                conn, p["user"], (d.get("agent") or "").strip(),
+                (d.get("repo_url") or "").strip(), token,
+                image=d.get("image") or DEFAULT_IMAGE,
+                network=d.get("network") or DEFAULT_NETWORK,
+                broker=d.get("broker") or DEFAULT_BROKER,
+                boot_cmd=d.get("boot_cmd"), replace=bool(d.get("replace")),
+                role_prompt=prompt or None)
+        except (LaunchError, subprocess.CalledProcessError):
+            if minted_id:
+                # A failed provision must not leave a live orphaned credential.
+                revoke_minted_token(auth_url, request.headers.get("cookie"),
+                                    minted_id)
+            raise
         return JSONResponse({"container": name, "agent": d.get("agent")})
 
     @guarded
@@ -1106,7 +1311,30 @@ def build_api(auth_url):
             return JSONResponse({"destroyed": name})
         _known_agent(conn, p["user"], name)
         rows = _agent_status(conn, p["user"])
-        return JSONResponse(next(r for r in rows if r["agent"] == name))
+        out = next(r for r in rows if r["agent"] == name)
+        # P3 live status: the same health-by-presence the CLI polls, read
+        # through the broker with the USER's forwarded cookie -- the launcher
+        # holds no broker credential of its own.
+        pres = _broker_json(auth_url, request.headers.get("cookie"),
+                            "GET", "/presence")
+        agents_list = (pres or {}).get("agents", [])
+        out["live"] = health_from_presence(agents_list, name)
+        return JSONResponse(out)
+
+    @guarded
+    async def my_rooms(request, p, conn):
+        """The form's room checkboxes: exactly the set assign_room admits for
+        this user (owned + member + public), read from the broker with the
+        forwarded cookie. IDs and names only."""
+        me = _broker_json(auth_url, request.headers.get("cookie"), "GET", "/me")
+        if not isinstance(me, dict):
+            raise LaunchError("broker unreachable")
+        rooms = []
+        for key in ("owned", "member", "public"):
+            for r in me.get(key) or []:
+                rooms.append({"id": r["id"], "name": r["name"], "kind": key})
+        return JSONResponse({"rooms": rooms,
+                             "roles": sorted(ROLE_PROMPTS)})
 
     @guarded
     async def agent_lifecycle(request, p, conn):
@@ -1176,10 +1404,16 @@ def build_api(auth_url):
         from starlette.responses import PlainTextResponse
         return PlainTextResponse("ok")
 
+    async def ui(_request):
+        from starlette.responses import HTMLResponse
+        return HTMLResponse(LAUNCH_UI)
+
     # grants routes BEFORE the {verb} catch-all: starlette matches in order, and
     # POST /agents/x/grants must be a mint, never an "unknown verb 'grants'".
     return Starlette(routes=[
         Route("/health", health),
+        Route("/ui", ui),
+        Route("/rooms-mine", my_rooms),
         Route("/agents", agents, methods=["GET", "POST"]),
         Route("/agents/{agent}", agent, methods=["GET", "DELETE"]),
         Route("/agents/{agent}/grants", agent_grants, methods=["GET", "POST"]),
