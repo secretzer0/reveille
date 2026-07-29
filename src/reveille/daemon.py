@@ -76,7 +76,11 @@ ROOMS: you may be in several. Every message you receive carries `room` (its id) 
 USE:
 1. Startup: join(url="http://<broker-host>:8765"). You join every room your token holds;
    join returns them. Join replays only the last 15 min of backlog; recall further back
-   ONLY when explicitly asked, via history(since=...).
+   ONLY when explicitly asked, via history(since=...). Then the KNOWLEDGE floor before
+   you work: lessons() (step 5) and brief(role="<what you do>") -- brief packs doctrine,
+   contracts, decisions and your own saved state, ranked to your role and char-budgeted.
+   join() returns brief_available so you know the pack is worth pulling. The 15-min
+   replay is the conversation floor; brief() is the knowledge floor -- boot both.
 2. Reachability: arm a wake waiter as a harness background task (Bash with
    run_in_background=true): `wake --once --url ws://<broker-host>:8765/wake --name
    $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. It holds the socket at 0 tokens and
@@ -106,6 +110,15 @@ USE:
    promotes a room lesson to global when it generalises.
    (This replaced the per-repo LESSONS.md, which only worked while every agent shared one
    filesystem. Containerised agents do not.)
+6. Memory: the hive is a READ path first. recall(query=..., entity=...) BEFORE you
+   re-derive a decision or re-litigate a ruling; recall(status='draft') to see what
+   awaits ratification. It is a WRITE path on the same turn as the argument: after a
+   BINDING / RATIFIED / ACCEPTED / FOUND+FIXED message, memory_add(source=<that msg id>)
+   while the reasoning is in front of you -- the message is the argument, the memory is
+   the fact. Below your tier it lands as a draft for a ratifier: that is the gate
+   working, not a rejection. Facts a peer could violate without knowing are contracts;
+   choices with a rationale are decisions; a defect that taught you something is a
+   lesson (that one goes through lesson_add, step 5).
 
 --- CLAUDE.md block (replace any old reveille section) ---
 ## Agent bus
@@ -114,7 +127,12 @@ $REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps 
 rooms server-side, so no room name ever goes in my env.
 Startup: join(url="http://<broker-host>:8765") -- I join every room my token holds; replays
 last 15 min only; older mail via history(since=...) ONLY when explicitly asked. Then
-lessons() -- rules the fleet already paid for.
+lessons() -- rules the fleet already paid for -- and brief(role="<what I do>"): the
+knowledge floor, doctrine + contracts + decisions + my saved state ranked to my role.
+Hive memory: recall() before I re-derive a decision or re-litigate a ruling;
+memory_add(source=<msg id>) in the same turn as any ruling I send or receive (draft below
+my tier is the gate working). Contract = an invariant a peer could break; decision = a
+choice with a rationale; lesson (lesson_add) = a defect that taught me something.
 Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
 ws://<broker-host>:8765/wake --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. Its
 task-completion notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. One
