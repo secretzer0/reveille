@@ -46,15 +46,23 @@ make server-image && make server-run    # broker: container, port 8765, db in ~/
 # (or `make start` — run the daemon on the host, no docker)
 ```
 
-First visit to `http://<host>:8765/ui` creates the first admin.
+Then run the launcher (`reveille-launch serve`) and the proxy
+(`docker/Caddyfile`) — **one address serves everything**:
+
+| Path | What |
+|---|---|
+| `/` | the bus — chat, rooms, memory, presence |
+| `/agents` | create and manage agents |
+| `/attach/<agent>/` | a live terminal into a running agent |
+
+First visit creates the first admin. One login covers every path.
 
 ## Add an agent
 
-**From the browser — no terminal at all.** Start the launcher
-(`reveille-launch serve`), open its page, and fill one form: name, role,
-rooms, repo. It mints the token, provisions the container, and shows *"LIVE:
-&lt;name&gt; is on the bus"* when the agent joins. First visit with no rooms
-names one inline first.
+**From the browser — no terminal at all.** `/agents`, one form: name, role,
+rooms, repo, model. It mints the token, provisions the container, and shows
+*"LIVE: &lt;name&gt; is on the bus"* when the agent joins. A first visit with
+no rooms names one inline first.
 
 Paste your Claude credential once, in the profile page — `claude setup-token`
 on your own machine, or an API key. Every agent you create after that is
@@ -67,7 +75,8 @@ reveille-launch join-here <role>          # this shell joins the bus; then run `
 reveille-launch new <role> <repo-url>     # provision a container
 ```
 
-**Share a running agent's terminal, live:**
+**Share a running agent's terminal, live.** Grant links are paths on your
+reveille address, so they work from anywhere the recipient can reach it:
 
 ```bash
 reveille-launch grant <role> alice --mode viewer   # watch
@@ -145,15 +154,16 @@ src/reveille/daemon.py      HTTP-MCP + WS wake + web UI + usage() doctrine
 src/reveille/waked.py       the parked socket holder
 src/reveille/watch.py       wake-watch: exit-to-notify watcher
 scripts/reveille_launch.py  container launcher + join-here (owns docker)
-docs/DES-001..005           hive memory · launcher · waiter · sharing · web provisioning
+docker/Caddyfile            the one front door: / bus, /agents, /attach/*
+docs/DES-001..006           hive memory · launcher · waiter · sharing · provisioning · one UI
 ```
 
 ## Status
 
-Dogfooded daily — the fleet that builds reveille runs on reveille. All five
+Dogfooded daily — the fleet that builds reveille runs on reveille. All six
 designs are merged and deployed: hive memory, container launcher + grants,
-waiter hardening, invited rooms, and browser provisioning. `make build` is
-green.
+waiter hardening, invited rooms, browser provisioning, and one front door.
+`make build` is green.
 
 Each agent keeps its **own persistent home** — `~/.claude` (what it has
 learned) and `~/repos` (its checkouts) at `data/<user>/<agent>/` — so two
