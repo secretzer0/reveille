@@ -161,6 +161,17 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.16 Host bootstrap (DES-003 W2). `reveille-launch join-here <role>` walks
+       the same provisioning checklist a container gets, on the operator's own
+       shell: env fragment ~/.reveille/<role>.env (0600, the ONLY file the
+       token ever lands in; stdin or prompt, never argv), MCP registration
+       with ${REVEILLE_TOKEN} env-template headers (config carries no token),
+       Stop hook install, wake/wake-watch/reveille-waked symlinked onto PATH,
+       spool dirs. After it: open a terminal, run claude, you are on the bus
+       -- the Stop hook arms the rest. Re-running replaces the .bashrc source
+       line (one identity per user shell; multi-identity stays the container
+       launcher's job). Agents: no tool changes; this is how a human peer
+       joins your rooms from a plain terminal.
 0.2.15 THE WAITER SPLIT (DES-003 W1). `wake --once` fused two jobs with
        opposite lifetimes; the whole waiter lesson family was symptoms of that
        fusion. Now: reveille-waked (spawned by your Stop hook or container
@@ -175,6 +186,12 @@ CHANGES (newest first; re-read after any broker version bump):
        flock-guarded spawn is the supervisor. Broker rule: a second wake
        attachment for the same agent SUPERSEDES the first (superseded frame;
        legacy `wake --once` exits code 2 on it and must not be re-armed).
+       MIGRATION ORDER (paid for live): retire EVERY legacy wake --once you
+       own -- TaskStop them or let exit-2 do it -- BEFORE your first
+       wake-watch arm. A straggler legacy can win the reattach race after a
+       broker restart and kick your waked until the next Stop hook firing;
+       nothing is lost (the straggler still delivers, the hook respawns),
+       but the clean order skips the circus.
 0.2.14 The memory UI (DES-001 S6c -- S6 complete, DES-001 done). /ui grows a
        Memory tab: ratify queue with per-item confirm (no bulk, ever), typed
        reason required to reject, provenance inline (source message, displaced

@@ -27,12 +27,19 @@ again.
       The tick 4.6 assigns the launcher: kill d-*/v-* sessions whose grant is
       expired/revoked/mode-mismatched, harvest the gate's ATTACH lines, and derive
       DETACH lines from sessions observed gone (observation time, stated as such).
+  reveille-launch join-here <role> [--broker URL]
+      Bootstrap THIS user's terminal for one agent identity (DES-003 2.4): env
+      fragment (0600 -- the ONLY file the token ever touches; stdin, never argv),
+      MCP registration (headers are env templates, no token in config), Stop
+      hook, PATH links for wake/wake-watch/reveille-waked, spool dir. Same
+      checklist container provisioning satisfies -- one list, two callers.
 
 launcher.db: $REVEILLE_LAUNCH_DB or ~/.reveille/launcher.db. Container + grant
 records only, never a secret and never a minted token. Audit log: audit.log next
 to the db ($REVEILLE_LAUNCH_AUDIT overrides).
 """
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -61,6 +68,23 @@ ROLE_RE = re.compile(r"\A[a-z0-9][a-z0-9-]{1,63}\Z")
 # discipline in one list: names here, values in env, never the two together on a
 # command line a `ps` can read.
 ENV_PASSTHROUGH_SECRET = ("REVEILLE_TOKEN", "REVEILLE_GATE_SECRET")
+
+# DES-003 2.4: ONE checklist, two callers. Container provisioning satisfies each
+# step inside the image/entrypoint (noted per step); `join-here` executes the
+# host-side equivalent. A new step added here without both halves is a visible
+# gap in join-here's printed walk, not a silent drift.
+PROVISION_CHECKLIST = (
+    ("env", "identity + credential + broker URL in the environment"),
+    #        container: docker -e names (docker_run_argv); host: env fragment 0600
+    ("register", "MCP server registered (reveille alias, HTTP transport)"),
+    #        container: entrypoint `claude mcp add`; host: the same command
+    ("hook", "Stop hook installed (waked supervisor + wake-watch gate)"),
+    #        container: baked into the image's claude home; host: install-hook
+    ("path", "wake, wake-watch, reveille-waked on PATH"),
+    #        container: uv tool install in the image; host: ~/.local/bin symlinks
+    ("spool", "spool directory exists"),
+    #        container: entrypoint mkdir; host: mkdir here
+)
 
 
 def die(msg, code=2):
@@ -560,6 +584,96 @@ def cmd_sweep(a):
     return 0
 
 
+def cmd_join_here(a):
+    """Bootstrap THIS user's terminal for one agent identity (DES-003 2.4):
+    after this, open a terminal, run `claude`, you are on the bus. Walks the
+    same PROVISION_CHECKLIST container provisioning satisfies, host-side."""
+    if not ROLE_RE.match(a.role):
+        die(f"bad role {a.role!r}: lowercase alnum + dash, 2-64 chars")
+    token = read_secret(f"bound broker token for {a.role}")
+    if not token:
+        die("no token given (stdin empty and no prompt)")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    home = os.path.expanduser("~")
+    done = {}
+
+    # env: the ONLY file the token ever lands in, mode 0600 before a byte is
+    # written (open with restrictive mode, not chmod-after).
+    frag_dir = os.path.join(home, ".reveille")
+    os.makedirs(frag_dir, exist_ok=True)
+    frag = os.path.join(frag_dir, f"{a.role}.env")
+    fd = os.open(frag, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"export REVEILLE_AGENT_ROLE={a.role}\n"
+                f"export REVEILLE_URL={a.broker}\n"
+                f"export REVEILLE_TOKEN={token}\n")
+    # One marker block in .bashrc points at the LAST-joined role; re-running
+    # join-here (same or another role) replaces it. ponytail: one identity per
+    # user shell -- per-terminal multi-identity stays the `agent` launcher's job.
+    rc = os.path.join(home, ".bashrc")
+    marker = "# reveille join-here"
+    lines = []
+    if os.path.exists(rc):
+        with open(rc) as f:
+            lines = [ln for ln in f.read().splitlines()
+                     if marker not in ln]
+    lines.append(f"source {frag}  {marker}")
+    with open(rc, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    done["env"] = f"{frag} (0600) + .bashrc source line"
+
+    # register: identical shape to `make register` -- headers are ${VAR}
+    # templates expanded per session from env, so the CONFIG carries no token.
+    subprocess.run(["claude", "mcp", "remove", "reveille", "--scope", "user"],
+                   capture_output=True)
+    r = subprocess.run(
+        ["claude", "mcp", "add", "--transport", "http", "--scope", "user",
+         "reveille", f"{a.broker}/mcp",
+         "--header", "Authorization: Bearer ${REVEILLE_TOKEN:-}",
+         "--header", "X-Agent: ${REVEILLE_AGENT_ROLE:-unset-agent}"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"claude mcp add failed: {r.stderr.strip()}")
+    done["register"] = "reveille -> " + a.broker + "/mcp (headers from env)"
+
+    # hook: the waked supervisor + watcher gate, user scope, idempotent.
+    r = subprocess.run([sys.executable, os.path.join(repo, "scripts",
+                                                     "install-hook")],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"install-hook failed: {r.stderr.strip()}")
+    done["hook"] = r.stdout.strip()
+
+    # path: console scripts out of the repo venv. Symlinks, so a repo rebuild
+    # updates them for free; stale links are replaced.
+    bindir = os.path.join(home, ".local", "bin")
+    os.makedirs(bindir, exist_ok=True)
+    linked = []
+    for tool in ("wake", "wake-watch", "reveille-waked"):
+        src = os.path.join(repo, ".venv", "bin", tool)
+        if not os.path.exists(src):
+            die(f"{src} missing -- run `uv sync` in {repo} first")
+        dst = os.path.join(bindir, tool)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(dst)
+        os.symlink(src, dst)
+        linked.append(tool)
+    done["path"] = f"{', '.join(linked)} -> {bindir}"
+
+    # spool
+    spooldir = os.path.join(os.environ.get(
+        "REVEILLE_SPOOL", os.path.join(home, ".reveille", "spool")), a.role)
+    for sub in ("tmp", "new"):
+        os.makedirs(os.path.join(spooldir, sub), exist_ok=True)
+    done["spool"] = spooldir
+
+    for step, what in PROVISION_CHECKLIST:
+        print(f"  [ok] {step:9s} {what}\n       {done[step]}")
+    print(f"joined: open a new terminal (or `source {frag}`) and run `claude` "
+          f"-- the Stop hook arms the rest.")
+    return 0
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="reveille-launch", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -629,6 +743,13 @@ def build_parser():
     s.add_argument("--loop", type=int, default=0, metavar="SECONDS",
                    help="repeat every N seconds (default: one tick and exit)")
     s.set_defaults(fn=cmd_sweep)
+
+    j = sub.add_parser("join-here",
+                       help="bootstrap THIS terminal for one agent (DES-003 2.4)")
+    j.add_argument("role")
+    j.add_argument("--broker", default="http://127.0.0.1:8765",
+                   help="broker URL for this host (default http://127.0.0.1:8765)")
+    j.set_defaults(fn=cmd_join_here)
     return p
 
 

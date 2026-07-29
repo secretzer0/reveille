@@ -198,6 +198,12 @@ grant-smoke: agent-image
 waiter-smoke: sync
 	uv run python tests/waiter_smoke.py
 
+# DES-003 W2 gate: join-here from a clean shell (scratch HOME + scratch broker):
+# checklist walked, token in exactly one file (0600 fragment), MCP config carries
+# the env template not the value, live+connected from the bootstrap alone.
+joinhere-smoke: sync
+	uv run python tests/joinhere_smoke.py
+
 lint:
 	uv run ruff check src tests scripts
 
