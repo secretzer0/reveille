@@ -191,3 +191,33 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(tests)} passed")
+
+
+# ---- DES-006 U3: the broker's ONE configured nav link ------------------------
+# The invariant is "the broker never depends on the launcher", not "the broker
+# may never render a link": unset config must be byte-identical to before.
+
+def test_nav_link_renders_nothing_unless_both_values_are_set():
+    assert daemon.nav_link_html("", "") == ""
+    assert daemon.nav_link_html("Agents", "") == ""      # path missing
+    assert daemon.nav_link_html("", "/agents") == ""     # label missing
+    assert daemon.nav_link_html("   ", "  ") == ""       # whitespace is unset
+
+
+def test_nav_link_is_a_path_and_names_no_service():
+    out = daemon.nav_link_html("Agents", "/agents")
+    assert out == '<a class="navlink" href="/agents">Agents</a>'
+    for word in ("launcher", "8766", "docker", "localhost"):
+        assert word not in out.lower()
+
+
+def test_nav_link_escapes_operator_supplied_text():
+    out = daemon.nav_link_html('<script>x</script>', '/a"onmouseover="x')
+    assert "<script>" not in out and 'onmouseover="x"' not in out
+    assert "&lt;script&gt;" in out and "&quot;" in out
+
+
+def test_unconfigured_page_renders_no_link_element():
+    page = daemon.WEBCHAT.replace("<!--NAVLINK-->", daemon.nav_link_html("", ""))
+    assert '<a class="navlink"' not in page     # the CSS rule may exist; no element
+    assert "<!--NAVLINK-->" not in page         # and no leftover placeholder

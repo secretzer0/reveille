@@ -133,6 +133,27 @@ server-run: server-image
 server-stop:
 	docker rm -f reveille-server
 
+# ---- one front door (DES-006 U3) --------------------------------------------------
+# The proxy is the ONLY thing that knows both addresses. --network host because the
+# launcher binds 127.0.0.1 and must stay unreachable from the LAN and the docker
+# network; the proxy reaches it over loopback and publishes :80 for everyone else.
+PROXY_IMAGE ?= caddy:2-alpine
+PROXY_PORT  ?= 80
+
+proxy-run:
+	docker rm -f reveille-proxy 2>/dev/null || true
+	docker run -d --name reveille-proxy --restart unless-stopped --network host \
+	  -v "$(REPO)/docker/Caddyfile":/etc/caddy/Caddyfile:ro \
+	  $(PROXY_IMAGE)
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+	  curl -sf http://127.0.0.1:$(PROXY_PORT)/health >/dev/null && \
+	    { echo "reveille-proxy up: http://0.0.0.0:$(PROXY_PORT)  (/ = bus, /agents = launcher)"; exit 0; }; \
+	  sleep 1; \
+	done; echo "FAILED -- docker logs reveille-proxy:"; docker logs --tail 10 reveille-proxy; exit 1
+
+proxy-stop:
+	docker rm -f reveille-proxy
+
 # ---- containerised agents ---------------------------------------------------------
 # A container is just another client: it sets the same two env vars and runs the same
 # `claude mcp add` as `make register`. Nothing here may become required to reach the bus,
