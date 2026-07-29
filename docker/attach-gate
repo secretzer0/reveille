@@ -11,8 +11,9 @@
 # the launcher docker-exec'ing a kill of this process group -- nothing in here
 # watches anything.
 #
-#   attach-gate attach <token>             verify, then exec tmux (viewer: -r
-#                                          grouped session; driver: writable)
+#   attach-gate attach <token>             verify, then exec tmux into the
+#                                          per-grant grouped session (4.6):
+#                                          v-<id> read-only, d-<id> writable
 #   attach-gate verify <token>             verify only, print "ok <mode> <id>"
 #   attach-gate mint <viewer|driver> [ttl_seconds] [grant_id]
 #                                          print a signed token (launcher UI's
@@ -60,6 +61,22 @@ check() {
   echo "$mode $id"
 }
 
+# 4.5.2: ATTACH is the gate's audit line -- it alone holds the verified grant id
+# and mode before the exec erases it. The launcher harvests this file on its
+# sweep tick into the host-side audit log; detach/revoke lines are the
+# launcher's, derived there, never fabricated here.
+audit_attach() {
+  printf '%s ATTACH %s %s\n' "$(date -u +%FT%TZ)" "$1" "$2" \
+    >>"${REVEILLE_AUDIT_LOG:-${HOME:-/tmp}/.attach-audit}" 2>/dev/null || true
+}
+
+# Multi-driver opt-out (4.3): create-time env, or the runtime marker the
+# launcher's `flip` command touches -- exec'd ttyd children only ever see
+# create-time env, so a post-provision toggle needs a file.
+multi_driver() {
+  [ "${REVEILLE_MULTI_DRIVER:-0}" = 1 ] || [ -e "${HOME:-}/.multi-driver" ]
+}
+
 attach() {
   # check runs in a command substitution, where its die() only kills the
   # subshell -- the assignment carries the failure out so set -e can act on it.
@@ -73,11 +90,48 @@ attach() {
     # the visitor session on detach; it MUST be set after the attach in one
     # command sequence -- set on a still-detached session, tmux reaps it on the
     # spot and the attach finds nothing.
+    audit_attach viewer "$id"
     tmux new-session -d -t agent -s "v-${id}" 2>/dev/null || true
     exec tmux attach-session -r -t "v-${id}" \; set-option destroy-unattached on
   fi
-  # Driver: the agent's whole identity (4.4) -- exclusivity bookkeeping is T3.
-  exec tmux attach-session -t agent
+  # Driver (4.6): a per-grant WRITABLE grouped session -- the revocable handle.
+  # T1's `exec tmux attach -t agent` left revocation nothing to aim at; d-<id>
+  # makes revoke `tmux kill-session -t d-<id>`, and the owner's ssh attach to
+  # session "agent" sits outside every d-*/v-* handle, so revoking a grantee
+  # can never boot the owner.
+  # Exclusivity (4.3): another grant's d-* session existing IS the refusal --
+  # readable, naming the holder. The same grant re-attaching to its own d-<id>
+  # is a reconnect, not a second driver. An owner attached over ssh is outside
+  # this bookkeeping (sanctioned, 4.5).
+  if ! multi_driver; then
+    local holder
+    holder="$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
+                | grep '^d-' | grep -vx "d-${id}" | head -n1 || true)"
+    [ -z "$holder" ] || die \
+      "driver attach refused: grant ${holder#d-} holds the keyboard (owner may flip multi-driver on)"
+  fi
+  tmux new-session -d -t agent -s "d-${id}" 2>/dev/null || true
+  # 4.6.1: the pre-check alone is check-then-create -- two racing writable
+  # attaches both see an empty list, both create, and the sweep kills neither
+  # (both grants healthy, both sessions mode-matched). So re-check AFTER
+  # creating: if another d-* precedes ours (creation time, tie broken by name),
+  # we lost the race -- kill our own session and refuse naming the survivor.
+  # Both racers run this same rule, so exactly one persists.
+  if ! multi_driver; then
+    local own rival rc rn
+    own="$(tmux display-message -p -t "d-${id}" '#{session_created}')"
+    rival="$(tmux list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
+               | grep ' d-' | grep -v " d-${id}\$" | sort -n | head -n1 || true)"
+    if [ -n "$rival" ]; then
+      read -r rc rn <<<"$rival"
+      if [ "$rc" -lt "$own" ] || { [ "$rc" -eq "$own" ] && [[ "$rn" < "d-${id}" ]]; }; then
+        tmux kill-session -t "d-${id}" 2>/dev/null || true
+        die "driver attach refused: grant ${rn#d-} holds the keyboard (owner may flip multi-driver on)"
+      fi
+    fi
+  fi
+  audit_attach driver "$id"
+  exec tmux attach-session -t "d-${id}" \; set-option destroy-unattached on
 }
 
 # No catch-all-as-token: an unknown first arg dies. Anything a browser smuggles
