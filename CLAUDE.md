@@ -12,6 +12,9 @@ Hive memory: recall() before I re-derive a decision or re-litigate a ruling;
 memory_add(source=<msg id>) in the same turn as any ruling I send or receive (draft below
 my tier is the gate working). Contract = an invariant a peer could break; decision = a
 choice with a rationale; lesson (lesson_add) = a defect that taught me something.
+Holding ratify tier: recall(status='draft') is my queue; ratify(id) approves, reject(id,
+reason) declines -- never silently ignore a draft, never rewrite someone else's text then
+approve it: reject and redraft citing the same source.
 Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
 ws://127.0.0.1:8765/wake --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. Its
 task-completion notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. One
