@@ -75,6 +75,13 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
 DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.2")
+# The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
+# lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
+# homes must belong to THIS uid, not to whoever ran the launcher: the two
+# coincide only when the operator's uid happens to be 1000 (msg 8475), and the
+# P1 daemon's will not.
+AGENT_UID = 1000
+AGENT_GID = 1000
 # Per-agent persistent state (DES-005 sec 4, a7d389b): data/<user>/<agent>/{claude,repos}.
 # The user segment exists for ownership and deletion ONLY -- two agents of one
 # user share NOTHING on disk.
@@ -392,6 +399,18 @@ def _exists(name):
     return _docker("inspect", name, check=False, capture=True).returncode == 0
 
 
+def _own_agent_dirs(root, image):
+    """Hand the agent dirs to the image's uid (msg 8475). A plain os.chown
+    needs CAP_CHOWN the launcher's own uid may not have; its actual privilege
+    is the docker socket, so the chown rides a throwaway container of the very
+    image about to use the dirs. -R heals pre-existing wrong-uid files from a
+    launcher that ran before this fix, not just fresh mkdirs."""
+    _docker("run", "--rm", "--entrypoint", "chown",
+            "-v", f"{root}:/own", image,
+            "-R", f"{AGENT_UID}:{AGENT_GID}", "/own/claude", "/own/repos",
+            capture=True)
+
+
 def _ensure_network(net, broker_url):
     """Create the shared network if missing and pull the broker onto it, so the agent
     can resolve it by DNS. Both are idempotent -- create/connect on an existing
@@ -447,13 +466,14 @@ def cmd_new(a):
     )
 
     # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
-    # host user browses it; the agent dirs under it are plain mkdirs.
+    # host user browses it; the agent dirs under it belong to the AGENT.
     root = data_root(a.user, a.agent)
     user_root = os.path.dirname(root)
     os.makedirs(user_root, mode=0o700, exist_ok=True)
     os.chmod(user_root, 0o700)
     for sub in ("claude", "repos"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
+    _own_agent_dirs(root, a.image)
 
     _ensure_network(a.network, a.broker)
     if a.replace:
