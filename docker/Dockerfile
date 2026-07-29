@@ -55,6 +55,16 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && npm cache clean --force \
     && apt-get update && playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
+# Globally-installed packages must be require()-able from anywhere. npm's global
+# root here is /usr/lib/node_modules, but node's default resolution for a bare
+# require() outside a project walks ~/.node_modules, ~/.node_libraries and
+# /usr/lib/node -- none of which is that. So `node -e "require('playwright')"`
+# threw MODULE_NOT_FOUND from every cwd until the caller happened to discover
+# the path themselves (reported by reveille-senior-ui-ux, msg 8523, after
+# hitting it mid-task). Installed-but-unreachable is the same defect class as a
+# capability with no reachable path.
+ENV NODE_PATH=/usr/lib/node_modules
+
 RUN groupadd -g ${GID} agent \
     && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent \
     && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent
