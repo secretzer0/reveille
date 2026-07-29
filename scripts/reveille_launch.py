@@ -1232,19 +1232,46 @@ def _agent_status(conn, user):
 # input.
 LAUNCH_UI = """<!doctype html><html><head><meta charset="utf-8">
 <title>Reveille agents</title><style>
-body{font-family:system-ui,sans-serif;background:#111;color:#ddd;max-width:44rem;
- margin:2rem auto;padding:0 1rem}
-h1{font-size:1.2rem}h2{font-size:1rem;margin-top:1.6rem}
-input,select,textarea,button{background:#222;color:#ddd;border:1px solid #444;
- border-radius:4px;padding:.35rem .5rem;font:inherit}
-button{cursor:pointer}label.chip{display:inline-block;margin:.15rem .4rem .15rem 0}
-.row{margin:.5rem 0}.dim{color:#888;font-size:.85rem}.err{color:#f88}
-.card{border:1px solid #333;border-radius:6px;padding:.6rem .8rem;margin:.5rem 0}
-a{color:#8cf}
+/* U5: the same tokens the bus uses, so one origin reads as one product.
+   Copied deliberately rather than shared -- a stylesheet served by the broker
+   would make this page depend on it, and the whole point is that neither
+   service needs the other to work. */
+:root{
+ color-scheme:dark;
+ --bg:#0e1116;--rail:#0a0d12;--card:#151a21;--line:#242c37;--hover:#1a212b;
+ --fg:#dce3ec;--dim:#8b95a3;--faint:#5a6472;--gold:#e2a63d;--green:#3ecf6a;
+}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--fg);
+ font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+header{background:var(--rail);border-bottom:1px solid var(--line);padding:1rem 0}
+/* One measure for the bar and the page, so the title and the first field sit
+   on the same left edge instead of the header hugging the viewport. */
+.wrap{max-width:46rem;margin:0 auto;padding:0 1.4rem}
+main{margin:1.6rem auto 4rem}
+h1{font-size:1.05rem;letter-spacing:.02em;font-weight:700}
+h2{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;
+ color:var(--faint);margin:1.8rem 0 .5rem;font-weight:600}
+input,select,textarea,button{background:var(--bg);color:var(--fg);
+ border:1px solid var(--line);border-radius:7px;padding:.42rem .6rem;font:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--gold)}
+button{cursor:pointer;background:var(--card)}
+button:hover{border-color:var(--gold)}
+label.chip{display:inline-block;margin:.15rem .5rem .15rem 0;color:var(--dim)}
+.row{margin:.55rem 0}
+.dim{color:var(--dim);font-size:.85rem}
+.err{color:#e2603d}
+.card{border:1px solid var(--line);border-radius:9px;background:var(--card);
+ padding:.7rem .9rem;margin:.5rem 0}
+.card b{color:var(--gold)}
+a{color:var(--gold);text-decoration:none}
+a:hover{text-decoration:underline}
+pre{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim)}
 </style></head><body>
-<h1>REVEILLE — your agents</h1>
-<div class="row dim"><a href="/">&larr; back to the bus</a> &middot;
- signed in via your broker session &mdash; no second login</div>
+<header><div class="wrap"><h1>REVEILLE &mdash; your agents</h1>
+<div class="dim"><a href="/">&larr; back to the bus</a> &middot;
+ signed in via your broker session &mdash; no second login</div></div></header>
+<main class="wrap">
 <div id="login" class="err" style="display:none">Not signed in. Log in at the
  <a href="" id="brokerLink">broker UI</a> first, then reload.</div>
 <div id="app" style="display:none">
@@ -1283,6 +1310,7 @@ a{color:#8cf}
  <span class="dim">stored 0600 on the launcher host; values are never echoed back</span></div>
 <div id="credNotes" class="row dim"></div>
 </div>
+</main>
 <script>
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,
  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1298,7 +1326,9 @@ async function refresh(){
  let d;try{d=await api('/agents');}catch(e){
   if(e.message==='401'){document.getElementById('login').style.display='';
    document.getElementById('brokerLink').href=
-    location.protocol+'//'+location.hostname+':8765/ui';return;}
+    // Behind the proxy the bus is "/" on this same origin; hit directly on
+    // loopback there is no proxy, so fall back to the broker's own port.
+    B?'/':location.protocol+'//'+location.hostname+':8765/ui';return;}
   throw e;}
  document.getElementById('app').style.display='';
  const list=document.getElementById('list');
