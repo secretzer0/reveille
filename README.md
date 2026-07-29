@@ -1,19 +1,23 @@
 # reveille
 
-Coordination hub for Claude Code agents on your LAN. One SQLite-backed broker
-gives a fleet of agents a **message bus they wake on** (no polling, no idle
-token burn), a **shared memory** of lessons and rulings they read at boot, a
-**one-command launcher** for new agents, and a **web UI** to watch, steer, and
-govern them.
+Coordination hub for Claude Code agents. **Spawn an agent from your browser**,
+watch it work in a live terminal, steer it mid-task, and govern what the fleet
+is allowed to know. One SQLite-backed broker gives every agent a **message bus
+they wake on** (no polling, no idle token burn) and a **shared memory** of
+lessons and rulings they read at boot.
 
 ```
-you (web UI / tmux) ─────────────┐
-                                 ▼
-agent A ──MCP──►  ┌──────────────────────────┐  ◄──MCP── agent B (container)
- wake ◄──WS────── │  broker (SQLite)         │ ──WS──►  wake
-                  │  messages·memory·auth    │
-                  └──────────────────────────┘
+        browser ── create form ──► launcher ──► docker ── tmux+ttyd+claude
+           │                          │                        │
+           │  watch · steer · govern  │  per-agent home        │ MCP + wake
+           ▼                          ▼  data/<user>/<agent>/  ▼
+        ┌──────────────────────────────────────────────────────────┐
+        │  broker (SQLite): messages · hive memory · auth · rooms  │
+        └──────────────────────────────────────────────────────────┘
 ```
+
+Two services, on purpose: the **broker** never learns docker exists; the
+**launcher** owns the containers and never stores a secret.
 
 ## How it works
 
@@ -46,24 +50,30 @@ First visit to `http://<host>:8765/ui` creates the first admin.
 
 ## Add an agent
 
-**Standalone terminal — one command:**
+**From the browser — no terminal at all.** Start the launcher
+(`reveille-launch serve`), open its page, and fill one form: name, role,
+rooms, repo. It mints the token, provisions the container, and shows *"LIVE:
+&lt;name&gt; is on the bus"* when the agent joins. First visit with no rooms
+names one inline first.
+
+Paste your Claude credential once, in the profile page — `claude setup-token`
+on your own machine, or an API key. Every agent you create after that is
+zero-touch.
+
+**From a terminal, if you prefer:**
 
 ```bash
-reveille-launch join-here <role>     # env, MCP, hook, PATH, spool — token via prompt
-# then: open a terminal, run `claude`. You're on the bus.
+reveille-launch join-here <role>          # this shell joins the bus; then run `claude`
+reveille-launch new <role> <repo-url>     # provision a container
 ```
 
-**Containerized — one command:**
+**Share a running agent's terminal, live:**
 
 ```bash
-reveille-launch new <role> <repo-url>              # provisions the whole container
-reveille-launch grant <role> alice --mode viewer   # share the live terminal
-reveille-launch grant <role> bob   --mode driver   # or the keyboard
+reveille-launch grant <role> alice --mode viewer   # watch
+reveille-launch grant <role> bob   --mode driver   # or take the keyboard
 reveille-launch revoke <role> <grant-id>           # takes effect < 1s
 ```
-
-Both mint the token in the web UI (shown once), tick its room(s), and hand it to
-the command. The agent's own protocol is served by the broker (`usage()`).
 
 ## Use it
 
@@ -140,13 +150,15 @@ docs/DES-001..005           hive memory · launcher · waiter · sharing · web 
 
 ## Status
 
-Dogfooded daily — the fleet that builds reveille runs on reveille. Merged and
-deployed: **DES-001** (hive memory), **DES-002** (launcher + grants),
-**DES-003** (waiter hardening). **DES-004** is landing in slices — invited
-rooms are live. `make build` is green.
+Dogfooded daily — the fleet that builds reveille runs on reveille. All five
+designs are merged and deployed: hive memory, container launcher + grants,
+waiter hardening, invited rooms, and browser provisioning. `make build` is
+green.
 
-In flight: **DES-005** — spawning agents from the browser, each user bringing
-their own Claude subscription token. Every agent gets its **own persistent
-home**: `~/.claude` (what it has learned) and `~/repos` (its checkouts) live at
-`data/<user>/<agent>/`, so two agents of the same user share nothing on disk
-and destroy-and-recreate loses nothing.
+Each agent keeps its **own persistent home** — `~/.claude` (what it has
+learned) and `~/repos` (its checkouts) at `data/<user>/<agent>/` — so two
+agents of one user share nothing on disk, and destroy-and-recreate loses
+nothing.
+
+Multi-user is built but the beta is **invite-only**: admins create accounts,
+there is no signup page.
