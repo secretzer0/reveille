@@ -65,6 +65,20 @@ somebody meant it.
 launcher.db: $REVEILLE_LAUNCH_DB or ~/.reveille/launcher.db. Container + grant
 records only, never a secret and never a minted token. Audit log: audit.log next
 to the db ($REVEILLE_LAUNCH_AUDIT overrides).
+
+SERVING IT (DES-006 U2). `serve` refuses to start when the docker socket is
+unreachable, takes a flock so one instance serves one data root, prints the
+resolved data root and db, and binds 127.0.0.1 -- the proxy is the only way in.
+Supervision is the Stop hook's blind flock-guarded spawn (no systemd), and it
+spawns the launcher ONLY where an operator has declared where state lives:
+
+    ~/.reveille/launcher.env       # sourced by the hook; no file, no spawn
+      REVEILLE_LAUNCH_DATA=/srv/reveille/data
+      REVEILLE_LAUNCH_DB=/srv/reveille/launcher.db
+
+That file is the deliberate declaration: without it the data root would follow
+whoever happened to start the process, and every agent's home would move the
+day someone else ran the command (msg 8499).
 """
 import argparse
 import contextlib
@@ -421,6 +435,54 @@ def _docker(*args, check=True, capture=False):
 
 def _exists(name):
     return _docker("inspect", name, check=False, capture=True).returncode == 0
+
+
+def docker_probe_error(rc, stderr):
+    """The startup docker probe's verdict, pure so the refusal is testable
+    without a broken docker (msg 8499): rc 0 is fine, anything else refuses.
+    A launcher that cannot reach the socket must not serve -- a health
+    endpoint returning 200 while provisioning is structurally impossible is
+    the 'looks fine, does nothing' shape we keep paying for. Returns the
+    operator-facing message, or None when the socket is reachable."""
+    if rc == 0:
+        return None
+    err = (stderr or "").strip()
+    hint = ("the launcher's user is not in the docker group -- add it "
+            "(usermod -aG docker <user>) and start a new login session"
+            if "permission denied" in err.lower() else
+            "is the docker daemon running, and is DOCKER_HOST correct?")
+    return (f"reveille-launch: cannot reach the docker socket ({hint}).\n"
+            f"docker said: {err or f'exit {rc}'}")
+
+
+def _require_docker():
+    """Refuse to serve without the socket. `docker version` is the cheapest
+    call that actually round-trips to the daemon (`docker --version` does
+    not -- it answers from the client alone and would pass on a host with no
+    daemon at all)."""
+    p = _docker("version", "--format", "{{.Server.Version}}",
+                check=False, capture=True)
+    msg = docker_probe_error(p.returncode, p.stderr)
+    if msg:
+        raise SystemExit(msg)
+    return (p.stdout or "").strip()
+
+
+def _singleton(lock_path):
+    """One serving launcher per data root, the waiter's discipline (DES-003
+    2.3): the flock IS the guard, so a supervisor may spawn blindly and the
+    loser exits itself. The fd stays open for the process's life on purpose;
+    closing it would drop the lock."""
+    import fcntl
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fd = open(lock_path, "w")   # noqa: SIM115 -- held for the process lifetime
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(
+            f"reveille-launch: another launcher already holds {lock_path} "
+            "-- this one exits (the running instance keeps serving)")
+    return fd
 
 
 # ---- credential profiles (DES-005 P2) ----------------------------------------------
@@ -1541,9 +1603,22 @@ def build_api(auth_url):
 
 def cmd_serve(a):
     import uvicorn
+    # Refuse before binding, then say out loud WHERE state lives: the data root
+    # follows whoever started the process, so an unnoticed wrong one silently
+    # moves every agent's home and its history (msg 8499). Printing it makes a
+    # wrong root visible at boot instead of after an agent's memory vanishes.
+    server = _require_docker()
+    db_path = os.environ.get(
+        "REVEILLE_LAUNCH_DB", os.path.expanduser("~/.reveille/launcher.db"))
+    lock = _singleton(os.path.join(os.path.dirname(db_path), ".launcher.lock"))
     app = build_api(a.auth_url)
-    print(f"reveille-launch api on {a.host}:{a.port} (auth: {a.auth_url}/me)")
-    uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
+    print(f"reveille-launch api on {a.host}:{a.port} (auth: {a.auth_url}/me)\n"
+          f"  docker  {server}\n  data    {DEFAULT_DATA}\n  db      {db_path}",
+          flush=True)
+    try:
+        uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
+    finally:
+        lock.close()
     return 0
 
 

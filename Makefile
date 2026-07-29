@@ -210,6 +210,12 @@ tenancy-smoke: agent-image
 launcher-api-smoke: agent-image
 	uv run python tests/launcher_api_smoke.py
 
+# DES-006 U2 gate: the launcher refuses to serve without the docker socket,
+# says where its state lives, is one-per-data-root by flock, binds 127.0.0.1
+# only, and a blind respawn after kill -9 brings it back.
+launcher-supervision-smoke: sync
+	uv run python tests/launcher_supervision_smoke.py
+
 # DES-003 W2 gate: join-here from a clean shell (scratch HOME + scratch broker):
 # checklist walked, token in exactly one file (0600 fragment), MCP config carries
 # the env template not the value, live+connected from the bootstrap alone.

@@ -40,6 +40,27 @@ if flock -n "$spool/.lock" true 2>/dev/null; then
     >>"$spool/waked.log" 2>&1 &
 fi
 
+# The LAUNCHER (DES-006 U2), same supervision, same flock discipline: it is a
+# host service, not an agent's, so it is spawned only where an operator has
+# declared where its state lives -- ~/.reveille/launcher.env, which must set
+# REVEILLE_LAUNCH_DATA and REVEILLE_LAUNCH_DB. No file, no spawn: a data root
+# inherited from whoever happened to run a command silently moves every agent's
+# home (msg 8499), so the deliberate declaration IS the gate. The launcher takes
+# the same lock at startup, so a blind spawn is safe; it binds 127.0.0.1 by
+# default and the proxy is the only way in.
+lenv="$HOME/.reveille/launcher.env"
+if [ -f "$lenv" ]; then
+  # shellcheck disable=SC1090
+  ( set -a; . "$lenv"; set +a
+    lockdir="$(dirname "${REVEILLE_LAUNCH_DB:-$HOME/.reveille/launcher.db}")"
+    mkdir -p "$lockdir"
+    if flock -n "$lockdir/.launcher.lock" true 2>/dev/null; then
+      py="$bindir/python"; [ -x "$py" ] || py=python3
+      nohup "$py" "$repo/scripts/reveille_launch.py" serve \
+        --auth-url "$url" >>"$lockdir/launcher.log" 2>&1 &
+    fi ) &
+fi
+
 # Watcher armed? wake-watch takes no secret, so a cmdline match is safe.
 pgrep -f "wake-watch $role( |\$)" >/dev/null 2>&1 && exit 0
 
