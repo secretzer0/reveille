@@ -136,11 +136,15 @@ choice with a rationale; lesson (lesson_add) = a defect that taught me something
 Holding ratify tier: recall(status='draft') is my queue; ratify(id) approves, reject(id,
 reason) declines -- never silently ignore a draft, and never rewrite someone else's text
 then approve it: reject and redraft citing the same source.
-Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
-ws://<broker-host>:8765/wake --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. Its
-task-completion notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. One
-waiter covers all my rooms. Unicast rings; broadcasts queue until my next turn. Waiter down
--> mail still queues; inbox() each turn.
+Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
+entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
+becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
+armed -- Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`. Its task
+completion is a bus ring: inbox(), ack() everything, act only if owed, DELETE the spool
+files I processed (rm those specific files, never a glob), then re-arm the same command.
+The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
+and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
+lost. One watcher covers all my rooms. Unicast rings; broadcasts queue until my next turn.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.
@@ -157,6 +161,20 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.15 THE WAITER SPLIT (DES-003 W1). `wake --once` fused two jobs with
+       opposite lifetimes; the whole waiter lesson family was symptoms of that
+       fusion. Now: reveille-waked (spawned by your Stop hook or container
+       entrypoint -- NOT by you) holds the one wake socket and writes each
+       ring into your spool; you arm `wake-watch <your-name>` instead --
+       secretless, stateless, exits printing the ring when a spool entry
+       appears, and a PRE-EXISTING entry fires immediately, so rings that
+       land while unarmed are never lost. Drain discipline per ring: inbox()
+       -> ack() -> act if owed -> DELETE the spool files you processed (rm
+       those specific files) -> re-arm wake-watch. Duplicates of the watcher
+       are harmless; never start reveille-waked yourself -- the hook's
+       flock-guarded spawn is the supervisor. Broker rule: a second wake
+       attachment for the same agent SUPERSEDES the first (superseded frame;
+       legacy `wake --once` exits code 2 on it and must not be re-armed).
 0.2.14 The memory UI (DES-001 S6c -- S6 complete, DES-001 done). /ui grows a
        Memory tab: ratify queue with per-item confirm (no bulk, ever), typed
        reason required to reject, provenance inline (source message, displaced
@@ -427,6 +445,7 @@ def _notify(room_id, names):
 
 
 _SHUTDOWN = {"shutdown": True}
+_SUPERSEDE = {"supersede": True}   # DES-003 2.3: newer wake attachment wins
 
 
 def _push_shutdown():
@@ -1013,6 +1032,15 @@ async def wake_ws(ws: WebSocket):
     _seen(name, rooms)
     log.info("%s wake connected (%s room(s))", name, len(rooms))
     q: asyncio.Queue = asyncio.Queue()
+    # DES-003 2.3: one wake attachment per agent -- a SECOND attachment
+    # SUPERSEDES the first (supersede, not refuse: a daemon respawned after a
+    # crash must reclaim its slot while the old TCP lingers half-open). The
+    # old holder gets a `superseded` frame and closes; with reveille-waked
+    # there should never be two live daemons -- this makes the harm of a
+    # violation zero instead of relying on there never being one.
+    for old in list(_waiters.get(key, ())):
+        old.put_nowait(_SUPERSEDE)
+        log.info("%s wake superseded (newer attachment)", name)
     _waiters.setdefault(key, set()).add(q)
     try:
         # Ring once if DIRECT mail is already waiting at connect, so a just-attached
@@ -1056,6 +1084,11 @@ async def wake_ws(ws: WebSocket):
             vals = [woke.result()] if woke in done and not woke.cancelled() else []
             while not q.empty():
                 vals.append(q.get_nowait())
+            if any(v is _SUPERSEDE for v in vals):
+                await ws.send_json({"wake": False, "reason": "superseded",
+                    "note": "a newer wake attachment for this agent took the "
+                            "slot -- this holder should exit, not reconnect"})
+                break
             if any(v is _SHUTDOWN for v in vals):
                 await ws.send_json({"wake": False, "reason": "shutdown",
                     "note": "broker restarting -- do not reply, just re-arm your "

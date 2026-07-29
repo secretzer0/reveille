@@ -15,11 +15,15 @@ choice with a rationale; lesson (lesson_add) = a defect that taught me something
 Holding ratify tier: recall(status='draft') is my queue; ratify(id) approves, reject(id,
 reason) declines -- never silently ignore a draft, never rewrite someone else's text then
 approve it: reject and redraft citing the same source.
-Reachability: I keep a wake waiter armed -- Bash run_in_background=true: `wake --once --url
-ws://127.0.0.1:8765/wake --name $REVEILLE_AGENT_ROLE --token $REVEILLE_TOKEN`. Its
-task-completion notification is a bus ring: inbox(), ack(), act only if owed, RE-ARM. One
-waiter covers all my rooms. Unicast rings; broadcasts queue until my next turn. Waiter down
--> mail still queues; inbox() each turn.
+Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
+entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
+becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
+armed -- Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`. Its task
+completion is a bus ring: inbox(), ack() everything, act only if owed, DELETE the spool
+files I processed (rm those specific files, never a glob), then re-arm the same command.
+The watcher is secretless and stateless: duplicates are harmless, arming early is safe, a
+ring that lands while unarmed waits in the spool and fires at the next arm. One watcher
+covers all my rooms. Unicast rings; broadcasts queue until my next turn.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.

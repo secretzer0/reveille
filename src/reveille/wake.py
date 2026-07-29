@@ -57,6 +57,14 @@ async def _session(uri, once):
                 if isinstance(obj, dict) and obj.get("wake"):
                     print(frame, flush=True)  # a REAL ring: this is the wake
                     return 0
+                if isinstance(obj, dict) and obj.get("reason") == "superseded":
+                    # DES-003 2.3: a newer attachment (reveille-waked) owns the
+                    # slot. Exit WITHOUT ringing and without reconnecting --
+                    # holding through this would steal the slot back and
+                    # ping-pong the daemon off the bus.
+                    print("wake: superseded by a newer attachment -- exiting, "
+                          "do not re-arm this legacy waiter", file=sys.stderr)
+                    return 2
                 # informational frame (e.g. reason:shutdown) -- never a wake; the
                 # broker is restarting and will be back. Hold on, do not fire.
                 print(f"wake: broker note {frame} -- holding through it", file=sys.stderr)

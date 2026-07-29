@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
-# Stop hook: block the agent from ending its turn while its wake waiter is unarmed.
-# The waiter (wake --once, run_in_background) is what turns a bus ring into a harness
-# task notification -- if it is not running, the agent is deaf to real-time wakes.
-# Fail-open on every doubt: no role, no broker, or a prior block this turn -> allow stop.
+# Stop hook (DES-003 2.1/2.2): the host-side supervisor for the split waiter.
+#
+# Two jobs, opposite lifetimes:
+#   reveille-waked  holds THE wake socket and spools rings. Spawned here if
+#                   absent; the flock on the agent's spool .lock is the
+#                   singleton guard, so a blind spawn is safe -- a loser exits
+#                   itself. This hook IS the supervisor (operator ruling: no
+#                   systemd); the next firing after a crash respawns it.
+#   wake-watch      exit-to-notify, stateless and secretless. If none is
+#                   running, block the stop and print the arm line.
+#
+# Verification is by FLOCK, never presence (a reconnecting daemon reads as
+# disconnected mid-retry) and never pgrep of anything carrying a token
+# (wake-watch carries none, so matching it by name is safe).
+# Fail-open on every doubt: no role, no broker, or a prior block -> allow stop.
 set -u
 
 input="$(cat)"
@@ -12,13 +23,26 @@ role="${REVEILLE_AGENT_ROLE:-}"
 [ -n "$role" ] || exit 0
 url="${REVEILLE_URL:-http://127.0.0.1:8765}"
 curl -fsS --max-time 2 "$url/version" >/dev/null 2>&1 || exit 0
-pgrep -f "wake --once.*--name $role( |\$)" >/dev/null 2>&1 && exit 0
 
 hostport="${url#*://}"; hostport="${hostport%%/*}"
 scheme=ws; [ "${url%%://*}" = "https" ] && scheme=wss
 repo="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-wake_bin="$repo/.venv/bin/wake"; [ -x "$wake_bin" ] || wake_bin="uv run --project $repo wake"
-cmd="$wake_bin --once --url $scheme://$hostport/wake --name $role"
-[ -n "${REVEILLE_TOKEN:-}" ] && cmd="$cmd --token \$REVEILLE_TOKEN"
-printf '{"decision":"block","reason":"Wake waiter not armed -- you are deaf to bus rings. Arm it now with Bash run_in_background=true: %s . Its task completion is a ring: inbox(), ack(), act only if owed, then re-arm."}\n' "$cmd"
+bindir="$repo/.venv/bin"
+spool="${REVEILLE_SPOOL:-$HOME/.reveille/spool}/$role"
+mkdir -p "$spool"
+
+# Daemon alive? flock -n SUCCEEDING means nobody holds it -> daemon absent ->
+# spawn one. The daemon takes the same flock at startup, so a race here
+# resolves itself (the loser exits 0). Token rides the environment, never argv.
+if flock -n "$spool/.lock" true 2>/dev/null; then
+  waked="$bindir/reveille-waked"; [ -x "$waked" ] || waked="reveille-waked"
+  nohup "$waked" --url "$scheme://$hostport/wake" --name "$role" \
+    >>"$spool/waked.log" 2>&1 &
+fi
+
+# Watcher armed? wake-watch takes no secret, so a cmdline match is safe.
+pgrep -f "wake-watch $role( |\$)" >/dev/null 2>&1 && exit 0
+
+watch_bin="$bindir/wake-watch"; [ -x "$watch_bin" ] || watch_bin="wake-watch"
+printf '{"decision":"block","reason":"Wake watcher not armed -- you are deaf to bus rings. Arm it now with Bash run_in_background=true: %s %s . Its task completion is a ring: inbox(), ack(), act only if owed, DELETE the spool entries you processed (rm the specific files under %s/new/), then re-arm the same command."}\n' "$watch_bin" "$role" "$spool"
 exit 0
