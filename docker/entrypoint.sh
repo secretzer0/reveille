@@ -38,6 +38,18 @@ umask 077
 printf '%s' "$REVEILLE_GATE_SECRET" > /home/agent/.gate-secret
 umask 022
 
+# The wake socket holder (DES-003 2.1): one daemon, one attachment, rings
+# become spool files. In a container the entrypoint is the supervisor -- it
+# dies and restarts with the container; the flock makes a double-start a
+# no-op. Token rides this shell's env, never argv.
+ws_url="${REVEILLE_URL/http/ws}/wake"
+mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
+( while :; do
+    reveille-waked --url "$ws_url" --name "$REVEILLE_AGENT_ROLE" \
+      >>"$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log" 2>&1
+    sleep 2
+  done ) &
+
 # Browser plane: ttyd execs `attach-gate attach` with the ?arg= token appended.
 # The literal "attach" is the security boundary: -a gives the CLIENT argv, and
 # only this pinned first arg keeps the trusted-side subcommands (mint, verify)

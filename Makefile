@@ -192,6 +192,12 @@ launch-smoke: agent-image
 grant-smoke: agent-image
 	uv run python tests/grant_smoke.py
 
+# DES-003 W1 gate: waked + spool + wake-watch end to end against a real broker --
+# attach+ring, supersede (old holder exits 2), kill -9 reclaim, broker restart
+# absorbed with zero agent re-arms.
+waiter-smoke: sync
+	uv run python tests/waiter_smoke.py
+
 lint:
 	uv run ruff check src tests scripts
 
