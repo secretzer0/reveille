@@ -1938,8 +1938,16 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
     entity overlap with the caller's role, then live contracts, then decisions
     (recent weighted up), then own state, then a presence digest. Budget is CHARS
     (~4/token, approximate by construction: the broker has no tokenizer, G4).
-    Every truncation is MARKED -- a silent cap reads as "covered everything"."""
-    budget = max(2000, int(budget))
+    Every truncation is MARKED -- a silent cap reads as "covered everything".
+
+    Budget accounting (s7 under-fill fix): the caller's budget is honored AS
+    GIVEN -- the old max(2000, budget) floor silently ran a bigger brief than
+    asked, the sibling sin of a silent cap. Section shares are guarantees, not
+    ceilings: unused share carries forward to the next section, and a section
+    whose FIRST row exceeds its share still shows it when the global remainder
+    fits -- one lesson beats zero lessons, and the share cap only bounds row
+    two onward. The one hard promise is the global budget."""
+    budget = max(0, int(budget))
     role_ents = {e.lower() for e in
                  (set((role or "").replace(",", " ").split()) |
                   extract_entities(role or ""))}
@@ -1965,18 +1973,24 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
         ents = set(r["entities"].split())
         return len(ents & role_ents)
 
+    carry = 0  # unused share flows to the NEXT section, never backwards
+
     def section(title, rows, render, cap_share):
+        nonlocal carry
         room_for = dict(rooms)
-        cap = int(budget * cap_share)
+        cap = int(budget * cap_share) + carry
         used, shown = 0, 0
         emit(f"== {title} ({len(rows)}) ==")
         for r in rows:
             line = render(r, room_for)
-            if used + len(line) > cap or spent + len(line) > budget:
-                break
+            if spent + len(line) > budget:
+                break  # the global budget is the one hard promise
+            if shown > 0 and used + len(line) > cap:
+                break  # the share cap bounds row two onward only
             emit(line)
             used += len(line) + 1
             shown += 1
+        carry = max(0, cap - used)
         if shown < len(rows):
             truncated.append(title)
             # the pointer must name the tool that actually serves this section:
