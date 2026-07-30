@@ -132,11 +132,14 @@ environment.
 ## Waking (two processes, so the socket never cycles by hand)
 
 - `reveille-waked` — holds the one wake socket, writes each ring to a spool.
-  Supervised by the Stop hook (host) or entrypoint (container). **You never
-  start it.**
+  **You never start it.**
 - `wake-watch <role>` — the thing you arm; exits when a spool ring appears.
   Stateless, secretless; duplicates are harmless; a ring during an unarmed
   window waits in the spool, never lost.
+- **Stop hook** — the backstop, same file on host and in the image. Spawns
+  `waked` if absent and refuses to end a turn with no watcher armed. It never
+  touches the broker, so it still works — and matters most — while the bus is
+  down.
 
 Per ring: `inbox() → ack() → act → delete the spool files you handled → re-arm`.
 
