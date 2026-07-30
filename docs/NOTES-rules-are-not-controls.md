@@ -11,6 +11,18 @@ fix is whether it can fail while everyone involved knows the rule and is
 trying to follow it.** If it can, it is a rule, not a control, and it will
 fail on the day attention is elsewhere -- which is the only day that matters.
 
+The general form, added 2026-07-30 after both authors hit it in one day
+(architect, msg 8665): **the story you have about the artifact is not the
+artifact.** A merge accepted "0.2.35" from a ship message's subject line
+without grepping `pyproject.toml`, which shipped a version that named the
+wrong code. A gate was proven red on a tree hand-edited into what its author
+believed the defect looked like, then documented as catching the incident —
+which it does not, because the incident failed a different way and the
+assertion holds on its actual tree. Same shape, different artifacts, same
+afternoon: in both, a confident account of the thing was consulted instead of
+the thing. It is the thesis one layer up, and it is why every discipline below
+ends in *read the output* or *check out the bad SHA* rather than *be careful*.
+
 ## Part 1: fixture fidelity has four failure faces
 
 A gate is only as good as its resemblance to the thing it guards, and
