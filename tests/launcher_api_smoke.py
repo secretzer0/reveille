@@ -20,6 +20,8 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ui_copy  # noqa: E402  -- the served copy every gate asserts, in ONE place
 from reveille import store  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -217,21 +219,13 @@ def main():
         # the launcher UI page serves (content sanity only; the real-browser
         # pass is the P3 gate proper)
         ui = req(L, "/ui", ana)
-        assert "never shown" in ui
-        # U7: creation is a page-level action behind a COLLAPSED disclosure, never
-        # rendered adjacent to a managed row -- that adjacency is what read as
-        # "redefine it to restart it". Asserted as the property, not the wording:
-        # a <details> that ships `open` would look identical to a reviewer reading
-        # the diff and would reintroduce the whole defect.
-        assert "<details class=\"addAgent\"><summary>Add agent</summary>" in ui
-        assert "<details class=\"addAgent\" open" not in ui
-        assert "name your first" in ui   # M3: the first-run chain ships
-        # The destroy modal must name what purge=1 ACTUALLY removes. It deletes
-        # the whole agent home -- claude/ as well as repos/ -- and the copy said
-        # only "local repo checkout", which reads as "what it learned survives".
-        # Pinned here because the copy and the rmtree live in different files.
-        assert "~/.claude" in ui and "Hive memory" in ui
-        assert "CREDENTIALS" in ui and "clear overrides" in ui   # U1 ships
+        # Every string this page is answerable for, from tests/ui_copy.py -- see
+        # there for why each one is load-bearing. The list is shared with
+        # single-origin-smoke and test_daemon so it cannot drift between them.
+        for _s in ui_copy.LAUNCHER_PAGE:
+            assert _s in ui, f"the launcher page lost copy a gate asserts: {_s!r}"
+        assert ui_copy.DISCLOSURE_OPEN not in ui, \
+            "the create form must not ship expanded -- the U7 adjacency bug"
 
         # -- stop, destroy, profile ------------------------------------------
         responses.append(req(L, "/agents/dev/stop", ana, "POST", {}))

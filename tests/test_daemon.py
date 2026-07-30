@@ -394,14 +394,11 @@ def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
     revlaunch = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(revlaunch)
 
-    # single_origin_smoke: the destroy modal must not understate purge=1
-    for s in ("~/.claude", "Hive memory"):
+    import ui_copy
+    for s in ui_copy.BUS_PAGE:
         assert s in daemon.WEBCHAT, f"single-origin-smoke asserts {s!r}"
-    # launcher_api_smoke: same, plus the disclosure property and U1/M3 markers
     ui = revlaunch.LAUNCH_UI
-    for s in ("~/.claude", "Hive memory", "never shown", "name your first",
-              "CREDENTIALS", "clear overrides",
-              '<details class="addAgent"><summary>Add agent</summary>'):
+    for s in ui_copy.LAUNCHER_PAGE:
         assert s in ui, f"launcher-api-smoke asserts {s!r}"
-    assert '<details class="addAgent" open' not in ui, \
+    assert ui_copy.DISCLOSURE_OPEN not in ui, \
         "the create form must not ship expanded -- that is the U7 adjacency bug"

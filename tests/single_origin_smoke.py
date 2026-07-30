@@ -33,6 +33,8 @@ import urllib.request
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import ui_copy  # noqa: E402  -- the served copy every gate asserts, in ONE place
 from reveille import store  # noqa: E402
 
 USER, PASS = "ana", "hunter2hunter2"
@@ -123,11 +125,11 @@ def main():
         assert code == 200 and 'id="agentsNav"' in page, code
         assert f'const AGBASE="{AGENTS_PATH}"' in page, \
             "the page does not carry the launcher prefix it must fetch with"
-        # Destroy sends purge=1, which rmtree's the whole agent home. The modal
-        # has to say so: "local repo checkout" alone reads as "what it learned
-        # survives", and the copy lives in a different file from the rmtree.
-        assert "~/.claude" in page and "Hive memory" in page, \
-            "the destroy modal understates what purge=1 removes"
+        # Every string this page is answerable for, from tests/ui_copy.py --
+        # shared with launcher-api-smoke and test_daemon so it cannot drift.
+        for _s in ui_copy.BUS_PAGE:
+            assert _s in page, \
+                f"the bus page lost copy a gate asserts: {_s!r}"
 
         # -- 3. every endpoint the pane calls, at AGBASE ----------------------
         for path, key in ((f"{AGENTS_PATH}/agents", "agents"),
