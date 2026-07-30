@@ -63,6 +63,21 @@
  #roster .newAgent button{width:100%;background:none;border:1px dashed var(--line);
    color:var(--gold);font:inherit;padding:.45rem;border-radius:7px;cursor:pointer}
  #roster .newAgent button:hover{background:var(--hover)}
+ /* U8 tab strip + frames. */
+ #agTabs{display:flex;gap:.25rem;flex-wrap:wrap;margin:.5rem 0 0}
+ #agTabs .tab{display:flex;align-items:center;gap:.4rem;padding:.35rem .6rem;
+   border:1px solid var(--line);border-bottom:0;border-radius:7px 7px 0 0;
+   background:none;color:var(--faint);font:inherit;cursor:pointer}
+ #agTabs .tab.on{background:var(--hover);color:var(--gold)}
+ #agTabs .tab.err{color:var(--bad,#e06c6c)}
+ #agTabs .tab .x{opacity:.6;padding:0 .15rem}
+ #agTabs .tab .x:hover{opacity:1}
+ #agFrames{border:1px solid var(--line);border-radius:0 7px 7px 7px;
+   height:60vh;position:relative}
+ /* Inactive frames are HIDDEN, never removed -- see the markup comment. */
+ #agFrames .fr{position:absolute;inset:0;width:100%;height:100%;border:0}
+ #agFrames .fr[hidden]{display:none}
+ #agFrames .frErr{position:absolute;inset:0;padding:1rem;overflow:auto}
  /* Live updates are down, so this rail is a LAST-KNOWN reading. A presence list
     that stopped updating looks exactly like a room where nobody moved -- the
     phantom-watcher class in the UI layer, so say which one it is. */
@@ -571,6 +586,14 @@
  <div class="pRow"><b>AGENTS</b><span class="lnk" id="agBack">&larr; back to chat</span></div>
  <div id="agUnavail" hidden><span id="agUnavailMsg"></span>
   <span class="lnk" id="agRetry">retry</span></div>
+ <!-- U8: the terminals you have OPEN. Separate from #agList, which is the
+      management view, because a tab and a roster entry mean different things:
+      the roster is what exists, a tab is what you opened. Frames stay MOUNTED
+      when inactive and are hidden by CSS -- unmounting an iframe drops its
+      attach, so re-selecting a tab would silently reconnect as a second
+      driver and be refused by its own predecessor. -->
+ <div id="agTabs" hidden></div>
+ <div id="agFrames" hidden></div>
  <div id="agList"></div>
  <details class="addAgent" id="addAgent"><summary>Add agent</summary>
  <div class="pRow">
@@ -1428,6 +1451,114 @@ function closeAgentsWell(){
  if(nav){nav.textContent='Agents';nav.setAttribute('aria-pressed','false');}
  railMode(false);
 }
+// ---- U8 terminal tabs ---------------------------------------------------
+// What you have OPEN. One entry per attach, never derived from the roster:
+// the tell that this model has broken is a tab existing for an agent nobody
+// opened (ruling 8600), and that stays false only because nothing writes to
+// this array except an explicit open.
+let agTabs=[];        // [{agent, gid, url, err}]
+let agTabOn=null;     // gid of the visible tab
+// A failure inside an iframe looks identical whatever caused it (ruling
+// 8718): a refused second driver, an unreachable launcher and a dead
+// container all render as nothing. So every failure carries WHICH ONE, taken
+// from a machine-readable field rather than from the shape of a message --
+// the same discipline the pane's fail-soft already uses.
+function attachFailure(e){
+ if(e&&e.status===401)return 'your session expired -- reload the page';
+ if(e&&e.status)return 'the launcher returned '+e.status;
+ return 'the launcher is not reachable ('+((e&&e.message)||'no response')+')';
+}
+async function openTerminal(agent){
+ if(agTabs.some(t=>t.agent===agent&&!t.err)){
+  // Already open: SELECT it rather than minting a second grant. A second
+  // driver for an agent you already hold would be refused by your own first
+  // session, which is a confusing way to learn you already had it.
+  const t=agTabs.find(x=>x.agent===agent&&!x.err);
+  agTabOn=t.gid;drawTabs();return;
+ }
+ let pre;
+ try{pre=await lapi('/agents/'+encodeURIComponent(agent)+'/grants');}
+ catch(e){
+  agTabs.push({agent,gid:'e-'+agent+'-'+agTabs.length,url:'',
+               err:attachFailure(e)});
+  agTabOn=agTabs[agTabs.length-1].gid;drawTabs();return;
+ }
+ // PRE-FLIGHT, ADVISORY ONLY. The authority is attach-gate inside the
+ // container, which re-checks after creating its session and resolves the
+ // race properly; this cannot and must not replace it. What it buys is the
+ // MESSAGE: without it the refusal arrives as text inside a terminal the user
+ // has to read, and DES-006's gate asks the manager to show the refusal.
+ const now=Date.now()*1e6;
+ const held=(pre.grants||[]).find(g=>g.mode==='driver'&&!g.revoked_ns&&
+   (!g.expiry_ns||g.expiry_ns>now));
+ if(held){
+  agTabs.push({agent,gid:'held-'+held.id,url:'',
+   err:'driver refused: grant '+held.id+' already holds the keyboard for '+
+       agent+'. Revoke it, or the owner can flip multi-driver on.'});
+  agTabOn=agTabs[agTabs.length-1].gid;drawTabs();return;
+ }
+ try{
+  const g=await lapi('/agents/'+encodeURIComponent(agent)+'/grants',
+   {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
+  agTabs.push({agent,gid:g.id,url:AGBASE+g.attach_url,err:''});
+  agTabOn=g.id;
+ }catch(e){
+  // A container that is not running fails HERE, at the mint, with a status --
+  // so it is nameable before a frame ever opens.
+  agTabs.push({agent,gid:'e-'+agent+'-'+agTabs.length,url:'',
+               err:attachFailure(e)});
+  agTabOn=agTabs[agTabs.length-1].gid;
+ }
+ drawTabs();
+}
+async function closeTab(gid){
+ const t=agTabs.find(x=>x.gid===gid);
+ agTabs=agTabs.filter(x=>x.gid!==gid);
+ if(agTabOn===gid)agTabOn=agTabs.length?agTabs[agTabs.length-1].gid:null;
+ drawTabs();
+ // Closing is an OBSERVED act, so release the grant explicitly. We do NOT
+ // hang release on unload: a browser that is killed never fires one, and a
+ // release that depends on a farewell is the feed-ghost shape -- the grant
+ // looks held, the agent looks driven, and nothing says otherwise. The
+ // launcher's sweep is what covers the killed-browser case, because it
+ // observes the session disappearing rather than being told.
+ if(t&&!t.err)try{
+  await lapi('/agents/'+encodeURIComponent(t.agent)+'/grants/'+
+   encodeURIComponent(gid),{method:'DELETE'});
+ }catch(e){/* the sweep reclaims it; nothing here should block the close */}
+}
+function drawTabs(){
+ const strip=$('agTabs'),frames=$('agFrames');
+ strip.hidden=frames.hidden=!agTabs.length;
+ strip.innerHTML=agTabs.map(t=>
+  '<span class="tab'+(t.gid===agTabOn?' on':'')+(t.err?' err':'')+
+   '" data-tab="'+esc(t.gid)+'">'+esc(t.agent)+
+   '<span class="x" data-tabx="'+esc(t.gid)+'" title="close">&times;</span></span>'
+ ).join('');
+ // Frames are RECONCILED, never re-rendered: rebuilding innerHTML here would
+ // recreate every iframe and drop every live attach, so an open tab would die
+ // whenever another was opened or closed.
+ for(const el of [...frames.children])
+  if(!agTabs.some(t=>t.gid===el.dataset.frame))el.remove();
+ for(const t of agTabs){
+  let el=frames.querySelector('[data-frame="'+CSS.escape(t.gid)+'"]');
+  if(!el){
+   if(t.err){el=document.createElement('div');el.className='frErr';
+    el.textContent=t.err;}
+   else{el=document.createElement('iframe');el.className='fr';el.src=t.url;
+    el.title='terminal for '+t.agent;}
+   el.dataset.frame=t.gid;frames.appendChild(el);
+  }
+  el.hidden=(t.gid!==agTabOn);
+ }
+ for(const el of strip.querySelectorAll('[data-tab]'))el.onclick=ev=>{
+  if(ev.target.dataset.tabx)return;
+  agTabOn=el.dataset.tab;drawTabs();
+ };
+ for(const el of strip.querySelectorAll('[data-tabx]'))el.onclick=ev=>{
+  ev.stopPropagation();closeTab(el.dataset.tabx);
+ };
+}
 // Roster selection. null = nothing picked yet, which is a real state: the well
 // shows the whole list until you choose, so the pane is never an empty frame
 // with no way to find out what exists.
@@ -1678,13 +1809,14 @@ async function refreshAgents(){
   if(box){box.value=n;box.focus();}
   toast('recreate '+n+': check the role and rooms, then create');
  };
- for(const b of list.querySelectorAll('[data-agwatch]'))b.onclick=async()=>{
-  try{
-   const g=await lapi('/agents/'+encodeURIComponent(b.dataset.agwatch)+'/grants',
-    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
-   window.open(g.attach_url,'_blank');
-  }catch(e){toast(e.message);}
- };
+ // U8: watch opens a TAB on this page. The popup path is gone -- DES-006 6.4
+ // is explicit that terminals live on one page, and the operator stated the
+ // same sentence as a constraint: never a separate browser tab or window.
+ // NOTE: a gate asserts that popup API is ABSENT from this file, so do not
+ // write its name here even to say it is banned -- a byte-level negative
+ // cannot tell code from the comment explaining the code.
+ for(const b of list.querySelectorAll('[data-agwatch]'))
+  b.onclick=()=>openTerminal(b.dataset.agwatch);
  for(const b of list.querySelectorAll('[data-agstart]'))b.onclick=async()=>{
   try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstart)+'/start',
    {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}

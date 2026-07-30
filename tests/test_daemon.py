@@ -471,6 +471,15 @@ def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
     # which DES-006 6.4 rules out -- and the diff reads identically either way.
     assert ui_copy.ROSTER_VISIBLE not in PAGE, \
         "the U8 roster must ship hidden; visible it is a second agent list"
+    # U8: terminals live on ONE page. This is the operator's own constraint and
+    # DES-006 6.4's, and window.open is the only way to break it -- so the gate
+    # is its absence, not the presence of the tab strip. A tab strip that
+    # shipped alongside a surviving window.open would look complete and would
+    # still put a terminal in a browser tab the first time anything reached the
+    # older path.
+    for s in ui_copy.BUS_PAGE_FORBIDDEN:
+        assert s not in PAGE, \
+            f"the bus page must not contain {s!r} -- terminals live on one page"
 
 
 def test_a_humans_presence_is_their_open_tab():

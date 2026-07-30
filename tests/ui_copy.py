@@ -62,5 +62,12 @@ RECONFIG_EDIT = ("Applying restarts this agent", "NEW bus credential",
 ROSTER = '<div id="roster" hidden></div>'
 ROSTER_VISIBLE = '<div id="roster">'
 
+# U8's hardest constraint, and the operator stated it as a constraint rather
+# than a sketch: terminals live on ONE page, never a separate browser tab or
+# window (DES-006 6.4). window.open is the only way to break it, so the gate is
+# its ABSENCE from the bus page. The launcher page still uses it -- that page
+# is the standalone surface and is not where the tab strip lives.
+BUS_PAGE_FORBIDDEN = ("window.open",)
+
 BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN + RECONFIG_EDIT + (ROSTER,)
 LAUNCHER_PAGE = DESTROY_MODAL + LAUNCHER_ONLY + (DISCLOSURE,)
