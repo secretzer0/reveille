@@ -907,7 +907,7 @@ def ensure_login_home(user, image):
     os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
     os.chmod(os.path.dirname(root), 0o700)
     os.makedirs(root, mode=0o700, exist_ok=True)
-    _own_agent_dirs(root, image)
+    _own_agent_dirs(root, image, subdirs=())   # the login home IS ~/.claude
     return os.path.isfile(os.path.join(root, ".credentials.json"))
 
 
@@ -966,25 +966,32 @@ PROFILE_NOTES = (
     "until you log it in.")
 
 
-def own_dirs_argv(root, image):
+def own_dirs_argv(root, image, subdirs=("claude", "repos")):
     """The chown container's argv, pure so the uid-critical shape is unit-
     testable anywhere (msg 8479: our one smoke host is uid 1000, where BOTH
     ownership defects were invisible -- the argv test is where the accident
     cannot hide). --user 0:0 is load-bearing: the image sets USER agent and
     --entrypoint does not change the user, so without it the chown runs as
-    uid 1000 and cannot take ownership of dirs a root launcher created."""
+    uid 1000 and cannot take ownership of dirs a root launcher created.
+
+    subdirs=() owns the ROOT ITSELF -- the USER LOGIN home, which has no
+    claude/repos beneath it because it IS the ~/.claude a login container
+    mounts. Chowning names that do not exist made chown exit 1, so the
+    ownership fix crashed the very command it was added to protect, on both
+    the terminal and browser doors, for any user whose login home was fresh."""
+    targets = [f"/own/{d}" for d in subdirs] or ["/own"]
     return ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "chown",
             "-v", f"{root}:/own", image,
-            "-R", f"{AGENT_UID}:{AGENT_GID}", "/own/claude", "/own/repos"]
+            "-R", f"{AGENT_UID}:{AGENT_GID}", *targets]
 
 
-def _own_agent_dirs(root, image):
+def _own_agent_dirs(root, image, subdirs=("claude", "repos")):
     """Hand the agent dirs to the image's uid (msg 8475). A plain os.chown
     needs CAP_CHOWN the launcher's own uid may not have; its actual privilege
     is the docker socket, so the chown rides a throwaway container of the very
     image about to use the dirs. -R heals pre-existing wrong-uid files from a
     launcher that ran before this fix, not just fresh mkdirs."""
-    subprocess.run(own_dirs_argv(root, image), check=True,
+    subprocess.run(own_dirs_argv(root, image, subdirs), check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
