@@ -19,12 +19,14 @@ import contextlib
 import http.server
 import os
 import pathlib
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -57,9 +59,10 @@ def wait_health(port, timeout=25):
 
 
 def stub_broker():
-    """The hook fails open when the broker is unreachable, so the gate needs
-    something answering /version -- nothing more. Not the real daemon: what is
-    under test is which TREE the hook spawns from."""
+    """Something at a real address, nothing more -- what is under test is which
+    TREE the hook spawns from, not the daemon. The hook no longer probes this at
+    all (the /version gate is deleted, cd9bf78); it is still a live port because
+    the hook derives waked's wake URL from it."""
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -101,7 +104,12 @@ def main():
     # only -- a pin is a deployment and deployments do not carry your unstaged
     # edits.
     origin = tmp / "origin"
-    git(REPO, "clone", "--quiet", str(REPO), str(origin))
+    # BARE, and that is load-bearing: this is only ever used as a remote URL, and
+    # a non-bare clone checks out whatever branch REPO has -- so `branch -f main`
+    # below is refused with "cannot force update the branch used by worktree"
+    # whenever the developer is ON main. The gate passed only from a feature
+    # branch, which is exactly when nobody notices.
+    git(REPO, "clone", "--quiet", "--bare", str(REPO), str(origin))
     git(origin, "branch", "-f", "main", git(REPO, "rev-parse", "HEAD").stdout.strip())
 
     # -- 1. pin: a clone at the declared path, on origin/main ----------------
@@ -199,6 +207,24 @@ def main():
         proc.terminate()
         with contextlib.suppress(Exception):
             proc.wait(timeout=5)
+        reap_waked(broker)
+
+
+def reap_waked(broker_url):
+    """Kill the waked this gate's hook runs left behind.
+
+    The hook spawns a daemon on purpose and detaches it -- that IS the behaviour
+    under test -- so nothing here reaps it unless the gate does. waked retries
+    its connect loop forever, so each run left a daemon dialling a scratch port
+    that died with the run: five of them, up to 20 hours old, were found on the
+    host (msg 8586). Matched on THIS run's port, never on the role name, so
+    concurrent runs cannot kill each other's."""
+    port = urllib.parse.urlparse(broker_url).port
+    r = subprocess.run(["pgrep", "-f", f"reveille-waked .*127.0.0.1:{port}/wake"],
+                       capture_output=True, text=True)
+    for pid in r.stdout.split():
+        with contextlib.suppress(Exception):
+            os.kill(int(pid), signal.SIGTERM)
 
 
 def spawned_launchers():
