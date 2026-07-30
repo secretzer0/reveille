@@ -579,3 +579,23 @@ def test_debug_refuses_while_the_managed_container_is_running(monkeypatch, capsy
     with pytest.raises(rl.LaunchError) as e:
         rl.cmd_debug(args)
     assert "RUNNING" in str(e.value) and "--force" in str(e.value)
+
+
+def test_login_hands_the_auth_root_to_the_image_uid(monkeypatch, tmp_path):
+    """THIRD instance of the data-root ownership defect. The login home is
+    created by the LAUNCHER's uid and then mounted as ~/.claude in a container
+    running as the image's agent uid. If they differ, `claude /login` cannot
+    write .credentials.json -- and that one command is what the whole
+    home-login mode depends on. It passed review twice before only because the
+    developer's uid happened to match the image's.
+    """
+    monkeypatch.setattr(rl, "DEFAULT_DATA", str(tmp_path))
+    chowned = []
+    monkeypatch.setattr(rl, "_own_agent_dirs",
+                        lambda root, image: chowned.append((root, image)))
+    monkeypatch.setattr(rl.os, "execvpe",
+                        lambda *a, **k: (_ for _ in ()).throw(SystemExit(0)))
+    args = types.SimpleNamespace(user="acme", image="img", network="net")
+    with pytest.raises(SystemExit):
+        rl.cmd_login(args)
+    assert chowned == [(rl.user_auth_root("acme"), "img")], chowned

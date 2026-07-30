@@ -775,6 +775,15 @@ def cmd_login(a):
     os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
     os.chmod(os.path.dirname(root), 0o700)
     os.makedirs(root, mode=0o700, exist_ok=True)
+    # THIRD INSTANCE of the data-root ownership defect (msg 8475, and again in
+    # the chown container itself). This dir is created by the LAUNCHER's uid and
+    # then mounted as ~/.claude in a container running as the image's agent uid;
+    # if they differ, `claude /login` cannot write .credentials.json and the one
+    # command this whole mode depends on fails. It works on this host only
+    # because the operator happens to be uid 1000, which is exactly the
+    # coincidence that hid it the first two times. provision_agent already does
+    # this for the agent home; the login home needs it for the same reason.
+    _own_agent_dirs(root, a.image)
     had = os.path.isfile(os.path.join(root, ".credentials.json"))
     print(f"login shell for user {a.user} ({'RE-login: replaces the current '
           'account for every agent' if had else 'first login'}): image "
