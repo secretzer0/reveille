@@ -190,6 +190,12 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.39 OPENING A ROOM IS JOINING IT. A web session that opens a room's feed
+becomes a MEMBER at that instant, not when its 15s poll next fires -- before
+this, a newcomer was in the watcher set but in nobody's presence list, so
+departures pushed immediately and arrivals waited up to a poll. Web sessions
+only: an agent's membership stays its own deliberate join().
+
 0.2.38 THE ROOM PUSHES ITS OWN EVENTS. Every /feed frame now carries an
 `event` type -- message | deleted | presence | ping | error -- instead of
 being told apart by which fields happen to be present, because many more
@@ -1979,10 +1985,25 @@ async def feed_ws(ws: WebSocket):
     _feed[q] = (room if room in p.rooms else (next(iter(p.rooms)) if p.rooms else ""),
                 p.name)
     log.info("%s feed connected (%s watching)", p.name, len(_feed))
-    # A person ARRIVING in a room is a room event, and this is the moment it
-    # happens -- after 0.2.36 a human's presence IS this socket, so the set
-    # changing and the fact changing are the same instant.
-    _push_presence(_feed[q][0])
+    # OPENING THE ROOM IS JOINING IT (operator, 2026-07-30: "the bill join does
+    # not seem to be automatically seen"). A person's presence is their open tab
+    # (0.2.35) -- but the member ROW that presence reads was created only by the
+    # 15s poll, so a newcomer existed in the watcher set and in nobody's list
+    # until their own poll fired. Departures pushed instantly and arrivals waited
+    # up to 15 seconds, which reads as "leave works, join does not".
+    #
+    # The socket is the fact, so the socket establishes the membership. Web
+    # sessions only: an agent's membership is its own deliberate join(), and
+    # inferring one from a socket would undo a leave the same way join() used to.
+    rid = _feed[q][0]
+    if rid and p.kind == "user":
+        with contextlib.suppress(store.BusError):
+            if store.known(_conn, p.name, [rid]):
+                store.touch(_conn, p.name, [rid])
+            else:
+                store.join(_conn, p.name, tag=f"web:{p.name}", room_id=rid, fresh=True)
+    # ...and ARRIVING is a room event, pushed at the instant it happens.
+    _push_presence(rid)
     try:
         # A parked sender NEVER learns the browser left. The close frame arrives on
         # the RECEIVE path, which this coroutine used not to read, so a tab that

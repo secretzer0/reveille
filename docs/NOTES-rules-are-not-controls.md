@@ -23,10 +23,10 @@ afternoon: in both, a confident account of the thing was consulted instead of
 the thing. It is the thesis one layer up, and it is why every discipline below
 ends in *read the output* or *check out the bad SHA* rather than *be careful*.
 
-## Part 1: fixture fidelity has four failure faces
+## Part 1: fixture fidelity has five failure faces
 
 A gate is only as good as its resemblance to the thing it guards, and
-resemblance fails four ways. All four happened here, in one week, each
+resemblance fails five ways. All five happened here, in one week, each
 producing green over red.
 
 **Dirtier than production** -- the fixture inherits live state the guarded
@@ -69,6 +69,25 @@ any classifier over real-world data, RUN IT ON PRODUCTION DATA BEFORE
 SHIPPING IT and read the output row by row. Enumerating what your fixture
 lacks cannot surface a shape you have never seen; only the real data can.
 
+**The fixture does the CLIENT's work for it** -- the first four faces are all
+about the server side of the scene; this one is about the other end of the
+wire. Worked example, hours old at time of writing: the room-events gate's
+fake browser logged in and then polled `/presence` once, "as the page does at
+boot". That poll is what created the member row. So the gate proved presence
+was pushed to people who were already members, and never noticed that OPENING
+a room made you a watcher but not a member -- arrivals stayed invisible to
+everyone else until the newcomer's own 15-second poll fired, while departures
+pushed instantly. The operator saw it in under an hour: "the bill join does not
+seem to be automatically seen." The fixture had quietly supplied the very step
+whose absence was the bug.
+
+The discipline: a fixture may stand in for a client, but it must not do
+anything ON the client's behalf that the real client does not do at that exact
+moment. Every convenience call added to make a fixture "work like the page"
+is a candidate defect being hidden -- and the tell is a fixture comment that
+says "as the page does", because that is the author noticing the divergence
+and then papering over it instead of asking why it was needed.
+
 The disciplines that follow, each now practiced here:
 
 1. Enumerate BOTH directions: what does the fixture have that production
@@ -88,6 +107,10 @@ The disciplines that follow, each now practiced here:
    and read the output before shipping. Nothing above catches the fourth
    face, because you cannot enumerate the absence of a shape you have never
    seen.
+6. List every call your fixture makes that the real client would not make at
+   that moment, and delete them. Each one is a step of the client's job the
+   gate is doing for it, and therefore a step whose absence the gate cannot
+   see.
 
 ## Part 2: the rules that failed were the ones living in heads
 
