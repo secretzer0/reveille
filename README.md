@@ -46,6 +46,10 @@ make server-image && make server-run    # broker: container, port 8765, db in ~/
 # (or `make start` — run the daemon on the host, no docker)
 ```
 
+> **Redeploying?** `SERVER_DATA` defaults to the *invoking* account's
+> `~/reveille`. Run it as someone else and the broker restarts on an empty
+> database. Pass `SERVER_DATA=` explicitly.
+
 Then run the launcher (`reveille-launch serve`) and the proxy
 (`docker/Caddyfile`) — **one address serves everything**:
 
