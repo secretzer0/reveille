@@ -460,10 +460,10 @@ def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
 
     import ui_copy
     for s in ui_copy.BUS_PAGE:
-        assert s in PAGE, f"single-origin-smoke asserts {s!r}"
+        assert s in ui_copy.joined(PAGE), f"single-origin-smoke asserts {s!r}"
     ui = revlaunch._ui_read("index.html")
     for s in ui_copy.LAUNCHER_PAGE:
-        assert s in ui, f"launcher-api-smoke asserts {s!r}"
+        assert s in ui_copy.joined(ui), f"launcher-api-smoke asserts {s!r}"
     assert ui_copy.DISCLOSURE_OPEN not in ui, \
         "the create form must not ship expanded -- that is the U7 adjacency bug"
 

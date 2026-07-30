@@ -14,13 +14,56 @@ with nothing reporting it -- so the duplication is gone rather than documented.
 
 Add a string here and every gate that imports the list picks it up. There is no
 second copy to forget.
+
+Assert against joined(page), not the raw page: both pages build their markup by
+concatenating JS literals, so a whole sentence is split across source lines and
+only a token survives a reflow. joined() closes those seams so a gate reads the
+sentence the USER sees.
 """
 
-# The destroy modal must not understate what purge=1 removes. It rmtree's the
+import re
+
+# 'foo '+\n    'bar'  ->  'foo bar'. Only pure literal-to-literal seams collapse;
+# anything with an interpolated value between the quotes (esc(a.agent)) does not
+# match, which is why the canonical sentences below start after the agent name.
+_SEAM = re.compile(r"'\s*\+\s*'")
+
+
+def joined(page):
+    """The served page with its JS string-concatenation seams closed."""
+    return _SEAM.sub("", page)
+
+# The destroy modal must not understate what erase removes. It rmtree's the
 # WHOLE agent home, claude/ as well as repos/, and "local repo checkout" alone
 # reads as "what it learned survives". The copy and the rmtree live in different
 # files, so nothing but an assertion keeps them honest.
-DESTROY_MODAL = ("~/.claude", "Hive memory")
+#
+# Held at SENTENCE granularity, not token. A token gate guarantees both pages
+# contain the string "Hive memory"; it guarantees nothing about the sentence
+# around it -- and the two pages describe this act in independently written
+# markup, so the only irreversible action in the product was free to be
+# described two different ways with every gate green. Lowercasing that one word
+# in both files nearly proved it: the gate would have caught the token, not the
+# claim. The copy still lives twice (the pages render it differently, which is
+# legitimate); it can no longer SAY two different things.
+#
+# Scoped to the destroy modal on purpose. A canonical list that grows without
+# judgement becomes a list nobody trusts, so this holds the irreversible act and
+# nothing else.
+#
+# Each entry starts after the agent name: both pages interpolate esc(a.agent)
+# mid-string, and the heading around it legitimately differs (the bus page bolds
+# "Destroy <name>?" on its own row, the launcher page runs it into the sentence).
+DESTROY_MODAL = (
+    "Either way its running session and bus grants end now -- that cannot be "
+    "undone. Hive memory (lessons, decisions, saved state) is kept.",
+    "<b>Retire &mdash; keep its files</b>",
+    "Local repos and everything it learned locally (its ~/.claude): KEPT, and "
+    "reused if you create an agent with this name again.",
+    "<b>Erase &mdash; take everything</b>",
+    "Container, local repos, and everything it learned locally (its "
+    "~/.claude): gone. Nothing local survives.",
+)
 
 # The launcher page additionally carries U1's credential block and M3's
 # first-run chain.

@@ -128,7 +128,7 @@ def main():
         # Every string this page is answerable for, from tests/ui_copy.py --
         # shared with launcher-api-smoke and test_daemon so it cannot drift.
         for _s in ui_copy.BUS_PAGE:
-            assert _s in page, \
+            assert _s in ui_copy.joined(page), \
                 f"the bus page lost copy a gate asserts: {_s!r}"
 
         # -- 3. every endpoint the pane calls, at AGBASE ----------------------
