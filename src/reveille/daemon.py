@@ -185,6 +185,14 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.36 A CLOSED TAB IS NOT A WATCHER. The /feed socket is now READ as well as
+written, so a browser that navigates away or closes is noticed at once
+instead of lingering as a phantom watcher -- and since 0.2.35 computes a
+person's presence from that watcher set, every phantom kept someone reading
+as live in a room they had left. A keepalive covers the browser that dies
+without saying so (REVEILLE_FEED_PING, default 30s); clients ignore
+{"ping":1}.
+
 0.2.35 A PERSON'S PRESENCE IS THEIR OPEN TAB. A human web identity now reads
 live in a room only while a browser holds that room's feed, computed at
 presence-read; signing out leaves every room (marked, not deleted, so history
@@ -1857,6 +1865,29 @@ async def delete_http(request):
     return JSONResponse({"deleted": mid})
 
 
+# How long a feed socket may go silent before the server pokes it. A browser that
+# vanishes WITHOUT closing (lid shut, wifi gone) sends no close frame, so only a
+# failed write reveals it -- and a quiet room writes nothing for hours.
+FEED_PING_SECONDS = int(os.environ.get("REVEILLE_FEED_PING", "30"))
+
+
+async def _feed_reader(ws):
+    """Read frames we do not want, for the exception we do: a browser's close
+    arrives here and nowhere else. Returning ends the session."""
+    while True:
+        await ws.receive_text()
+
+
+async def _feed_sender(ws, q):
+    """Pump the room's messages, and PING into the silence so a socket that died
+    without saying so fails a write instead of lingering as a phantom watcher."""
+    while True:
+        try:
+            await ws.send_json(await asyncio.wait_for(q.get(), FEED_PING_SECONDS))
+        except TimeoutError:
+            await ws.send_json({"ping": 1})
+
+
 async def feed_ws(ws: WebSocket):
     """WS /feed: pushes every bus message as one JSON frame -- the UI's live wire.
     Cookie rides the handshake automatically; a bad credential is rejected."""
@@ -1873,10 +1904,26 @@ async def feed_ws(ws: WebSocket):
                 p.name)
     log.info("%s feed connected (%s watching)", p.name, len(_feed))
     try:
-        # ponytail: a dropped browser parked on q.get() is only reaped when the next
-        # message's send fails -- bounded leak, self-cleaning, fine for a LAN UI.
-        while True:
-            await ws.send_json(await q.get())
+        # A parked sender NEVER learns the browser left. The close frame arrives on
+        # the RECEIVE path, which this coroutine used not to read, so a tab that
+        # navigated away or closed stayed in _feed forever -- and since 0.2.35
+        # computes a person's presence FROM _feed, every ghost kept someone reading
+        # as live in a room they had left. Found live: 26 entries for 2 open
+        # browsers (operator, 2026-07-30).
+        #
+        # So: read alongside the send, and whichever finishes first ends the
+        # session. The reader exists for its exception, not its data -- the UI
+        # sends nothing.
+        reader = asyncio.create_task(_feed_reader(ws))
+        sender = asyncio.create_task(_feed_sender(ws, q))
+        done, pending = await asyncio.wait({reader, sender},
+                                           return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+        for t in done:                      # surface a real error, swallow the close
+            with contextlib.suppress(WebSocketDisconnect, RuntimeError,
+                                     asyncio.CancelledError):
+                t.result()
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:

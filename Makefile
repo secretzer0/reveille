@@ -301,6 +301,13 @@ readmit-gate: sync
 deafness-gate: sync
 	uv run python tests/deafness_gate.py
 
+# Feed-ghost gate: a CLOSED TAB IS NOT A WATCHER. 0.2.35 computes a person's
+# presence from the set of browsers holding a room's feed, so a socket that is
+# never read from -- and therefore never notices the close -- keeps someone
+# reading as live in a room they left. Found live at 26 entries for 2 browsers.
+feed-ghost-gate: sync
+	uv run python tests/feed_ghost_gate.py
+
 # The code-relay boundary, gated by its NEGATIVE cases (ruling 8644): scoped
 # to the caller's own pending login, one relay, opaque code, zero leakage.
 login-relay-smoke: sync
