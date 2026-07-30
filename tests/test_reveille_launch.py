@@ -222,6 +222,19 @@ def test_login_argv_is_per_user_and_credential_free():
     assert argv[-1] == rl._DEBUG_SEED   # lands in a seeded bash, no wizard
 
 
+def test_claude_login_state_is_a_reading(tmp_path):
+    # Absent -> present tracks the FILE, computed fresh each call -- never a
+    # stored flag that can lapse. No values ever ride the reading.
+    assert rl.claude_login_state("acme", base=str(tmp_path)) == \
+        {"present": False, "logged_in_at_ns": None}
+    p = tmp_path / "acme" / "claude-auth"
+    p.mkdir(parents=True)
+    (p / ".credentials.json").write_text('{"secret":"NEVER-IN-THE-READING"}')
+    st = rl.claude_login_state("acme", base=str(tmp_path))
+    assert st["present"] is True and st["logged_in_at_ns"] > 0
+    assert "NEVER" not in json.dumps(st)
+
+
 def test_entrypoint_copies_login_at_every_boot():
     # The shipped entrypoint must copy the user's login into the agent home
     # OVERWRITING (the account-rotation workflow is re-login + restart; a

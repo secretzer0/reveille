@@ -35,5 +35,12 @@ LAUNCHER_ONLY = ("never shown", "name your first", "CREDENTIALS",
 DISCLOSURE = '<details class="addAgent"><summary>Add agent</summary>'
 DISCLOSURE_OPEN = '<details class="addAgent" open'
 
-BUS_PAGE = DESTROY_MODAL
+# Ruling 8633: the claude-login section lives in the ACCOUNT tab (a login is
+# a property of the user; adjacency teaches), fails soft NAMING the failure,
+# and its directive is the one command. These pin the section, the command,
+# and both failure branches.
+ACCOUNT_LOGIN = ("CLAUDE LOGIN", "reveille-launch login ",
+                 "the launcher is not reachable", "the launcher returned ")
+
+BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN
 LAUNCHER_PAGE = DESTROY_MODAL + LAUNCHER_ONLY + (DISCLOSURE,)
