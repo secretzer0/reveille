@@ -466,6 +466,11 @@ def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
         assert s in ui, f"launcher-api-smoke asserts {s!r}"
     assert ui_copy.DISCLOSURE_OPEN not in ui, \
         "the create form must not ship expanded -- that is the U7 adjacency bug"
+    # U8: the roster must ship HIDDEN. Visible by default it renders a second
+    # agent list beneath the chat filter list -- two selectors for one thing,
+    # which DES-006 6.4 rules out -- and the diff reads identically either way.
+    assert ui_copy.ROSTER_VISIBLE not in PAGE, \
+        "the U8 roster must ship hidden; visible it is a second agent list"
 
 
 def test_a_humans_presence_is_their_open_tab():

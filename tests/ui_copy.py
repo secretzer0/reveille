@@ -53,5 +53,14 @@ ACCOUNT_LOGIN = ("CLAUDE LOGIN", "reveille-launch login ",
 RECONFIG_EDIT = ("Applying restarts this agent", "NEW bus credential",
                  "Read back from the running container")
 
-BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN + RECONFIG_EDIT
+# U8: the rail becomes the ROSTER in manage-agents mode and is hidden the rest
+# of the time. Asserted as the PROPERTY for the same reason as DISCLOSURE: a
+# roster that shipped without `hidden` would render a second agent list under
+# the chat filter list -- two selectors for one thing, which is precisely what
+# the ruling forbids -- and it would look identical to a reviewer reading the
+# diff. The paired negative below is the one that actually catches it.
+ROSTER = '<div id="roster" hidden></div>'
+ROSTER_VISIBLE = '<div id="roster">'
+
+BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN + RECONFIG_EDIT + (ROSTER,)
 LAUNCHER_PAGE = DESTROY_MODAL + LAUNCHER_ONLY + (DISCLOSURE,)
