@@ -1595,6 +1595,21 @@ def test_membership_dies_with_user_and_room_audit_survives():
     assert [r["action"] for r in rows] == ["invite"]   # record outlives both
 
 
+def test_migration_v14_to_v15_adds_left_ns_and_is_rerunnable(tmp_path):
+    # A departure has to survive an upgrade: existing rows get NULL, which is
+    # right -- nobody who is in a room today left it. And the step must be safe
+    # to re-run, because _SCHEMA already carries the column on the fresh path.
+    db = str(tmp_path / "b.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    c.execute("PRAGMA user_version=14")
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(members)")}
+    assert "left_ns" in cols
+    c.execute("PRAGMA user_version=14")
+    assert store.migrate(c, db) == store.SCHEMA_VERSION   # rerunnable
+
+
 def test_migration_v13_to_v14_adds_membership_tables():
     c, admin, room, tok = fixture()
     c.execute("DROP TABLE room_members")
@@ -1751,3 +1766,77 @@ if __name__ == "__main__":
         t()
         print(f"ok  {t.__name__}")
     print(f"\n{len(tests)} passed")
+
+
+def _seen(conn, name, rooms, token_id):
+    """The daemon's _seen, in three lines, so this file can run the architect's
+    proof without a socket. Must stay in step with daemon._seen."""
+    if store.touch(conn, name, list(rooms)) < len(list(rooms)):
+        store.readmit(conn, name, name, rooms, token_id)
+
+
+def test_an_ordinary_call_does_not_undo_a_deliberate_leave():
+    # reveille-architect's proof, msg 8586, verbatim in shape: leave() then ONE
+    # ordinary call used to re-admit -- for a live agent, within seconds. That
+    # voided DIRECTIVE:LEAVE (ratified doctrine) and voided it SILENTLY.
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.leave(c, "dev", [room["id"]])
+    assert store.presence(c, [room["id"]]) == []
+    _seen(c, "dev", [room["id"]], tok["id"])
+    assert store.presence(c, [room["id"]]) == [], \
+        "an ordinary tool call re-admitted an agent that deliberately left"
+    # and it stays gone across many calls, not just the first
+    for _ in range(3):
+        _seen(c, "dev", [room["id"]], tok["id"])
+    assert store.presence(c, [room["id"]]) == []
+    assert not store.known(c, "dev", [room["id"]]), \
+        "a departed agent must not be addressable by unicast"
+
+
+def test_leaving_one_room_does_not_cost_the_others():
+    # The other half: an agent that deliberately holds membership in a SUBSET of
+    # its token's rooms must keep that shape, so selective leave(room=X) lives.
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.join(c, "dev", "dev", r2["id"], tok["id"])
+    store.leave(c, "dev", [r2["id"]])
+    for _ in range(3):
+        _seen(c, "dev", [room["id"], r2["id"]], tok["id"])
+    assert [p["room"] for p in store.presence(c, [room["id"], r2["id"]])] \
+        == [room["id"]]
+    assert store.known(c, "dev", [room["id"]])
+    assert not store.known(c, "dev", [r2["id"]])
+
+
+def test_join_is_the_only_way_back_after_leaving():
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.leave(c, "dev", [room["id"]])
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    assert [p["name"] for p in store.presence(c, [room["id"]])] == ["dev"]
+
+
+def test_a_reaped_row_still_comes_back_but_a_left_one_does_not():
+    # The two deletions must stay distinguishable: the reaper DELETES, leave()
+    # marks. Same agent, same token, opposite outcomes on the next call.
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.join(c, "dev", "dev", r2["id"], tok["id"])
+    store.leave(c, "dev", [r2["id"]])
+    _age(c, room["id"], "dev", 3600)
+    assert store.reap_stale(c) == ["dev"]          # only the un-left room's row
+    _seen(c, "dev", [room["id"], r2["id"]], tok["id"])
+    assert [p["room"] for p in store.presence(c, [room["id"], r2["id"]])] \
+        == [room["id"]]
+
+
+def test_a_departed_agent_does_not_hold_its_name():
+    # A name is held by someone PRESENT. After leaving, another tag may take it.
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "TAG_a", room["id"], tok["id"])
+    store.leave(c, "dev", [room["id"]])
+    assert store.join(c, "dev", "TAG_b", room["id"], tok["id"]) == "dev"
+    assert store.presence(c, [room["id"]])[0]["tag"] == "TAG_b"

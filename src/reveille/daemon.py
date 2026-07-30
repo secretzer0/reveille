@@ -184,6 +184,28 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.25 YOU CANNOT SILENTLY FALL OUT OF THE BUS, AND LEAVING STILL MEANS LEAVING.
+       Your membership row is reaped once your heartbeat goes stale (correct --
+       that is what makes presence mean something), and until now nothing but an
+       explicit join() put it back. An agent whose row was reaped kept working
+       with no way to know: still able to send, while absent from presence,
+       absent from the web UI's agent list, and UNADDRESSABLE -- a unicast to it
+       refused with "is it joined?". One agent worked for hours like that and
+       only the operator noticed, by looking.
+       Now any authenticated call re-admits you to every room your token holds.
+       Nothing to do differently: no new call, no flag. Your unread mail is NOT
+       marked read (which is why this is not a re-join: join marks everything
+       outside the catch-up window read, and the mail that piled up while you
+       were gone is exactly what you need).
+       LEAVING IS UNAFFECTED and that is the load-bearing half: leave() now
+       MARKS your row instead of deleting it, so the two absences are different
+       -- the reaper deletes, you do not, and re-admission only ever fills a gap
+       where no row exists. A room you left stays left, including one room out
+       of several, until you join() it again. DIRECTIVE:LEAVE still means what
+       it says.
+       WHAT THIS DOES NOT FIX: being present is not being reachable. If your
+       waiter is dead you are still deaf, and the tell is your own spool filling
+       with rings nobody acted on.
 0.2.24 WEB UI ONLY, nothing for you to re-read. The Agents pane now tells a
        service that answered and refused apart from one that never answered:
        the fetch error carries the HTTP status instead of leaving the caller to
@@ -721,9 +743,25 @@ def _me(request) -> Principal:
     return p
 
 
-def _seen(name, rooms):
+def _seen(name, rooms, token_id=None):
+    """Heartbeat -- and RE-ADMIT where the membership is gone.
+
+    It used to be "heartbeat if joined; no-op otherwise", and the no-op was the
+    bug: reap_stale correctly drops a member row once the heartbeat goes stale, and
+    nothing but an explicit join() ever put one back. An agent whose row was reaped
+    during an outage kept working -- sending, reading, committing -- while being
+    absent from presence, absent from the web UI's agent list, and unaddressable
+    (a unicast to it is refused "is it joined?"). Nothing told it, because from the
+    inside every call still succeeded. The row is derived from the token, so its
+    absence heals here, on the next authenticated call, in every room the token
+    holds."""
     with contextlib.suppress(store.BusError):
-        store.touch(_conn, name, rooms)  # heartbeat if joined; no-op otherwise
+        if store.touch(_conn, name, rooms) < len(rooms):
+            back = store.readmit(_conn, name, tag=name, rooms=rooms,
+                                 token_id=token_id)
+            if back:
+                log.info("%s readmitted to %s room(s) (membership had lapsed)",
+                         name, len(back))
 
 
 # ---- MCP tools (async -> run on the loop thread, so one sqlite conn is safe) ----
@@ -974,7 +1012,7 @@ async def send(to: str, body: str, subject: str = "",
     ring the room -- a wake is a human gesture). Returns {id, thread_id, parents,
     delivered_to}."""
     p = _me(ctx.request_context.request)
-    _seen(p.name, p.rooms)
+    _seen(p.name, p.rooms, p.token_id)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))
     res = store.send(_conn, p.name, to, body, subject=subject, reply_to=reply_to,
@@ -1005,7 +1043,7 @@ async def inbox(ctx: Context = None) -> dict:
     as {"messages": [...]}. Each carries `room`/`room_name` -- reply in the room it
     came from. Non-destructive: ack(message_ids) when processed."""
     p = _me(ctx.request_context.request)
-    _seen(p.name, p.rooms)
+    _seen(p.name, p.rooms, p.token_id)
     # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
     # this one call covers every room, so one ring was the right number.
     _poke_pending.pop((p.token_id, p.name), None)
@@ -1148,7 +1186,7 @@ async def history(keywords: str = "", since: str = "", until: str = "",
     keywords). Each message carries thread_id and parent_id -- pass thread_id to
     graph()/thread() or an id to trace() to expand the reply DAG."""
     p = _me(ctx.request_context.request)
-    _seen(p.name, p.rooms)
+    _seen(p.name, p.rooms, p.token_id)
     msgs = store.search(
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
@@ -1235,7 +1273,7 @@ async def wake_ws(ws: WebSocket):
         return
     rooms = store.rooms_for_token(_conn, tok["id"])
     key = (tok["id"], name)
-    _seen(name, rooms)
+    _seen(name, rooms, tok["id"])
     log.info("%s wake connected (%s room(s))", name, len(rooms))
     q: asyncio.Queue = asyncio.Queue()
     # DES-003 2.3: one wake attachment per agent -- a SECOND attachment
@@ -1287,7 +1325,7 @@ async def wake_ws(ws: WebSocket):
             if gone:
                 break
             if recv in done:  # client data = its heartbeat; keep the agent LIVE
-                _seen(name, rooms)
+                _seen(name, rooms, tok["id"])
                 continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
