@@ -686,3 +686,26 @@ def test_login_hands_the_auth_root_to_the_image_uid(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         rl.cmd_login(args)
     assert chowned == [(rl.user_auth_root("acme"), "img")], chowned
+
+
+def test_lifecycle_state_names_all_four_and_erased_is_recoverable():
+    # Operator requirement 2026-07-30: the UI must distinguish an agent that
+    # is merely offline from one that was erased, and say which recreates
+    # resume something. Pure join of three independent readings.
+    hive = {"messages": 63, "memories": 1, "lessons": 3, "has_state_note": True}
+    assert rl.lifecycle_state("running", True, hive) == "running"
+    assert rl.lifecycle_state("exited", True, hive) == "stopped"
+    assert rl.lifecycle_state("exited", False, {}) == "stopped"   # container wins
+    # no container, files kept -> retired: recreate resumes LOCAL state
+    assert rl.lifecycle_state("absent", True, {}) == "retired"
+    assert rl.lifecycle_state("", True, {}) == "retired"
+    # no container, no files, but the hive remembers -> ERASED, not gone: this
+    # is the state that had no name and therefore no recovery path
+    assert rl.lifecycle_state("absent", False, hive) == "erased"
+    assert rl.lifecycle_state("absent", False,
+                              {"messages": 0, "memories": 1}) == "erased"
+    # nothing anywhere is a new name, not a corpse
+    assert rl.lifecycle_state("absent", False, {}) == "unknown"
+    assert rl.lifecycle_state("absent", False,
+                              {"messages": 0, "memories": 0,
+                               "lessons": 0}) == "unknown"

@@ -185,6 +185,15 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.34 AN ERASED AGENT IS NOT A LOST ONE. GET /agents-seen lists every agent
+name the hive still remembers in your rooms, with what it holds of theirs
+(messages, memories, lessons, whether they left a state note). The Agents
+pane joins it with container and file state to show FOUR lifecycle states --
+running, stopped, retired (files kept) and erased (files gone, hive intact)
+-- each with the action that fits, and recreate says what it will resume.
+Before this, a destroyed agent vanished from the list entirely and its
+recovery path was unreachable.
+
 0.2.33 THE LOGIN POLL NO LONGER EATS YOUR TYPING. The Account tab's login
 section repaints only when its content actually changed, so the 3s poll that
 watches a pending login cannot wipe the code box mid-keystroke.
@@ -1520,6 +1529,23 @@ async def messages_http(request):
 
 
 @_guard
+async def agents_seen_http(request):
+    """GET /agents-seen[&room=] -> every agent name the hive still knows here,
+    with what it holds of theirs (messages, memories, lessons, whether they
+    left a state note). This is what makes "erased is not unrecoverable"
+    sayable: the launcher joins it with what exists on disk and in docker to
+    tell a human whether recreating a name resumes anything.
+
+    The broker answers only its own question -- who does the hive remember --
+    and learns nothing about containers (G4)."""
+    p = _principal(request)
+    rooms = _scope(request, p)
+    # Humans are not recoverable agents: exclude every web identity present.
+    people = {a["name"] for a in store.presence(_conn, rooms)
+              if (a.get("tag") or "").startswith("web:")}
+    return JSONResponse({"agents": store.agents_seen(_conn, rooms, exclude=people)})
+
+
 async def presence_http(request):
     """GET /presence[&room=] -> same view as the presence() tool, for the UI header."""
     p = _principal(request)
@@ -2323,6 +2349,7 @@ def build_app():
             Route("/messages", messages_http),
             Route("/search", search_http),
             Route("/presence", presence_http),
+            Route("/agents-seen", agents_seen_http),
             Route("/send", send_http, methods=["POST"]),
             Route("/upload", upload_http, methods=["POST"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),

@@ -528,7 +528,7 @@
  <div id="agUnavail" hidden><span id="agUnavailMsg"></span>
   <span class="lnk" id="agRetry">retry</span></div>
  <div id="agList"></div>
- <details class="addAgent"><summary>Add agent</summary>
+ <details class="addAgent" id="addAgent"><summary>Add agent</summary>
  <div class="pRow">
   <input id="agName" placeholder="agent name (e.g. senior-dev)">
   <select id="agRole"><option value="">no role template</option></select>
@@ -1383,6 +1383,29 @@ async function refreshAgents(){
      '<div class="pRow"><button class="danger" data-agdelyes="'+esc(a.agent)+
      '" disabled>erase '+esc(a.agent)+'</button> '+
      '<button data-agdelno="'+esc(a.agent)+'">cancel</button></div></div>';
+   // FOUR STATES, and what each one OFFERS. The launcher derives the state
+   // from container + files + hive; the row's job is to make the difference
+   // legible, because "erased" used to read as gone forever when the hive
+   // still held everything the agent knew.
+   const h=a.hive||{}, st=a.state||(running(a)?'running':'stopped');
+   const held=[h.messages?h.messages+' messages':'',
+               h.memories?h.memories+' memories':'',
+               h.lessons?h.lessons+' lessons':'',
+               h.has_state_note?'a handoff note':''].filter(Boolean).join(', ');
+   if(st==='retired'||st==='erased'){
+    return '<div class="pRow"><b>'+esc(a.agent)+'</b>'+
+     '<span class="pDim">'+(st==='retired'
+       ?'retired &middot; its files are kept'
+       :'erased &middot; no container, no files')+'</span>'+
+     '<button data-agrecreate="'+esc(a.agent)+'">recreate</button>'+
+     '<div class="pAsk">'+(st==='retired'
+       ? 'Recreating resumes everything it learned locally (its ~/.claude) '+
+         'and its repo checkouts, exactly as it left them.'
+       : 'Nothing local survives, but the hive still holds '+
+         (held||'nothing of its own')+
+         (h.has_state_note?' -- recreating brings it back knowing where it '+
+          'stopped.':'.'))+'</div></div>';
+   }
    return '<div class="pRow"><b>'+esc(a.agent)+'</b>'+
     '<span class="pDim'+(broken(a)?' err':'')+'">'+
      (broken(a)?'broken — container missing':esc(a.status))+
@@ -1394,6 +1417,15 @@ async function refreshAgents(){
       : '<button data-agstart="'+esc(a.agent)+'">start</button>')+
     '<button data-agdel="'+esc(a.agent)+'">destroy</button></div>';
   }).join('');
+ for(const b of list.querySelectorAll('[data-agrecreate]'))b.onclick=()=>{
+  // Recreate is CREATE with the name filled in -- one provisioning path, no
+  // second implementation. The disclosure opens so the human sees (and can
+  // change) the role, rooms and repo before anything is built.
+  const n=b.dataset.agrecreate, box=$('agName'), det=$('addAgent');
+  if(det)det.open=true;
+  if(box){box.value=n;box.focus();}
+  toast('recreate '+n+': check the role and rooms, then create');
+ };
  for(const b of list.querySelectorAll('[data-agwatch]'))b.onclick=async()=>{
   try{
    const g=await lapi('/agents/'+encodeURIComponent(b.dataset.agwatch)+'/grants',

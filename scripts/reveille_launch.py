@@ -1727,17 +1727,72 @@ def revoke_bound_tokens(auth_url, cookie_header, agent):
             _broker_json(auth_url, cookie_header, "DELETE", f"/tokens/{t['id']}")
 
 
-def _agent_status(conn, user):
+def lifecycle_state(docker_status, has_files, hive):
+    """The FOUR states a name can be in, from three independent readings
+    (operator requirement 2026-07-30). Pure -- the join is the whole feature,
+    so it is testable without docker, disk or a broker.
+
+      running / stopped  a container exists       -> watch, or start
+      retired            no container, files kept -> recreate resumes its
+                         local ~/.claude and repos verbatim
+      erased             no container, no files, but the HIVE remembers it
+                         -> recreate resumes from memories, lessons, its own
+                         state note and the room's history. THIS is the state
+                         nothing could previously say, so an erased agent read
+                         as gone forever when it was never gone at all.
+      unknown            nothing anywhere -> a new agent
+
+    Derived per call from live readings, never stored: a lifecycle flag that
+    could lapse would be the deaf-agent shape wearing a lifecycle hat."""
+    if docker_status in ("running", "restarting", "paused"):
+        return "running"
+    if docker_status and docker_status != "absent":
+        return "stopped"
+    if has_files:
+        return "retired"
+    if hive and (hive.get("messages") or hive.get("memories")
+                 or hive.get("lessons")):
+        return "erased"
+    return "unknown"
+
+
+def _agent_status(conn, user, hive_by_name=None):
+    """Every name this user could act on, in one list: their provisioned
+    containers PLUS names the hive still remembers whose container is gone.
+    The second half is what makes recovery reachable -- a destroyed agent
+    leaves no launcher record at all, so before this it was invisible and its
+    resume path may as well not have existed."""
+    hive_by_name = hive_by_name or {}
     rows = conn.execute(
         "SELECT * FROM containers WHERE user=? ORDER BY agent", (user,)).fetchall()
-    out = []
+    out, listed = [], set()
     for r in rows:
-        st = _docker("inspect", "-f", "{{.State.Status}}", r["container"],
-                     check=False, capture=True)
-        out.append({"agent": r["agent"], "container": r["container"],
-                    "status": (st.stdout or "").strip() or "absent",
+        st = (_docker("inspect", "-f", "{{.State.Status}}", r["container"],
+                      check=False, capture=True).stdout or "").strip() or "absent"
+        agent = r["agent"]
+        listed.add(agent)
+        hive = hive_by_name.get(agent, {})
+        has_files = os.path.isdir(data_root(user, agent))
+        out.append({"agent": agent, "container": r["container"], "status": st,
                     "image": r["image"], "repo_url": r["repo_url"],
-                    "created_ns": r["created_ns"]})
+                    "created_ns": r["created_ns"],
+                    "state": lifecycle_state(st, has_files, hive),
+                    "has_files": has_files, "hive": hive})
+    for agent, hive in sorted(hive_by_name.items()):
+        # present = alive right now somewhere else (a host agent, another
+        # user's container). Remembered-and-gone is a recovery case;
+        # remembered-and-working is not, and offering to recreate it would
+        # invite someone to duplicate a live identity.
+        if agent in listed or hive.get("present") or not ROLE_RE.match(agent or ""):
+            continue
+        has_files = os.path.isdir(data_root(user, agent))
+        state = lifecycle_state("absent", has_files, hive)
+        if state == "unknown":
+            continue
+        out.append({"agent": agent, "container": container_name(user, agent),
+                    "status": "absent", "image": "", "repo_url": "",
+                    "created_ns": hive.get("last_ns") or 0,
+                    "state": state, "has_files": has_files, "hive": hive})
     return out
 
 
@@ -1794,7 +1849,13 @@ def build_api(auth_url):
     @guarded
     async def agents(request, p, conn):
         if request.method == "GET":
-            return JSONResponse({"agents": _agent_status(conn, p["user"])})
+            # The hive half comes from the BROKER, with this request's own
+            # cookie -- the launcher never learns bus facts on its own
+            # authority, exactly as it never mints on its own authority.
+            seen = _broker_json(auth_url, request.headers.get("cookie"),
+                                "GET", "/agents-seen") or {}
+            hive = {a["name"]: a for a in seen.get("agents", [])}
+            return JSONResponse({"agents": _agent_status(conn, p["user"], hive)})
         d = await request.json()
         # P3: no token in the body + rooms ticked -> the LAUNCHER mints the
         # bound state-tier token through the broker's session routes with THIS
