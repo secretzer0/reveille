@@ -190,6 +190,15 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.43 THE WHOLE IDENTITY BLOCK MOVES, AND A FAILURE CARRIES ITS STATE. The
+0.2.42 hoist moved git's user.name and safe.directory above the clone and left
+user.email 160 lines below it, so the file read as though the split were
+deliberate -- the same ordering defect one size smaller, introduced by the
+commit that fixed the first one. Reunited above the clone. And a failed clone
+now records the credential helpers configured AT THAT MOMENT and whether
+GITHUB_TOKEN was present, beside git's own words: "clone failed" alone sent two
+people to the token for an hour, and the token was fine.
+
 0.2.42 YOUR CONTAINER WRITES YOU A BOOT REPORT. Every agent boot writes
 ~/boot-report.md naming what it attempted, what succeeded and what is MISSING
 -- role prompt, git credentials, claude credential, the repo clone and git's

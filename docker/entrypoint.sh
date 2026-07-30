@@ -77,8 +77,14 @@ claude mcp add --transport http --scope user reveille "${REVEILLE_URL}/mcp" \
 # Username for 'https://github.com'", and died on a terminal nobody was watching.
 # GITHUB_TOKEN was present the whole time. A public repo would have hidden this
 # forever. The wiring is not new; its POSITION is the fix.
+# Unattended git: permission mode silences the PROMPTS, but these are what
+# actually fail a clone, a commit or a push, and no permission setting fixes
+# them. Kept TOGETHER -- hoisting half an identity block is how the next reader
+# concludes the other half was deliberate.
 git config --global --get user.name >/dev/null 2>&1 || \
   git config --global user.name "${REVEILLE_GIT_NAME:-${REVEILLE_AGENT_ROLE}}"
+git config --global --get user.email >/dev/null 2>&1 || \
+  git config --global user.email "${REVEILLE_GIT_EMAIL:-${REVEILLE_AGENT_ROLE}@reveille.local}"
 git config --global --get safe.directory >/dev/null 2>&1 || \
   git config --global --add safe.directory '*'
 # gh reads GH_TOKEN first; the P2 profile supplies GITHUB_TOKEN. gh as git's
@@ -97,7 +103,22 @@ if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/repos 2>/dev/nul
   if git clone "${REVEILLE_REPO_URL}" /home/agent/repos/work 2>/tmp/clone.err; then
     say "- cloned ${REVEILLE_REPO_URL} -> ~/repos/work"
   else
-    note "- clone of ${REVEILLE_REPO_URL} **FAILED**. git said:"
+    note "- clone of ${REVEILLE_REPO_URL} **FAILED**."
+    # THE FAILURE AND THE STATE THAT CAUSED IT. "clone failed, clone by hand"
+    # cost two people an hour suspecting the token, when the token was fine and
+    # the credential helper simply was not wired yet. A failure without the state
+    # around it sends the reader to the likeliest suspect, which is not the same
+    # thing as the cause.
+    say "  git credential helper at clone time:"
+    if git config --global --get-regexp '^credential\..*\.helper' >/dev/null 2>&1; then
+      git config --global --get-regexp '^credential\..*\.helper' \
+        | sed 's/^/      /' >> "$BOOT_REPORT" 2>/dev/null || true
+    else
+      say "      (none configured)"
+    fi
+    say "  GITHUB_TOKEN: $([ -n "${GITHUB_TOKEN:-}" ] && echo present || echo absent)"
+    say ""
+    say "  git said:"
     say ""
     sed 's/^/      /' /tmp/clone.err >> "$BOOT_REPORT" 2>/dev/null || true
     say ""
@@ -246,12 +267,8 @@ if [ -f /run/reveille-auth/.credentials.json ]; then
     /home/agent/.claude/.credentials.json
 fi
 
-# Unattended git: permission mode silences the PROMPTS, but these three are
-# what actually fail a commit or a push, and no permission setting fixes them.
-git config --global --get user.email >/dev/null 2>&1 || \
-  git config --global user.email "${REVEILLE_GIT_EMAIL:-${REVEILLE_AGENT_ROLE}@reveille.local}"
-# git identity and credentials are wired BEFORE the clone -- see the block above
-# the clone for why the order is the fix.
+# Git identity and credentials are wired ABOVE the clone -- see that block for
+# why the order IS the fix. Nothing git-related belongs down here any more.
 
 # Per-container gate secret (DES-002 4.3): injected by the launcher at provision
 # (T2); a hand-run container gets a random one, never printed -- mint grant
