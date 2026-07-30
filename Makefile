@@ -301,6 +301,12 @@ readmit-gate: sync
 deafness-gate: sync
 	uv run python tests/deafness_gate.py
 
+# Room-events gate: the room PUSHES its own events, so a browser learns that
+# someone arrived or left without asking. Every /feed frame names its event
+# type, and presence rides that channel carrying the whole list, not a diff.
+room-events-gate: sync
+	uv run python tests/room_events_gate.py
+
 # Leave-sticks gate: a DIRECTIVE:LEAVE survives the boot ritual. join() used to
 # clear every leave mark unconditionally, and join() at startup is the standing
 # ritual -- so leaving lasted until the next restart. Gated through the real MCP
