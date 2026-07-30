@@ -1607,6 +1607,19 @@ def revoke_minted_token(auth_url, cookie_header, token_id):
     _broker_json(auth_url, cookie_header, "DELETE", f"/tokens/{token_id}")
 
 
+def revoke_bound_tokens(auth_url, cookie_header, agent):
+    """Destroy's counterpart to the broker's mint-time supersede: an agent
+    that no longer exists must not leave a live credential answering to its
+    name. Lists the SESSION USER's own tokens (that is all GET /tokens
+    returns) and revokes those bound to this agent. Best-effort like
+    revoke_minted_token -- the broker's supersede-on-next-mint catches any
+    residue if this call never lands."""
+    out = _broker_json(auth_url, cookie_header, "GET", "/tokens")
+    for t in (out or {}).get("tokens", []):
+        if t.get("agent_name") == agent:
+            _broker_json(auth_url, cookie_header, "DELETE", f"/tokens/{t['id']}")
+
+
 def _agent_status(conn, user):
     rows = conn.execute(
         "SELECT * FROM containers WHERE user=? ORDER BY agent", (user,)).fetchall()
@@ -2060,6 +2073,10 @@ def build_api(auth_url):
             _known_agent(conn, p["user"], name)
             destroy_agent(conn, p["user"], name,
                           purge=request.query_params.get("purge") == "1")
+            # The agent's bus credential dies with it (same doctrine as
+            # grants): a destroyed agent must not leave a live token
+            # answering to its name.
+            revoke_bound_tokens(auth_url, request.headers.get("cookie"), name)
             return JSONResponse({"destroyed": name})
         _known_agent(conn, p["user"], name)
         rows = _agent_status(conn, p["user"])

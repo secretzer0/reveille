@@ -184,6 +184,13 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+
+0.2.28 ONE BUS IDENTITY, ONE LIVE CREDENTIAL. Minting a token bound to an
+agent name now REVOKES the owner's previous tokens for that name (response
+carries superseded=[ids]); before this, every agent re-provision left the
+predecessor credential alive. Same supersede shape as wake attachments. If
+your token stops resolving after a re-provision, that is this working: the
+newest provision holds the live credential.
 0.2.27 PRESENCE NOW SHOWS WHO IS DEAF. An entry may carry deaf=true with
        deaf_reason: "no-waiter" (its wake daemon is not attached) or
        "not-draining" (rings arrive, nothing acts). The verdict is computed
@@ -3961,13 +3968,22 @@ async def tokens_http(request):
     if request.method == "GET":
         return JSONResponse({"tokens": store.list_tokens(_conn, p.user_id)})
     d = await request.json()
+    # Binding a name SUPERSEDES the owner's previous tokens for that name --
+    # one bus identity, one live credential. Before this, every agent
+    # re-provision minted anew and orphaned the predecessor (four live
+    # credentials for one agent, found by the operator in the Tokens tab).
+    superseded = []
+    bound = (d.get("agent_name") or "").strip()
+    if bound:
+        superseded = store.supersede_bound_tokens(_conn, p.user_id, bound)
     t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip(),
                            agent_name=d.get("agent_name"),
                            mem_tier=(d.get("mem_tier") or "state"))
-    log.info("%s minted token %s%s", p.name, t["id"],
-             f" bound to {t['agent_name']}" if t["agent_name"] else "")
+    log.info("%s minted token %s%s%s", p.name, t["id"],
+             f" bound to {t['agent_name']}" if t["agent_name"] else "",
+             f" (superseded {len(superseded)})" if superseded else "")
     # The secret is returned exactly once here; only its hash is stored.
-    return JSONResponse(t)
+    return JSONResponse(dict(t, superseded=superseded))
 
 
 @_guard
