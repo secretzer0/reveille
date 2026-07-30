@@ -8,6 +8,7 @@ import importlib.util
 import json
 import pathlib
 import sqlite3
+import types
 
 import pytest
 
@@ -483,3 +484,24 @@ def test_debug_argv_is_interactive_selfremoving_and_secretless():
     raw = rl.debug_argv("acme", "dev", "img:1", "net", entrypoint="sh")
     assert raw[raw.index("--entrypoint") + 1] == "sh"
     assert raw[-1] == "img:1"
+
+
+def test_debug_refuses_while_the_managed_container_is_running(monkeypatch, capsys):
+    """Two claudes on one ~/.claude step on each other's sqlite state, and what
+    is at risk is the agent's PERSISTED home -- the thing the destroy modal and
+    the retire/erase split exist to protect. A warning printed immediately
+    before exec'ing into a tty is read after the damage, so this refuses. Every
+    other guard in this file refuses; a tool aimed at an investigation is the
+    last place to make an exception, because whoever runs it is by definition
+    not yet sure what is going on.
+    """
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k: types.SimpleNamespace(
+        stdout="true", returncode=0))
+    monkeypatch.setattr(rl, "resolve_credentials",
+                        lambda *a, **k: {"claude_token": "sk-ant-oat-x",
+                                         "github_token": "", "repo_url": ""})
+    args = types.SimpleNamespace(user="acme", agent="dev", image="img",
+                                 network="net", entrypoint="bash", force=False)
+    with pytest.raises(rl.LaunchError) as e:
+        rl.cmd_debug(args)
+    assert "RUNNING" in str(e.value) and "--force" in str(e.value)

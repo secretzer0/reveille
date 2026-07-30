@@ -656,8 +656,22 @@ def cmd_debug(a):
     if _docker("inspect", "-f", "{{.State.Running}}", managed,
                check=False, capture=True).stdout.strip() == "true":
         # Same ~/.claude, two claudes: shared sqlite state and stepped-on locks.
+        # REFUSE rather than warn-and-proceed. A warning printed immediately
+        # before exec'ing into a tty is read after the damage, and what is at
+        # risk here is the agent's persisted ~/.claude -- the thing the destroy
+        # modal and the retire/erase split exist to protect. Every other guard
+        # in this file refuses (deploy-preflight, server-image, the
+        # credential-less boot); a debug tool aimed at a billing investigation
+        # is not the place to make an exception, because the operator running it
+        # is by definition not yet sure what is going on.
+        if not a.force:
+            raise LaunchError(
+                f"{managed} is RUNNING and shares ~/.claude with this shell. "
+                f"Two claudes on one home step on each other's sqlite state. "
+                f"Stop it first (reveille-launch stop {a.user} {a.agent}), or "
+                f"pass --force if you genuinely want both at once.")
         print(f"WARNING: {managed} is RUNNING and shares this home -- "
-              f"stop it first unless you know why you want both.", file=sys.stderr)
+              f"--force given, proceeding.", file=sys.stderr)
     print(f"debug shell into {a.user}/{a.agent}: image {a.image}, "
           f"credential: {kind}\n"
           f"  inside, try:  claude /status   (whose account, which billing)\n"
@@ -2424,6 +2438,10 @@ def build_parser():
     dbg.add_argument("--entrypoint", default="bash",
                      help="override to /usr/local/bin/entrypoint.sh for the "
                           "full boot (then REVEILLE_* env is on you)")
+    dbg.add_argument("--force", action="store_true",
+                     help="open the shell even while the managed container is "
+                          "running (two claudes share one ~/.claude and step on "
+                          "each other's state)")
     dbg.set_defaults(fn=cmd_debug)
 
     j = sub.add_parser("join-here",
