@@ -1687,6 +1687,12 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   color-scheme:dark;
   --bg:#0e1116;--rail:#0a0d12;--card:#151a21;--line:#242c37;--hover:#1a212b;
   --fg:#dce3ec;--dim:#8b95a3;--faint:#5a6472;--gold:#e2a63d;--green:#3ecf6a;
+  /* Referenced by .pRow button and .chip below but never defined -- both
+     rendered with a transparent background (var() with no fallback resolves
+     to the property's initial value), which is why chips/buttons across
+     Rooms/Tokens/Agents read as visually inconsistent with the rest of the
+     dark theme instead of like a raised surface. */
+  --chip:#1b212a;
  }
  *{box-sizing:border-box;margin:0}
  html,body{height:100%}
@@ -1703,9 +1709,21 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  #status{width:.55em;height:.55em;border-radius:50%;background:var(--faint)}
  #status.on{background:var(--green)}
  #rail h2{font-size:.68rem;letter-spacing:.14em;color:var(--faint);padding:.9rem 1rem .4rem}
- a.navlink{display:block;margin:.55rem 1rem 0;padding:.4rem .6rem;border:1px solid
-  var(--line);border-radius:7px;color:var(--fg);text-decoration:none;font-size:.85rem}
- a.navlink:hover{border-color:var(--accent)}
+ /* The Agents control is a <button> (it runs script, an <a> would need a
+    fake href) but shared the ANCHOR-only selector below, so it rendered with
+    zero intentional style -- plain browser button chrome next to the rest of
+    the dark, rounded rail. That mismatch is what the operator's screenshot
+    was pointing at, more than any single color choice. */
+ a.navlink,button.navlink{display:block;margin:.55rem 1rem 0;
+  padding:.4rem .6rem;border:1px solid var(--line);border-radius:7px;
+  color:var(--fg);text-decoration:none;font:inherit;font-size:.85rem;
+  text-align:left;background:none;cursor:pointer;box-sizing:border-box}
+ /* --accent, same as --chip below, was never defined in :root -- every other
+    hover/focus highlight in this file uses --gold, so this was a stray name
+    rather than a deliberate second accent color. */
+ a.navlink:hover,button.navlink:hover{border-color:var(--gold)}
+ button.navlink[aria-pressed="true"]{background:var(--hover);
+  border-color:var(--gold);color:var(--gold)}
  #fmode{display:flex;margin:0 1rem .45rem;border:1px solid var(--line);border-radius:7px;
   overflow:hidden}
  #fmode button{flex:1;background:none;border:0;color:var(--faint);font:inherit;
@@ -1987,7 +2005,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   border-radius:6px;color:var(--fg);padding:.3rem .5rem;font:inherit;font-size:.78rem}
  .pRow button{background:var(--chip);border:1px solid var(--line);border-radius:6px;
   color:var(--fg);padding:.25rem .55rem;font:inherit;font-size:.72rem;cursor:pointer}
- .pRow button:hover{border-color:var(--accent)}
+ .pRow button:hover{border-color:var(--gold)}
  .pRow button.danger{color:#e8555a;border-color:#5a2b2d}
  .pRow button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line)}
  /* U7: creation is a page-level action, management is row-level (architect
@@ -2682,7 +2700,12 @@ async function loadPresence(){
    +'<span class="nm">everyone</span>'
    +'<span class="cnt">'+agentList.length+'</span>';
  all.title=selAgents.size?'show every agent':'showing every agent';
- all.onclick=()=>{selAgents.clear();recip.clear();renderPicker();loadPresence();refilter();};
+ // Picking a filter is asking to see the transcript, which the Agents well is
+ // covering right now (operator screenshot, msg 8588) -- so the same click
+ // that sets the filter also returns to chat, instead of applying invisibly
+ // behind the well.
+ all.onclick=()=>{selAgents.clear();recip.clear();renderPicker();loadPresence();refilter();
+  if($('agentsWell').classList.contains('on'))closeAgentsWell();};
  $('agents').appendChild(all);
  const sel=$('hAgent'),keep=sel.value;
  sel.innerHTML='<option value="">any</option>';
@@ -2704,7 +2727,8 @@ async function loadPresence(){
    :a.live?(web?'signed in, not watching this room':'live, waiter down -- mail queues'):'stale';
   el.onclick=()=>{selAgents.has(a.name)?selAgents.delete(a.name):selAgents.add(a.name);
    recip.clear();for(const n of selAgents)if(n!==myName)recip.add(n);   // filter selection IS the target, minus yourself
-   renderPicker();loadPresence();refilter();};
+   renderPicker();loadPresence();refilter();
+   if($('agentsWell').classList.contains('on'))closeAgentsWell();};
   $('agents').appendChild(el);
  }
  renderPicker();
@@ -2931,20 +2955,33 @@ function lapi(path,opts){return api(AGBASE+path,opts);}
 // because nothing here is on their path.
 let agConfirm=null;   // {agent} -- at most one destroy-confirm open at a time
 let agMeta=null;      // {roles, role_prompts, rooms} from /rooms-mine, cached per open
+// U7 follow-up (operator screenshot, msg 8588): entry and exit used two
+// different controls in two different corners -- the nav button opened it,
+// a small text link buried in the well's own content closed it. The nav
+// button now toggles and relabels itself, so the SAME control in the SAME
+// place is the answer to "how do I get back", never a diagonal reach across
+// the page. aria-pressed carries the state for a screen reader; the text
+// label carries it for everyone else. The in-well "back to chat" link stays
+// too -- it's the reachable one if the page has scrolled the nav out of view.
 function openAgentsWell(){
  $('chatWell').classList.add('hidden');
  $('agentsWell').classList.add('on');
+ const nav=$('agentsNav');
+ if(nav){nav.textContent='← Back to chat';nav.setAttribute('aria-pressed','true');}
  refreshAgents();
 }
 function closeAgentsWell(){
  $('agentsWell').classList.remove('on');
  $('chatWell').classList.remove('hidden');
+ const nav=$('agentsNav');
+ if(nav){nav.textContent='Agents';nav.setAttribute('aria-pressed','false');}
 }
 // The button exists only where the launcher's location was declared, so this
 // must not assume it: an unguarded onclick on a missing element throws at
 // load and takes the REST of this script with it -- chat, presence and the
 // composer included. The pane degrading is acceptable; the page dying is not.
-if(typeof AGBASE!=='undefined')$('agentsNav').onclick=openAgentsWell;
+if(typeof AGBASE!=='undefined')$('agentsNav').onclick=
+ ()=>{$('agentsWell').classList.contains('on')?closeAgentsWell():openAgentsWell();};
 $('agBack').onclick=closeAgentsWell;
 $('agRetry').onclick=refreshAgents;
 function agUnavailable(msg){
@@ -3916,7 +3953,8 @@ def agents_nav_html(path):
         return ""
     js = json.dumps(base).replace("<", "\\u003c")
     return (f'<script>const AGBASE={js};</script>'
-            f'<button type="button" id="agentsNav" class="navlink">Agents</button>')
+            f'<button type="button" id="agentsNav" class="navlink" '
+            f'aria-pressed="false">Agents</button>')
 
 
 def nav_link_html(label, path):
