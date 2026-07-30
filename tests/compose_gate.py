@@ -110,7 +110,28 @@ def main():
         run(["bash", str(REPO / "scripts" / "deploy-preflight"), str(data),
              "revgate-server"])
 
-        # -- 5. down stops the platform, keeps the network --------------------
+        # -- 5. up-dev serves the WORKING TREE's UI, and says so --------------
+        # The overlay's bind source is RELATIVE to the compose file dir; a
+        # wrong resolution serves an empty dir and looks fine until a dev
+        # wonders why edits do nothing. Assert the served page came from the
+        # tree AND that the override announces itself in /version.
+        r = run(mk + ["up-dev"], env_extra=env)
+        assert "UI DEV MODE" in r.stdout, r.stdout[-400:]
+        with urllib.request.urlopen(f"http://127.0.0.1:{pport}/version",
+                                    timeout=5) as resp:
+            v = resp.read().decode()
+        assert "ui override: /devui" in v, v
+        with urllib.request.urlopen(f"http://127.0.0.1:{pport}/", timeout=5) as resp:
+            assert b"UI OVERRIDE" in resp.read(), \
+                "dev mode served a page without the visible marker"
+        # plain `make up` RETURNS to the baked UI -- dev mode must not stick
+        run(mk + ["up"], env_extra=env)
+        with urllib.request.urlopen(f"http://127.0.0.1:{pport}/version",
+                                    timeout=5) as resp:
+            assert b"override" not in resp.read(), \
+                "the dev override survived a plain `make up`"
+
+        # -- 6. down stops the platform, keeps the network --------------------
         run(mk + ["down"], env_extra=env)
         for c in ("revgate-server", "revgate-proxy"):
             st = run(["docker", "inspect", "-f", "{{.State.Running}}", c]).stdout
@@ -128,7 +149,9 @@ def main():
               f"launcher prefix on :{pport}; rebuilding the existing tag "
               f"refused with the fix named; preflight refused an empty data "
               f"root over a live db, allowed the in-service root and a true "
-              f"first boot; down stopped the platform and kept the network")
+              f"first boot; up-dev served the working tree's UI with the "
+              f"override announced and a plain up returned to the baked UI; "
+              f"down stopped the platform and kept the network")
     finally:
         run(mk + ["down"], env_extra=env, check=False)
         run(["docker", "rm", "-f", "revgate-server", "revgate-proxy"],
