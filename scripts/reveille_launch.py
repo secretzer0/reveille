@@ -367,6 +367,28 @@ def _launcher_tables(conn):
         "CREATE TABLE IF NOT EXISTS user_quotas("
         "user TEXT PRIMARY KEY, cpus REAL, mem TEXT, disk_gb INTEGER, "
         "pids INTEGER, max_containers INTEGER)")
+    # WHO OWNS A NAME (ruling 8660). An agent name that carries messages,
+    # memories and a state note is an IDENTITY; only its owner may resurrect it.
+    # This table is DELIBERATELY not `containers`: a container is ephemeral by
+    # design and destroy deletes its row, so ownership stored there dies with the
+    # thing it outlives. Ownership is a fact about the PAST that nothing surviving
+    # a destroy can re-derive -- the one category that must be written down.
+    # Keyed on agent ALONE: a name has exactly one owner. FIRST provisioner, not
+    # most recent, or the rule is only "whoever last touched it".
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_owners("
+        "agent TEXT PRIMARY KEY, user TEXT NOT NULL, "
+        "first_provisioned_ns INTEGER NOT NULL, "
+        "released_ns INTEGER, released_by TEXT)")
+    # Backfill from containers ONCE, because a still-provisioned agent's owner is
+    # derivable TODAY and unrecoverable the moment it is destroyed. This is the
+    # only place the two tables ever touch, and it runs before the first destroy
+    # that would take the fact with it. Already-erased names are past saving --
+    # their container rows are gone, which is exactly the gap being closed.
+    conn.execute(
+        "INSERT OR IGNORE INTO agent_owners(agent, user, first_provisioned_ns) "
+        "SELECT agent, user, created_ns FROM containers")
+    conn.commit()   # open holds no write lock: a second opener must not block
 
 
 def _db(path=None):
@@ -384,6 +406,47 @@ def _db(path=None):
 def _quotas_for(conn, user):
     return resolve_quotas(conn.execute(
         "SELECT * FROM user_quotas WHERE user=?", (user,)).fetchone())
+
+
+def claim_agent_name(conn, user, agent, now_ns=None):
+    """Record who owns this name, once, at provision time (ruling 8660).
+
+    RECORDING IS URGENT, ENFORCING IS NOT: this writes the fact and returns the
+    owner; it refuses nothing today, because the operator is the only user and
+    the enforcement wants the UI half. But every agent provisioned before the
+    enforcement exists has an ownership fact that is UNRECOVERABLE if it is not
+    written at the time, so it is written at the time.
+
+    First provisioner wins and re-provisioning does not move ownership. A
+    RELEASED name is claimable again -- release is the key to this lock, and
+    shipping the lock without it would leak every name a deleted account held."""
+    now = time.time_ns() if now_ns is None else now_ns
+    row = conn.execute("SELECT * FROM agent_owners WHERE agent=?",
+                       (agent,)).fetchone()
+    if row is None or row["released_ns"] is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_owners"
+            "(agent, user, first_provisioned_ns, released_ns, released_by) "
+            "VALUES(?,?,?,NULL,NULL)", (agent, user, now))
+        conn.commit()
+        return {"agent": agent, "user": user, "first_provisioned_ns": now}
+    return {"agent": agent, "user": row["user"],
+            "first_provisioned_ns": row["first_provisioned_ns"]}
+
+
+def release_agent_name(conn, agent, by, now_ns=None):
+    """Free a name for someone else to claim. Returns the prior owner, or None
+    if the name was unowned or already released. Audited by the caller: an
+    ownership transfer nobody can point at afterwards is not a transfer."""
+    now = time.time_ns() if now_ns is None else now_ns
+    row = conn.execute("SELECT * FROM agent_owners WHERE agent=?",
+                       (agent,)).fetchone()
+    if row is None or row["released_ns"] is not None:
+        return None
+    conn.execute("UPDATE agent_owners SET released_ns=?, released_by=? "
+                 "WHERE agent=?", (now, by, agent))
+    conn.commit()
+    return row["user"]
 
 
 def _record(conn, user, agent, repo_url, image, broker_url):
@@ -1039,16 +1102,23 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                            auth_mount=auth_mount)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
     _record(conn, user, agent, creds["repo_url"], image, broker)
+    owner = claim_agent_name(conn, user, agent)
     # The KIND on the audit line and in every response: "provisioned on api-key
     # billing" is one word that turns an invoice surprise into a paste-time fact.
-    _audit("PROVISION", user=user, agent=agent, image=image, credential=kind)
+    _audit("PROVISION", user=user, agent=agent, image=image, credential=kind,
+           name_owner=owner["user"])
     return name, kind
 
 
 def destroy_agent(conn, user, agent, purge=False):
     """Shared destroy path. Grants die with the container (4.5) -- the gate
     secret they were signed against is gone, so the records are history, not
-    authority. The data root survives unless purge."""
+    authority. The data root survives unless purge.
+
+    agent_owners is UNTOUCHED, on purpose and by ruling 8660: the name outlives
+    the container, and who owned it is the one fact no surviving state can
+    re-derive afterwards. Freeing a name is release_agent_name(), explicit and
+    audited -- never a side effect of throwing a container away."""
     _docker("rm", "-f", container_name(user, agent), check=False, capture=True)
     if purge:
         import shutil
@@ -1181,6 +1251,42 @@ def cmd_destroy(a):
         print(f"destroyed {a.user}/{a.agent}; kept {root} (--purge to drop -- "
               f"recreate picks up everything the agent learned)")
     return 0
+
+
+def cmd_owner(a):
+    """Who owns an agent NAME -- and, with --release, the key to that lock.
+
+    Ownership is not enforced yet (ruling 8660: recording is urgent, enforcing
+    is not), so today this reads the record the enforcement will read. Release
+    exists from day one anyway: an unenforced-forever name held by a deleted
+    account is a leak, and adding the key after the lock is how locks stay
+    unopenable."""
+    conn = _db()
+    try:
+        if a.release:
+            prior = release_agent_name(conn, a.agent, a.by)
+            if prior is None:
+                print(f"{a.agent}: unowned or already released -- nothing to do")
+                return 1
+            _audit("RELEASE-NAME", agent=a.agent, prior_owner=prior, by=a.by)
+            print(f"released {a.agent} (was {prior}'s); anyone may claim it now")
+            return 0
+        row = conn.execute("SELECT * FROM agent_owners WHERE agent=?",
+                           (a.agent,)).fetchone()
+        if row is None:
+            print(f"{a.agent}: no owner recorded -- provisioned before this "
+                  f"table existed, or never provisioned")
+            return 1
+        when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                             time.gmtime(row["first_provisioned_ns"] / 1e9))
+        if row["released_ns"] is not None:
+            print(f"{a.agent}: RELEASED by {row['released_by']} "
+                  f"(was {row['user']}'s, first provisioned {when})")
+        else:
+            print(f"{a.agent}: {row['user']} (first provisioned {when})")
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_profile(a):
@@ -2448,6 +2554,16 @@ def build_parser():
                    help="also drop the data root (default keeps everything the "
                         "agent learned; recreate picks it back up)")
     d.set_defaults(fn=cmd_destroy)
+
+    ow = sub.add_parser("owner", help="who owns an agent NAME, and --release to "
+                                      "free it (ruling 8660; recorded now, "
+                                      "enforced later)")
+    ow.add_argument("agent")
+    ow.add_argument("--release", action="store_true",
+                    help="free the name for anyone to claim -- audited")
+    ow.add_argument("--by", default="admin",
+                    help="who is releasing it (goes on the audit line)")
+    ow.set_defaults(fn=cmd_owner)
 
     pr = sub.add_parser("profile", help="show (masked) or set stored credentials "
                                         "(DES-005 P2); token values via stdin, "

@@ -394,6 +394,69 @@ def test_idle_decision_matrix():
     assert rl.is_idle(False, 0, 0, 100 * H, 0) is False
 
 
+# ---- ownership of a NAME (ruling 8660) ---------------------------------------------
+
+def test_a_name_belongs_to_its_first_provisioner_and_survives_destroy(
+        tmp_path, monkeypatch):
+    """The gap this closes: after destroy, NOTHING recorded who had owned the
+    name -- the container row was deleted and the bound token revoked -- so the
+    operator's rule ("only the original owner may resurrect an agent") had no
+    fact to enforce against. Ownership is now its own durable record, written at
+    provision, keyed on the name, and untouched by destroy."""
+    monkeypatch.setenv("REVEILLE_LAUNCH_DATA", str(tmp_path / "data"))
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k: None)
+    conn = rl._db(str(tmp_path / "launcher.db"))
+    assert rl.claim_agent_name(conn, "ana", "scout", now_ns=100)["user"] == "ana"
+    # re-provisioning does not move ownership -- otherwise the rule is only
+    # "whoever last touched it owns it", which is not a rule
+    again = rl.claim_agent_name(conn, "bob", "scout", now_ns=200)
+    assert again["user"] == "ana" and again["first_provisioned_ns"] == 100
+
+    rl.destroy_agent(conn, "ana", "scout", purge=True)
+    row = conn.execute("SELECT user FROM agent_owners WHERE agent='scout'"
+                       ).fetchone()
+    assert row is not None and row["user"] == "ana", \
+        "destroy erased the one fact nothing surviving it can re-derive"
+    conn.close()
+
+
+def test_existing_agents_get_their_owner_backfilled(tmp_path):
+    """Agents provisioned before this table existed still have a derivable owner
+    -- their container row -- but only until someone destroys them. Backfill on
+    open, once, so the live fleet is covered before the first destroy takes the
+    fact with it."""
+    db = str(tmp_path / "launcher.db")
+    conn = rl._db(db)
+    conn.execute("INSERT INTO containers(user, agent, created_ns) "
+                 "VALUES('ana','legacy-scout',77)")
+    conn.commit()
+    conn.close()
+
+    conn = rl._db(db)                      # next open backfills
+    row = conn.execute("SELECT * FROM agent_owners WHERE agent='legacy-scout'"
+                       ).fetchone()
+    assert row["user"] == "ana" and row["first_provisioned_ns"] == 77
+    # and it is a BACKFILL, not a reassignment: a released name stays released
+    rl.release_agent_name(conn, "legacy-scout", "admin", now_ns=99)
+    conn.close()
+    conn = rl._db(db)
+    assert conn.execute("SELECT released_ns FROM agent_owners WHERE "
+                        "agent='legacy-scout'").fetchone()["released_ns"] == 99
+    conn.close()
+
+
+def test_a_released_name_is_claimable_and_release_is_idempotent(tmp_path):
+    """Do not ship the lock without the key: a name held forever by a deleted
+    account is a leak."""
+    conn = rl._db(str(tmp_path / "launcher.db"))
+    rl.claim_agent_name(conn, "ana", "scout", now_ns=100)
+    assert rl.release_agent_name(conn, "scout", "admin", now_ns=300) == "ana"
+    assert rl.release_agent_name(conn, "scout", "admin", now_ns=400) is None
+    assert rl.release_agent_name(conn, "never-existed", "admin") is None
+    assert rl.claim_agent_name(conn, "bob", "scout", now_ns=500)["user"] == "bob"
+    conn.close()
+
+
 # ---- T3: grant records + sweep decisions (pure paths; docker/tmux is the smoke) ----
 
 def test_grants_table_holds_metadata_only(tmp_path):
