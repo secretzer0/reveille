@@ -1508,8 +1508,14 @@ async function openTerminal(agent){
  // the container-side re-check because "the UI already checks" is the specific
  // mistake this paragraph exists to prevent (ruling 8728).
  const now=Date.now()*1e6;
+ // OUR OWN PRIOR GRANT IS NOT A RIVAL. This page mints grantee 'me', and the
+ // mint supersedes any live driver grant with that same grantee, so a match
+ // here is this browser reconnecting -- not someone else holding the keyboard.
+ // Counting it refused the owner against themselves, naming a grant id they had
+ // no reason to recognise, and made attach work once per agent per TTL.
+ // A grant handed to another person (grantee anything else) IS a holder.
  const held=(pre.grants||[]).find(g=>g.mode==='driver'&&!g.revoked_ns&&
-   (!g.expiry_ns||g.expiry_ns>now));
+   g.grantee!=='me'&&(!g.expiry_ns||g.expiry_ns>now));
  if(held){
   agTabs.push({agent,gid:'held-'+held.id,url:'',
    err:'driver refused: grant '+held.id+' already holds the keyboard for '+

@@ -1355,3 +1355,90 @@ def test_agent_image_check_says_unknown_when_it_cannot_see_docker():
     assert "REFUSING to deploy" not in res.stderr, (
         "this is the exact confusion the ruling is about: an unreadable store "
         "must never be reported as a tag that was never built")
+
+
+def test_a_second_driver_grant_for_the_same_grantee_supersedes_the_first(tmp_path):
+    """You cannot lock yourself out of your own agent.
+
+    The web page mints a fresh 24h driver grant on every attach and nothing
+    releases the old one -- a closed tab revokes nothing. Exclusivity then
+    refused the owner against their OWN hour-old grant, naming an id they had no
+    reason to recognise, so attach worked exactly once per agent per TTL. Found
+    live with three live driver grants, all grantee 'me', all the operator's.
+
+    The same grantee asking again is the same driver reconnecting, not a rival.
+    Reuse is not available -- re-issue is re-mint, never retrieval (4.5.2) --
+    so the prior grant is superseded, which also KILLS its session and makes the
+    new tab the driver rather than leaving two of them fighting.
+
+    A grant held by SOMEONE ELSE must survive: that is the exclusivity the rule
+    is actually for.
+    """
+    db = tmp_path / "launcher.db"
+    conn = rl._db(str(db))
+    rl._record(conn, "acme", "dev", "https://r", "img", "http://b")
+    minted = []
+
+    def fake_docker(*args, **kw):
+        if args[:1] == ("exec",):
+            minted.append(args)
+            return types.SimpleNamespace(returncode=0, stdout="v1.tok\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    orig = rl._docker
+    rl._docker = fake_docker
+    try:
+        first = rl.mint_grant(conn, "acme", "dev", "me", "driver", 86400)
+        other = rl.mint_grant(conn, "acme", "dev", "bob", "driver", 86400)
+        second = rl.mint_grant(conn, "acme", "dev", "me", "driver", 86400)
+    finally:
+        rl._docker = orig
+
+    live = {r["id"] for r in conn.execute(
+        "SELECT id FROM grants WHERE revoked_ns IS NULL").fetchall()}
+    assert first["id"] not in live, (
+        "the owner's own previous driver grant must be superseded, not left to "
+        "refuse them on the next attach")
+    assert second["id"] in live
+    assert other["id"] in live, (
+        "superseding must be scoped to the SAME grantee -- revoking bob's grant "
+        "would hand the keyboard away silently")
+
+    # A viewer grant is not a driver and must not be swept up by this.
+    rl._docker = fake_docker
+    try:
+        v1 = rl.mint_grant(conn, "acme", "dev", "me", "viewer", 86400)
+        v2 = rl.mint_grant(conn, "acme", "dev", "me", "viewer", 86400)
+    finally:
+        rl._docker = orig
+    live = {r["id"] for r in conn.execute(
+        "SELECT id FROM grants WHERE revoked_ns IS NULL").fetchall()}
+    assert v1["id"] in live and v2["id"] in live, (
+        "viewers are not exclusive -- several people may watch at once")
+    conn.close()
+
+
+def test_the_preflight_does_not_call_your_own_grant_a_rival():
+    """The advisory pre-flight, read off the SHIPPED page.
+
+    It refused on ANY live driver grant, including the one this very page minted
+    an hour ago under grantee 'me'. Since the mint now supersedes that grant, a
+    match on it is this browser reconnecting -- and reporting it as "someone
+    already holds the keyboard" sent the owner looking for a person who did not
+    exist.
+
+    Someone ELSE's driver grant must still refuse: that is the exclusivity the
+    rule exists for, and dropping it here would move exclusivity to the client
+    (ruling 8728) by making the pre-flight silently permissive.
+    """
+    page = (pathlib.Path(rl.__file__).parent.parent
+            / "src/reveille/ui/bus/index.html").read_text()
+    # The STATEMENT, not the line: the condition spans a line break, and a
+    # line-granular read would pass on the broken page by simply not seeing the
+    # half that matters.
+    start = page.find("const held=")
+    assert start != -1, "the pre-flight holder check is gone or renamed"
+    stmt = page[start:page.index(";", start)]
+    assert "g.grantee!=='me'" in stmt, (
+        "the pre-flight counts the page's own grantee as a holder -- the owner "
+        "is refused against themselves on every attach after the first")
