@@ -1840,3 +1840,81 @@ def test_a_departed_agent_does_not_hold_its_name():
     store.leave(c, "dev", [room["id"]])
     assert store.join(c, "dev", "TAG_b", room["id"], tok["id"]) == "dev"
     assert store.presence(c, [room["id"]])[0]["tag"] == "TAG_b"
+
+
+def _mail(c, room, to, age_s, sender="architect"):
+    mid = store.send(c, sender, to, "b", subject="s", room=room)["id"]
+    c.execute("UPDATE messages SET ts_ns=? WHERE id=?",
+              (time.time_ns() - age_s * 10**9, mid))
+    return mid
+
+
+def test_deafness_definition_table():
+    # Each exclusion is a ratified protocol boundary (msg 8620), not a tuning
+    # choice -- so each gets its own row here.
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.join(c, "architect", "architect", room["id"], tok["id"])
+    rid = room["id"]
+
+    # old direct mail, no life since -> DEAF
+    _mail(c, rid, "dev", age_s=1000)
+    _age(c, rid, "dev", 1001)
+    assert (rid, "dev") in store.deafness(c, [rid])
+
+    # the agent WORKED after the mail landed (silence is a valid turn) -> clear
+    store.touch(c, "dev", [rid])
+    assert (rid, "dev") not in store.deafness(c, [rid])
+
+
+def test_deafness_needs_age_not_just_unread():
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.join(c, "architect", "architect", room["id"], tok["id"])
+    _mail(c, room["id"], "dev", age_s=5)      # fresh mail
+    _age(c, room["id"], "dev", 10)
+    assert store.deafness(c, [room["id"]]) == {}
+
+
+def test_broadcasts_never_make_anyone_deaf():
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.join(c, "architect", "architect", room["id"], tok["id"])
+    _mail(c, room["id"], "*", age_s=5000)
+    _age(c, room["id"], "dev", 6000)
+    assert store.deafness(c, [room["id"]]) == {}
+
+
+def test_a_fresh_join_starts_the_clock_at_arrival():
+    # Mail older than the window predates the joiner; join advances seen_ns, so
+    # the backlog does not read as deafness.
+    c, admin, room, tok = fixture()
+    store.join(c, "architect", "architect", room["id"], tok["id"])
+    # the member exists (send requires it), then goes stale and is reaped --
+    # the mail survives the member row, which is the case a re-joiner walks into
+    store.join(c, "late-dev", "late-dev", room["id"], tok["id"])
+    _mail(c, room["id"], "late-dev", age_s=5000)
+    c.execute("DELETE FROM members WHERE name='late-dev'")   # reaped
+    store.join(c, "late-dev", "late-dev", room["id"], tok["id"])
+    assert store.deafness(c, [room["id"]]) == {}
+
+
+def test_reading_the_mail_clears_deafness_even_with_stale_heartbeat():
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.join(c, "architect", "architect", room["id"], tok["id"])
+    mid = _mail(c, room["id"], "dev", age_s=1000)
+    _age(c, room["id"], "dev", 1001)
+    assert (room["id"], "dev") in store.deafness(c, [room["id"]])
+    store.ack(c, "dev", [mid], {room["id"]: "R"})
+    assert (room["id"], "dev") not in store.deafness(c, [room["id"]])
+
+
+def test_an_agent_that_left_is_not_deaf_it_is_gone():
+    c, admin, room, tok = fixture()
+    store.join(c, "dev", "dev", room["id"], tok["id"])
+    store.join(c, "architect", "architect", room["id"], tok["id"])
+    _mail(c, room["id"], "dev", age_s=1000)
+    _age(c, room["id"], "dev", 1001)
+    store.leave(c, "dev", [room["id"]])
+    assert store.deafness(c, [room["id"]]) == {}

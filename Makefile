@@ -283,6 +283,12 @@ offline-recovery-smoke: sync
 readmit-gate: sync
 	uv run python tests/readmit_gate.py
 
+# Deafness gate: a silent agent with unread direct mail is VISIBLY deaf from
+# both presence surfaces, with the reason (no-waiter / not-draining), and one
+# ordinary call clears it. The verdict is computed at read time, never stored.
+deafness-gate: sync
+	uv run python tests/deafness_gate.py
+
 # SIGTERM gate: with a /feed socket held open by a client that never hangs up
 # (a browser tab -- the live incident's holder), SIGTERM still exits within the
 # bounded graceful timeout, courtesy frame first. On the unfixed daemon this
