@@ -301,3 +301,46 @@ def test_the_multipart_refusal_names_the_call_that_works():
     # A refusal that does not say what to do instead is a dead end, not a gate.
     assert "--data-binary" in daemon._MULTIPART_HELP
     assert "upload()" in daemon._MULTIPART_HELP
+
+
+def test_agents_control_exists_only_where_the_launcher_was_declared():
+    # A capability with no reachable path must not have a button: U6 shipped this
+    # control unconditionally, so a broker with no launcher grew a button whose
+    # every click ended in "agent management is unavailable".
+    assert daemon.agents_nav_html("") == ""
+    assert daemon.agents_nav_html("   ") == ""
+    on = daemon.agents_nav_html("/agents")
+    assert 'id="agentsNav"' in on
+    assert 'const AGBASE="/agents"' in on
+
+
+def test_agents_base_is_normalised_and_cannot_close_the_script_tag():
+    # Operator-supplied text landing inside <script>: a path containing </script>
+    # would end the block and run whatever follows as markup.
+    assert 'const AGBASE="/agents"' in daemon.agents_nav_html("/agents/")
+    evil = daemon.agents_nav_html("/x</script><script>alert(1)</script>")
+    assert "</script><script>" not in evil.split("</script>")[0]
+    assert "\\u003c" in evil
+
+
+def test_the_page_renders_no_agents_control_when_unconfigured():
+    page = daemon.WEBCHAT.replace("<!--AGENTSNAV-->", daemon.agents_nav_html(""))
+    assert 'id="agentsNav"' not in page
+    assert "const AGBASE=" not in page      # nothing to click, nothing declared
+    assert "<!--AGENTSNAV-->" not in page   # the placeholder itself never ships
+
+
+def test_every_launcher_call_in_the_embedded_pane_is_prefixed():
+    # The defect: U6 called api('/agents') and api('/profile') -- unprefixed, so
+    # the proxy routed them to the BROKER, which 404s. Reachable service, wrong
+    # address. Every launcher-owned path must go through lapi().
+    block = daemon.WEBCHAT[daemon.WEBCHAT.index("U6: agents, embedded"):
+                           daemon.WEBCHAT.index("The presence poll is armed once")]
+    # Comments in that block QUOTE the old wrong calls on purpose (that is the
+    # explanation), so scan code lines only.
+    code = "\n".join(ln for ln in block.splitlines()
+                     if not ln.lstrip().startswith("//"))
+    for path in ("'/agents'", "'/agents/'", "'/profile'", "'/rooms-mine'"):
+        # every bare api(<path>) must be the tail of an lapi(<path>)
+        assert code.count(f"api({path}") == code.count(f"lapi({path}"), path
+        assert code.count(f"lapi({path}") > 0, path
