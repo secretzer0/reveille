@@ -1442,3 +1442,57 @@ def test_the_preflight_does_not_call_your_own_grant_a_rival():
     assert "g.grantee!=='me'" in stmt, (
         "the pre-flight counts the page's own grantee as a holder -- the owner "
         "is refused against themselves on every attach after the first")
+
+
+def test_branch_orphans_finds_a_commit_that_had_no_merge_to_ride(tmp_path):
+    """A commit pushed to an ALREADY-MERGED branch never gets a merge to ride.
+
+    Twice in one evening: e37aaf5 and d9a5724. Both branches read as landed
+    because their siblings had landed, and nothing catches that -- `git branch
+    --merged` asks about the TIP, which is an ancestor of main, and no test fails
+    for a feature that is merely absent. The second was found only because
+    someone ran git cherry by hand.
+
+    Built as the real shape rather than mocked: a base, a branch merged into it,
+    then a commit added to that branch AFTERWARDS.
+    """
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a],
+                              capture_output=True, text=True, check=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    (repo / "f.txt").write_text("base\n")
+    git("add", "-A"); git("commit", "-qm", "base")
+
+    git("checkout", "-q", "-b", "feat/x")
+    (repo / "f.txt").write_text("base\nlanded\n")
+    git("add", "-A"); git("commit", "-qm", "the half that landed")
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-ff", "feat/x", "-m", "merge feat/x")
+
+    # THE DEFECT: another commit onto the branch that was already merged.
+    git("checkout", "-q", "feat/x")
+    (repo / "f.txt").write_text("base\nlanded\nstranded\n")
+    git("add", "-A"); git("commit", "-qm", "the half that did not")
+    git("checkout", "-q", "main")
+
+    script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "branch-orphans"
+    res = subprocess.run(["bash", str(script)], cwd=str(repo),
+                         capture_output=True, text=True)
+    assert "the half that did not" in res.stdout, (
+        "a commit pushed to an already-merged branch is invisible -- this is the "
+        "case --merged reports as merged, because the TIP is an ancestor")
+    assert "the half that landed" not in res.stdout, (
+        "commits already in main must not be reported, or the signal drowns")
+
+    # And it stays quiet once the stranded commit is on main.
+    git("cherry-pick", "feat/x")
+    clean = subprocess.run(["bash", str(script)], cwd=str(repo),
+                           capture_output=True, text=True)
+    assert "no orphaned commits" in clean.stdout, (
+        "reporting a commit whose patch IS in main makes the audit unreadable")

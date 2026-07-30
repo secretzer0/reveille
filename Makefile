@@ -8,7 +8,7 @@ PID  := $(REPO)/reveille.pid
 # launcher.db image records ambiguous.
 AGENT_IMAGE ?= reveille-agent:0.2.11
 
-.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image up down
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image up down branch-orphans
 
 help:
 	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
@@ -26,6 +26,7 @@ help:
 	@echo "make unregister      remove the reveille MCP registration"
 	@echo "make lint           ruff check"
 	@echo "make agent-image    build the agent container image ($(AGENT_IMAGE))"
+	@echo "make branch-orphans commits that live on a branch and nowhere else"
 	@echo "make agent-container ROLE=<name> [WORK=<dir>] [URL=]  run one agent in a container"
 	@echo "make agent-spike    prove a container keeps its knowledge: join from inside it"
 
@@ -378,6 +379,12 @@ launcher-pin-smoke: sync
 # by hand all passed while the sweep had never run in production once.
 sweep-scheduler-smoke: sync
 	uv run python tests/sweep_scheduler_smoke.py
+
+# NOT part of any deploy: most unapplied commits are a branch legitimately in
+# review, and a check that fires on every open branch is one nobody reads. Run
+# it during hygiene, when a branch you BELIEVE is finished still prints a line.
+branch-orphans:
+	@bash scripts/branch-orphans
 
 lint:
 	uv run ruff check src tests scripts
