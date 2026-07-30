@@ -190,7 +190,7 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
-0.2.44 YOUR PLUGINS ARE ACTUALLY INSTALLED. caveman and ponytail were baked
+0.2.45 YOUR PLUGINS ARE ACTUALLY INSTALLED. caveman and ponytail were baked
 into the image's ~/.claude at build time -- correct when that path was a named
 volume (docker seeds those from the image) and void once the agent home became
 a BIND MOUNT, which shadows it. So both were present in the image, absent in
