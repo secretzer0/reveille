@@ -1514,6 +1514,45 @@ def whoami(conn, tag):
     return r["name"] if r else None
 
 
+# How long an unread DIRECT message may sit, with no sign of life from its
+# recipient since it landed, before that recipient is flagged deaf. Not a
+# judgement about quietness -- silence is a valid turn -- but about mail being
+# undeliverable in practice.
+DEAF_AFTER_NS = int(os.environ.get("REVEILLE_DEAF_AFTER", "900")) * 10**9
+
+
+def deafness(conn, rooms, now=None):
+    """{(room_id, name): oldest_stuck_ts_ns} for members who look DEAF: an
+    unread DIRECT message older than DEAF_AFTER whose recipient has shown no
+    sign of life since it landed (seen_ns has not advanced past the message).
+
+    COMPUTED at read time from state that cannot go stale -- deliberately never
+    stored, counted, or scheduled. A tracked deafness verdict would itself be
+    derived state that could lapse, i.e. the seventh instance of the defect
+    this exists to surface (ruling, msg 8620).
+
+    The exclusions are the design, not optimizations (each is a ratified
+    protocol boundary): an agent whose seen_ns advanced after the mail landed
+    is WORKING and merely not replying -- silence stays a valid turn;
+    broadcasts queue by design and never count; a fresh join() advances
+    seen_ns, so the clock starts at arrival, not at the mail."""
+    if not rooms:
+        return {}
+    now = now or time.time_ns()
+    rooms = list(rooms)
+    rows = conn.execute(
+        f"SELECT mem.room_id, mem.name, min(m.ts_ns) AS stuck "
+        f"FROM members mem JOIN messages m "
+        f"  ON m.room = mem.room_id AND m.recipient = mem.name "
+        f"WHERE mem.room_id IN ({_ph(rooms)}) AND mem.left_ns IS NULL "
+        f"  AND m.ts_ns <= ? AND m.ts_ns > mem.seen_ns "
+        f"  AND NOT EXISTS (SELECT 1 FROM reads r "
+        f"                  WHERE r.message_id = m.id AND r.agent = mem.name) "
+        f"GROUP BY mem.room_id, mem.name",
+        rooms + [now - DEAF_AFTER_NS]).fetchall()
+    return {(r["room_id"], r["name"]): r["stuck"] for r in rows}
+
+
 def presence(conn, rooms):
     """Everyone across the caller's rooms. Each entry carries its room: names are
     per-room now, so a flat list would be ambiguous."""

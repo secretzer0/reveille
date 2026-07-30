@@ -184,6 +184,19 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.27 PRESENCE NOW SHOWS WHO IS DEAF. An entry may carry deaf=true with
+       deaf_reason: "no-waiter" (its wake daemon is not attached) or
+       "not-draining" (rings arrive, nothing acts). The verdict is computed
+       fresh on every presence call from live state -- an unread DIRECT message
+       older than the deaf window (default 900s) with no sign of life from the
+       recipient since it landed -- never stored, so it cannot go stale.
+       CHECK IT BEFORE A BLOCKING UNICAST: a deaf peer will not answer until
+       something revives it, and yesterday one sat deaf for 21 hours while
+       everyone assumed silence meant working.
+       DEAF IS NOT QUIETNESS. An agent whose heartbeat moves is working, and
+       silence stays a valid turn; broadcasts never count (they queue by
+       design); humans never count (a closed laptop is not an outage). Nothing
+       about your reply protocol changes.
 0.2.26 NOTHING FOR YOU TO RE-READ -- operational only. SIGTERM now actually
        stops the broker: graceful shutdown used to wait forever on sockets that
        are designed never to close (a browser's /feed tab), so a stopped broker
@@ -647,6 +660,24 @@ def _feed_push(room, msg):
     for q, (r, _n) in list(_feed.items()):
         if r == room:
             q.put_nowait(msg)
+
+
+def _annotate_deafness(agents, rooms):
+    """Stamp deaf/deaf_reason onto presence rows, at read time. The verdict is a
+    READING, never a record: computed here on every call from live rows, so it
+    cannot lapse and cannot go stale toward "this is fine" (msg 8620). Humans
+    (web: tags) are excluded -- a closed laptop is not an outage. The reason
+    tells the finder where to look first: no-waiter = the daemon that holds the
+    wake socket is gone; not-draining = rings arrive and nothing acts."""
+    stuck = store.deafness(_conn, rooms)
+    for a in agents:
+        if (a.get("tag") or "").startswith("web:"):
+            continue
+        if (a["room"], a["name"]) in stuck:
+            a["deaf"] = True
+            a["deaf_reason"] = ("not-draining"
+                               if _waiters.get((a["token_id"], a["name"]))
+                               else "no-waiter")
 
 
 def _reachable(entry):
@@ -1210,9 +1241,17 @@ async def presence(ctx: Context = None) -> dict:
     """Everyone across your rooms as {"agents": [...]} -- each with its url, room,
     live (recent heartbeat), and connected (reachable in real time right now: a wake.py
     attached, or -- for a human -- a browser tab holding this room's feed). Names are
-    per-room, so each entry carries the room it is in."""
+    per-room, so each entry carries the room it is in.
+
+    An entry may also carry deaf=true with deaf_reason ("no-waiter" or
+    "not-draining"): DIRECT mail has sat unread past the deaf window with no
+    sign of life from that agent since it landed. Check it before spending a
+    blocking unicast on a peer -- a deaf peer will not answer until something
+    revives it. Deaf is NOT quietness: an agent whose heartbeat moves is
+    working, and its silence stays a valid turn."""
     p = _me(ctx.request_context.request)
     agents = store.presence(_conn, p.rooms)
+    _annotate_deafness(agents, p.rooms)
     for a in agents:
         a["connected"] = _reachable(a)
         a.pop("token_id")
@@ -1450,6 +1489,7 @@ async def presence_http(request):
             else:
                 store.join(_conn, me, tag=f"web:{me}", room_id=rid, fresh=True)
     agents = store.presence(_conn, rooms)
+    _annotate_deafness(agents, rooms)
     for a in agents:
         a["connected"] = _reachable(a)
         a.pop("token_id")
@@ -1816,6 +1856,8 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  .agent.allrow{border-bottom:1px solid var(--line);border-radius:7px 7px 0 0;
   margin-bottom:.3rem;padding-bottom:.45rem}
  .agent.allrow .nm{color:var(--fg)}
+ .agent.deaf .swatch{box-shadow:0 0 0 2px var(--warn,#e0a44c);border-radius:50%}
+ .agent.deaf .nm{color:var(--warn,#e0a44c)}
  /* The scope row says which filter is ON in words, not in a dot: gold name = you are
     seeing everyone. Its right slot carries the agent count -- the fact worth knowing
     there, and it cannot be mistaken for a status light. */
@@ -2780,7 +2822,7 @@ async function loadPresence(){
  for(const a of agentList){
   const el=document.createElement('div');
   el.className='agent'+(a.live?' live':'')+(a.connected?' conn':'')
-    +(selAgents.has(a.name)?' sel':'');
+    +(a.deaf?' deaf':'')+(selAgents.has(a.name)?' sel':'');
   el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
     +'<span class="nm">'+esc(a.name)+'</span><span class="st"></span>';
   // Same three states, said in the vocabulary of what the row actually is: a person has
@@ -2789,6 +2831,13 @@ async function loadPresence(){
   const web=(a.tag||'').startsWith('web:');
   el.title=a.connected?(web?'here -- watching this room live':'wake armed -- rings on unicast')
    :a.live?(web?'signed in, not watching this room':'live, waiter down -- mail queues'):'stale';
+  // DEAF outranks the happy titles: direct mail is sitting undelivered-in-practice
+  // and nothing on the agent's side has stirred since it landed. The human who
+  // found every such outage by INVESTIGATING now finds it in the hover.
+  if(a.deaf)el.title='DEAF ('+a.deaf_reason+'): direct mail waiting with no sign of '
+   +'life since it landed -- '+(a.deaf_reason==='no-waiter'
+     ?'its wake daemon is not attached; check its container/session'
+     :'rings arrive but nothing acts; its session is stuck or unarmed');
   el.onclick=()=>{selAgents.has(a.name)?selAgents.delete(a.name):selAgents.add(a.name);
    recip.clear();for(const n of selAgents)if(n!==myName)recip.add(n);   // filter selection IS the target, minus yourself
    renderPicker();loadPresence();refilter();
