@@ -76,6 +76,11 @@ def main():
 
     # The scratch tag must not exist yet, or the refusal test tests nothing.
     run(["docker", "rmi", tag], check=False)
+    # The network PRE-EXISTS, hand-made and unlabeled -- every live deployment's
+    # does (launcher _ensure_network, old server-run). A compose that only works
+    # on networks it created itself fails the first real cutover, which is
+    # exactly what happened: this line is that incident, planted.
+    run(["docker", "network", "create", NET], check=False)
     try:
         # -- 1+2. up: declared, healthy, one front door, reachable by name ----
         r = run(mk + ["up"], env_extra=env)

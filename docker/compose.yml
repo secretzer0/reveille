@@ -28,7 +28,17 @@ networks:
     # A FIXED name, not the project-scoped default: agent containers are created
     # by the launcher (DEFAULT_NETWORK="reveille") and must land on this same
     # network, or container DNS cannot resolve the broker for them.
+    #
+    # EXTERNAL, because the network is shared infrastructure, not this stack's
+    # private plumbing: the launcher's _ensure_network creates it when an agent
+    # is provisioned first, and every live deployment already carries one made
+    # by hand -- which compose REFUSES to adopt (missing compose labels), so a
+    # non-external declaration failed the first real cutover on sight. External
+    # also states the down-keeps-the-network property in the file itself:
+    # compose never removes what it does not own. `make up` creates it
+    # idempotently before compose runs, so a fresh host needs no extra step.
     name: ${REVEILLE_NET:-reveille}
+    external: true
 
 services:
   broker:

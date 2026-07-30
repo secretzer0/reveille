@@ -152,6 +152,7 @@ server-image:
 up:
 	@bash scripts/deploy-preflight "$(SERVER_DATA)" "$(BROKER_NAME)"
 	@docker image inspect $(SERVER_IMAGE) >/dev/null 2>&1 || $(MAKE) server-image
+	@docker network create $(SERVER_NETWORK) 2>/dev/null || true
 	$(COMPOSE) up -d --wait
 	@# REACHABLE BY NAME, from the network the agents are on -- not just the
 	@# host probe. A deploy that answers on 127.0.0.1 and is invisible to every
