@@ -48,6 +48,36 @@
   font-size:.72rem;letter-spacing:.08em;padding:.28rem 0;cursor:pointer}
  #fmode button.on{background:var(--hover);color:var(--gold)}
  #agents{overflow-y:auto;flex:1;padding:0 .5rem .8rem}
+ /* U8 roster: same box as #agents so switching modes does not move the rail
+    around underneath the pointer. Shares .agent for the entries, so a roster
+    row and a chat row read as the same KIND of thing in the same place. */
+ #roster{overflow-y:auto;flex:1;padding:0 .5rem .8rem}
+ #roster .agent.sel{background:var(--hover)}
+ #roster .st{margin-left:auto;font-size:.66rem;color:var(--faint)}
+ #roster .st.err{color:var(--bad,#e06c6c)}
+ /* The create item is an ACTION, not an agent, so it must not look like a
+    roster row that happens to be named "new agent" -- dashed, gold, and
+    separated by a rule above it. */
+ #roster .newAgent{margin-top:.5rem;border-top:1px solid var(--line);
+   padding-top:.5rem}
+ #roster .newAgent button{width:100%;background:none;border:1px dashed var(--line);
+   color:var(--gold);font:inherit;padding:.45rem;border-radius:7px;cursor:pointer}
+ #roster .newAgent button:hover{background:var(--hover)}
+ /* U8 tab strip + frames. */
+ #agTabs{display:flex;gap:.25rem;flex-wrap:wrap;margin:.5rem 0 0}
+ #agTabs .tab{display:flex;align-items:center;gap:.4rem;padding:.35rem .6rem;
+   border:1px solid var(--line);border-bottom:0;border-radius:7px 7px 0 0;
+   background:none;color:var(--faint);font:inherit;cursor:pointer}
+ #agTabs .tab.on{background:var(--hover);color:var(--gold)}
+ #agTabs .tab.err{color:var(--bad,#e06c6c)}
+ #agTabs .tab .x{opacity:.6;padding:0 .15rem}
+ #agTabs .tab .x:hover{opacity:1}
+ #agFrames{border:1px solid var(--line);border-radius:0 7px 7px 7px;
+   height:60vh;position:relative}
+ /* Inactive frames are HIDDEN, never removed -- see the markup comment. */
+ #agFrames .fr{position:absolute;inset:0;width:100%;height:100%;border:0}
+ #agFrames .fr[hidden]{display:none}
+ #agFrames .frErr{position:absolute;inset:0;padding:1rem;overflow:auto}
  /* Live updates are down, so this rail is a LAST-KNOWN reading. A presence list
     that stopped updating looks exactly like a room where nobody moved -- the
     phantom-watcher class in the UI layer, so say which one it is. */
@@ -475,6 +505,13 @@
   <button type="button" id="fmTo">TO</button>
  </div>
  <div id="agents"></div>
+ <!-- U8: in manage-agents mode the rail IS the roster -- every agent with its
+      lifecycle state, plus the create item. It replaces the chat filter list
+      rather than sitting beside it: one navigation model, never two selectors
+      for one thing (DES-006 6.4). The well then shows only what you have
+      OPEN, so a roster entry and a tab mean different things by construction.
+ -->
+ <div id="roster" hidden></div>
  <div id="meWrap">
   <div id="meMenu">
    <div class="mi" id="miSettings">Settings</div>
@@ -549,6 +586,14 @@
  <div class="pRow"><b>AGENTS</b><span class="lnk" id="agBack">&larr; back to chat</span></div>
  <div id="agUnavail" hidden><span id="agUnavailMsg"></span>
   <span class="lnk" id="agRetry">retry</span></div>
+ <!-- U8: the terminals you have OPEN. Separate from #agList, which is the
+      management view, because a tab and a roster entry mean different things:
+      the roster is what exists, a tab is what you opened. Frames stay MOUNTED
+      when inactive and are hidden by CSS -- unmounting an iframe drops its
+      attach, so re-selecting a tab would silently reconnect as a second
+      driver and be refused by its own predecessor. -->
+ <div id="agTabs" hidden></div>
+ <div id="agFrames" hidden></div>
  <div id="agList"></div>
  <details class="addAgent" id="addAgent"><summary>Add agent</summary>
  <div class="pRow">
@@ -1380,11 +1425,23 @@ let agMeta=null;      // {roles, role_prompts, rooms} from /rooms-mine, cached p
 // the page. aria-pressed carries the state for a screen reader; the text
 // label carries it for everyone else. The in-well "back to chat" link stays
 // too -- it's the reachable one if the page has scrolled the nav out of view.
+// U8: the toggle switches the WHOLE rail, not just the well. In manage mode
+// the rail is the roster and the chat filter has no meaning -- leaving FROM/TO
+// visible would offer a control that silently does nothing to what is on
+// screen, which is the unreachable-control defect pointed the other way round.
+function railMode(manage){
+ $('fmode').hidden=manage;
+ $('agents').hidden=manage;
+ $('roster').hidden=!manage;
+ const h=document.querySelector('#rail h2');
+ if(h)h.textContent=manage?'MANAGE AGENTS':'AGENTS';
+}
 function openAgentsWell(){
  $('chatWell').classList.add('hidden');
  $('agentsWell').classList.add('on');
  const nav=$('agentsNav');
  if(nav){nav.textContent='← Back to chat';nav.setAttribute('aria-pressed','true');}
+ railMode(true);
  refreshAgents();
 }
 function closeAgentsWell(){
@@ -1392,6 +1449,158 @@ function closeAgentsWell(){
  $('chatWell').classList.remove('hidden');
  const nav=$('agentsNav');
  if(nav){nav.textContent='Agents';nav.setAttribute('aria-pressed','false');}
+ railMode(false);
+}
+// ---- U8 terminal tabs ---------------------------------------------------
+// What you have OPEN. One entry per attach, never derived from the roster:
+// the tell that this model has broken is a tab existing for an agent nobody
+// opened (ruling 8600), and that stays false only because nothing writes to
+// this array except an explicit open.
+let agTabs=[];        // [{agent, gid, url, err}]
+let agTabOn=null;     // gid of the visible tab
+// A failure inside an iframe looks identical whatever caused it (ruling
+// 8718): a refused second driver, an unreachable launcher and a dead
+// container all render as nothing. So every failure carries WHICH ONE, taken
+// from a machine-readable field rather than from the shape of a message --
+// the same discipline the pane's fail-soft already uses.
+function attachFailure(e){
+ if(e&&e.status===401)return 'your session expired -- reload the page';
+ if(e&&e.status)return 'the launcher returned '+e.status;
+ return 'the launcher is not reachable ('+((e&&e.message)||'no response')+')';
+}
+async function openTerminal(agent){
+ if(agTabs.some(t=>t.agent===agent&&!t.err)){
+  // Already open: SELECT it rather than minting a second grant. A second
+  // driver for an agent you already hold would be refused by your own first
+  // session, which is a confusing way to learn you already had it.
+  const t=agTabs.find(x=>x.agent===agent&&!x.err);
+  agTabOn=t.gid;drawTabs();return;
+ }
+ let pre;
+ try{pre=await lapi('/agents/'+encodeURIComponent(agent)+'/grants');}
+ catch(e){
+  agTabs.push({agent,gid:'e-'+agent+'-'+agTabs.length,url:'',
+               err:attachFailure(e)});
+  agTabOn=agTabs[agTabs.length-1].gid;drawTabs();return;
+ }
+ // PRE-FLIGHT, ADVISORY ONLY. The authority is attach-gate inside the
+ // container, which re-checks after creating its session and resolves the
+ // race properly; this cannot and must not replace it. What it buys is the
+ // MESSAGE: without it the refusal arrives as text inside a terminal the user
+ // has to read, and DES-006's gate asks the manager to show the refusal.
+ //
+ // IF ANYONE LATER TREATS THIS CHECK AS THE GATE, EXCLUSIVITY MOVES TO THE
+ // CLIENT AND THE RACE COMES BACK. This is check-then-act by construction --
+ // two browsers can both read "free" here and both proceed. That is fine
+ // precisely because it decides nothing; it only chooses what to SAY. Deleting
+ // the container-side re-check because "the UI already checks" is the specific
+ // mistake this paragraph exists to prevent (ruling 8728).
+ const now=Date.now()*1e6;
+ const held=(pre.grants||[]).find(g=>g.mode==='driver'&&!g.revoked_ns&&
+   (!g.expiry_ns||g.expiry_ns>now));
+ if(held){
+  agTabs.push({agent,gid:'held-'+held.id,url:'',
+   err:'driver refused: grant '+held.id+' already holds the keyboard for '+
+       agent+'. Revoke it, or the owner can flip multi-driver on.'});
+  agTabOn=agTabs[agTabs.length-1].gid;drawTabs();return;
+ }
+ try{
+  const g=await lapi('/agents/'+encodeURIComponent(agent)+'/grants',
+   {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
+  agTabs.push({agent,gid:g.id,url:AGBASE+g.attach_url,err:''});
+  agTabOn=g.id;
+ }catch(e){
+  // A container that is not running fails HERE, at the mint, with a status --
+  // so it is nameable before a frame ever opens.
+  agTabs.push({agent,gid:'e-'+agent+'-'+agTabs.length,url:'',
+               err:attachFailure(e)});
+  agTabOn=agTabs[agTabs.length-1].gid;
+ }
+ drawTabs();
+}
+async function closeTab(gid){
+ const t=agTabs.find(x=>x.gid===gid);
+ agTabs=agTabs.filter(x=>x.gid!==gid);
+ if(agTabOn===gid)agTabOn=agTabs.length?agTabs[agTabs.length-1].gid:null;
+ drawTabs();
+ // Closing is an OBSERVED act, so release the grant explicitly. We do NOT
+ // hang release on unload: a browser that is killed never fires one, and a
+ // release that depends on a farewell is the feed-ghost shape -- the grant
+ // looks held, the agent looks driven, and nothing says otherwise. The
+ // launcher's sweep is what covers the killed-browser case, because it
+ // observes the session disappearing rather than being told.
+ if(t&&!t.err)try{
+  await lapi('/agents/'+encodeURIComponent(t.agent)+'/grants/'+
+   encodeURIComponent(gid),{method:'DELETE'});
+ }catch(e){/* the sweep reclaims it; nothing here should block the close */}
+}
+function drawTabs(){
+ const strip=$('agTabs'),frames=$('agFrames');
+ strip.hidden=frames.hidden=!agTabs.length;
+ strip.innerHTML=agTabs.map(t=>
+  '<span class="tab'+(t.gid===agTabOn?' on':'')+(t.err?' err':'')+
+   '" data-tab="'+esc(t.gid)+'">'+esc(t.agent)+
+   '<span class="x" data-tabx="'+esc(t.gid)+'" title="close">&times;</span></span>'
+ ).join('');
+ // Frames are RECONCILED, never re-rendered: rebuilding innerHTML here would
+ // recreate every iframe and drop every live attach, so an open tab would die
+ // whenever another was opened or closed.
+ for(const el of [...frames.children])
+  if(!agTabs.some(t=>t.gid===el.dataset.frame))el.remove();
+ for(const t of agTabs){
+  let el=frames.querySelector('[data-frame="'+CSS.escape(t.gid)+'"]');
+  if(!el){
+   if(t.err){el=document.createElement('div');el.className='frErr';
+    el.textContent=t.err;}
+   else{el=document.createElement('iframe');el.className='fr';el.src=t.url;
+    el.title='terminal for '+t.agent;}
+   el.dataset.frame=t.gid;frames.appendChild(el);
+  }
+  el.hidden=(t.gid!==agTabOn);
+ }
+ for(const el of strip.querySelectorAll('[data-tab]'))el.onclick=ev=>{
+  if(ev.target.dataset.tabx)return;
+  agTabOn=el.dataset.tab;drawTabs();
+ };
+ for(const el of strip.querySelectorAll('[data-tabx]'))el.onclick=ev=>{
+  ev.stopPropagation();closeTab(el.dataset.tabx);
+ };
+}
+// Roster selection. null = nothing picked yet, which is a real state: the well
+// shows the whole list until you choose, so the pane is never an empty frame
+// with no way to find out what exists.
+let agSel=null;
+function drawRoster(agents,defaultImage){
+ const box=$('roster');
+ const st=a=>a.state||(a.status==='running'?'running':'stopped');
+ box.innerHTML=agents.map(a=>{
+  const s=st(a);
+  const bad=(s==='erased'||a.status==='absent');
+  return '<div class="agent'+(agSel===a.agent?' sel':'')+'" data-rost="'+
+   esc(a.agent)+'" title="'+esc(a.agent)+' -- '+esc(s)+'">'+
+   '<span class="swatch" style="background:'+color(a.agent)+'"></span>'+
+   '<span class="nm">'+esc(a.agent)+'</span>'+
+   '<span class="st'+(bad?' err':'')+'">'+esc(s)+
+    (a.image&&defaultImage&&a.image!==defaultImage?' &middot; behind':'')+
+   '</span></div>';
+ }).join('')+
+  '<div class="newAgent"><button type="button" id="rostNew">+ New Agent</button></div>';
+ for(const el of box.querySelectorAll('[data-rost]'))el.onclick=()=>{
+  // Selecting an agent is NOT opening a terminal. The roster says what
+  // exists; opening is a separate act, and conflating them is what would put
+  // a tab on screen for an agent nobody asked to open.
+  agSel=(agSel===el.dataset.rost)?null:el.dataset.rost;
+  agEdit=null;agConfirm=null;
+  refreshAgents();
+ };
+ const nb=$('rostNew');
+ if(nb)nb.onclick=()=>{
+  agSel=null;agEdit=null;agConfirm=null;
+  refreshAgents();
+  const det=$('addAgent'),box2=$('agName');
+  if(det)det.open=true;
+  if(box2)box2.focus();
+ };
 }
 // The button exists only where the launcher's location was declared, so this
 // must not assume it: an unguarded onclick on a missing element throws at
@@ -1485,6 +1694,16 @@ async function refreshAgents(){
   return;}
  const list=$('agList');
  agDefaultImage=d.default_image||'';
+ // A selection that no longer exists (destroyed in another tab, erased by
+ // someone else) must not leave the well showing a row for nothing. Drop it
+ // and fall back to the full list rather than rendering an empty detail pane.
+ if(agSel&&!d.agents.some(a=>a.agent===agSel))agSel=null;
+ drawRoster(d.agents,agDefaultImage);
+ // THE WELL SHOWS WHAT YOU PICKED, the rail shows what exists. With nothing
+ // picked it shows everything, so the pane is browsable before you know any
+ // names. This is the half that keeps roster and well from being two
+ // selectors for one thing.
+ const shown=agSel?d.agents.filter(a=>a.agent===agSel):d.agents;
  // BEHIND is a comparison, not a version parse: any difference from what the
  // launcher would provision today is worth showing, and inventing an ordering
  // over image tags would be a second thing to keep true. An agent with no
@@ -1500,7 +1719,9 @@ async function refreshAgents(){
  // same reasoning as the launcher page's own U6-predecessor fix: a stopped
  // agent shows start, a running one shows watch+stop, both show destroy.
  list.innerHTML=(d.agents.length?'':'<div class="pDim">no agents yet</div>')+
-  d.agents.map(a=>{
+  (agSel?'<div class="pRow"><b>'+esc(agSel)+'</b>'+
+    '<button id="agShowAll">show all</button></div>':'')+
+  shown.map(a=>{
    // TWO INTENTS, NOT ONE. U7 made this panel's single button always send
    // purge=1, which made the copy true but left retiring an agent and erasing
    // it as the same irreversible act -- so fixing a mistyped repo URL cost the
@@ -1595,13 +1816,14 @@ async function refreshAgents(){
   if(box){box.value=n;box.focus();}
   toast('recreate '+n+': check the role and rooms, then create');
  };
- for(const b of list.querySelectorAll('[data-agwatch]'))b.onclick=async()=>{
-  try{
-   const g=await lapi('/agents/'+encodeURIComponent(b.dataset.agwatch)+'/grants',
-    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
-   window.open(g.attach_url,'_blank');
-  }catch(e){toast(e.message);}
- };
+ // U8: watch opens a TAB on this page. The popup path is gone -- DES-006 6.4
+ // is explicit that terminals live on one page, and the operator stated the
+ // same sentence as a constraint: never a separate browser tab or window.
+ // NOTE: a gate asserts that popup API is ABSENT from this file, so do not
+ // write its name here even to say it is banned -- a byte-level negative
+ // cannot tell code from the comment explaining the code.
+ for(const b of list.querySelectorAll('[data-agwatch]'))
+  b.onclick=()=>openTerminal(b.dataset.agwatch);
  for(const b of list.querySelectorAll('[data-agstart]'))b.onclick=async()=>{
   try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstart)+'/start',
    {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
@@ -1610,6 +1832,11 @@ async function refreshAgents(){
   try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstop)+'/stop',
    {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
  };
+ // The way back out of a selection, in the well where the selection is
+ // visible -- not only by re-clicking the rail entry, which requires knowing
+ // that clicking it again is what clears it.
+ const showAll=$('agShowAll');
+ if(showAll)showAll.onclick=()=>{agSel=null;agEdit=null;agConfirm=null;refreshAgents();};
  // Opening the form FETCHES the current config first. Prefilling from the
  // row would prefill from launcher.db, which records what was requested at
  // provision -- the container is what actually happened, and the gap between

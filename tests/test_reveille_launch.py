@@ -1027,3 +1027,46 @@ console.log("ok");
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stderr or res.stdout
     assert "ok" in res.stdout
+
+
+def test_attach_failure_names_which_failure_from_the_shipped_page():
+    """U8 ruling 8718: a refused driver, an unreachable launcher and a dead
+    container all render as NOTHING inside an iframe, so every failure must
+    carry which one it was -- read from a machine-readable field, never from
+    the shape of a human-readable message.
+
+    Extracted from the served page and executed, not re-implemented here: a
+    copy would drift, and this is the same method the behind predicate uses.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not on PATH -- served-JS gates need it")
+    page = (pathlib.Path(rl.__file__).parent.parent
+            / "src/reveille/ui/bus/index.html").read_text().splitlines()
+    start = next((i for i, ln in enumerate(page)
+                  if ln.startswith("function attachFailure(")), None)
+    assert start is not None, "attachFailure is gone or renamed in ui/bus/"
+    end = next(i for i in range(start + 1, len(page)) if page[i] == "}")
+    src = "\n".join(page[start:end + 1])
+    prog = src + """
+const eq = (got, want, what) => {
+  if (got !== want) throw new Error(what + ': ' + got + ' != ' + want);
+};
+// A completed response carries a status; genuine unreachability does not.
+// These three must never read the same -- that sameness is the defect.
+const expired = attachFailure({status: 401});
+const http    = attachFailure({status: 502});
+const down    = attachFailure({message: 'Failed to fetch'});
+if (expired === http || http === down || expired === down)
+  throw new Error('two failure causes render identically');
+if (!/session/.test(expired)) throw new Error('401 must name the session');
+if (!/502/.test(http)) throw new Error('an HTTP failure must carry its status');
+if (!/not reachable/.test(down)) throw new Error('no response must read unreachable');
+// No status and no message at all still must not claim a status it never saw.
+if (/undefined/.test(attachFailure({}))) throw new Error('leaks undefined');
+if (/undefined/.test(attachFailure(null))) throw new Error('throws or leaks on null');
+console.log('ok');
+"""
+    res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert "ok" in res.stdout
