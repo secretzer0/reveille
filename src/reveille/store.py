@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -175,6 +175,12 @@ CREATE TABLE IF NOT EXISTS members (
     token_id  TEXT REFERENCES tokens(id),
     joined_ns INTEGER NOT NULL,
     seen_ns   INTEGER NOT NULL,
+    -- Set when the agent LEFT deliberately (DIRECTIVE:LEAVE). The row stays so
+    -- that a departure is distinguishable from a reap: the reaper DELETES, and
+    -- readmit() only fills a gap where no row exists. Without this column the
+    -- two are the same absence, and re-admitting on the next call silently
+    -- undoes leave() -- ratified doctrine, voided by an implementation detail.
+    left_ns   INTEGER,
     PRIMARY KEY (room_id, name)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -473,20 +479,27 @@ def migrate(conn, db_path):
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
+        _upgrade_v14(conn, db_path)
     elif v == 10:
         _upgrade_v10(conn, db_path)
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
+        _upgrade_v14(conn, db_path)
     elif v == 11:
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
+        _upgrade_v14(conn, db_path)
     elif v == 12:
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
+        _upgrade_v14(conn, db_path)
     elif v == 13:
         _upgrade_v13(conn, db_path)
+        _upgrade_v14(conn, db_path)
+    elif v == 14:
+        _upgrade_v14(conn, db_path)
     # Chains from <=v8 need no v9+ steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
     # which already carries the current index shape, status set, and audit
     # tables, and backfills through _memory_insert.
@@ -716,6 +729,21 @@ def _upgrade_v13(conn, db_path):
     _SCHEMA's CREATE IF NOT EXISTS lays down exactly what is missing."""
     with tx(conn):
         _exec_script(conn, _SCHEMA)
+        conn.execute("PRAGMA user_version=14")
+
+
+def _upgrade_v14(conn, db_path):
+    """v14 -> v15: members.left_ns. CREATE IF NOT EXISTS cannot add a column to an
+    existing table, so this is an explicit ALTER. Every existing row gets NULL,
+    which is exactly right: nobody who is in a room today left it."""
+    with tx(conn):
+        # sqlite has no ADD COLUMN IF NOT EXISTS, and _SCHEMA (used by the fresh
+        # path and by every additive upgrade) already carries the column -- so
+        # check, the same way the token upgrades do. An upgrade step that cannot
+        # run twice cannot be re-run after a partial chain.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(members)")}
+        if "left_ns" not in cols:
+            conn.execute("ALTER TABLE members ADD COLUMN left_ns INTEGER")
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -1369,8 +1397,19 @@ def sweep_sessions(conn):
 # ---- membership / presence ---------------------------------------------------
 
 def _member(conn, room_id, name):
+    """The raw row, INCLUDING one marked left_ns. Callers that ask "is this agent
+    HERE" want _present() instead; this one exists for the two callers that need
+    to know a row exists at all -- readmit (a row you left is not a gap to fill)
+    and join (which clears the mark)."""
     return conn.execute("SELECT * FROM members WHERE room_id=? AND name=?",
                         (room_id, name)).fetchone()
+
+
+def _present(conn, room_id, name):
+    """Is this agent in this room right now? A row marked left_ns is not."""
+    return conn.execute(
+        "SELECT 1 FROM members WHERE room_id=? AND name=? AND left_ns IS NULL",
+        (room_id, name)).fetchone() is not None
 
 
 def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None):
@@ -1381,13 +1420,14 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None):
     valid_name(name)
     now = time.time_ns()
     cur = _member(conn, room_id, name)
-    if cur and cur["tag"] != tag and _is_live(cur["seen_ns"], now):
+    if cur and cur["left_ns"] is None and cur["tag"] != tag \
+            and _is_live(cur["seen_ns"], now):
         raise BusError(f"name {name!r} is held by a live agent (tag {cur['tag']}). pick another.")
     conn.execute(
         "INSERT INTO members(room_id, name, tag, url, token_id, joined_ns, seen_ns) "
         "VALUES(?,?,?,?,?,?,?) "
         "ON CONFLICT(room_id, name) DO UPDATE SET tag=excluded.tag, url=excluded.url, "
-        "token_id=excluded.token_id, seen_ns=excluded.seen_ns",
+        "token_id=excluded.token_id, seen_ns=excluded.seen_ns, left_ns=NULL",
         (room_id, name, tag, url, token_id, now, now))
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
@@ -1400,23 +1440,69 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None):
 
 
 def touch(conn, name, rooms):
-    """Heartbeat across every room the agent is a member of."""
+    """Heartbeat across every room the agent is a member of. Returns how many rows
+    it refreshed -- fewer than len(rooms) means a membership is MISSING, which is
+    the caller's cue to readmit() rather than carry on invisibly."""
     valid_name(name)
+    if not rooms:
+        return 0
+    rooms = list(rooms)
+    return conn.execute(
+        f"UPDATE members SET seen_ns=? WHERE name=? AND room_id IN ({_ph(rooms)})",
+        [time.time_ns(), name] + rooms).rowcount
+
+
+def readmit(conn, name, tag, rooms, token_id=None):
+    """Re-establish membership that reap_stale removed, in every named room the
+    agent is not already in. Returns the rooms readmitted.
+
+    WHY THIS EXISTS: membership is a CACHE of what the token already grants -- the
+    broker maps a token to its rooms server-side and no room name is ever in an
+    agent's env. So a missing member row is not an authorization question, it is
+    stale derived state, and it should heal on the next authenticated call. Before
+    this, an agent reaped during an outage could still send (send does not require
+    the sender to be a member) while being absent from presence, absent from the
+    web UI's agent list, and UNADDRESSABLE -- a unicast to it was refused with "is
+    it joined?" -- with nothing anywhere telling it so. One agent worked for hours
+    in that state and only the operator noticed, by looking.
+
+    NOT store.join: join marks everything outside the catch-up window READ, so
+    readmitting through it would silently mark unread mail read -- the worst
+    possible side effect for a recovery path, since the mail that piled up during
+    the outage is exactly what the agent needs. This touches reads never.
+
+    No name-collision check, and that is not an omission: this inserts ONLY where
+    no row exists at all, so there is no holder to take over. A room where someone
+    else holds the name still has a row, so this skips it and join's refusal
+    remains the only path that can contest a name."""
+    valid_name(name)
+    now = time.time_ns()
+    back = []
+    for room_id in list(rooms):
+        if _member(conn, room_id, name):
+            continue
+        conn.execute(
+            "INSERT INTO members(room_id, name, tag, token_id, joined_ns, seen_ns) "
+            "VALUES(?,?,?,?,?,?)", (room_id, name, tag, token_id, now, now))
+        back.append(room_id)
+    return back
+
+
+def leave(conn, name, rooms):
+    """Sign off. Membership only -- messages are never touched.
+
+    MARKS the row rather than deleting it, so a departure survives contact with
+    readmit(): the reaper deletes, this does not, and readmit only ever fills a
+    gap where no row exists. When both were a DELETE they were the same absence,
+    and re-admitting on the next authenticated call silently undid every
+    DIRECTIVE:LEAVE -- for a live agent, within seconds. join() clears the mark;
+    nothing else does."""
     if not rooms:
         return
     rooms = list(rooms)
     conn.execute(
-        f"UPDATE members SET seen_ns=? WHERE name=? AND room_id IN ({_ph(rooms)})",
+        f"UPDATE members SET left_ns=? WHERE name=? AND room_id IN ({_ph(rooms)})",
         [time.time_ns(), name] + rooms)
-
-
-def leave(conn, name, rooms):
-    """Sign off. Membership only -- messages are never touched."""
-    if not rooms:
-        return
-    rooms = list(rooms)
-    conn.execute(f"DELETE FROM members WHERE name=? AND room_id IN ({_ph(rooms)})",
-                 [name] + rooms)
 
 
 def whoami(conn, tag):
@@ -1442,7 +1528,8 @@ def presence(conn, rooms):
          "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"]}
         for r in conn.execute(
             f"SELECT m.*, ro.name AS room_name FROM members m JOIN rooms ro ON ro.id=m.room_id "
-            f"WHERE m.room_id IN ({_ph(rooms)}) ORDER BY m.name", rooms)
+            f"WHERE m.room_id IN ({_ph(rooms)}) AND m.left_ns IS NULL "
+            f"ORDER BY m.name", rooms)
     ]
 
 
@@ -1459,11 +1546,14 @@ def reap_stale(conn):
 
 
 def known(conn, name, rooms):
+    """Is this name addressable here? A row marked left_ns is NOT: leaving means
+    a unicast to you is refused, same as never having joined."""
     if not rooms:
         return False
     rooms = list(rooms)
     return conn.execute(
-        f"SELECT 1 FROM members WHERE name=? AND room_id IN ({_ph(rooms)})",
+        f"SELECT 1 FROM members WHERE name=? AND left_ns IS NULL "
+        f"AND room_id IN ({_ph(rooms)})",
         [name] + rooms).fetchone() is not None
 
 
@@ -1474,7 +1564,8 @@ def _wake_targets(conn, sender, recipient, room_id):
         return [recipient]
     now = time.time_ns()
     return [r["name"] for r in conn.execute(
-                "SELECT name, seen_ns FROM members WHERE room_id=?", (room_id,))
+                "SELECT name, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL",
+                (room_id,))
             if r["name"] != sender and _is_live(r["seen_ns"], now)]
 
 
@@ -1525,7 +1616,7 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
         raise BusError("room is required")
     if recipient != BROADCAST:
         valid_name(recipient)
-        if not _member(conn, room, recipient):
+        if not _present(conn, room, recipient):
             raise BusError(f"no such agent in this room: {recipient!r} (is it joined?)")
     parents = [] if reply_to is None else ([reply_to] if isinstance(reply_to, int) else list(reply_to))
     thread_id, parent_id = None, None
@@ -2419,7 +2510,8 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
     emit("== presence ==")
     for rid, rname in rooms.items():
         live = [r["name"] for r in conn.execute(
-            "SELECT name, seen_ns FROM members WHERE room_id=? ORDER BY seen_ns DESC",
+            "SELECT name, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL "
+            "ORDER BY seen_ns DESC",
             (rid,)) if _is_live(r["seen_ns"], time.time_ns())]
         emit(f"- {rname}: {', '.join(live) if live else '(nobody live)'}")
 

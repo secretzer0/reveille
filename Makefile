@@ -283,6 +283,14 @@ upload-gate: sync
 offline-recovery-smoke: sync
 	uv run python tests/offline_recovery_smoke.py
 
+# Readmit gate: an agent whose membership was REAPED comes back on its next
+# ordinary call (visible, addressable, pre-outage mail still unread), while an
+# agent that deliberately LEFT stays gone until it joins again. The two absences
+# must not be the same absence -- when they were, re-admission voided
+# DIRECTIVE:LEAVE within one tool call.
+readmit-gate: sync
+	uv run python tests/readmit_gate.py
+
 # Single-origin gate (DES-006 U3/U4/U6): the front door, through the REAL shipped
 # Caddyfile with a REAL session cookie. One login covers both services, the bus
 # page carries the launcher prefix it fetches with, every endpoint the embedded
