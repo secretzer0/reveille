@@ -301,6 +301,14 @@ readmit-gate: sync
 deafness-gate: sync
 	uv run python tests/deafness_gate.py
 
+# Leave-sticks gate: a DIRECTIVE:LEAVE survives the boot ritual. join() used to
+# clear every leave mark unconditionally, and join() at startup is the standing
+# ritual -- so leaving lasted until the next restart. Gated through the real MCP
+# tool, because a store-level test that filters the rooms itself would pass on
+# the broken daemon: the daemon's fault was calling join at all.
+leave-sticks-gate: sync
+	uv run python tests/leave_sticks_gate.py
+
 # Feed-ghost gate: a CLOSED TAB IS NOT A WATCHER. 0.2.35 computes a person's
 # presence from the set of browsers holding a room's feed, so a socket that is
 # never read from -- and therefore never notices the close -- keeps someone
