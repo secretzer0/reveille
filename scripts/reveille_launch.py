@@ -42,6 +42,9 @@ somebody meant it.
   reveille-launch grants [user] [agent]              list grant records
   reveille-launch revoke <user> <agent> <grant-id>   kill d-/v-<id> now; audit exact
   reveille-launch flip <user> <agent> on|off         multi-driver toggle (4.3)
+  reveille-launch debug <user> <agent>           interactive --rm shell in the
+      agent's EXACT environment (same image/mounts/credential env); run claude
+      by hand to watch billing and login behave. Entrypoint bash by default.
   reveille-launch pin [--path ~/.reveille/launcher-src]
       Create or fast-forward the tree `serve` is SPAWNED from. Never a
       developer's checkout: spawning from one makes `git checkout` a deployment.
@@ -576,6 +579,95 @@ def claude_env_name(token):
     CLAUDE_CODE_OAUTH_TOKEN. Pure."""
     return ("ANTHROPIC_API_KEY" if token.startswith("sk-ant-api")
             else "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+# ~/.claude.json is CONTAINER-LOCAL (the bind mounts cover ~/.claude and
+# ~/repos, not the file beside them), so a fresh debug container boots claude
+# into the first-run wizard: theme picker, then a LOGIN flow -- and completing
+# that login would write new credentials into the agent's SHARED mounted home.
+# The managed entrypoint (docker/entrypoint.sh) seeds these same keys for the
+# same reason; this is that seed, minus settings.json (which lives in the
+# persisted home and is already there). setdefault-merge, then exec bash: an
+# operator re-entering a container they configured keeps their choices.
+_DEBUG_SEED = """\
+import json, os, pathlib
+p = pathlib.Path.home() / ".claude.json"
+try:
+    d = json.loads(p.read_text())
+except Exception:
+    d = {}
+d.setdefault("hasCompletedOnboarding", True)
+d.setdefault("theme", "dark")
+d.setdefault("autoMode", True)
+d.setdefault("autoModeOptInDismissed", True)
+pr = d.setdefault("projects", {})
+for path in ("/home/agent/repos", "/home/agent"):
+    pr.setdefault(path, {}).setdefault("hasTrustDialogAccepted", True)
+p.write_text(json.dumps(d, indent=2))
+os.execlp("bash", "bash")
+"""
+
+
+def debug_argv(user, agent, image, network, extra_env=(), entrypoint="bash",
+               data_base=None):
+    """`docker run --rm -ti` mirroring what provision gives the agent -- same
+    image, same network, same two mounts, same credential env BY NAME -- but
+    interactive, foreground, self-removing, and named apart from the managed
+    container. This exists so an operator can sit INSIDE the exact environment
+    an agent gets and watch claude behave (billing, login, model) instead of
+    inferring it from the outside: reveille-launch debug <user> <agent>.
+    Entrypoint defaults to bash ON PURPOSE -- the debugging question is "what
+    does claude do in this env", so the operator runs claude by hand; the full
+    entrypoint would also demand a bus token and spawn the waiter, which is
+    plumbing noise around a billing question. The default bash arrives AFTER
+    the _DEBUG_SEED first-run seed (see above): without it claude opens the
+    wizard whose login step can rewrite the agent's shared credentials.
+    An explicit --entrypoint runs raw. Pure: no env read."""
+    root = data_root(user, agent, base=data_base)
+    argv = ["docker", "run", "--rm", "-ti",
+            "--name", f"{container_name(user, agent)}-debug",
+            "--network", network,
+            "-v", f"{os.path.join(root, 'claude')}:/home/agent/.claude",
+            "-v", f"{os.path.join(root, 'repos')}:/home/agent/repos"]
+    if entrypoint == "bash":
+        tail = [image, "-c", _DEBUG_SEED]
+        argv += ["--entrypoint", "python3"]
+    else:
+        tail = [image]
+        argv += ["--entrypoint", entrypoint]
+    for name in extra_env:
+        argv += ["-e", name]     # names only -- values ride the child env
+    argv += tail
+    return argv
+
+
+def cmd_debug(a):
+    creds = resolve_credentials(load_profile(a.user), a.agent, "")
+    kind = credential_kind(creds["claude_token"])
+    env = dict(os.environ)
+    extra = []
+    if creds["claude_token"]:
+        extra.append(claude_env_name(creds["claude_token"]))
+        env[extra[-1]] = creds["claude_token"]
+    if creds["github_token"]:
+        extra.append("GITHUB_TOKEN")
+        env["GITHUB_TOKEN"] = creds["github_token"]
+    managed = container_name(a.user, a.agent)
+    if _docker("inspect", "-f", "{{.State.Running}}", managed,
+               check=False, capture=True).stdout.strip() == "true":
+        # Same ~/.claude, two claudes: shared sqlite state and stepped-on locks.
+        print(f"WARNING: {managed} is RUNNING and shares this home -- "
+              f"stop it first unless you know why you want both.", file=sys.stderr)
+    print(f"debug shell into {a.user}/{a.agent}: image {a.image}, "
+          f"credential: {kind}\n"
+          f"  inside, try:  claude /status   (whose account, which billing)\n"
+          f"                claude /usage    (subscription limit bars -- absent "
+          f"means not on a subscription seat)\n"
+          f"  exits clean: --rm, nothing to clean up; the agent home persists.",
+          file=sys.stderr)
+    argv = debug_argv(a.user, a.agent, a.image, a.network,
+                      extra_env=extra, entrypoint=a.entrypoint)
+    os.execvpe("docker", argv, env)   # foreground: the tty is the point
 
 
 def masked_profile(prof):
@@ -2321,6 +2413,18 @@ def build_parser():
                     help="clone URL for a first pin (default: this checkout's "
                          "origin)")
     pn.set_defaults(fn=cmd_pin)
+
+    dbg = sub.add_parser("debug", help="docker run --rm -ti into an agent's "
+                                       "exact environment (bash; run claude by "
+                                       "hand to watch billing/login behave)")
+    dbg.add_argument("user")
+    dbg.add_argument("agent")
+    dbg.add_argument("--image", default=DEFAULT_IMAGE)
+    dbg.add_argument("--network", default=DEFAULT_NETWORK)
+    dbg.add_argument("--entrypoint", default="bash",
+                     help="override to /usr/local/bin/entrypoint.sh for the "
+                          "full boot (then REVEILLE_* env is on you)")
+    dbg.set_defaults(fn=cmd_debug)
 
     j = sub.add_parser("join-here",
                        help="bootstrap THIS terminal for one agent (DES-003 2.4)")
