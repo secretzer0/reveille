@@ -190,6 +190,15 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.47 A BROKEN BOOT IS VISIBLE TO THE HUMAN. GET /agents/{agent}/boot-report
+returns the agent's boot report and the row shows the LINES that say something
+failed, not a count -- "role prompt: MISSING" has already answered the question
+a count only raises. Read with docker cp, never exec, so a STOPPED container
+still answers, which is the case that matters: "why did this never come up" is
+asked about a container that is no longer running. The problem markers MISSING
+and FAILED are now a FORMAT SHARED between the report and this reader; change
+that vocabulary in the entrypoint and the reader goes quiet rather than wrong.
+
 0.2.46 THE RAIL IS THE ROSTER AND TERMINALS ARE TABS (DES-006 U8). In
 manage-agents mode the room rail becomes the agent roster, and attaching opens
 a tab in the content well instead of a popup window -- the popup path is gone

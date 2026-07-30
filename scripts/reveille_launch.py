@@ -104,9 +104,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import typing
@@ -1960,6 +1962,66 @@ def config_diff(requested, actual):
     return out
 
 
+# ---- the boot report, made reachable ------------------------------------
+# The entrypoint writes what each boot ATTEMPTED, SUCCEEDED at and is MISSING
+# to a file in the agent's own home, because the agent has no docker socket and
+# could not otherwise read its own broken boot. That closed the gap for the
+# AGENT. It did not close it for the HUMAN, who has no shell in the container
+# and whose first question about a silent agent is why it is silent.
+BOOT_REPORT_PATH = "/home/agent/boot-report.md"
+# The two markers the entrypoint writes. Kept as data rather than inlined: the
+# report's own header promises these words to its reader, so they are a shared
+# format between two files and not a private detail of either.
+BOOT_PROBLEM_MARKERS = ("**MISSING**", "**FAILED**")
+
+
+def boot_report_problems(text):
+    """The lines of a boot report that say something is wrong. PURE.
+
+    Returns them verbatim, stripped of the leading list dash -- never a count
+    and never a boolean. A row saying "2 problems" sends the reader looking for
+    them; a row saying "role prompt: MISSING" has already answered the
+    question, and that is the difference between surfacing a fact and
+    advertising that one exists.
+
+    Marker-based rather than clever: the entrypoint's own header promises the
+    reader that MISSING or FAILED is how a problem announces itself, so this
+    reads the format the report documents. A problem the entrypoint states in
+    some other vocabulary will be missed here, which is the right failure --
+    the fix is to write the marker, not to teach this to guess."""
+    out = []
+    for line in (text or "").splitlines():
+        if any(m in line for m in BOOT_PROBLEM_MARKERS):
+            out.append(line.strip().lstrip("-").strip())
+    return out
+
+
+def read_boot_report(user, agent, limit=40000):
+    """The agent's boot report, copied out of its container.
+
+    docker cp rather than exec, deliberately: exec needs a RUNNING container,
+    and "why did this agent never come up" is asked precisely about one that is
+    not running. cp reads a stopped container's filesystem, so the report is
+    reachable in the state where it matters most.
+
+    Returns None when there is no container or no report -- an agent that was
+    never provisioned and one whose boot predates the report are both "nothing
+    to show", and neither is an error."""
+    if not _exists(container_name(user, agent)):
+        return None
+    tmpdir = tempfile.mkdtemp(prefix="reveille-boot-")
+    try:
+        dest = os.path.join(tmpdir, "boot-report.md")
+        res = _docker("cp", f"{container_name(user, agent)}:{BOOT_REPORT_PATH}",
+                      dest, check=False, capture=True)
+        if res.returncode != 0 or not os.path.isfile(dest):
+            return None
+        with open(dest, encoding="utf-8", errors="replace") as f:
+            return f.read(limit)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def read_container_config(user, agent):
     """effective_config for a live container, or None when there is none.
 
@@ -2324,6 +2386,20 @@ def build_api(auth_url):
         return JSONResponse({"cancelled": True})
 
     @guarded
+    async def agent_boot_report(request, p, conn):
+        """The agent's own account of its last boot, and what went wrong in it.
+
+        Read on demand rather than cached: it is the container's file, it is
+        rewritten every boot, and a cached copy would be a second thing that
+        can lapse -- in a UI whose whole job this week has been surfacing
+        things that lapsed quietly."""
+        name = request.path_params["agent"]
+        _known_agent(conn, p["user"], name)
+        text = read_boot_report(p["user"], name)
+        return JSONResponse({"agent": name, "report": text,
+                             "problems": boot_report_problems(text)})
+
+    @guarded
     async def agent_config(request, p, conn):
         """Edit an agent in place (reconfig 2).
 
@@ -2594,6 +2670,7 @@ def build_api(auth_url):
         Route("/agents/{agent}/grants/{gid}", agent_grant, methods=["DELETE"]),
         Route("/agents/{agent}/profile", agent_profile, methods=["PUT"]),
         Route("/agents/{agent}/config", agent_config, methods=["GET", "PUT"]),
+        Route("/agents/{agent}/boot-report", agent_boot_report),
         Route("/agents/{agent}/{verb:str}", agent_lifecycle, methods=["POST"]),
         Route("/profile", profile, methods=["GET", "PUT"]),
         Route("/login/start", login_start, methods=["POST"]),

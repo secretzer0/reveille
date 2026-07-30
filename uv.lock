@@ -443,7 +443,7 @@ wheels = [
 
 [[package]]
 name = "reveille"
-version = "0.2.45"
+version = "0.2.47"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

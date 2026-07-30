@@ -408,6 +408,12 @@
   padding-left:.5rem;margin:.2rem 0;border-bottom:none}
  .pRow.warn b{color:#e8555a}
  .pAsk{font-size:.72rem;color:var(--dim);padding:.1rem 0 .35rem .5rem}
+ /* The full boot report, verbatim. Scrolls in its OWN box rather than
+    stretching the row: it is a whole markdown file, and a row that grows to
+    fit it pushes every other agent off the screen. */
+ .bootRep{font-size:.68rem;line-height:1.35;background:var(--rail);
+   border:1px solid var(--line);border-radius:7px;padding:.6rem;margin:.2rem 0 .5rem;
+   max-height:22rem;overflow:auto;white-space:pre-wrap;word-break:break-word}
  .pChips{display:flex;flex-wrap:wrap;gap:.3rem;margin:0 0 .5rem}
  .chip{display:flex;align-items:center;gap:.25rem;background:var(--chip);
   border:1px solid var(--line);border-radius:999px;padding:.15rem .5rem;font-size:.7rem}
@@ -1416,6 +1422,12 @@ let agEdit=null;
 // five unprocessed rings in its spool, and every health signal it could see
 // green. So the row says it, because nothing else can.
 let agDefaultImage='';
+// Boot reports, per agent, fetched lazily and kept only for this pane's
+// lifetime. {agent: {problems:[], report:'', open:bool}}. Not cached across
+// opens: it is the container's file, rewritten every boot, and a cached copy
+// would be one more thing that can lapse in a pane whose whole purpose this
+// week has been surfacing things that lapsed quietly.
+let agBoot={};
 let agMeta=null;      // {roles, role_prompts, rooms} from /rooms-mine, cached per open
 // U7 follow-up (operator screenshot, msg 8588): entry and exit used two
 // different controls in two different corners -- the nav button opened it,
@@ -1795,6 +1807,23 @@ async function refreshAgents(){
     // field is prefilled with what is actually running.
     (behind(a)?'<span class="pDim err"> behind &middot; current is '+
       esc(agDefaultImage)+'; use edit to move it</span>':'')+
+    // THE BOOT REPORT'S PROBLEMS, SAID OUT LOUD. Not a count and not a badge:
+    // "2 problems" sends the reader looking, where the line itself has already
+    // answered. This agent booted with no repo and no role prompt, both
+    // silently, and reached its first turn only because a human typed at it --
+    // every one of those facts was sitting in a file nobody could see.
+    // ESCAPING IS A SECURITY BOUNDARY HERE, not tidiness. The entrypoint
+    // writes this file, but it lives in a home the AGENT can write, and it
+    // renders in the OPERATOR's privileged browser -- same posture as the
+    // ratify queue rendering memory text. Every field goes through esc() and
+    // the body is a <pre>, never innerHTML of raw report text.
+    ((agBoot[a.agent]&&agBoot[a.agent].problems.length)
+      ? '<div class="pAsk err">'+agBoot[a.agent].problems.map(esc).join('<br>')+
+        ' <span class="lnk" data-agboot="'+esc(a.agent)+'">'+
+        (agBoot[a.agent].open?'hide':'full report')+'</span></div>'+
+        (agBoot[a.agent].open?'<pre class="bootRep">'+
+          esc(agBoot[a.agent].report||'')+'</pre>':'')
+      : '')+
     (running(a)
       ? '<button data-agwatch="'+esc(a.agent)+'">watch</button>'+
         '<button data-agstop="'+esc(a.agent)+'">stop</button>'
@@ -1807,6 +1836,28 @@ async function refreshAgents(){
     (broken(a)?'':'<button data-agedit="'+esc(a.agent)+'">edit</button>')+
     '<button data-agdel="'+esc(a.agent)+'">destroy</button></div>';
   }).join('');
+ // Fetch each agent's boot report ONCE per pane open, in the background. It is
+ // a docker cp per agent, so it must not sit in front of the list rendering --
+ // the list is useful immediately and the report is an annotation on it.
+ // Failures are SILENT here on purpose: the pane already reports launcher
+ // trouble once, and a second banner for the same cause is noise. An agent
+ // whose report cannot be read simply carries no annotation, which is honest
+ // -- not knowing of a problem is different from claiming there is none.
+ for(const a of d.agents){
+  if(agBoot[a.agent]||a.status==='absent')continue;
+  agBoot[a.agent]={problems:[],report:'',open:false};
+  lapi('/agents/'+encodeURIComponent(a.agent)+'/boot-report')
+   .then(r=>{
+    if(!r.problems||!r.problems.length)return;
+    agBoot[a.agent]={problems:r.problems,report:r.report||'',open:false};
+    refreshAgents();
+   })
+   .catch(e=>{/* see above: no annotation, and no second banner */});
+ }
+ for(const el of list.querySelectorAll('[data-agboot]'))el.onclick=()=>{
+  const b=agBoot[el.dataset.agboot];
+  if(b){b.open=!b.open;refreshAgents();}
+ };
  for(const b of list.querySelectorAll('[data-agrecreate]'))b.onclick=()=>{
   // Recreate is CREATE with the name filled in -- one provisioning path, no
   // second implementation. The disclosure opens so the human sees (and can
