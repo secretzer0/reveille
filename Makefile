@@ -128,11 +128,14 @@ PROXY_IMAGE ?= caddy:2-alpine
 PROXY_PORT  ?= 80
 BROKER_NAME ?= reveille-server
 PROXY_NAME  ?= reveille-proxy
+# COMPOSE_EXTRA: overlay files layered by variant targets (up-dev). Empty for
+# the real deploy, so `make up` composes exactly one file.
+COMPOSE_EXTRA =
 COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
   REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
   PROXY_IMAGE=$(PROXY_IMAGE) PROXY_PORT=$(PROXY_PORT) \
   BROKER_NAME=$(BROKER_NAME) PROXY_NAME=$(PROXY_NAME) \
-  docker compose -f docker/compose.yml
+  docker compose -f docker/compose.yml $(COMPOSE_EXTRA)
 
 # REFUSES TO REBUILD AN EXISTING TAG. The version string is the image tag; building
 # changed content under a tag that exists makes two images answer to one name and
@@ -166,6 +169,15 @@ up:
 	       echo "reveille-server on the $(SERVER_NETWORK) network -- every agent"; \
 	       echo "container is cut off from the bus"; exit 1; }
 	@echo "reveille up: proxy :$(PROXY_PORT) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
+
+# `make up` with the working tree's UI mounted LIVE (docker/compose.dev.yml):
+# edit src/reveille/ui/bus/index.html, refresh, done -- no rebuild. Same
+# preflight, same guards, same by-name probe; the ONLY delta is the overlay,
+# and the override announces itself everywhere it can be seen. `make down`
+# stops this stack too (same project, same services).
+up-dev: COMPOSE_EXTRA = -f docker/compose.dev.yml
+up-dev: up
+	@echo "UI DEV MODE: serving src/reveille/ui/bus LIVE (see /version); plain 'make up' returns to the baked UI"
 
 # Stops the platform containers. Deliberately NOT `compose down`: down removes the
 # network, agent containers live on it, and removing a network with live endpoints

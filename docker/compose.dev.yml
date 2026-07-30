@@ -1,0 +1,13 @@
+# DEV OVERLAY -- `make up-dev` layers this over compose.yml. Never part of a
+# real deploy: it mounts the WORKING TREE's bus page into the broker and flips
+# REVEILLE_UI_PATH, so UI edits are live on refresh with no rebuild. The
+# override is loud on purpose (/version suffix, boot banner, page marker):
+# a deployment must always answer "which UI am I serving", and this one
+# answers "not the artifact's own".
+services:
+  broker:
+    environment:
+      REVEILLE_UI_PATH: /devui
+    volumes:
+      # Relative to THIS file's directory: the repo's working tree.
+      - ../src/reveille/ui/bus:/devui
