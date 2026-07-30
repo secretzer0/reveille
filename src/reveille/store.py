@@ -54,7 +54,7 @@ SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
 BROADCAST = "*"
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -183,6 +183,32 @@ CREATE TABLE IF NOT EXISTS members (
     left_ns   INTEGER,
     PRIMARY KEY (room_id, name)
 );
+-- WHO AN AGENT IS (DES-007, ruling 8665). The identity is a UUID; (owner_id,
+-- name) is a LABEL on it, not a key. The operator's own requirement proves the
+-- composite cannot be the key: declining a resurrect mints a NEW identity under
+-- the SAME name, so one (user, name) maps to several histories over time and a
+-- composite key would collide with itself the first time somebody declined.
+--
+-- Lives here rather than in the launcher because the hive holds the history and
+-- the whole point of an identity is to segment history -- the launcher's
+-- container rows are ephemeral by design and deleting one is what lost the
+-- ownership fact in the first place.
+CREATE TABLE IF NOT EXISTS agents (
+    id          TEXT PRIMARY KEY,
+    owner_id    TEXT NOT NULL REFERENCES users(id),
+    name        TEXT NOT NULL,
+    created_ns  INTEGER NOT NULL,
+    retired_ns  INTEGER,
+    released_ns INTEGER,
+    released_by TEXT
+);
+-- THIS INDEX IS THE RULE "one live instance per name per user", enforced by the
+-- database rather than by anyone remembering it -- which is this week's whole
+-- thesis applied to a schema. A second live mint under the same label fails at
+-- the constraint, in the path the mistake takes, with no code to route around.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_live
+    ON agents(owner_id, name) WHERE retired_ns IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
 CREATE TABLE IF NOT EXISTS messages (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id INTEGER,
@@ -500,6 +526,9 @@ def migrate(conn, db_path):
         _upgrade_v14(conn, db_path)
     elif v == 14:
         _upgrade_v14(conn, db_path)
+        _upgrade_v15(conn, db_path)
+    elif v == 15:
+        _upgrade_v15(conn, db_path)
     # Chains from <=v8 need no v9+ steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
     # which already carries the current index shape, status set, and audit
     # tables, and backfills through _memory_insert.
@@ -747,6 +776,30 @@ def _upgrade_v14(conn, db_path):
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
+def _upgrade_v15(conn, db_path):
+    """v15 -> v16: the agents table (DES-007). Purely additive -- no existing row
+    moves and nothing reads it yet, which is deliberate: the record has to start
+    being written before the enforcement that reads it exists, or every agent
+    provisioned in between has an ownership fact that cannot be recovered later
+    (ruling 8660, recording is urgent and enforcing is not)."""
+    with tx(conn):
+        _exec_script(conn, """
+CREATE TABLE IF NOT EXISTS agents (
+    id          TEXT PRIMARY KEY,
+    owner_id    TEXT NOT NULL REFERENCES users(id),
+    name        TEXT NOT NULL,
+    created_ns  INTEGER NOT NULL,
+    retired_ns  INTEGER,
+    released_ns INTEGER,
+    released_by TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_live
+    ON agents(owner_id, name) WHERE retired_ns IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
+""")
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+
+
 def _upgrade_v0(conn, db_path):
     """v0 (room = the shared secret, stored as a string on every row) -> v2 (rooms are
     uuid rows owned by a user). Ownerless rooms are claimed by the first admin at
@@ -761,10 +814,17 @@ def _upgrade_v0(conn, db_path):
     conn.execute("PRAGMA foreign_keys=OFF")   # a no-op inside a tx, so it goes here
     try:
         with tx(conn):
+            # NAME COLLISION ACROSS ERAS: v0's `agents` was the presence/member
+            # cache; DES-007's `agents` is the identity table. CREATE IF NOT
+            # EXISTS would silently keep the v0 shape and then fail building an
+            # index on a column it does not have. Rename the old one out of the
+            # way first -- it is read twice below and dropped, and it must not be
+            # mistaken for the new table by anything in between.
+            conn.execute("ALTER TABLE agents RENAME TO agents_v0")
             _exec_script(conn, _SCHEMA)        # adds the new tables; messages untouched
             now = time.time_ns()
             legacy = [r["room"] for r in conn.execute(
-                "SELECT room FROM messages UNION SELECT room FROM agents")]
+                "SELECT room FROM messages UNION SELECT room FROM agents_v0")]
             room_map = {k: _uuid() for k in legacy}
             conn.executemany(
                 "INSERT INTO rooms(id, name, owner_id, public, retention_ns, created_ns) "
@@ -797,7 +857,7 @@ def _upgrade_v0(conn, db_path):
             # re-joins on its next turn and messages already carry the authorship.
             # Dropping beats porting -- and it discards the live corruption where
             # join()'s ON CONFLICT(name) yanked human-web out of its first room.
-            conn.execute("DROP TABLE agents")
+            conn.execute("DROP TABLE agents_v0")
             _exec_script(conn, _SCHEMA)        # re-add indexes lost with the old table
             # The messages table was rebuilt (DROP + RENAME), so the external-content
             # FTS index is stale by definition -- rebuild it from the rows that exist
@@ -1430,6 +1490,88 @@ def _present(conn, room_id, name):
     return conn.execute(
         "SELECT 1 FROM members WHERE room_id=? AND name=? AND left_ns IS NULL",
         (room_id, name)).fetchone() is not None
+
+
+def mint_agent(conn, owner_id, name, now=None):
+    """Claim the LIVE identity for (owner, name), minting one if there is none.
+
+    FIRST provisioner wins and re-provisioning does not move ownership: if a live
+    row exists it is RETURNED, never replaced. Anything else implements "whoever
+    last touched it owns it", which is not a rule (ruling 8660).
+
+    A retired or released row does not block a new mint -- that is the whole
+    point of the label being separate from the identity. Declining a resurrect
+    mints a fresh id and the old row keeps its history under its own.
+    """
+    valid_name(name)
+    now = now or time.time_ns()
+    live = conn.execute(
+        "SELECT * FROM agents WHERE owner_id=? AND name=? AND retired_ns IS NULL",
+        (owner_id, name)).fetchone()
+    if live:
+        return dict(live)
+    aid = uuid.uuid4().hex
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO agents(id, owner_id, name, created_ns) VALUES(?,?,?,?)",
+            (aid, owner_id, name, now))
+    return dict(conn.execute("SELECT * FROM agents WHERE id=?", (aid,)).fetchone())
+
+
+def agent_identities(conn, owner_id, name):
+    """Every identity that has held this label, newest first -- what a resurrect
+    dialog offers. A name accumulates a LIST, which is exactly the operator's
+    "the same name chosen a third time offers two histories to resume"."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM agents WHERE owner_id=? AND name=? ORDER BY created_ns DESC",
+        (owner_id, name))]
+
+
+def retire_agent(conn, agent_id, now=None):
+    """Mark an identity not-live. Destroy sets this; the row is NEVER deleted,
+    because the row IS the record that outlives the container."""
+    now = now or time.time_ns()
+    with tx(conn):
+        conn.execute("UPDATE agents SET retired_ns=? WHERE id=? AND retired_ns IS NULL",
+                     (now, agent_id))
+
+
+def resurrect_agent(conn, agent_id, now=None):
+    """Re-activate a retired identity: it keeps its id, so every message and
+    memory already attributed to it stays attributed to it.
+
+    Refuses when the label already has a live holder -- the partial unique index
+    would refuse anyway, and catching it here means the caller gets a sentence
+    instead of an IntegrityError."""
+    row = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+    if not row:
+        raise BusError(f"no such agent identity {agent_id!r}")
+    if row["released_ns"] is not None:
+        raise BusError(f"{row['name']!r} was released and is no longer that owner's")
+    held = conn.execute(
+        "SELECT id FROM agents WHERE owner_id=? AND name=? AND retired_ns IS NULL",
+        (row["owner_id"], row["name"])).fetchone()
+    if held:
+        raise BusError(
+            f"{row['name']!r} already has a live instance -- retire it before "
+            f"resurrecting an older one, since one label holds one live agent")
+    with tx(conn):
+        conn.execute("UPDATE agents SET retired_ns=NULL WHERE id=?", (agent_id,))
+    return dict(conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone())
+
+
+def release_agent_name(conn, agent_id, by, now=None):
+    """Free a label so another account may claim it. Do not ship the lock without
+    the key: a name held forever by a deleted account is a leak. Audited by the
+    caller -- an ownership transfer nobody can point at afterwards is not one."""
+    now = now or time.time_ns()
+    with tx(conn):
+        conn.execute(
+            "UPDATE agents SET released_ns=?, released_by=?, "
+            "retired_ns=COALESCE(retired_ns, ?) WHERE id=? AND released_ns IS NULL",
+            (now, by, now, agent_id))
+    r = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+    return dict(r) if r else None
 
 
 def left_rooms(conn, name, rooms):
