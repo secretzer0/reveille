@@ -38,15 +38,37 @@ def free_port():
     return p
 
 
-def wait_ok(url, timeout=30):
+def _wait(url, is_up, timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            if urllib.request.urlopen(url, timeout=1).read() == b"ok":
+            if is_up(urllib.request.urlopen(url, timeout=1).read()):
                 return
-        except OSError:
-            time.sleep(0.2)
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.2)
     raise SystemExit(f"{url} never came up")
+
+
+# TWO SERVICES, TWO SHAPES, AND THIS SMOKE WAITS ON BOTH.
+#
+# The broker's /health is the literal bytes "ok". The launcher's is a JSON
+# document carrying version, commit and branch, because a deploy has to be able
+# to ASK what is running. One waiter asserting one shape cannot be right for
+# both: it compared bytes, so the launcher -- which was up and healthy -- read
+# as "never came up" for 30 seconds and left this gate red on main.
+#
+# Named separately on purpose. A single waiter that accepted either shape would
+# pass if the broker started answering JSON or the launcher regressed to bytes,
+# which is the failure this exists to catch.
+def wait_ok(url, timeout=30):
+    """The BROKER: /health is the bare bytes ok."""
+    _wait(url, lambda body: body == b"ok", timeout)
+
+
+def wait_health_json(url, timeout=30):
+    """The LAUNCHER: /health is a document and ok is a field in it."""
+    _wait(url, lambda body: json.loads(body).get("ok") is True, timeout)
 
 
 def req(base, path, cookie=None, method="GET", body=None, want=200):
@@ -112,7 +134,7 @@ def main():
     subprocess.run(["docker", "rm", "-f", "rev-ana-dev"], capture_output=True)
     try:
         wait_ok(B + "/health")
-        wait_ok(L + "/health")
+        wait_health_json(L + "/health")
         ana = login(B, "ana", "hunter2hunter2")
         bob = login(B, "bob", "hunter2hunter2")
 

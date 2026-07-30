@@ -4,6 +4,7 @@ suite; here we pin the invariants that must hold no matter what: no secret in ar
 no secret in launcher.db, the health-by-presence decision, and the tenancy rules --
 namespaced names, per-agent data roots, quota resolution, idle decision."""
 
+import asyncio
 import importlib.util
 import json
 import pathlib
@@ -1161,3 +1162,28 @@ def test_read_boot_report_is_nothing_to_show_not_an_error():
         assert rl.read_boot_report("acme", "ghost") is None
     finally:
         rl._docker = orig
+
+
+def test_health_is_a_document_with_a_pinned_shape():
+    """/health has at least three consumers -- launcher-api-smoke, the deploy's
+    staleness check, and whoever curls it -- so its SHAPE is a contract.
+
+    It was a bare "ok" and became a JSON document. The launcher kept coming up
+    fine; the smoke compared bytes, could not tell, and reported "never came up"
+    for 30 seconds at a time. Nothing was wrong with the service or the new
+    shape, only with a consumer pinned to the old one -- and the only gate that
+    could see it needed a docker socket, so it stayed red on main for everyone.
+
+    This is that gate at unit cost: change the shape and it fails HERE, in the
+    dev container, instead of in whichever docker run someone happens to make.
+    """
+    app = rl.build_api("http://127.0.0.1:8765")
+    health = next(r.endpoint for r in app.routes
+                  if getattr(r, "path", None) == "/health")
+    body = json.loads(asyncio.run(health(None)).body)
+    assert body["ok"] is True, "consumers gate on ok being literally true"
+    assert set(body) == {"ok", "version", "commit", "branch", "source"}, (
+        "the /health document changed shape -- update launcher_api_smoke.py's "
+        "wait_ok and scripts/launcher-pin-check in the SAME commit")
+    for key in ("version", "commit", "branch", "source"):
+        assert isinstance(body[key], str) and body[key], f"{key} must be a non-empty string"
