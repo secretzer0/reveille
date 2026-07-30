@@ -190,6 +190,16 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.46 THE RAIL IS THE ROSTER AND TERMINALS ARE TABS (DES-006 U8). In
+manage-agents mode the room rail becomes the agent roster, and attaching opens
+a tab in the content well instead of a popup window -- the popup path is gone
+and the served page is asserted to no longer contain the call. Frames are
+RECONCILED, never re-rendered: anything that later rebuilds the frame container
+wholesale kills every live attach, and re-selecting a tab then reconnects as a
+second driver that its own predecessor refuses. That is the failure mode to
+suspect first if tabs misbehave. Not yet field-tested: N tabs across 2+ agents
+attaching at once, and a killed browser reclaimed within one sweep tick.
+
 0.2.45 YOUR PLUGINS ARE ACTUALLY INSTALLED. caveman and ponytail were baked
 into the image's ~/.claude at build time -- correct when that path was a named
 volume (docker seeds those from the image) and void once the agent home became
