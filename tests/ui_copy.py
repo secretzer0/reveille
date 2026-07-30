@@ -42,5 +42,16 @@ DISCLOSURE_OPEN = '<details class="addAgent" open'
 ACCOUNT_LOGIN = ("CLAUDE LOGIN", "reveille-launch login ",
                  "the launcher is not reachable", "the launcher returned ")
 
-BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN
+# Reconfig 2: the edit form's PRICE, stated before the click. Applying an edit
+# re-provisions, re-provisioning mints, and a mint supersedes the agent's
+# previous bound token -- so every field edit restarts the agent and rotates
+# its credential, not just a rooms change (ruling 8606, widened at 8699).
+# Load-bearing because the cost is invisible otherwise: the user clicks "apply"
+# on a repo URL and gets a restart plus a new token, and nothing in the DOM
+# would have warned them. Also pinned: the verdict is read back from the
+# container, so the form must never claim success from a status code.
+RECONFIG_EDIT = ("Applying restarts this agent", "NEW bus credential",
+                 "Read back from the running container")
+
+BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN + RECONFIG_EDIT
 LAUNCHER_PAGE = DESTROY_MODAL + LAUNCHER_ONLY + (DISCLOSURE,)

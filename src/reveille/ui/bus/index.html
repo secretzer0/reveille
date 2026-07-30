@@ -1357,6 +1357,14 @@ function lapi(path,opts){return api(AGBASE+path,opts);}
 // ONLY this pane to #agUnavail; chat/rooms/memory/presence never know,
 // because nothing here is on their path.
 let agConfirm=null;   // {agent} -- at most one destroy-confirm open at a time
+// Reconfig 2. {agent, cfg, rooms, result} -- the open edit form, at most one.
+// `cfg` is what the CONTAINER holds (GET .../config), never the request that
+// created it; `result` is the per-field verdict a PUT read back. We render the
+// verdict and never the word "saved": a 200 means the container came up, which
+// is not the same as the field having taken (contract cea8b522), and the one
+// time those differed the form would have reported success for a role change
+// that changed nothing.
+let agEdit=null;
 let agMeta=null;      // {roles, role_prompts, rooms} from /rooms-mine, cached per open
 // U7 follow-up (operator screenshot, msg 8588): entry and exit used two
 // different controls in two different corners -- the nav button opened it,
@@ -1392,6 +1400,65 @@ function agUnavailable(msg){
   msg+') -- chat, rooms, and memory are unaffected. ';
  $('agUnavail').hidden=false;
  $('agList').innerHTML='';
+}
+// The edit form and its verdict. Split out of the row map because it is the
+// only branch there that renders a RESULT as well as a control.
+function agEditPanel(a){
+ const c=agEdit.cfg||{}, res=agEdit.result;
+ const roles=(agMeta&&agMeta.roles)||[];
+ const rooms=(agMeta&&agMeta.rooms)||[];
+ const chosen=agEdit.rooms||[];
+ // THE VERDICT, per field, read back off the running container. "unchanged"
+ // is not an error and not a success -- it is the fact, and it is exactly the
+ // fact a status code cannot carry.
+ const verdict=!res?'':
+  '<div class="pRow"><b>'+(res.applied?'Applied.':'Applied in part.')+
+   '</b> Read back from the running container, not from the response code.'+
+   '</div>'+
+  Object.keys(res.fields||{}).map(k=>{
+   const f=res.fields[k];
+   return '<div class="pAsk">'+esc(k)+': '+
+    (f.applied?'now '+esc(f.actual||'(empty)')
+             :'<span class="err">still '+esc(f.actual||'(empty)')+
+              ' -- asked for '+esc(f.requested||'(empty)')+'</span>')+'</div>';
+  }).join('')+
+  (res.credential_rotated
+    ?'<div class="pAsk">Its bus credential was re-minted; the previous one no '+
+     'longer answers for this name.</div>':'');
+ return '<div data-ageditbox="'+esc(a.agent)+'">'+
+  '<div class="pRow"><b>Edit '+esc(a.agent)+'</b></div>'+
+  // Keep this sentence UNBROKEN in the source. Split across a concatenation it
+  // still renders correctly for the user, and tests/ui_copy.py -- which reads
+  // the file, not the DOM -- cannot see it. Copy that a gate is answerable for
+  // must be greppable in the bytes that ship.
+  '<div class="pAsk">Applying restarts this agent and issues it a NEW bus credential'+
+  ' -- its old token stops working. Everything it has learned '+
+  'locally (its ~/.claude) and its repo checkouts are kept.</div>'+
+  '<div class="pRow">repo URL <input data-agedrepo size="40" '+
+   'value="'+esc(c.repo_url||'')+'"></div>'+
+  '<div class="pRow">role <select data-agedrole>'+
+   '<option value="">(none)</option>'+
+   roles.map(r=>'<option value="'+esc(r)+'"'+
+    (r===(c.role||'')?' selected':'')+'>'+esc(r)+'</option>').join('')+
+   '</select></div>'+
+  '<div class="pRow">append to the role <input data-agedappend size="40" '+
+   'value="'+esc(c.append||'')+'"></div>'+
+  '<div class="pRow">model <input data-agedmodel size="24" '+
+   'value="'+esc(c.model||'')+'" placeholder="blank = account default"></div>'+
+  '<div class="pRow">image <input data-agedimage size="24" '+
+   'value="'+esc(c.image||'')+'"></div>'+
+  // Rooms are shown even though they are a rotation either way -- prefilled
+  // from where the agent IS (presence), so leaving them alone re-mints the
+  // same set rather than silently dropping it.
+  '<div class="pRow">rooms '+(rooms.length?rooms.map(r=>
+    '<label class="chip"><input type="checkbox" data-agedroom value="'+
+    esc(r.id)+'"'+(chosen.indexOf(r.id)>=0?' checked':'')+'> '+
+    esc(r.name)+'</label>').join(' ')
+   :'<span class="pDim">rooms unavailable -- reopen the pane</span>')+'</div>'+
+  '<div class="pRow"><button data-agedapply="'+esc(a.agent)+'">apply</button> '+
+   '<button data-agedno="'+esc(a.agent)+'">close</button>'+
+   '<span data-agedstatus class="pDim"></span></div>'+
+  verdict+'</div>';
 }
 async function refreshAgents(){
  $('agUnavail').hidden=true;
@@ -1450,6 +1517,19 @@ async function refreshAgents(){
      '<div class="pRow"><button class="danger" data-agdelyes="'+esc(a.agent)+
      '" disabled>erase '+esc(a.agent)+'</button> '+
      '<button data-agdelno="'+esc(a.agent)+'">cancel</button></div></div>';
+   // EDIT IN PLACE (reconfig 2). Before this the only way to fix a mistyped
+   // repo URL was to destroy the agent, so the cheapest correction in the
+   // system cost the most -- and after U7 made destroy always purge, it cost
+   // everything the agent had learned locally.
+   //
+   // The panel states the price BEFORE the click, because it is not free:
+   // applying re-provisions, re-provisioning mints, and a mint supersedes the
+   // agent's previous bound token. Every field edit rotates the credential,
+   // not just a rooms change (ruling 8606, widened at 8699). A restart the
+   // user did not expect is a surprise; a restart they were told about is a
+   // decision.
+   if(agEdit&&agEdit.agent===a.agent)
+    return agEditPanel(a);
    // FOUR STATES, and what each one OFFERS. The launcher derives the state
    // from container + files + hive; the row's job is to make the difference
    // legible, because "erased" used to read as gone forever when the hive
@@ -1482,6 +1562,11 @@ async function refreshAgents(){
         '<button data-agstop="'+esc(a.agent)+'">stop</button>'
       : broken(a) ? ''
       : '<button data-agstart="'+esc(a.agent)+'">start</button>')+
+    // Not offered on a BROKEN row: there is no container to read the current
+    // config back from, so the form could only be prefilled with blanks, and
+    // a blank form reads as "this agent is configured with nothing" rather
+    // than "we cannot see it". Destroy is still the honest action there.
+    (broken(a)?'':'<button data-agedit="'+esc(a.agent)+'">edit</button>')+
     '<button data-agdel="'+esc(a.agent)+'">destroy</button></div>';
   }).join('');
  for(const b of list.querySelectorAll('[data-agrecreate]'))b.onclick=()=>{
@@ -1508,7 +1593,60 @@ async function refreshAgents(){
   try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstop)+'/stop',
    {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
  };
+ // Opening the form FETCHES the current config first. Prefilling from the
+ // row would prefill from launcher.db, which records what was requested at
+ // provision -- the container is what actually happened, and the gap between
+ // those two is the entire reason this slice exists.
+ for(const b of list.querySelectorAll('[data-agedit]'))b.onclick=async()=>{
+  const n=b.dataset.agedit;
+  try{
+   // agMeta is fetched at the END of refreshAgents, so on the FIRST open it
+   // is still null and the form would render with an empty role list and no
+   // room checkboxes -- a control that only works the second time you use it,
+   // which reads as a broken feature (unreachable-control-reads-as-missing-
+   // capability). Load it here rather than relying on render order.
+   if(!agMeta)agMeta=await lapi('/rooms-mine');
+   const d=await lapi('/agents/'+encodeURIComponent(n)+'/config');
+   if(!d.config){toast('cannot read '+n+"'s configuration -- no container to "+
+    'read it from; start it first',true);return;}
+   agEdit={agent:n,cfg:d.config,rooms:d.rooms||[],result:null};
+   agConfirm=null;
+   refreshAgents();
+  }catch(e){toast('could not open the editor: '+(e.message||e),true);}
+ };
+ for(const b of list.querySelectorAll('[data-agedno]'))b.onclick=()=>{
+  agEdit=null;refreshAgents();};
+ for(const b of list.querySelectorAll('[data-agedapply]'))b.onclick=async()=>{
+  const box=b.closest('[data-ageditbox]'), st=box.querySelector('[data-agedstatus]');
+  const q=s=>box.querySelector(s);
+  const body={
+   repo_url:q('[data-agedrepo]').value.trim(),
+   role:q('[data-agedrole]').value,
+   append:q('[data-agedappend]').value.trim(),
+   model:q('[data-agedmodel]').value.trim(),
+   image:q('[data-agedimage]').value.trim(),
+   rooms:[...box.querySelectorAll('[data-agedroom]:checked')].map(c=>c.value)};
+  try{
+   // Say what is actually about to happen. "saving..." would be a lie about
+   // the cost: the container is going away and coming back.
+   st.textContent=' restarting '+b.dataset.agedapply+'...';
+   b.disabled=true;
+   const res=await lapi('/agents/'+encodeURIComponent(b.dataset.agedapply)+
+    '/config',{method:'PUT',body:JSON.stringify(body)});
+   agEdit={agent:b.dataset.agedapply,cfg:res.config||{},
+           rooms:body.rooms,result:res};
+   refreshAgents();
+  }catch(e){
+   b.disabled=false;
+   st.textContent='';
+   toast('edit failed: '+(e.message||e),true);
+  }
+ };
  for(const b of list.querySelectorAll('[data-agdel]'))b.onclick=()=>{
+  // Both panels render in the same slot on the same row, so leaving the other
+  // one set would render a destroy confirm and an edit form on top of each
+  // other -- and the one that wins is decided by branch order, not by intent.
+  agEdit=null;
   agConfirm={agent:b.dataset.agdel};refreshAgents();
  };
  for(const b of list.querySelectorAll('[data-agdelno]'))b.onclick=()=>{

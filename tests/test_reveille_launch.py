@@ -849,3 +849,98 @@ def test_lifecycle_state_names_all_four_and_erased_is_recoverable():
     assert rl.lifecycle_state("absent", False,
                               {"messages": 0, "memories": 0,
                                "lessons": 0}) == "unknown"
+
+
+# ---- reconfig 2: edit in place ------------------------------------------
+# The whole read-back is pure on purpose: the agent who owns this UI has no
+# docker socket, so anything only a smoke can reach is anything they cannot
+# verify before shipping.
+
+def test_split_role_prompt_recovers_both_halves_and_keeps_a_custom_prompt():
+    prompts = {"dev": "You are a developer.", "dev-senior": "You are a developer. Senior."}
+    # Longest matching prefix wins: dev-senior starts with dev's whole text, and
+    # resolving it to "dev" would silently demote the agent on every edit.
+    assert rl.split_role_prompt("You are a developer. Senior.", prompts) == \
+        ("dev-senior", "")
+    assert rl.split_role_prompt("You are a developer.", prompts) == ("dev", "")
+    # The user's append comes back SEPARATELY, so the form can show it in its
+    # own box instead of making them retype their additions to keep them.
+    assert rl.split_role_prompt("You are a developer.\n\nAlso mind the CSS.",
+                                prompts) == ("dev", "Also mind the CSS.")
+    # A prompt no role explains is preserved as an append, never dropped: an
+    # edit form that eats a hand-written prompt destroys the thing it opened to
+    # change.
+    assert rl.split_role_prompt("Bespoke prompt.", prompts) == ("", "Bespoke prompt.")
+    assert rl.split_role_prompt("", prompts) == ("", "")
+    assert rl.split_role_prompt("   ", prompts) == ("", "")
+
+
+def test_effective_config_reads_the_container_not_the_request():
+    prompts = {"ui": "Mind the pixels."}
+    env = ["PATH=/usr/bin", "REVEILLE_REPO_URL=https://example.invalid/r.git",
+           "REVEILLE_ROLE_PROMPT=Mind the pixels.\n\nAnd the copy.",
+           "ANTHROPIC_MODEL=claude-opus-5", "REVEILLE_TOKEN=secret-never-echoed"]
+    cfg = rl.effective_config(env, "reveille-agent:0.2.7", prompts)
+    assert cfg == {"repo_url": "https://example.invalid/r.git", "role": "ui",
+                   "append": "And the copy.", "model": "claude-opus-5",
+                   "image": "reveille-agent:0.2.7"}
+    # The token is in the env we just parsed and must not ride along in a
+    # response the browser reads.
+    assert "secret-never-echoed" not in json.dumps(cfg)
+    # A malformed line is skipped, not fatal: docker's env is a list of
+    # strings and one oddity must not blank the whole form.
+    assert rl.effective_config(["JUSTAKEY"], "img", prompts)["repo_url"] == ""
+    assert rl.effective_config([], "", prompts)["role"] == ""
+
+
+def test_config_diff_judges_only_submitted_fields_and_catches_a_silent_no_op():
+    # THE DEFECT THIS EXISTS FOR: provision returns 200 as soon as the
+    # container is up. Before the delimiter-pair entrypoint fix, a role edit
+    # came back 200 having changed nothing at all. A status code cannot tell
+    # "changed" from "came up holding the old value"; this can.
+    requested = {"repo_url": "https://example.invalid/new.git", "role": "ui"}
+    actual = {"repo_url": "https://example.invalid/old.git", "role": "ui",
+              "append": "", "model": "", "image": "img"}
+    d = rl.config_diff(requested, actual)
+    assert d["repo_url"]["applied"] is False
+    assert d["repo_url"]["requested"] == "https://example.invalid/new.git"
+    assert d["repo_url"]["actual"] == "https://example.invalid/old.git"
+    assert d["role"]["applied"] is True
+    # A field nobody submitted gets NO verdict -- reporting it as applied
+    # would be inventing a result for something nobody asked for.
+    assert "model" not in d and "image" not in d and "append" not in d
+    # Submitting a field EMPTY is a real request (clear it) and is judged.
+    assert rl.config_diff({"model": ""}, {"model": ""})["model"]["applied"] is True
+    assert rl.config_diff({"model": ""}, {"model": "opus"})["model"]["applied"] is False
+    assert rl.config_diff({}, actual) == {}
+    assert rl.config_diff(None, actual) == {}
+
+
+def test_agent_rooms_now_returns_room_ids_for_that_agent_only():
+    # Verified against store.presence rather than assumed: each entry carries
+    # room_id under the key "room", and the token attach takes IDs. A display
+    # name here would attach nothing and the agent would boot into no room.
+    calls = []
+
+    def fake_broker(auth, cookie, method, path, body=None):
+        calls.append((method, path))
+        return {"agents": [
+            {"name": "ui", "room": "r-1"}, {"name": "ui", "room": "r-2"},
+            {"name": "ui", "room": "r-1"},            # duplicate: one entry per room
+            {"name": "dev", "room": "r-9"},           # someone else's room
+            {"name": "ui"},                           # no room: skipped
+        ]}
+
+    orig = rl._broker_json
+    rl._broker_json = fake_broker
+    try:
+        assert rl.agent_rooms_now("http://b", "c=1", "ui") == ["r-1", "r-2"]
+        # A stopped agent whose member rows were reaped yields NOTHING, which
+        # the endpoint must refuse rather than mint a room-less credential.
+        rl._broker_json = lambda *a, **k: {"agents": []}
+        assert rl.agent_rooms_now("http://b", "c=1", "ui") == []
+        rl._broker_json = lambda *a, **k: None      # broker unreachable
+        assert rl.agent_rooms_now("http://b", "c=1", "ui") == []
+    finally:
+        rl._broker_json = orig
+    assert calls == [("GET", "/presence")], calls
