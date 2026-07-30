@@ -463,6 +463,17 @@ def test_entrypoint_writes_a_report_the_agent_can_read(tmp_path):
     assert "/home/agent/boot-report.md" in ep, "no report in the agent's own home"
     for missing in ("role prompt: **MISSING**", "claude credential: **MISSING**"):
         assert missing in ep, f"the report never names {missing!r}"
+    # the identity block must stay TOGETHER above the clone: hoisting half of it
+    # is how the next reader concludes the other half was deliberate
+    clone = ep.find("git clone ")
+    for key in ("user.name", "user.email", "safe.directory"):
+        assert ep.find(f"git config --global --get {key}") < clone, (
+            f"git {key} is configured AFTER the clone -- the identity block was "
+            f"split, which is the same ordering defect one layer smaller")
+    # a failure without the state around it sends the reader to the likeliest
+    # suspect, which is not the same thing as the cause (two people, one hour)
+    assert "git credential helper at clone time" in ep, (
+        "the report names the failure but not the state that caused it")
     assert 'sed \'s/^/      /\' /tmp/clone.err' in ep, (
         "the report must carry git's OWN words -- 'clone failed' without the "
         "reason sends the agent to a human anyway")
