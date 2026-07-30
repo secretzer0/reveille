@@ -158,7 +158,81 @@ def test_credential_resolution_override_beats_global_beats_nothing():
     assert rl.resolve_credentials(prof, "dev", "https://g/req")["repo_url"] \
         == "https://g/req"
     assert rl.resolve_credentials({}, "dev") == \
-        {"claude_token": None, "github_token": None, "repo_url": ""}
+        {"claude_token": None, "github_token": None,
+         "claude_mode": "token", "repo_url": ""}
+
+
+def test_claude_mode_resolution_and_validation():
+    # The mode is a CHOICE (msg 8629): default token, per-agent override wins,
+    # and an unknown choice is refused at WRITE time by merge_profile -- the
+    # one funnel both the CLI and the HTTP PUT flow through.
+    prof = {"claude_mode": "home-login", "claude_token": "sk-ant-oat01-x",
+            "agents": {"dev": {"claude_mode": "token"}}}
+    assert rl.resolve_credentials(prof, "other")["claude_mode"] == "home-login"
+    assert rl.resolve_credentials(prof, "dev")["claude_mode"] == "token"
+    assert rl.resolve_credentials({}, "dev")["claude_mode"] == "token"
+    try:
+        rl.merge_profile({}, {"claude_mode": "auto"})
+        raise AssertionError("unknown claude_mode accepted -- a typo would "
+                             "silently become the default at provision time")
+    except rl.LaunchError:
+        pass
+    saved = rl.merge_profile({}, {"claude_mode": "home-login"})
+    assert saved["claude_mode"] == "home-login"
+    assert rl.merge_profile(saved, {"claude_mode": ""}) == {}  # clear drops it
+
+
+def test_credential_env_home_login_passes_no_claude_env():
+    # The mode's whole point, stated as the invariant: in home-login mode NO
+    # claude env var rides -- even with a token also stored, because claude's
+    # own precedence would let the env shadow the file credential the operator
+    # logged in (the silent-billing-switch class). github still rides.
+    creds = {"claude_token": "sk-ant-oat01-SECRET", "github_token": "ghp_x",
+             "claude_mode": "home-login", "repo_url": ""}
+    names, env, kind = rl.credential_env(creds)
+    assert kind == "home-login"
+    assert names == ["GITHUB_TOKEN"] and set(env) == {"GITHUB_TOKEN"}
+    assert not any("SECRET" in v for v in env.values())
+    # token mode is unchanged by the feature
+    names, env, kind = rl.credential_env(dict(creds, claude_mode="token"))
+    assert kind == "subscription-token"
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in names
+    # and no credential at all still reports none (the provision refusal's key)
+    assert rl.credential_env({"claude_token": None, "github_token": None,
+                              "claude_mode": "token"})[2] == "none"
+
+
+def test_auth_mount_rides_read_only_and_only_when_given():
+    argv = rl.docker_run_argv("acme", "dev", "img", "net", Q, data_base="/d",
+                              auth_mount="/d/acme/claude-auth")
+    assert "/d/acme/claude-auth:/run/reveille-auth:ro" in " ".join(argv)
+    assert ":ro" not in " ".join(
+        rl.docker_run_argv("acme", "dev", "img", "net", Q, data_base="/d"))
+
+
+def test_login_argv_is_per_user_and_credential_free():
+    # The login shell exists to WRITE the one shared credential: the user's
+    # login home mounted as ~/.claude, seeded past the wizard, and NOTHING
+    # else -- no agent mounts, no env names, so nothing can leak in or out.
+    argv = rl.login_argv("acme", "img:1", "net", data_base="/d")
+    assert "--rm" in argv and "-ti" in argv and "rev-acme-login" in argv
+    assert "/d/acme/claude-auth:/home/agent/.claude" in argv
+    assert "-e" not in argv                       # no env names at all
+    assert not any("repos" in a for a in argv[:-1])   # no agent mounts
+    assert argv[-1] == rl._DEBUG_SEED   # lands in a seeded bash, no wizard
+
+
+def test_entrypoint_copies_login_at_every_boot():
+    # The shipped entrypoint must copy the user's login into the agent home
+    # OVERWRITING (the account-rotation workflow is re-login + restart; a
+    # setdefault would pin agents to their first account) and must copy ONLY
+    # the credentials file -- the rest of ~/.claude stays agent-unique.
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "docker" / "entrypoint.sh").read_text()
+    assert "if [ -f /run/reveille-auth/.credentials.json ]; then" in text
+    # install(1) on the ONE file: overwrite semantics, 600, never a dir copy
+    assert "install -m 600 /run/reveille-auth/.credentials.json" in text
+    assert "/home/agent/.claude/.credentials.json" in text
 
 
 def test_claude_env_name_by_prefix():

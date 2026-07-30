@@ -147,6 +147,20 @@ patch(home / ".claude" / "settings.json",
                                       "command": "/usr/local/bin/agent-stop-hook"}]}]}})
 PY
 
+# home-login mode (launcher mounts the user's login home read-only at
+# /run/reveille-auth): COPY the credentials file into this agent's own home,
+# OVERWRITING, on every boot. Overwrite is the point -- the user's login home
+# is the authority for WHICH account pays, and the operator's account-rotation
+# workflow is "re-login once, restart the agents"; a setdefault here would pin
+# every agent to whichever account it first booted under. Everything else in
+# ~/.claude stays this agent's own: the login is the ONLY shared thing, by
+# copy, never by shared mount -- agents sharing a home have been observed
+# bleeding identity into each other, which the hive exists to prevent.
+if [ -f /run/reveille-auth/.credentials.json ]; then
+  install -m 600 /run/reveille-auth/.credentials.json \
+    /home/agent/.claude/.credentials.json
+fi
+
 # Unattended git: permission mode silences the PROMPTS, but these three are
 # what actually fail a commit or a push, and no permission setting fixes them.
 git config --global --get user.email >/dev/null 2>&1 || \
