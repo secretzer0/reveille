@@ -89,9 +89,21 @@ patch(home / ".claude.json", {
 # fs, own data root, cpu/memory/pid caps, and NO docker socket (that stays with
 # the launcher), so the sandbox the warning asks for is the thing the agent is
 # already inside.
+#
+# THE STOP HOOK IS THE WATCHER BACKSTOP, and containers were shipping without
+# it: the image seeded permissions and onboarding but never the hook, so nothing
+# ever blocked a containerised agent's stop to say "you are not armed". Host
+# agents had that backstop from `make register` / join-here; container agents had
+# only their own discipline, and discipline does not survive an outage --
+# reveille-senior-ui-ux ended a turn unarmed during a broker blackout and sat
+# deaf for 21 HOURS with 44 rings in its spool, on a bus that was healthy again
+# after the first few minutes (msg 8573). The hook needs no bus to run and is
+# most needed when there is none.
 patch(home / ".claude" / "settings.json",
       {"permissions": {"defaultMode": "bypassPermissions"},
-       "skipDangerousModePermissionPrompt": True})
+       "skipDangerousModePermissionPrompt": True,
+       "hooks": {"Stop": [{"hooks": [{"type": "command",
+                                      "command": "/usr/local/bin/agent-stop-hook"}]}]}})
 PY
 
 # Unattended git: permission mode silences the PROMPTS, but these three are

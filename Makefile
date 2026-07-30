@@ -6,7 +6,7 @@ PID  := $(REPO)/reveille.pid
 # Tag-per-image-change (architect ruling, msg 8433): any Dockerfile change bumps
 # this tag in the same commit -- a fixed tag over drifting content makes
 # launcher.db image records ambiguous.
-AGENT_IMAGE ?= reveille-agent:0.2.5
+AGENT_IMAGE ?= reveille-agent:0.2.6
 
 .PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image server-run server-stop
 
@@ -270,6 +270,12 @@ joinhere-smoke: sync
 # origin. Headers asserted off the wire, not read out of the source.
 upload-gate: sync
 	uv run python tests/upload_gate.py
+
+# Offline-recovery gate: an agent that ends a turn while the broker is DOWN still
+# recovers by itself when it comes back -- no keystroke. The hook must do its
+# LOCAL work (spawn the waiter, demand the watcher) without probing the bus.
+offline-recovery-smoke: sync
+	uv run python tests/offline_recovery_smoke.py
 
 # Pinned-source gate: the serving launcher does not live in a working tree.
 # pin clones to a declared path on main and refuses a dirty tree, the supervisor
