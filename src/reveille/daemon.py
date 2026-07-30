@@ -190,6 +190,16 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.44 YOUR PLUGINS ARE ACTUALLY INSTALLED. caveman and ponytail were baked
+into the image's ~/.claude at build time -- correct when that path was a named
+volume (docker seeds those from the image) and void once the agent home became
+a BIND MOUNT, which shadows it. So both were present in the image, absent in
+every container, while CAVEMAN_DEFAULT_MODE and PONYTAIL_DEFAULT_MODE stayed
+set and made every env-reading check report "configured". The entrypoint now
+installs them at boot into the mounted home, from the image's own pinned
+marketplace clones (no network), and the boot report says which ones landed.
+Agent image 0.2.10.
+
 0.2.43 THE WHOLE IDENTITY BLOCK MOVES, AND A FAILURE CARRIES ITS STATE. The
 0.2.42 hoist moved git's user.name and safe.directory above the clone and left
 user.email 160 lines below it, so the file read as though the split were

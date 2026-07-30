@@ -61,6 +61,47 @@ say ""
 say "## repo"
 say ""
 
+# ---- PLUGINS: INSTALLED AT BUILD, MASKED AT RUNTIME --------------------------
+# The image installs caveman and ponytail at build time into /home/agent/.claude
+# -- correct when that path was a NAMED VOLUME, because docker seeds an empty
+# named volume from the image. DES-005 moved the agent home to a BIND MOUNT, and
+# a bind mount is NOT seeded: it shadows whatever the image put there. So the
+# marketplaces and the installs were present in the image, absent at runtime, and
+# CAVEMAN_DEFAULT_MODE / PONYTAIL_DEFAULT_MODE stayed set on PID 1 -- so anything
+# checking the env reported "configured" while neither skill existed.
+#
+# That is the same shape as the clone (~/work -> ~/repos) and the role prompt: a
+# mechanism that was right under the old storage shape and silently void after it
+# changed, with an env var still declaring the intent. An env var that configures
+# a capability must be set by whatever INSTALLS it, or it is a claim nobody
+# verified (senior-ui-ux, msg 8713; ratified).
+#
+# The marketplace CLONES live outside ~/.claude, so they survive the mount and the
+# install is a re-registration rather than a download -- offline-safe and pinned
+# to the same commits the image built.
+say ""
+say "## plugins"
+say ""
+for mk in caveman ponytail; do
+  src="/home/agent/${mk}-marketplace"
+  if [ ! -d "$src" ]; then
+    note "- ${mk}: **MISSING** from the image (expected ${src})"
+    continue
+  fi
+  if claude plugin list 2>/dev/null | grep -qi "^${mk}\b"; then
+    say "- ${mk}: already installed in this home"
+    continue
+  fi
+  claude plugin marketplace add "$src" >/dev/null 2>&1 || true
+  if claude plugin install "${mk}@${mk}" >/dev/null 2>&1; then
+    say "- ${mk}: installed from ${src}"
+  else
+    note "- ${mk}: **FAILED** to install from ${src} -- the plugin is in the"
+    say "  image but not in this home, and its DEFAULT_MODE env var still"
+    say "  claims it is configured"
+  fi
+done
+
 claude mcp remove reveille --scope user >/dev/null 2>&1 || true
 claude mcp add --transport http --scope user reveille "${REVEILLE_URL}/mcp" \
   --header "Authorization: Bearer ${REVEILLE_TOKEN}" \
