@@ -25,40 +25,19 @@ REVEILLE_DEAF_AFTER is the env knob (seconds, default 900); the gate runs at 2.
 import asyncio
 import contextlib
 import json
-import os
 import pathlib
-import socket
-import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from reveille import store  # noqa: E402
+from scratch import scratch_broker  # noqa: E402  -- owned-lifetime daemon
 
 ROLE = "deaf-dev"
 DEAF_AFTER = 2
-
-
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
-
-
-def wait_health(port, timeout=25):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        with contextlib.suppress(OSError):
-            if urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/health", timeout=1).read() == b"ok":
-                return True
-        time.sleep(0.2)
-    return False
 
 
 def post(base, path, secret, payload):
@@ -79,28 +58,21 @@ def presence_row(base, secret, name):
 
 
 def main():
-    tmp = pathlib.Path(tempfile.mkdtemp())
-    port = free_port()
-    base = f"http://127.0.0.1:{port}"
-    db = str(tmp / "broker.db")
-
-    conn = store.connect(db)
-    store.migrate(conn, db)
-    u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
-    room = store.create_room(conn, u["id"], "gate")
-    tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE)
-    store.assign_room(conn, tok["id"], room["id"], u["id"])
-    adm = store.create_token(conn, u["id"], "ana", agent_name="ana")
-    store.assign_room(conn, adm["id"], room["id"], u["id"])
-    conn.close()
-
-    env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port),
-               REVEILLE_HOST="127.0.0.1", REVEILLE_DEAF_AFTER=str(DEAF_AFTER))
-    env["PATH"] = str(REPO / ".venv" / "bin") + os.pathsep + env["PATH"]
-    proc = subprocess.Popen(["reveille-daemon"], env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        assert wait_health(port)
+    # The broker's lifetime is OWNED by the with-block (tests/scratch.py):
+    # no bare Popen, no cleanup step, nothing for a tidy-up reflex to reach
+    # for -- the mechanism from docs/NOTES-rules-are-not-controls.md, adopted
+    # here first. Seeding rides the running daemon's db (sqlite multi-process,
+    # same as readmit_gate's mid-run reap).
+    with scratch_broker({"REVEILLE_DEAF_AFTER": str(DEAF_AFTER)}) as b:
+        base = b.base
+        conn = store.connect(b.db)
+        u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
+        room = store.create_room(conn, u["id"], "gate")
+        tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE)
+        store.assign_room(conn, tok["id"], room["id"], u["id"])
+        adm = store.create_token(conn, u["id"], "ana", agent_name="ana")
+        store.assign_room(conn, adm["id"], room["id"], u["id"])
+        conn.close()
 
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
@@ -145,7 +117,7 @@ def main():
             # first version returned on the first ring frame, closing the
             # attachment, and the gate itself proved that a dropped socket
             # reads as no-waiter.
-            uri = f"ws://127.0.0.1:{port}/wake?name={ROLE}&token={tok['secret']}"
+            uri = f"ws://127.0.0.1:{b.port}/wake?name={ROLE}&token={tok['secret']}"
             async with websockets.connect(uri) as ws:
                 evt.set()
                 loop = asyncio.get_running_loop()
@@ -192,11 +164,8 @@ def main():
               f"deaf:no-waiter after {DEAF_AFTER}s on BOTH presence surfaces; "
               "wake attach cleared it (attach is activity); held socket + fresh "
               "unread mail flipped it to deaf:not-draining; one ordinary inbox "
-              "call cleared it everywhere; nothing was stored")
-    finally:
-        proc.terminate()
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=5)
+              "call cleared it everywhere; nothing was stored; the broker's "
+              "lifetime was owned by scratch_broker, nothing left to tidy")
 
 
 if __name__ == "__main__":

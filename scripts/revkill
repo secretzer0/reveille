@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""revkill: stop reveille scratch daemons WITHOUT the pkill foot-gun.
+
+The backstop half of docs/NOTES-rules-are-not-controls.md part 3 -- for
+processes already orphaned (the primary mechanism, owned-lifetime scratch
+daemons, cannot cover what already leaked). Two incidents in one week proved
+`pkill -f reveille-daemon` reaches INTO CONTAINERS on a host whose uid
+matches the container's: the live broker died once and survived once, the
+second time by permission rather than care.
+
+What makes this the safe short path:
+  - candidates resolve by EXACT process identity (the basename of argv[0]
+    or argv[1] is reveille-daemon / reveille-waked), never by substring
+    across a command line;
+  - a process inside a docker/containerd cgroup is NEVER signalled -- it is
+    printed with the one command that stops it properly (docker stop);
+  - it kills only what it prints, and prints everything it kills.
+
+Usage: revkill [daemon|waked|all] [--dry-run]
+"""
+import os
+import signal
+import sys
+
+IDENTITIES = {"daemon": {"reveille-daemon"},
+              "waked": {"reveille-waked"},
+              "all": {"reveille-daemon", "reveille-waked"}}
+
+
+def classify(cmdline, cgroup, wanted):
+    """(kind) for one process: 'target' | 'container' | None. Pure.
+
+    cmdline is the argv list; cgroup the text of /proc/<pid>/cgroup. Identity
+    is the BASENAME of argv[0] or argv[1] (venv entry point, or interpreter +
+    script) matching exactly -- `pkill -f`'s substring match over the joined
+    command line is precisely the reach this refuses to have.
+    """
+    names = {os.path.basename(a) for a in cmdline[:2] if a}
+    if not names & wanted:
+        return None
+    in_container = any(m in cgroup for m in ("docker", "containerd", "libpod"))
+    return "container" if in_container else "target"
+
+
+def scan(wanted):
+    out = []
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read().decode(errors="replace").split("\0")
+            with open(f"/proc/{pid}/cgroup") as f:
+                cgroup = f.read()
+        except OSError:
+            continue
+        kind = classify(cmdline, cgroup, wanted)
+        if kind:
+            out.append((int(pid), kind, " ".join(a for a in cmdline if a)[:120]))
+    return out
+
+
+def main(argv):
+    which = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else "all"
+    if which not in IDENTITIES:
+        print(f"usage: revkill [{'|'.join(IDENTITIES)}] [--dry-run]",
+              file=sys.stderr)
+        return 2
+    dry = "--dry-run" in argv
+    me = os.getpid()
+    found = [f for f in scan(IDENTITIES[which]) if f[0] != me]
+    if not found:
+        print(f"no {which} processes found")
+        return 0
+    rc = 0
+    for pid, kind, cmd in sorted(found):
+        if kind == "container":
+            # THE incident: this process only LOOKS reachable. Signalling it
+            # from the host kills a containerized service out from under its
+            # supervisor. Refuse, and name the correct tool.
+            print(f"REFUSING {pid}: inside a container -- stop it with "
+                  f"`docker stop` (find it: docker ps), never a host signal.\n"
+                  f"    {cmd}")
+            rc = 1
+            continue
+        print(f"{'would stop' if dry else 'stopping'} {pid}  {cmd}")
+        if not dry:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                print(f"  no permission for {pid} (someone else's process)")
+                rc = 1
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

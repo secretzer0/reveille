@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# A scratch broker whose lifetime is THIS terminal's (the ad-hoc half of
+# docs/NOTES-rules-are-not-controls.md part 3). Both pkill incidents began
+# with a hand-started daemon nobody had a clean way to stop; this one stops
+# itself when you leave, so there is nothing to tidy and no reflex to fire.
+#
+#   scripts/scratch-broker            # prints the URL, runs until Ctrl-C/EOF
+#   REVEILLE_DEAF_AFTER=2 scripts/scratch-broker   # env rides through
+set -euo pipefail
+
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+tmp="$(mktemp -d)"
+port="$("$repo/.venv/bin/python" - <<'PY'
+import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
+PY
+)"
+
+REVEILLE_DB="$tmp/broker.db" REVEILLE_PORT="$port" REVEILLE_HOST=127.0.0.1 \
+  "$repo/.venv/bin/reveille-daemon" >"$tmp/broker.log" 2>&1 &
+pid=$!
+# The whole point: the stop is owned HERE, before any work happens.
+trap 'kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "scratch broker stopped (db was $tmp)"' EXIT
+
+for _ in $(seq 1 50); do
+  if curl -sf "http://127.0.0.1:$port/health" >/dev/null 2>&1; then break; fi
+  sleep 0.2
+done
+echo "scratch broker: http://127.0.0.1:$port  (db $tmp/broker.db, log $tmp/broker.log)"
+echo "Ctrl-C or EOF stops it -- it cannot outlive this terminal."
+cat >/dev/null  # hold until the human leaves
