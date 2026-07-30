@@ -122,7 +122,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.8")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.9")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -1058,6 +1058,20 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
             f"and log in once (reveille-launch login {user}) -- an agent must "
             f"never inherit whatever credential is lying around in the "
             f"launcher's environment")
+    # A ROLE-LESS AGENT IS AS BROKEN AS A CREDENTIAL-LESS ONE, just quieter about
+    # it (architect ruling 8691). The entrypoint's CLAUDE.md rewrite is guarded on
+    # the prompt being non-empty, so an empty one correctly does nothing and the
+    # agent boots knowing what it is only from its bus name -- no refusal, no
+    # error, an agent that reads as provisioned and is not. Same shape as the
+    # credential refusal above: the requirement follows the thing that consumes
+    # it, so a boot_cmd that runs no claude does not need one. A deliberately
+    # role-less agent is an explicit flag, never an empty string.
+    if not (role_prompt or "").strip() and not boot_cmd:
+        raise LaunchError(
+            f"no role prompt for {user}/{agent}: pass one with --role-prompt (or "
+            f"pick a role in the Agents form) -- an agent provisioned without one "
+            f"boots with no CLAUDE.md role block and knows what it is only from "
+            f"its bus name")
     auth_mount = None
     if kind == "home-login":
         auth_mount = user_auth_root(user)

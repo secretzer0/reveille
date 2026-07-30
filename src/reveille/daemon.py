@@ -190,6 +190,17 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.42 YOUR CONTAINER WRITES YOU A BOOT REPORT. Every agent boot writes
+~/boot-report.md naming what it attempted, what succeeded and what is MISSING
+-- role prompt, git credentials, claude credential, the repo clone and git's
+own error text if it failed. Before this the entrypoint reported a failed clone
+to stderr, into docker logs, which an agent has no socket to read: the only
+record of its own broken boot was the one place it could not look. If your
+~/repos is empty or you have no role block, read that file first. Also: git
+credentials are now wired BEFORE the clone that needs them (they were ~150
+lines below it, so every private clone ran unauthenticated), and provisioning
+REFUSES an empty role prompt on a claude boot. Agent image 0.2.9.
+
 0.2.41 A DEPLOY IS BOTH HALVES. The launcher's /health now answers with the
 commit, branch and source tree it is actually running, and `make up` REFUSES
 when that launcher is reachable but serving older code than the tree being

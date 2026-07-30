@@ -10,6 +10,57 @@ set -euo pipefail
 : "${REVEILLE_TOKEN:?set REVEILLE_TOKEN (your bus credential)}"
 : "${REVEILLE_URL:=http://127.0.0.1:8765}"
 
+# ---- BOOT REPORT (architect ruling 8691) -------------------------------------
+# A diagnostic is only a diagnostic if the party who needs it can reach it.
+#
+# The entrypoint already reported a failed clone -- to stderr, into docker logs.
+# The agent has no docker socket BY DESIGN, so the only record of its own broken
+# boot was in the one place it cannot look. It found an empty repos/ and had to
+# ask a human to read logs for it. That is worse than silence, because it looks
+# like diligence.
+#
+# So every boot writes what it ATTEMPTED, what SUCCEEDED and what is MISSING to a
+# file in the agent's own home. Truncated per boot: this is the state of THIS
+# boot, not a history, and a report that accumulates is one nobody reads.
+BOOT_REPORT="/home/agent/boot-report.md"
+: > "$BOOT_REPORT"
+say() { printf '%s\n' "$*" >> "$BOOT_REPORT"; }
+note() { printf '%s\n' "$*" >> "$BOOT_REPORT"; printf '%s\n' "reveille: $*" >&2; }
+
+say "# reveille boot report"
+say ""
+say "Written by the container entrypoint every boot, because the agent cannot"
+say "read docker logs. If something below says MISSING or FAILED, that is why"
+say "the thing you are looking for is not there."
+say ""
+say "- agent: ${REVEILLE_AGENT_ROLE}"
+say "- broker: ${REVEILLE_URL}"
+say ""
+say "## inputs"
+say ""
+if [ -n "${REVEILLE_ROLE_PROMPT:-}" ]; then
+  say "- role prompt: present (written into ~/.claude/CLAUDE.md)"
+else
+  note "- role prompt: **MISSING** -- no REVEILLE_ROLE_PROMPT was passed, so"
+  say "  ~/.claude/CLAUDE.md has no reveille role block. You know what you are"
+  say "  only from your bus name and brief()."
+fi
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  say "- github token: present"
+else
+  say "- github token: absent (private clones and pushes will not authenticate)"
+fi
+if [ -f /run/reveille-auth/.credentials.json ]; then
+  say "- claude login: copied from the user's shared login home"
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  say "- claude credential: from the environment"
+else
+  note "- claude credential: **MISSING** -- claude will stop at a login prompt"
+fi
+say ""
+say "## repo"
+say ""
+
 claude mcp remove reveille --scope user >/dev/null 2>&1 || true
 claude mcp add --transport http --scope user reveille "${REVEILLE_URL}/mcp" \
   --header "Authorization: Bearer ${REVEILLE_TOKEN}" \
@@ -21,9 +72,43 @@ claude mcp add --transport http --scope user reveille "${REVEILLE_URL}/mcp" \
 # a private repo with no creds fails here and the agent clones it by hand; the
 # health gate is join+arm, not the checkout. Auth rides the claude home
 # (gh/git creds) or $GITHUB_TOKEN from the user's P2 profile.
+# CREDENTIALS BEFORE THE CLONE THAT NEEDS THEM. This wiring existed, ~150 lines
+# BELOW -- so every private clone ran unauthenticated, hit "could not read
+# Username for 'https://github.com'", and died on a terminal nobody was watching.
+# GITHUB_TOKEN was present the whole time. A public repo would have hidden this
+# forever. The wiring is not new; its POSITION is the fix.
+git config --global --get user.name >/dev/null 2>&1 || \
+  git config --global user.name "${REVEILLE_GIT_NAME:-${REVEILLE_AGENT_ROLE}}"
+git config --global --get safe.directory >/dev/null 2>&1 || \
+  git config --global --add safe.directory '*'
+# gh reads GH_TOKEN first; the P2 profile supplies GITHUB_TOKEN. gh as git's
+# credential helper is what makes clone AND push over HTTPS non-interactive.
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
+  if gh auth setup-git >/dev/null 2>&1; then
+    say "- git credentials: wired from GITHUB_TOKEN"
+  else
+    note "- git credentials: **FAILED** to wire despite GITHUB_TOKEN being set;"
+    say "  private clones and pushes will prompt and fail"
+  fi
+fi
+
 if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/repos 2>/dev/null)" ]; then
-  git clone "${REVEILLE_REPO_URL}" /home/agent/repos/work \
-    || echo "reveille: repo clone failed (${REVEILLE_REPO_URL}) -- clone by hand" >&2
+  if git clone "${REVEILLE_REPO_URL}" /home/agent/repos/work 2>/tmp/clone.err; then
+    say "- cloned ${REVEILLE_REPO_URL} -> ~/repos/work"
+  else
+    note "- clone of ${REVEILLE_REPO_URL} **FAILED**. git said:"
+    say ""
+    sed 's/^/      /' /tmp/clone.err >> "$BOOT_REPORT" 2>/dev/null || true
+    say ""
+    say "  Your ~/repos is empty for this reason, not because you have no repo."
+    say "  Clone by hand once the cause above is fixed."
+  fi
+  rm -f /tmp/clone.err
+elif [ -n "${REVEILLE_REPO_URL:-}" ]; then
+  say "- ~/repos already had content; clone skipped"
+else
+  say "- no REVEILLE_REPO_URL was passed; nothing to clone"
 fi
 
 # DES-005 P3 / architect ruling msg 8607: the chosen role's prompt lives in the
@@ -165,17 +250,8 @@ fi
 # what actually fail a commit or a push, and no permission setting fixes them.
 git config --global --get user.email >/dev/null 2>&1 || \
   git config --global user.email "${REVEILLE_GIT_EMAIL:-${REVEILLE_AGENT_ROLE}@reveille.local}"
-git config --global --get user.name >/dev/null 2>&1 || \
-  git config --global user.name "${REVEILLE_GIT_NAME:-${REVEILLE_AGENT_ROLE}}"
-git config --global --get safe.directory >/dev/null 2>&1 || \
-  git config --global --add safe.directory '*'
-# gh reads GH_TOKEN first; the P2 profile supplies GITHUB_TOKEN. Wiring gh as
-# git's credential helper is what makes `git push` over HTTPS non-interactive --
-# without it the push asks for a username on a terminal nobody is watching.
-if [ -n "${GITHUB_TOKEN:-}" ]; then
-  export GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}"
-  gh auth setup-git >/dev/null 2>&1 || true
-fi
+# git identity and credentials are wired BEFORE the clone -- see the block above
+# the clone for why the order is the fix.
 
 # Per-container gate secret (DES-002 4.3): injected by the launcher at provision
 # (T2); a hand-run container gets a random one, never printed -- mint grant
