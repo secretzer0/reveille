@@ -441,3 +441,35 @@ def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
         assert s in ui, f"launcher-api-smoke asserts {s!r}"
     assert ui_copy.DISCLOSURE_OPEN not in ui, \
         "the create form must not ship expanded -- that is the U7 adjacency bug"
+
+
+def test_a_humans_presence_is_their_open_tab():
+    """Operator report 2026-07-30: a web user stayed 'active' in a room after
+    switching rooms or signing out -- their live flag came from a member row
+    the presence poll touched, and the poll only touches the room being
+    VIEWED, so the old room kept a stale timestamp for the whole 40-minute
+    window. Humans are now computed from the feed; AGENTS are deliberately
+    left on the heartbeat, because an agent's absence is a state to see."""
+    agents = [
+        {"name": "ana", "tag": "web:ana", "room": "r1", "live": True},
+        {"name": "ana", "tag": "web:ana", "room": "r2", "live": True},
+        {"name": "ui-dev", "tag": "ui-dev", "room": "r1", "live": True},
+        {"name": "gone-dev", "tag": "gone-dev", "room": "r1", "live": False},
+    ]
+    saved = dict(daemon._feed)
+    try:
+        daemon._feed.clear()
+        daemon._feed["q1"] = ("r1", "ana")       # one tab, on r1 only
+        daemon._human_live(agents)
+        assert agents[0]["live"] is True, "the room she is watching"
+        assert agents[1]["live"] is False, \
+            "she switched away from r2 -- she must not read as present there"
+        assert agents[2]["live"] is True, "an AGENT keeps its heartbeat liveness"
+        assert agents[3]["live"] is False
+        daemon._feed.clear()                      # signed out / closed the tab
+        daemon._human_live(agents)
+        assert agents[0]["live"] is False and agents[1]["live"] is False
+        assert agents[2]["live"] is True, "signing a human out must not touch agents"
+    finally:
+        daemon._feed.clear()
+        daemon._feed.update(saved)

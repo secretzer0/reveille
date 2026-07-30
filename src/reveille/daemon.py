@@ -729,6 +729,27 @@ def _annotate_deafness(agents, rooms):
                                else "no-waiter")
 
 
+def _human_live(agents):
+    """A HUMAN's presence in a room IS their open tab -- computed, never a
+    stored heartbeat (operator report 2026-07-30).
+
+    The bug: a web identity's `live` came from a member row the presence poll
+    touched, and the poll only touches the room being VIEWED. Switch rooms and
+    the old room kept its last timestamp, so a person read as present in a
+    room they had left for up to the 40-minute liveness window; log out and
+    they lingered exactly as long, because a dead session does not touch rows.
+    Same shape as every derived-state defect this week: a fact that could
+    lapse, stored, with nothing reporting the lapse.
+
+    An AGENT is deliberately different. Its liveness stays heartbeat-based --
+    it has no tab, and its absence is a state worth SEEING (offline, retired,
+    erased, resurrectable) rather than a disappearance."""
+    here = set(_feed.values())
+    for a in agents:
+        if (a.get("tag") or "").startswith("web:"):
+            a["live"] = (a["room"], a["name"]) in here
+
+
 def _reachable(entry):
     """Is this member reachable in real time RIGHT NOW, in this room?
 
@@ -1301,6 +1322,7 @@ async def presence(ctx: Context = None) -> dict:
     p = _me(ctx.request_context.request)
     agents = store.presence(_conn, p.rooms)
     _annotate_deafness(agents, p.rooms)
+    _human_live(agents)
     for a in agents:
         a["connected"] = _reachable(a)
         a.pop("token_id")
@@ -1560,6 +1582,7 @@ async def presence_http(request):
                 store.join(_conn, me, tag=f"web:{me}", room_id=rid, fresh=True)
     agents = store.presence(_conn, rooms)
     _annotate_deafness(agents, rooms)
+    _human_live(agents)
     for a in agents:
         a["connected"] = _reachable(a)
         a.pop("token_id")
@@ -1927,6 +1950,15 @@ async def login_http(request):
 
 @_guard
 async def logout_http(request):
+    # Signing out LEAVES every room this identity was showing in. Without it
+    # the member row outlived the session and the person stayed "here" for the
+    # whole liveness window -- visible to agents deciding whether to ask them
+    # something. leave() MARKS rather than deletes, so their history stands and
+    # their next sign-in puts them straight back (join clears the mark).
+    with contextlib.suppress(Exception):
+        p = _principal(request)
+        if p and p.name:
+            store.leave(_conn, p.name, list(p.rooms))
     store.delete_session(_conn, request.cookies.get(COOKIE))
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(COOKIE, path="/")
