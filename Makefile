@@ -118,6 +118,11 @@ SERVER_DATA  ?= $(HOME)/reveille
 # resolve on a user-defined network -- the default bridge has no DNS. Must match
 # reveille_launch.py's DEFAULT_NETWORK.
 SERVER_NETWORK ?= reveille
+# Where the PROXY mounts the launcher, as the browser sees it. The broker uses it
+# for two things and nothing else: whether to render the Agents control at all,
+# and the prefix its fetches carry. Empty = no launcher in this deployment, and
+# the bus renders exactly as it did before agent management existed.
+AGENTS_PATH ?= /agents
 
 server-image:
 	docker build -t $(SERVER_IMAGE) -f docker/Dockerfile.server .
@@ -130,6 +135,7 @@ server-run: server-image
 	  --network $(SERVER_NETWORK) \
 	  -p 8765:8765 \
 	  -v "$(SERVER_DATA)":/data \
+	  -e REVEILLE_AGENTS_PATH="$(AGENTS_PATH)" \
 	  $(SERVER_IMAGE)
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 	  curl -sf http://127.0.0.1:8765/health >/dev/null && break; \
@@ -276,6 +282,14 @@ upload-gate: sync
 # LOCAL work (spawn the waiter, demand the watcher) without probing the bus.
 offline-recovery-smoke: sync
 	uv run python tests/offline_recovery_smoke.py
+
+# Single-origin gate (DES-006 U3/U4/U6): the front door, through the REAL shipped
+# Caddyfile with a REAL session cookie. One login covers both services, the bus
+# page carries the launcher prefix it fetches with, every endpoint the embedded
+# Agents pane calls answers 200 JSON there, and the same paths unprefixed do not
+# answer at all. U6 shipped calling them unprefixed; its harness mocked fetch.
+single-origin-smoke: sync
+	uv run python tests/single_origin_smoke.py
 
 # Pinned-source gate: the serving launcher does not live in a working tree.
 # pin clones to a declared path on main and refuses a dirty tree, the supervisor

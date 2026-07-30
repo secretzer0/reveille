@@ -31,6 +31,7 @@ import base64
 import binascii
 import contextlib
 import html
+import json
 import logging
 import os
 import pathlib
@@ -2096,7 +2097,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  <div id="brand"><h1>REVEILLE</h1>
   <small><span id="status"></span><span id="ver">bus</span></small></div>
  <!--NAVLINK-->
- <button type="button" id="agentsNav" class="navlink">Agents</button>
+ <!--AGENTSNAV-->
  <h2>AGENTS</h2>
  <div id="fmode" title="filter selected agents by messages they sent, or messages sent to them">
   <button type="button" id="fmFrom" class="on">FROM</button>
@@ -2898,6 +2899,17 @@ async function api(path,opts){
 }
 
 // ---- DES-006 §6 U6: agents, embedded in the bus's own content well --------
+// EVERY launcher call goes through lapi(), never api(). The launcher is NOT at
+// this origin's root: the proxy owns the URL layout and mounts it under a
+// prefix (production: /agents, which handle_path STRIPS before forwarding, so
+// the launcher sees its own paths). U6 shipped calling api('/agents') and
+// api('/profile') -- unprefixed, which the proxy routes to the BROKER, which
+// 404s, which the pane reported as "the launcher is not reachable". It was
+// reachable; the calls were aimed at the wrong service. The prefix is
+// AGBASE, injected from REVEILLE_AGENTS_PATH, because the broker must not
+// hardcode where a second service lives (§2.1) -- it is told, once, or the
+// pane does not exist at all.
+function lapi(path,opts){return api(AGBASE+path,opts);}
 // Same api() as everything else on this page: same session cookie, same
 // same-origin fetch. The launcher still runs its own two gates (session
 // principal + agent ownership, §2.3) on every one of these calls -- this
@@ -2916,7 +2928,11 @@ function closeAgentsWell(){
  $('agentsWell').classList.remove('on');
  $('chatWell').classList.remove('hidden');
 }
-$('agentsNav').onclick=openAgentsWell;
+// The button exists only where the launcher's location was declared, so this
+// must not assume it: an unguarded onclick on a missing element throws at
+// load and takes the REST of this script with it -- chat, presence and the
+// composer included. The pane degrading is acceptable; the page dying is not.
+if(typeof AGBASE!=='undefined')$('agentsNav').onclick=openAgentsWell;
 $('agBack').onclick=closeAgentsWell;
 $('agRetry').onclick=refreshAgents;
 function agUnavailable(msg){
@@ -2928,7 +2944,7 @@ function agUnavailable(msg){
 async function refreshAgents(){
  $('agUnavail').hidden=true;
  let d;
- try{d=await api('/agents');}
+ try{d=await lapi('/agents');}
  catch(e){agUnavailable(e.message==='401'?'session expired -- reload the page':
   'the launcher is not reachable');return;}
  const list=$('agList');
@@ -2956,17 +2972,17 @@ async function refreshAgents(){
   }).join('');
  for(const b of list.querySelectorAll('[data-agwatch]'))b.onclick=async()=>{
   try{
-   const g=await api('/agents/'+encodeURIComponent(b.dataset.agwatch)+'/grants',
+   const g=await lapi('/agents/'+encodeURIComponent(b.dataset.agwatch)+'/grants',
     {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
    window.open(g.attach_url,'_blank');
   }catch(e){toast(e.message);}
  };
  for(const b of list.querySelectorAll('[data-agstart]'))b.onclick=async()=>{
-  try{await api('/agents/'+encodeURIComponent(b.dataset.agstart)+'/start',
+  try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstart)+'/start',
    {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
  };
  for(const b of list.querySelectorAll('[data-agstop]'))b.onclick=async()=>{
-  try{await api('/agents/'+encodeURIComponent(b.dataset.agstop)+'/stop',
+  try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstop)+'/stop',
    {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
  };
  for(const b of list.querySelectorAll('[data-agdel]'))b.onclick=()=>{
@@ -2977,7 +2993,7 @@ async function refreshAgents(){
  };
  for(const b of list.querySelectorAll('[data-agdelyes]'))b.onclick=async()=>{
   try{
-   await api('/agents/'+encodeURIComponent(b.dataset.agdelyes),{method:'DELETE'});
+   await lapi('/agents/'+encodeURIComponent(b.dataset.agdelyes),{method:'DELETE'});
    agConfirm=null;refreshAgents();
   }catch(e){toast(e.message);}
  };
@@ -2991,7 +3007,7 @@ async function refreshAgents(){
  // once; a second red banner for the same cause would just be noise.
  try{
   if(!agMeta){
-   agMeta=await api('/rooms-mine');
+   agMeta=await lapi('/rooms-mine');
    const sel=$('agRole');
    for(const r of agMeta.roles){
     const o=document.createElement('option');o.value=o.textContent=r;sel.appendChild(o);}
@@ -3002,7 +3018,7 @@ async function refreshAgents(){
    '<span class="pDim">no rooms yet -- create one from the Rooms tab first</span>';
  }catch(e){/* soft-degrade, see comment above */}
  try{
-  const p=await api('/profile');
+  const p=await lapi('/profile');
   const c=p.credentials||{};
   $('agCredState').textContent='claude token: '+(c.claude_token||'absent')+
    ' / github token: '+(c.github_token||'absent');
@@ -3016,7 +3032,7 @@ $('agCreate').onclick=async()=>{
  const name=$('agName').value.trim();
  try{
   st.textContent='provisioning...';
-  await api('/agents',{method:'POST',body:JSON.stringify({
+  await lapi('/agents',{method:'POST',body:JSON.stringify({
    agent:name,rooms:rooms,role:$('agRole').value,
    append:$('agAppend').value.trim(),
    repo_url:$('agRepo').value.trim(),
@@ -3024,7 +3040,7 @@ $('agCreate').onclick=async()=>{
   st.textContent='container up; waiting for the agent to reach the bus...';
   for(let i=0;i<60;i++){
    await new Promise(r=>setTimeout(r,2000));
-   const a=await api('/agents/'+encodeURIComponent(name));
+   const a=await lapi('/agents/'+encodeURIComponent(name));
    if(a.live){st.textContent='LIVE: '+name+' is on the bus.';refreshAgents();return;}
   }
   st.textContent='container is up but not live yet -- check its logs.';
@@ -3036,17 +3052,17 @@ $('agCredSave').onclick=async()=>{
  const cl=$('agCredClaude').value.trim();if(cl)b.claude_token=cl;
  const gh=$('agCredGithub').value.trim();if(gh)b.github_token=gh;
  try{
-  await api('/profile',{method:'PUT',body:JSON.stringify(b)});
+  await lapi('/profile',{method:'PUT',body:JSON.stringify(b)});
   $('agCredClaude').value='';$('agCredGithub').value='';
   refreshAgents();
  }catch(e){toast(e.message);}
 };
 $('agCredClaudeClear').onclick=async()=>{
- try{await api('/profile',{method:'PUT',body:'{"claude_token":""}'});refreshAgents();}
+ try{await lapi('/profile',{method:'PUT',body:'{"claude_token":""}'});refreshAgents();}
  catch(e){toast(e.message);}
 };
 $('agCredGithubClear').onclick=async()=>{
- try{await api('/profile',{method:'PUT',body:'{"github_token":""}'});refreshAgents();}
+ try{await lapi('/profile',{method:'PUT',body:'{"github_token":""}'});refreshAgents();}
  catch(e){toast(e.message);}
 };
 
@@ -3831,6 +3847,28 @@ async def memory_verdict_http(request):
     return JSONResponse(out)
 
 
+def agents_nav_html(path):
+    """The embedded Agents control, ONLY when the operator has declared where the
+    launcher is (REVEILLE_AGENTS_PATH, the same-origin prefix the proxy mounts it
+    under -- "/agents" in the shipped Caddyfile). Undeclared renders NOTHING, and
+    that is the point: U6 shipped this button unconditionally, so a broker with no
+    launcher grew a control whose every click ended in "agent management is
+    unavailable". A capability with no reachable path must not have a button
+    (ratified lesson), and DES-006 2.2's property -- an unconfigured deployment is
+    byte-identical to one that never had the feature -- has to keep holding.
+
+    AGBASE rides in the same fragment because the button and the base are ONE
+    fact: if the broker does not know where the launcher is, there is nothing to
+    click. JSON-encoded and <-escaped so an operator-supplied path cannot close
+    the script tag. Pure."""
+    base = (path or "").strip().rstrip("/")
+    if not base:
+        return ""
+    js = json.dumps(base).replace("<", "\\u003c")
+    return (f'<script>const AGBASE={js};</script>'
+            f'<button type="button" id="agentsNav" class="navlink">Agents</button>')
+
+
 def nav_link_html(label, path):
     """ONE optional nav link, from configuration (DES-006 2.2). The broker learns
     'there is a link', never what is behind it: no second service is named here,
@@ -3848,7 +3886,9 @@ def nav_link_html(label, path):
 async def chat_http(_request):
     return HTMLResponse(WEBCHAT.replace(
         "<!--NAVLINK-->", nav_link_html(os.environ.get("REVEILLE_NAV_LABEL", ""),
-                                        os.environ.get("REVEILLE_NAV_PATH", ""))))
+                                        os.environ.get("REVEILLE_NAV_PATH", "")))
+        .replace("<!--AGENTSNAV-->",
+                 agents_nav_html(os.environ.get("REVEILLE_AGENTS_PATH", ""))))
 
 
 async def _sweeper():
