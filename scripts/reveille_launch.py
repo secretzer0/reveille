@@ -2187,10 +2187,20 @@ def build_api(auth_url):
         q = _quotas_for(conn, p["user"])
         used = conn.execute("SELECT count(*) FROM containers WHERE user=?",
                             (p["user"],)).fetchone()[0]
+        # needed_by: which EXISTING agents resolve to home-login -- the
+        # first-run callout fires only for users this actually applies to
+        # (ruling 8633: a directive that does not apply to you is noise).
+        prof = load_profile(p["user"])
+        cl = claude_login_state(p["user"])
+        cl["needed_by"] = sorted(
+            r["agent"] for r in conn.execute(
+                "SELECT agent FROM containers WHERE user=?", (p["user"],))
+            if resolve_credentials(prof, r["agent"])["claude_mode"]
+            == "home-login")
         return JSONResponse({"user": p["user"], "quotas": q,
                              "containers": used,
-                             "credentials": masked_profile(load_profile(p["user"])),
-                             "claude_login": claude_login_state(p["user"]),
+                             "credentials": masked_profile(prof),
+                             "claude_login": cl,
                              "notes": PROFILE_NOTES,
                              "disk_note": "disk_gb recorded, not yet enforced"})
 

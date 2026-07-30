@@ -185,6 +185,12 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.29 CLAUDE LOGIN IN THE ACCOUNT TAB. Deployments with a launcher show the
+user's claude-login state (present + when, or the one command to run) in
+Settings > Account; signing in with home-login agents and NO login on file
+opens that tab with the directive. Launcher-fed, fail-soft: a dead launcher
+changes one div's text and never the password controls.
+
 0.2.28 ONE BUS IDENTITY, ONE LIVE CREDENTIAL. Minting a token bound to an
 agent name now REVOKES the owner's previous tokens for that name (response
 carries superseded=[ids]); before this, every agent re-provision left the
@@ -3701,6 +3707,14 @@ async function openUsers(){
 }
 
 function openAccount(){
+ // The claude-login section is launcher-fed and renders ONLY when this
+ // deployment declared a launcher (ruling 8633: the login is a property of
+ // the USER, so it lives here, not among agent rows -- adjacency teaches).
+ // Same two constraints as the Agents pane: AGBASE is told, never derived,
+ // and an unconfigured deployment is byte-identical to one without the
+ // feature. This modal is core bus UI (the password lives here), so the
+ // section FAIL-SOFTS: a dead launcher changes this one div's text and
+ // nothing else.
  panel('account',
   '<div class="pSec">CHANGE YOUR PASSWORD</div>'+
   '<div class="pDim">Your current password is required -- without it, a borrowed unlocked '+
@@ -3708,7 +3722,12 @@ function openAccount(){
   '<div class="pRow"><input id="pwOld" type="password" placeholder="current password"></div>'+
   '<div class="pRow"><input id="pwNew" type="password" placeholder="new password (min 8)"></div>'+
   '<div class="pRow"><input id="pwNew2" type="password" placeholder="repeat new password">'+
-  '<button id="pwGo">change</button></div>');
+  '<button id="pwGo">change</button></div>'+
+  (typeof AGBASE!=='undefined'?
+   '<div class="pSec">CLAUDE LOGIN</div>'+
+   '<div class="pDim">One login per user; agents in home-login mode copy it '+
+   'when they boot. Re-login switches accounts; restart agents to move them.</div>'+
+   '<div class="pRow" id="acctLogin">checking...</div>':''));
  $('pwGo').onclick=async()=>{
   if($('pwNew').value!==$('pwNew2').value){toast('the new passwords do not match');return;}
   try{await api('/me/password',{method:'POST',
@@ -3716,6 +3735,28 @@ function openAccount(){
    toast('password changed');openAccount();}catch(e){toast(e.message);}};
  for(const id of ['pwOld','pwNew','pwNew2'])
   $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('pwGo').click();});
+ if(typeof AGBASE!=='undefined')(async()=>{
+  const el=$('acctLogin');
+  try{
+   const p=await lapi('/profile');const L=p.claude_login||{};
+   const cmd='<code>reveille-launch login '+esc(p.user)+'</code>';
+   if(L.present){
+    el.innerHTML='logged in ('+esc(new Date(L.logged_in_at_ns/1e6)
+     .toLocaleString())+'). To switch accounts: '+cmd+' in a terminal, then '+
+     'restart your agents.';
+   }else if((L.needed_by||[]).length){
+    el.innerHTML='<b>No login on file.</b> Your agents '+
+     esc(L.needed_by.join(', '))+' cannot work until you run: '+cmd;
+   }else{
+    el.innerHTML='No login on file. Needed only by home-login agents: '+cmd;
+   }
+  }catch(e){
+   // Named failure, never a dead modal: the password control above must
+   // keep working when the launcher is down (8633's hard constraint).
+   el.textContent=e.status?'the launcher returned '+e.status+' from '+
+    AGBASE+'/profile':'the launcher is not reachable';
+  }
+ })();
 }
 
 function pruneAgent(name){
@@ -3749,6 +3790,20 @@ fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+
  if(!room||!d.rooms.some(r=>r.id===room))room=d.rooms[0].id;
  localStorage.revRoom=room;
  paintMe();updateBlast();loadBacklog(true);loadPresence();connect();start();
+ // First-run directive (ruling 8633): a user whose home-login agents have NO
+ // login on file is told at sign-in, ONCE per condition, by being taken to
+ // the place that says the one command -- and only when it actually applies
+ // (token-mode users never see it; a directive that does not apply is noise).
+ // Fail-silent: a dead launcher must not touch sign-in.
+ if(typeof AGBASE!=='undefined')(async()=>{
+  try{
+   const p=await lapi('/profile');const L=p.claude_login||{};
+   if(!L.present&&(L.needed_by||[]).length){
+    openAccount();
+    toast('first run: your agents need a claude login -- the Account tab has the one command');
+   }
+  }catch(e){}
+ })();
 })();
 </script></body></html>
 """

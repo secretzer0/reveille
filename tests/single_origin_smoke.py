@@ -138,6 +138,10 @@ def main():
             code, body = get(path)
             assert code == 200, (path, code, body[:200])
             assert key in json.loads(body), (path, body[:200])
+        # the Account tab's login section reads this same /profile (8633)
+        _, body = get(f"{AGENTS_PATH}/profile")
+        login = json.loads(body)["claude_login"]
+        assert login["present"] is False and login["needed_by"] == [], login
 
         # -- 4. unprefixed is the BUG, and must not answer --------------------
         for path in ("/rooms-mine", "/profile"):
@@ -150,6 +154,28 @@ def main():
         # -- 5. the standalone page is untouched (§6.2) -----------------------
         code, body = get(AGENTS_PATH)
         assert code == 200 and b"<!doctype html" in body[:60].lower(), code
+
+        # -- 6. LAUNCHER DOWN: the settings modal is core bus UI (8633) -------
+        # The password control and the login section's named-failure branch
+        # ride the page source; what this step proves is the wiring the page
+        # will hit: the bus still serves with the launcher dead, and the
+        # section's fetch path answers with an ERROR STATUS, not a hang and
+        # not a 200 -- the two things the fail-soft branch needs to name it.
+        procs[1].terminate()
+        procs[1].wait(timeout=5)
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            code, _ = get(f"{AGENTS_PATH}/profile")
+            if code != 200:
+                break
+            time.sleep(0.3)
+        assert code != 200, "launcher endpoints still answering after kill"
+        code, body = get("/")
+        page = body.decode()
+        assert code == 200, "the BUS page died with the launcher"
+        assert 'id="pwGo"' in page, "password control gone from the page"
+        for _s in ("the launcher is not reachable", "the launcher returned "):
+            assert _s in page, f"fail-soft branch lost its copy: {_s!r}"
 
         print(f"single-origin OK: one login at {proxy} covers both services; the "
               f"bus page carries AGBASE={AGENTS_PATH} and every launcher endpoint "
