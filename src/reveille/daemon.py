@@ -2362,6 +2362,14 @@ def main():
                          f"broker.sock):\n  {uds}")
     log.info("daemon on %s db=%s schema=v%s users=%s", uds or f"{host}:{port}", _db_path, v,
              "yes" if store.any_users(_conn) else "NONE -- open /ui to create the first admin")
+    # The THIRD announce site (ruling 8635). /version answers whoever asks and the
+    # page marker shows whoever looks, but the banner is what an operator reads
+    # when they start the process -- and "did I leave this set in production" is
+    # exactly a start-time question. An override that is legible only to someone
+    # already suspicious is not legible.
+    if _ui_override():
+        log.warning("UI OVERRIDE ACTIVE: serving %s from %s -- NOT the packaged UI "
+                    "this version names", "/ui", _ui_override())
     # timeout_graceful_shutdown: WITHOUT it, SIGTERM WEDGES THE BROKER instead of
     # stopping it. uvicorn's default graceful shutdown waits for every open
     # connection to finish -- forever, None means no limit -- and this daemon's
