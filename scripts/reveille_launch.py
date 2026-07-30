@@ -1869,6 +1869,121 @@ def lifecycle_state(docker_status, has_files, hive):
     return "unknown"
 
 
+# ---- edit-in-place (reconfig 2) ----------------------------------------
+# The fields a human may change on an agent that already exists. Anything not
+# here is not editable through this path: rooms ride the credential rotation
+# below, and identity (user, agent name) is not a field at all.
+EDITABLE_FIELDS = ("repo_url", "role", "append", "model", "image")
+
+
+def split_role_prompt(prompt, role_prompts):
+    """Recover (role, append) from the prompt text a container actually holds.
+
+    The agents POST handler builds the env value as ROLE_PROMPTS[role] plus,
+    optionally, "\\n\\n" + the user's append. Nothing stores the two halves, so
+    an edit form that could not split them would have to show one opaque blob
+    and make the user retype their own additions to keep them. Longest matching
+    prefix wins, so a role whose text starts with a shorter role's text still
+    resolves to the specific one.
+
+    Pure, and returns ("", prompt) for a prompt no known role explains -- a
+    hand-rolled prompt is preserved as an append rather than silently dropped,
+    because dropping it is how an edit form eats the thing it was opened to
+    change."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return "", ""
+    best, best_len = "", 0
+    for name, text in (role_prompts or {}).items():
+        t = (text or "").strip()
+        if t and prompt.startswith(t) and len(t) > best_len:
+            best, best_len = name, len(t)
+    if not best:
+        return "", prompt
+    return best, prompt[best_len:].strip()
+
+
+def effective_config(env_lines, image, role_prompts):
+    """The config the RUNNING container was actually given.
+
+    `env_lines` is docker's Config.Env (a list of "K=V"), `image` its real
+    image. This is the read-back half of edit-in-place and it reads the
+    CONTAINER, not the request that created it: a provision returns 200 the
+    moment the container comes up, which says the call succeeded and says
+    nothing about whether any field took (contract cea8b522).
+
+    Pure, so the whole read-back is testable with no docker socket -- which is
+    the only way the agent who owns this UI can test it at all."""
+    env = {}
+    for line in env_lines or ():
+        k, sep, v = str(line).partition("=")
+        if sep:
+            env[k] = v
+    role, append = split_role_prompt(env.get("REVEILLE_ROLE_PROMPT", ""),
+                                     role_prompts)
+    return {"repo_url": env.get("REVEILLE_REPO_URL", ""),
+            "role": role, "append": append,
+            "model": env.get("ANTHROPIC_MODEL", ""),
+            "image": image or ""}
+
+
+def config_diff(requested, actual):
+    """Per field: what was asked for, what is now running, and whether they
+    agree. Only fields the caller actually SUBMITTED are judged -- an absent
+    field means "leave it", and reporting it as applied would be inventing a
+    result for something nobody asked for.
+
+    This is what the UI renders. It never renders the POST's status code,
+    because a status code cannot distinguish "changed" from "came up with the
+    old value"."""
+    out = {}
+    for k in EDITABLE_FIELDS:
+        if requested is None or k not in requested:
+            continue
+        want = (requested.get(k) or "").strip()
+        have = ((actual or {}).get(k) or "").strip()
+        out[k] = {"requested": want, "actual": have, "applied": want == have}
+    return out
+
+
+def read_container_config(user, agent):
+    """effective_config for a live container, or None when there is none.
+
+    None is not an error: a retired agent has files and no container, and the
+    honest answer to "what is running" is then nothing at all. The form shows
+    that as no-container rather than as an empty form, which would read as an
+    agent configured with blanks."""
+    res = _docker("inspect", "-f", "{{json .Config.Env}}\t{{.Config.Image}}",
+                  container_name(user, agent), check=False, capture=True)
+    if res.returncode != 0:
+        return None
+    env_json, _, image = (res.stdout or "").strip().partition("\t")
+    try:
+        env = json.loads(env_json)
+    except ValueError:
+        return None
+    return effective_config(env, image.strip(), ROLE_PROMPTS)
+
+
+def agent_rooms_now(auth_url, cookie_header, agent):
+    """The rooms this agent is CURRENTLY a member of, as room IDs.
+
+    Read from the presence call the launcher already makes with the user's
+    forwarded cookie (ruling 8699): no new broker call, no new authority, no
+    sixth deputy question. Returns IDs because that is what the token attach
+    takes -- verified against store.presence, which carries room_id under the
+    key "room", not the display name.
+
+    May be EMPTY for a stopped agent whose member rows have been reaped. The
+    caller must refuse rather than mint a credential attached to no room."""
+    pres = _broker_json(auth_url, cookie_header, "GET", "/presence") or {}
+    out = []
+    for a in pres.get("agents") or []:
+        if a.get("name") == agent and a.get("room") and a["room"] not in out:
+            out.append(a["room"])
+    return out
+
+
 def _agent_status(conn, user, hive_by_name=None):
     """Every name this user could act on, in one list: their provisioned
     containers PLUS names the hive still remembers whose container is gone.
@@ -2189,6 +2304,79 @@ def build_api(auth_url):
         return JSONResponse({"cancelled": True})
 
     @guarded
+    async def agent_config(request, p, conn):
+        """Edit an agent in place (reconfig 2).
+
+        GET  -> what is ACTUALLY RUNNING, for the form to prefill from, plus
+                the agent's current rooms. Never the creation request: the
+                request is what someone once asked for, the container is what
+                happened.
+        PUT  -> apply, then READ IT BACK and answer with a per-field verdict.
+                The read-back lives HERE rather than in the page so that no
+                future client can skip it and report a 200 as success
+                (contract cea8b522: coming up is not having applied it).
+
+        Every edit re-provisions, and provisioning mints -- and a mint
+        supersedes the agent's previous bound token. So EVERY edit rotates the
+        agent's bus credential, not only a rooms change (ruling 8606 as
+        confirmed at 8699). The page says so before the click; this endpoint
+        says so again in its answer, because the two surfaces drift."""
+        name = request.path_params["agent"]
+        _known_agent(conn, p["user"], name)
+        cookie = request.headers.get("cookie")
+        if request.method == "GET":
+            return JSONResponse({
+                "agent": name,
+                "config": read_container_config(p["user"], name),
+                "editable": list(EDITABLE_FIELDS),
+                "rooms": agent_rooms_now(auth_url, cookie, name),
+                "rotates_credential": True})
+        d = await request.json()
+        requested = {k: (d.get(k) or "").strip()
+                     for k in EDITABLE_FIELDS if k in d}
+        role = requested.get("role", "")
+        if role and role not in ROLE_PROMPTS:
+            raise LaunchError(f"unknown role {role!r}")
+        # Rooms are explicit on the wire, prefilled by GET from presence. A
+        # stopped agent's member rows may have been reaped, so deriving them
+        # here could silently mint a credential attached to NO room -- an
+        # agent that boots, joins nothing, and looks fine. Refuse and name the
+        # fix instead.
+        rooms = [r for r in (d.get("rooms") or []) if r]
+        if not rooms:
+            raise LaunchError(
+                f"no rooms given for {name}: an edit re-mints its credential, "
+                f"and a token attached to no room is an agent that boots and "
+                f"joins nothing -- tick at least one room in the form (it is "
+                f"prefilled from where the agent is now)")
+        prompt = ROLE_PROMPTS.get(role, "")
+        if requested.get("append"):
+            prompt = (prompt + "\n\n" + requested["append"]).strip()
+        minted_id, token = mint_bound_token(auth_url, cookie, name, rooms)
+        try:
+            provision_agent(
+                conn, p["user"], name, requested.get("repo_url", ""), token,
+                image=requested.get("image") or DEFAULT_IMAGE,
+                network=DEFAULT_NETWORK, broker=DEFAULT_BROKER,
+                replace=True, role_prompt=prompt or None,
+                model=requested.get("model") or None)
+        except (LaunchError, subprocess.CalledProcessError):
+            revoke_minted_token(auth_url, cookie, minted_id)
+            raise
+        # THE READ-BACK. Not "did the call return", but "what does the
+        # container hold now" -- the only question whose answer the user cares
+        # about.
+        actual = read_container_config(p["user"], name)
+        diff = config_diff(requested, actual)
+        _audit("RECONFIG", user=p["user"], agent=name,
+               fields=",".join(sorted(diff)) or "none",
+               applied=",".join(sorted(k for k, v in diff.items()
+                                       if v["applied"])) or "none")
+        return JSONResponse({"agent": name, "config": actual, "fields": diff,
+                             "applied": all(v["applied"] for v in diff.values()),
+                             "credential_rotated": True})
+
+    @guarded
     async def profile(request, p, conn):
         """GET: quotas + usage + MASKED credentials (set/absent, never values)
         + the custody/rotation notes stated out loud (sec 3 / Q1 / Q2).
@@ -2369,6 +2557,7 @@ def build_api(auth_url):
         Route("/agents/{agent}/grants", agent_grants, methods=["GET", "POST"]),
         Route("/agents/{agent}/grants/{gid}", agent_grant, methods=["DELETE"]),
         Route("/agents/{agent}/profile", agent_profile, methods=["PUT"]),
+        Route("/agents/{agent}/config", agent_config, methods=["GET", "PUT"]),
         Route("/agents/{agent}/{verb:str}", agent_lifecycle, methods=["POST"]),
         Route("/profile", profile, methods=["GET", "PUT"]),
         Route("/login/start", login_start, methods=["POST"]),
