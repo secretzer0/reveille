@@ -1157,6 +1157,28 @@ def mint_grant(conn, user, agent, grantee, mode, ttl):
     """Shared grant-mint path. The token is RETURNED once, never stored
     (4.5.2): re-issue is re-mint, never retrieval."""
     _known_agent(conn, user, agent)
+    # THE SAME GRANTEE ASKING AGAIN IS NOT A SECOND DRIVER, IT IS THE SAME ONE
+    # RECONNECTING, so their previous driver grant is superseded rather than
+    # treated as a rival for the keyboard.
+    #
+    # Without this, attach worked exactly ONCE per agent per TTL. The web page
+    # mints a fresh 24h driver grant on every attach and nothing releases the
+    # old one -- a closed tab revokes nothing -- so the owner's own hour-old
+    # grant refused them, naming a grant id they had no reason to recognise.
+    # Found live: three live driver grants, all grantee 'me', all the operator's,
+    # locking the operator out of the operator's own agent.
+    #
+    # Re-issue is re-mint and never retrieval (4.5.2), so reusing the old grant
+    # is not available -- its token was returned once and never stored. Supersede
+    # is the shape already used for bound tokens and for a second waiter attach.
+    # Revoking KILLS the old session first, which is what makes the new tab the
+    # driver rather than the two of them fighting.
+    if mode == "driver":
+        for row in conn.execute(
+                "SELECT id FROM grants WHERE user=? AND agent=? AND grantee=? "
+                "AND mode='driver' AND revoked_ns IS NULL",
+                (user, agent, grantee)).fetchall():
+            revoke_grant(conn, user, agent, row["id"], actor="supersede")
     name = container_name(user, agent)
     gid = secrets.token_hex(4)
     res = _docker("exec", name, "attach-gate", "mint", mode, str(ttl), gid,

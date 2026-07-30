@@ -190,6 +190,21 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.49 YOU CANNOT LOCK YOURSELF OUT OF YOUR OWN AGENT. Attaching mints a fresh
+24h driver grant and nothing released the old one -- a closed tab revokes
+nothing -- so exclusivity refused the OWNER against their own hour-old grant,
+naming an id they had no reason to recognise. Attach therefore worked exactly
+once per agent per TTL. Found live with three live driver grants on one agent,
+all the operator's own. The same grantee asking again is the same driver
+reconnecting, not a rival, so the mint now SUPERSEDES that grantee's live driver
+grant, killing its session so the new tab holds the keyboard rather than two
+fighting. Reuse was never available: re-issue is re-mint, never retrieval
+(4.5.2). Scoped to the same grantee and to driver mode -- revoking someone
+else's grant would hand the keyboard away silently, and viewers were never
+exclusive. The advisory pre-flight stops counting this page's own grantee as a
+holder; another person's driver grant still refuses, which is the exclusivity
+the rule is for.
+
 0.2.48 THREE CONTROLS THAT DESCRIBED THE DISK, NOT THE THING THEY GUARDED.
 (1) /health read the source tree per request, so it answered "what is pinned"
 while claiming to answer "what is running" -- launcher-pin-check therefore went
