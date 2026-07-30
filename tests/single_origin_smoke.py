@@ -181,7 +181,9 @@ def main():
               f"bus page carries AGBASE={AGENTS_PATH} and every launcher endpoint "
               f"the embedded pane calls answers 200 JSON there, while the same "
               f"paths unprefixed do not answer at all; the standalone "
-              f"{AGENTS_PATH} page still serves")
+              f"{AGENTS_PATH} page still serves; and with the launcher DEAD the "
+              f"bus page still serves with its password control and both "
+              f"named-failure branches intact")
     finally:
         subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
         for p in procs:
