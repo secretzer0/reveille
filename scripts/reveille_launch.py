@@ -1607,6 +1607,20 @@ def revoke_minted_token(auth_url, cookie_header, token_id):
     _broker_json(auth_url, cookie_header, "DELETE", f"/tokens/{token_id}")
 
 
+def claude_login_state(user, base=None):
+    """A READING of the user's login home (operator requirement 2026-07-30:
+    login state is managed in the settings area, and its absence is the first
+    thing a signing-in user is told). present + the file's mtime, computed
+    fresh on every call, no values, nothing cached -- the same discipline as
+    every other derived state here. Pure aside from the stat."""
+    path = os.path.join(user_auth_root(user, base), ".credentials.json")
+    try:
+        return {"present": True,
+                "logged_in_at_ns": os.stat(path).st_mtime_ns}
+    except OSError:
+        return {"present": False, "logged_in_at_ns": None}
+
+
 def revoke_bound_tokens(auth_url, cookie_header, agent):
     """Destroy's counterpart to the broker's mint-time supersede: an agent
     that no longer exists must not leave a live credential answering to its
@@ -2176,6 +2190,7 @@ def build_api(auth_url):
         return JSONResponse({"user": p["user"], "quotas": q,
                              "containers": used,
                              "credentials": masked_profile(load_profile(p["user"])),
+                             "claude_login": claude_login_state(p["user"]),
                              "notes": PROFILE_NOTES,
                              "disk_note": "disk_gb recorded, not yet enforced"})
 
