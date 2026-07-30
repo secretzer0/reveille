@@ -260,6 +260,84 @@ def test_leave_only_named_rooms():
     assert store.known(c, "bot", [room["id"]]) and not store.known(c, "bot", [r2["id"]])
 
 
+def test_one_label_holds_one_live_identity_and_the_index_is_the_rule():
+    """DES-007: the identity is a uuid, (owner, name) is a LABEL on it.
+
+    The operator's own requirement proves the composite cannot be the key --
+    declining a resurrect mints a NEW identity under the SAME name, so one label
+    maps to several histories over time. What stays true is that only ONE of them
+    is live, and that is enforced by a partial unique index rather than by anyone
+    remembering it."""
+    c, admin, room, tok = fixture()
+    first = store.mint_agent(c, admin["id"], "scout")
+    assert first["id"] and first["retired_ns"] is None
+
+    # re-provisioning returns the SAME identity: first provisioner wins, or the
+    # rule is only "whoever last touched it owns it", which is not a rule
+    assert store.mint_agent(c, admin["id"], "scout")["id"] == first["id"]
+
+    # retire, then DECLINE the resurrect -> a new identity under the same label
+    store.retire_agent(c, first["id"])
+    second = store.mint_agent(c, admin["id"], "scout")
+    assert second["id"] != first["id"], "declining a resurrect reused the identity"
+
+    # the label now has TWO histories, newest first -- what a resurrect offers
+    ids = [a["id"] for a in store.agent_identities(c, admin["id"], "scout")]
+    assert ids == [second["id"], first["id"]], ids
+
+    # and the OLD one cannot come back while the label is held: the index would
+    # refuse anyway, so the caller gets a sentence instead of an IntegrityError
+    try:
+        store.resurrect_agent(c, first["id"])
+        raise AssertionError("resurrected onto a label that already has a live agent")
+    except store.BusError as e:
+        assert "live instance" in str(e), e
+
+    # retire the holder and the older identity returns WITH ITS OWN ID, so every
+    # message already attributed to it stays attributed to it
+    store.retire_agent(c, second["id"])
+    assert store.resurrect_agent(c, first["id"])["id"] == first["id"]
+
+
+def test_the_index_refuses_a_second_live_row_even_by_raw_insert():
+    """The rule lives in the DATABASE, not in mint_agent's politeness. A caller
+    that bypasses the helper must still be refused -- otherwise the invariant is
+    a convention and the next code path gets to re-decide it."""
+    import sqlite3 as _sq
+    c, admin, room, tok = fixture()
+    live = store.mint_agent(c, admin["id"], "scout")
+    try:
+        c.execute("INSERT INTO agents(id, owner_id, name, created_ns) VALUES(?,?,?,?)",
+                  ("deadbeef", admin["id"], "scout", 1))
+        raise AssertionError("a second LIVE row under one label was accepted")
+    except _sq.IntegrityError:
+        pass
+    # ...and the same insert is fine once it is not live, because a label
+    # accumulating retired identities is the whole point
+    c.execute("INSERT INTO agents(id, owner_id, name, created_ns, retired_ns) "
+              "VALUES(?,?,?,?,?)", ("deadbeef", admin["id"], "scout", 1, 2))
+    assert len(store.agent_identities(c, admin["id"], "scout")) == 2
+    assert live["id"] != "deadbeef"
+
+
+def test_a_released_label_is_claimable_and_release_retires():
+    """Do not ship the lock without the key: a name held forever by a deleted
+    account is a leak. Release also retires, so the label is genuinely free
+    rather than free-but-still-held."""
+    c, admin, room, tok = fixture()
+    a = store.mint_agent(c, admin["id"], "scout")
+    rel = store.release_agent_name(c, a["id"], "admin")
+    assert rel["released_ns"] and rel["released_by"] == "admin"
+    assert rel["retired_ns"], "release left the label still live"
+    fresh = store.mint_agent(c, admin["id"], "scout")
+    assert fresh["id"] != a["id"]
+    try:
+        store.resurrect_agent(c, a["id"])
+        raise AssertionError("a released identity was resurrected")
+    except store.BusError as e:
+        assert "released" in str(e), e
+
+
 def test_left_rooms_names_exactly_what_was_left():
     """What the bare join() reads to decide which rooms it must NOT rejoin.
 
@@ -1387,7 +1465,14 @@ def test_migration_v0_preserves_data_and_maps_rooms():
     assert names == {"W4keUpN0w", "retract-test"}
     assert all(r["owner_id"] is None for r in c.execute("SELECT owner_id FROM rooms"))
     assert c.execute("SELECT count(*) FROM messages").fetchone()[0] == 4
-    assert not store._table_exists(c, "agents")          # presence is a cache, not a record
+    # The v0 presence cache is gone -- presence is a cache, not a record. It was
+    # called `agents`, which DES-007 now uses for the IDENTITY table, so the
+    # assertion has to name the era it means: the old shape is dropped, and the
+    # new one exists with its own columns rather than inheriting the old table.
+    assert not store._table_exists(c, "agents_v0")
+    assert store._table_exists(c, "agents")
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(agents)")}
+    assert {"id", "owner_id", "name", "retired_ns"} <= cols, cols
     assert len(c.execute("PRAGMA foreign_key_check").fetchall()) == 0
     assert store.migrate(c, path) == store.SCHEMA_VERSION  # idempotent
 

@@ -190,6 +190,16 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.44 AN AGENT IDENTITY IS A UUID (DES-007 step 2, schema v16). New `agents`
+table: id (uuid), owner_id, name, created_ns, retired_ns, released_ns/by. The
+NAME is a label on the identity, not a key -- declining a resurrect mints a new
+identity under the same name, so one label maps to several histories over time
+and the resurrect dialog offers a LIST. A partial unique index on
+(owner_id, name) WHERE retired_ns IS NULL enforces "one live instance per label"
+in the database rather than in anyone's memory. Nothing reads it yet: the record
+has to start being written before the enforcement exists, or agents provisioned
+in between have an ownership fact that cannot be recovered later.
+
 0.2.43 THE WHOLE IDENTITY BLOCK MOVES, AND A FAILURE CARRIES ITS STATE. The
 0.2.42 hoist moved git's user.name and safe.directory above the clone and left
 user.email 160 lines below it, so the file read as though the split were
