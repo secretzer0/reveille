@@ -651,7 +651,7 @@ def claude_env_name(token):
 # same reason; this is that seed, minus settings.json (which lives in the
 # persisted home and is already there). setdefault-merge, then exec bash: an
 # operator re-entering a container they configured keeps their choices.
-_DEBUG_SEED = """\
+_SEED_BASE = """\
 import json, os, pathlib
 p = pathlib.Path.home() / ".claude.json"
 try:
@@ -666,8 +666,8 @@ pr = d.setdefault("projects", {})
 for path in ("/home/agent/repos", "/home/agent"):
     pr.setdefault(path, {}).setdefault("hasTrustDialogAccepted", True)
 p.write_text(json.dumps(d, indent=2))
-os.execlp("bash", "bash")
 """
+_DEBUG_SEED = _SEED_BASE + 'os.execlp("bash", "bash")\n'
 
 
 def debug_argv(user, agent, image, network, extra_env=(), entrypoint="bash",
@@ -763,6 +763,91 @@ def login_argv(user, image, network, data_base=None):
             "--entrypoint", "python3", image, "-c", _DEBUG_SEED]
 
 
+# ---- browser-mediated login (operator, msg 8642; rulings 8644) ---------------
+# The SAME login container the terminal path opens, driven headless: claude
+# /login runs in tmux, the container ITSELF advances the method picker to
+# choice 1 (subscription) -- the picker must never reach a human, because its
+# choice 2 is per-token Console billing and a hurried click through a picker
+# we surfaced would rebuild the billing incident with a nicer front end. The
+# launcher then only READS the pane (the URL is shown to the human, never
+# followed by us) and relays ONE pasted authorization code back. Completion is
+# OBSERVED: .credentials.json appears in the login home, read fresh -- never
+# the container exiting, never the human claiming.
+_LOGIN_BOOT = r"""
+python3 -c "$SEED"
+tmux new-session -d -s login -x 220 -y 50 "claude /login"
+for i in $(seq 1 120); do
+  if tmux capture-pane -t login -p 2>/dev/null | grep -q "Select login method"; then
+    tmux send-keys -t login 1 Enter
+    break
+  fi
+  sleep 0.5
+done
+while tmux has-session -t login 2>/dev/null; do sleep 1; done
+"""
+
+# From the REAL pane, captured in-container 2026-07-30 (msg 8643): the flow
+# prints the authorize URL and then waits at "Paste code here if prompted".
+_LOGIN_URL_RE = re.compile(r"https://[^\s]*claude\.com/[^\s]+")
+# The code is OPAQUE: never parsed beyond "printable, sane length, no control
+# characters" -- enough to refuse key sequences, never enough to learn it.
+_LOGIN_CODE_RE = re.compile(r"^[A-Za-z0-9_\-#%.~]{4,256}$")
+
+
+def login_container_name(user):
+    return f"rev-{user}-login"
+
+
+def login_bg_argv(user, image, network, data_base=None):
+    """The DETACHED login container (browser path): same mounts and same
+    no-credential-env rule as login_argv, but it holds a tmux the launcher can
+    read, and its boot script advances the picker itself. Pure."""
+    return ["docker", "run", "-d",
+            "--name", login_container_name(user),
+            "--network", network,
+            "-v", f"{user_auth_root(user, data_base)}:/home/agent/.claude",
+            "-e", "SEED",   # the first-run seed rides env BY NAME, like every secretish value
+            "--entrypoint", "sh", image, "-c", _LOGIN_BOOT]
+
+
+def parse_login_pane(text):
+    """The pending login's stage, READ from its pane. Pure. The pane is the
+    truth (ruling 8644): expiry and failure surface here, not from exit codes.
+    -> {stage: starting|picker|awaiting-code|failed, url: str|None}"""
+    url = None
+    m = _LOGIN_URL_RE.search(text.replace("\n", ""))   # tmux wraps the long URL
+    if m:
+        url = m.group(0)
+    if "Paste code here" in text or url:
+        return {"stage": "awaiting-code", "url": url}
+    if "Select login method" in text:
+        return {"stage": "picker", "url": None}
+    if "Login" in text or "Welcome" in text or not text.strip():
+        return {"stage": "starting", "url": None}
+    return {"stage": "failed", "url": None}
+
+
+def ensure_login_home(user, image):
+    """Create the user's login home with the OWNERSHIP fix, and say whether a
+    login already exists. Shared by the terminal and browser paths -- one
+    mechanism, two doors.
+
+    THIRD INSTANCE of the data-root ownership defect (msg 8475, and again in
+    the chown container itself). This dir is created by the LAUNCHER's uid and
+    then mounted as ~/.claude in a container running as the image's agent uid;
+    if they differ, `claude /login` cannot write .credentials.json and the one
+    command this whole mode depends on fails. It works on this host only
+    because the operator happens to be uid 1000, which is exactly the
+    coincidence that hid it the first two times. provision_agent already does
+    this for the agent home; the login home needs it for the same reason."""
+    root = user_auth_root(user)
+    os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
+    os.chmod(os.path.dirname(root), 0o700)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    _own_agent_dirs(root, image)
+    return os.path.isfile(os.path.join(root, ".credentials.json"))
+
+
 def cmd_login(a):
     """The per-USER interactive login for home-login mode (operator
     requirement, 2026-07-30): ONE login shared by ALL of the user's agents as
@@ -772,20 +857,7 @@ def cmd_login(a):
     each agent holds its own COPY and picks up the new login on its next
     restart, never mid-session. The launcher never holds this credential; it
     lives in the user's login home, written by claude itself."""
-    root = user_auth_root(a.user)
-    os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
-    os.chmod(os.path.dirname(root), 0o700)
-    os.makedirs(root, mode=0o700, exist_ok=True)
-    # THIRD INSTANCE of the data-root ownership defect (msg 8475, and again in
-    # the chown container itself). This dir is created by the LAUNCHER's uid and
-    # then mounted as ~/.claude in a container running as the image's agent uid;
-    # if they differ, `claude /login` cannot write .credentials.json and the one
-    # command this whole mode depends on fails. It works on this host only
-    # because the operator happens to be uid 1000, which is exactly the
-    # coincidence that hid it the first two times. provision_agent already does
-    # this for the agent home; the login home needs it for the same reason.
-    _own_agent_dirs(root, a.image)
-    had = os.path.isfile(os.path.join(root, ".credentials.json"))
+    had = ensure_login_home(a.user, a.image)
     print(f"login shell for user {a.user} ({'RE-login: replaces the current '
           'account for every agent' if had else 'first login'}): image "
           f"{a.image}, no credential env, no agent home touched.\n"
@@ -1832,6 +1904,96 @@ def build_api(auth_url):
                      request.path_params["gid"], actor=f"web:{p['user']}")
         return JSONResponse({"revoked": request.path_params["gid"]})
 
+    # ---- browser-mediated login (rulings 8644) -----------------------------
+    # THE CODE-RELAY BOUNDARY, stated where the endpoints live: this is not a
+    # send-keys surface. The target container is DERIVED from the session
+    # (never named on the wire), it must be the user's own PENDING login,
+    # exactly one relay is accepted per login container, only a code-shaped
+    # string travels (literally, via tmux load-buffer on stdin -- no key-name
+    # interpretation, no argv), and the code is never parsed, stored, logged,
+    # echoed, or audited. A general keystroke endpoint would be an RCE
+    # primitive against every agent container; this one cannot address them.
+
+    def _login_pending(user):
+        return _docker("inspect", "-f", "{{.State.Running}}",
+                       login_container_name(user), check=False,
+                       capture=True).stdout.strip() == "true"
+
+    @guarded
+    async def login_start(request, p, conn):
+        if _login_pending(p["user"]):
+            raise LaunchError(
+                f"a login is already pending for {p['user']} -- finish or "
+                f"cancel it first (one login at a time; two flows would race "
+                f"on one credential file)")
+        _docker("rm", "-f", login_container_name(p["user"]), check=False,
+                capture=True)   # a stopped leftover holds the name
+        ensure_login_home(p["user"], DEFAULT_IMAGE)
+        env = dict(os.environ, SEED=_SEED_BASE)
+        subprocess.run(login_bg_argv(p["user"], DEFAULT_IMAGE, DEFAULT_NETWORK),
+                       env=env, check=True, stdout=subprocess.DEVNULL)
+        _audit("LOGIN_START", user=p["user"])
+        return JSONResponse({"started": True})
+
+    @guarded
+    async def login_status(request, p, conn):
+        """The pending login as a READING: the credential file fresh, the pane
+        fresh. Completion is the FILE appearing -- when it has, the container
+        is done being useful and is removed here, on observation."""
+        out = dict(claude_login_state(p["user"]))
+        if out["present"] and _login_pending(p["user"]):
+            _docker("rm", "-f", login_container_name(p["user"]), check=False,
+                    capture=True)
+            _audit("LOGIN_DONE", user=p["user"])
+        if not out["present"] and _login_pending(p["user"]):
+            pane = _docker("exec", login_container_name(p["user"]), "tmux",
+                           "capture-pane", "-t", "login", "-p",
+                           check=False, capture=True).stdout
+            st = parse_login_pane(pane or "")
+            out["pending"] = st["stage"]
+            out["url"] = st["url"]
+            out["relayed"] = _docker(
+                "exec", login_container_name(p["user"]), "test", "-f",
+                "/tmp/.code-relayed", check=False, capture=True).returncode == 0
+        return JSONResponse(out)
+
+    @guarded
+    async def login_code(request, p, conn):
+        name = login_container_name(p["user"])   # derived, never from the wire
+        if not _login_pending(p["user"]):
+            raise LaunchError("no login is pending -- start one first")
+        if _docker("exec", name, "test", "-f", "/tmp/.code-relayed",
+                   check=False, capture=True).returncode == 0:
+            raise LaunchError(
+                "a code was already relayed to this login -- if it failed, "
+                "cancel and start a fresh login (each flow takes one code)")
+        code = ((await request.json()).get("code") or "").strip()
+        if not _LOGIN_CODE_RE.match(code):
+            raise LaunchError("that does not look like a login code")
+        # stdin -> tmux buffer -> paste: the code never rides argv and cannot
+        # be interpreted as key names.
+        r = subprocess.run(
+            ["docker", "exec", "-i", name, "tmux", "load-buffer",
+             "-b", "relay", "-"], input=code.encode(), capture_output=True)
+        if r.returncode != 0:
+            raise LaunchError("the login container refused the relay -- "
+                              "check its status")
+        _docker("exec", name, "tmux", "paste-buffer", "-d", "-b", "relay",
+                "-t", "login", check=True, capture=True)
+        _docker("exec", name, "tmux", "send-keys", "-t", "login", "Enter",
+                check=True, capture=True)
+        _docker("exec", name, "touch", "/tmp/.code-relayed", check=True,
+                capture=True)
+        _audit("LOGIN_CODE_RELAY", user=p["user"])   # THAT it happened; never what
+        return JSONResponse({"relayed": True})
+
+    @guarded
+    async def login_cancel(request, p, conn):
+        _docker("rm", "-f", login_container_name(p["user"]), check=False,
+                capture=True)
+        _audit("LOGIN_CANCEL", user=p["user"])
+        return JSONResponse({"cancelled": True})
+
     @guarded
     async def profile(request, p, conn):
         """GET: quotas + usage + MASKED credentials (set/absent, never values)
@@ -2020,6 +2182,10 @@ def build_api(auth_url):
         Route("/agents/{agent}/profile", agent_profile, methods=["PUT"]),
         Route("/agents/{agent}/{verb:str}", agent_lifecycle, methods=["POST"]),
         Route("/profile", profile, methods=["GET", "PUT"]),
+        Route("/login/start", login_start, methods=["POST"]),
+        Route("/login/status", login_status),
+        Route("/login/code", login_code, methods=["POST"]),
+        Route("/login/pending", login_cancel, methods=["DELETE"]),
         # /ws BEFORE the catch-all: the terminal's socket must never be served
         # as a static asset. WebSocketRoute and Route do not collide (different
         # scope types), so both /attach/{agent}/ws entries can coexist.
