@@ -22,7 +22,21 @@ set -euo pipefail
 # So every boot writes what it ATTEMPTED, what SUCCEEDED and what is MISSING to a
 # file in the agent's own home. Truncated per boot: this is the state of THIS
 # boot, not a history, and a report that accumulates is one nobody reads.
-BOOT_REPORT="/home/agent/boot-report.md"
+#
+# UNDER ~/.claude, which is a BIND MOUNT, not container-local (ruling 8732). A
+# container-local report dies with the container -- taking the explanation of a
+# failed boot with it exactly when someone is acting on that failed boot -- and
+# a mounted path is readable from the host with no docker at all. Retire keeps
+# the home so the report survives it; erase destroys the home, and erase means
+# erase.
+#
+# ONE PREVIOUS COPY, because truncation destroys the prior report wherever it
+# lives, and a re-provision is precisely when the PRIOR boot's report is the
+# thing someone needs. One predecessor is not accumulation.
+BOOT_REPORT="/home/agent/.claude/boot-report.md"
+BOOT_REPORT_PREV="/home/agent/.claude/boot-report.prev.md"
+mkdir -p "$(dirname "$BOOT_REPORT")"
+[ -f "$BOOT_REPORT" ] && mv -f "$BOOT_REPORT" "$BOOT_REPORT_PREV"
 : > "$BOOT_REPORT"
 say() { printf '%s\n' "$*" >> "$BOOT_REPORT"; }
 note() { printf '%s\n' "$*" >> "$BOOT_REPORT"; printf '%s\n' "reveille: $*" >&2; }

@@ -190,6 +190,26 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.48 THREE CONTROLS THAT DESCRIBED THE DISK, NOT THE THING THEY GUARDED.
+(1) /health read the source tree per request, so it answered "what is pinned"
+while claiming to answer "what is running" -- launcher-pin-check therefore went
+GREEN the instant `pin` moved the tree, before any restart, which is precisely
+the window it exists to refuse. Seen live deploying 0.2.46. The stamp is now
+taken once, when the app is built, because that is the moment the running code
+was loaded. (2) The boot report moves to ~/.claude, which is the bind mount, so
+it outlives its container and a RETIRED agent can still be asked why its last
+boot failed; it keeps exactly one predecessor, because truncation destroys the
+prior report wherever it lives and a re-provision is when that report matters
+(ruling 8732). (3) `make up` now refuses a DEFAULT_IMAGE tag that does not
+exist on the host, and the suite pins the Makefile's AGENT_IMAGE to it. Three
+deploys shipped a tag nobody had built; each was caught by a reviewer looking
+by hand, and a reviewer who happens to look is not a control. That check
+distinguishes UNREACHABLE DOCKER (exit 2) from an absent tag (exit 1), because
+`docker image inspect` fails identically for both and an agent container has no
+docker socket by design -- reported as absence, it told a caller with the image
+genuinely built to go build it. Unknown is not the same answer as no, which is
+this entry's own defect one level in. Agent image 0.2.11.
+
 0.2.47 A BROKEN BOOT IS VISIBLE TO THE HUMAN. GET /agents/{agent}/boot-report
 returns the agent's boot report and the row shows the LINES that say something
 failed, not a count -- "role prompt: MISSING" has already answered the question

@@ -7,6 +7,7 @@ namespaced names, per-agent data roots, quota resolution, idle decision."""
 import asyncio
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -483,7 +484,10 @@ def test_entrypoint_writes_a_report_the_agent_can_read(tmp_path):
     cannot look."""
     ep = (pathlib.Path(__file__).resolve().parent.parent
           / "docker" / "entrypoint.sh").read_text()
-    assert "/home/agent/boot-report.md" in ep, "no report in the agent's own home"
+    # On the MOUNT, so it also outlives the container -- ruling 8732, gated in
+    # full by test_boot_report_lives_on_the_mount_and_keeps_one_predecessor.
+    assert "/home/agent/.claude/boot-report.md" in ep, (
+        "no report in the agent's own home")
     for missing in ("role prompt: **MISSING**", "claude credential: **MISSING**"):
         assert missing in ep, f"the report never names {missing!r}"
     # the identity block must stay TOGETHER above the clone: hoisting half of it
@@ -1187,3 +1191,167 @@ def test_health_is_a_document_with_a_pinned_shape():
         "wait_ok and scripts/launcher-pin-check in the SAME commit")
     for key in ("version", "commit", "branch", "source"):
         assert isinstance(body[key], str) and body[key], f"{key} must be a non-empty string"
+
+def test_health_reports_the_running_commit_not_the_tree_on_disk():
+    """The pin-check asks /health "what are you running?" and refuses a deploy
+    when the answer is older than the repo. That question is only answerable if
+    the stamp is taken when the code is LOADED. A per-request read describes the
+    tree on disk, and `pin` moves the tree while the old process keeps serving --
+    so the check went green the instant the pin landed, before any restart, which
+    is exactly the window it exists to refuse (seen live deploying 0.2.46).
+
+    Measured as: the stamp is read ONCE, at build, and a later change to what the
+    tree would report does not change what /health says.
+    """
+    tree = ["aaaaaaa"]          # what the tree on disk would report, right now
+    calls = []
+
+    def fake_stamp(path):
+        calls.append(path)
+        return (tree[0], "main", "9.9.9")
+
+    orig = rl.source_stamp
+    rl.source_stamp = fake_stamp
+    try:
+        app = rl.build_api("http://127.0.0.1:8765")
+        assert len(calls) == 1, "the stamp must be taken once, when the app is built"
+        # `pin` lands. The tree moves; this process did not restart, so what it is
+        # RUNNING is still aaaaaaa and it must keep saying so.
+        tree[0] = "bbbbbbb"
+
+        health = next(r.endpoint for r in app.routes
+                      if getattr(r, "path", None) == "/health")
+        body = json.loads(asyncio.run(health(None)).body)
+    finally:
+        rl.source_stamp = orig
+    assert body["commit"] == "aaaaaaa", (
+        "/health reported the tree as it reads NOW, not the commit this process "
+        "loaded -- pin moves the tree and the check goes green unrestarted")
+    assert len(calls) == 1, "serving /health must not re-read the tree"
+
+
+def test_boot_report_lives_on_the_mount_and_keeps_one_predecessor(tmp_path):
+    """Ruling 8732, both halves, read off the SHIPPED entrypoint.
+
+    Half one, LOCATION: the report must be under ~/.claude, which is a bind
+    mount. Container-local, it died with the container -- so the record of a
+    failed boot vanished exactly when someone acted on that boot, and a retired
+    agent could no longer be asked why it broke.
+
+    Half two, ROTATION: truncation destroys the prior report wherever it lives,
+    and a re-provision is precisely when the PRIOR boot's report is what someone
+    needs. Exactly one predecessor: two is a history nobody reads.
+
+    The launcher's reader path is asserted against the writer's, because the two
+    files agreeing on WHERE is as load-bearing as agreeing on the markers.
+    """
+    ep = (pathlib.Path(rl.__file__).parent.parent / "docker" / "entrypoint.sh").read_text()
+    assert 'BOOT_REPORT="/home/agent/.claude/boot-report.md"' in ep, (
+        "the boot report is container-local again -- it dies with the container")
+    assert rl.BOOT_REPORT_PATH == "/home/agent/.claude/boot-report.md", (
+        "the reader and the writer disagree about where the report is")
+
+    # Execute the shipped rotation, twice, against a temp home.
+    lines = [ln for ln in ep.splitlines()
+             if ln.startswith(("BOOT_REPORT=", "BOOT_REPORT_PREV=", "mkdir -p ",
+                               "[ -f ", ": > "))][:5]
+    # Under the shipped shell's OWN flags. `[ -f x ] && mv` returns 1 on the
+    # first boot, and a fixture without set -e would not notice if that ever
+    # became the thing that killed the entrypoint before it wrote a line.
+    boot = ("set -euo pipefail\n"
+            + "\n".join(lines).replace("/home/agent", str(tmp_path)))
+    home = tmp_path / ".claude"
+    for body in ("first boot", "second boot"):
+        subprocess.run(["bash", "-c", boot], check=True)
+        (home / "boot-report.md").write_text(body)
+    subprocess.run(["bash", "-c", boot], check=True)   # third boot rotates again
+
+    assert (home / "boot-report.md").read_text() == "", "this boot's report"
+    assert (home / "boot-report.prev.md").read_text() == "second boot", (
+        "the predecessor must be the boot before this one")
+    assert not list(home.glob("boot-report.prev.prev*")), "one predecessor, not a history"
+
+
+def test_the_makefile_builds_the_image_provisioning_actually_runs():
+    """AGENT_IMAGE is what `make agent-image` BUILDS; DEFAULT_IMAGE is what a
+    provision RUNS. Nothing has ever tied them together, so bumping one and not
+    the other builds a tag no agent uses and provisions a tag nobody built --
+    silently, because each file is internally consistent.
+
+    The companion control is scripts/agent-image-check, which asks docker
+    whether the tag exists at deploy time. This one is the half a unit test can
+    see: that the two files name the SAME tag.
+    """
+    root = pathlib.Path(rl.__file__).parent.parent
+    mk = [ln for ln in (root / "Makefile").read_text().splitlines()
+          if ln.startswith("AGENT_IMAGE ?=")]
+    assert len(mk) == 1, "AGENT_IMAGE is declared zero or several times"
+    assert mk[0].split("?=")[1].strip() == rl.DEFAULT_IMAGE, (
+        f"the Makefile builds {mk[0].split('?=')[1].strip()} but provisioning "
+        f"runs {rl.DEFAULT_IMAGE} -- one of them was bumped alone")
+
+
+def test_agent_image_check_refuses_a_tag_that_was_never_built():
+    """The deploy-time control, exercised on a tag that certainly does not exist.
+
+    Bumping DEFAULT_IMAGE is one line; building the tag is a separate command,
+    and the suite cannot tell the difference because a string is correct either
+    way. Three deploys shipped a tag nobody had built (0.2.6, 0.2.7, 0.2.10),
+    each caught by a reviewer looking by hand -- which is not a control.
+
+    UNREACHABLE DOCKER IS NOT AN ABSENT IMAGE, and this test must not treat them
+    alike either. An agent container has no docker socket by design, so exit 2
+    (cannot see the image store) is the normal answer there and skipping is
+    right. Exit 1 means docker LOOKED and the tag is not there -- that is the
+    defect the control exists for, and skipping on it would retire the only half
+    that ever fails. Ruling 8744: skip on unreachable, fail on absent.
+    """
+    script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "agent-image-check"
+    if shutil.which("docker") is None:
+        pytest.skip("docker not on PATH -- this gate asks docker")
+
+    absent = subprocess.run(["bash", str(script), "reveille-agent:0.0.0-never-built"],
+                            capture_output=True, text=True)
+    if absent.returncode == 2:
+        pytest.skip("docker unreachable from here -- the store cannot be read")
+    assert absent.returncode == 1, "a missing agent image must stop the deploy"
+    assert "REFUSING to deploy" in absent.stderr
+    assert "CANNOT VERIFY" not in absent.stderr, (
+        "a missing tag must not be reported as an unreadable store")
+
+    # The positive half. Docker is reachable -- proven one line up -- so exit 1
+    # here means DEFAULT_IMAGE was bumped and never built, which is exactly the
+    # thing this gate is for. Failing, not skipping.
+    present = subprocess.run(["bash", str(script), rl.DEFAULT_IMAGE],
+                             capture_output=True, text=True)
+    assert present.returncode == 0, (
+        f"{rl.DEFAULT_IMAGE} is not built on this host, and docker can see the "
+        f"store -- build it: make agent-image AGENT_IMAGE={rl.DEFAULT_IMAGE}")
+    assert "present" in present.stdout
+
+
+def test_agent_image_check_says_unknown_when_it_cannot_see_docker():
+    """The blocking half of ruling 8744, measured rather than argued.
+
+    `docker image inspect` fails identically for "no such tag" and "cannot reach
+    the daemon". Reported as the first, the control told a caller with the image
+    genuinely built that it had never been built, and sent them to rebuild it --
+    a probe whose vocabulary cannot express its own inability, reporting a null
+    as a fact. Exit 2 is the vocabulary for unknown.
+
+    Docker is pointed at a socket that is not there, rather than removed from
+    PATH: the client then fails the way it fails in an agent container -- present
+    and unable to reach a daemon -- and the rest of the script's shell tools keep
+    working, so the test measures the probe and not a broken fixture.
+    """
+    script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "agent-image-check"
+    if shutil.which("docker") is None:
+        pytest.skip("docker not on PATH -- nothing to make unreachable")
+    env = dict(os.environ, DOCKER_HOST="unix:///nonexistent/docker.sock")
+    res = subprocess.run(["bash", str(script), "reveille-agent:0.2.11"],
+                         capture_output=True, text=True, env=env)
+    assert res.returncode == 2, "unreachable docker is its own outcome, not absence"
+    assert "CANNOT VERIFY" in res.stderr
+    assert "REFUSING to deploy" not in res.stderr, (
+        "this is the exact confusion the ruling is about: an unreadable store "
+        "must never be reported as a tag that was never built")

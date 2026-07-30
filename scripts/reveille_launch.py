@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.10")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.11")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -1968,7 +1968,11 @@ def config_diff(requested, actual):
 # could not otherwise read its own broken boot. That closed the gap for the
 # AGENT. It did not close it for the HUMAN, who has no shell in the container
 # and whose first question about a silent agent is why it is silent.
-BOOT_REPORT_PATH = "/home/agent/boot-report.md"
+# Under ~/.claude, which is the bind mount, so this path outlives the container
+# (ruling 8732). docker cp reads it either way; what the mount buys is that a
+# RETIRED agent -- container gone, home kept -- can still be asked why its last
+# boot failed.
+BOOT_REPORT_PATH = "/home/agent/.claude/boot-report.md"
 # The two markers the entrypoint writes. Kept as data rather than inlined: the
 # report's own header promises these words to its reader, so they are a shared
 # format between two files and not a private detail of either.
@@ -2135,6 +2139,15 @@ def build_api(auth_url):
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
     from starlette.routing import Route, WebSocketRoute
+
+    # STAMPED ONCE, HERE, because this is the moment the running code was loaded.
+    # Reading the tree per-request answers "what is pinned", not "what is
+    # running", and those differ for exactly as long as it takes to restart --
+    # which is the window the pin-check exists to refuse. Deploying 0.2.46 the
+    # check passed the instant `pin` moved the tree, with the old process still
+    # serving; a frozen stamp is what makes it a claim about the process.
+    running_stamp = source_stamp(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     def guarded(fn):
         async def wrapped(request):
@@ -2632,12 +2645,17 @@ def build_api(auth_url):
 
         A banner at boot could not close that: it is read once, by whoever
         happened to restart. An endpoint can be ASKED, which is what makes the
-        deploy able to refuse."""
+        deploy able to refuse.
+
+        The stamp is the one taken when this app was BUILT, never a fresh read:
+        see build_api. A per-request read describes the disk, and the disk is
+        what moves first."""
         from starlette.responses import JSONResponse
-        src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        commit, branch, version = source_stamp(src)
+        commit, branch, version = running_stamp
         return JSONResponse({"ok": True, "version": version, "commit": commit,
-                             "branch": branch, "source": src})
+                             "branch": branch,
+                             "source": os.path.dirname(os.path.dirname(
+                                 os.path.abspath(__file__)))})
 
     async def ui(_request):
         from starlette.responses import HTMLResponse
