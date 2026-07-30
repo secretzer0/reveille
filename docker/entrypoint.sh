@@ -26,14 +26,55 @@ if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/repos 2>/dev/nul
     || echo "reveille: repo clone failed (${REVEILLE_REPO_URL}) -- clone by hand" >&2
 fi
 
-# DES-005 P3: the chosen role's prompt becomes standing doctrine in the agent's
-# own CLAUDE.md -- marker-guarded so a container restart never duplicates it,
-# and never touching a home that already carries one (the agent may have
-# evolved it; a template must not clobber learned doctrine).
-if [ -n "${REVEILLE_ROLE_PROMPT:-}" ] \
-    && ! grep -q "# reveille role" /home/agent/.claude/CLAUDE.md 2>/dev/null; then
-  printf '\n# reveille role\n%s\n' "${REVEILLE_ROLE_PROMPT}" \
-    >> /home/agent/.claude/CLAUDE.md
+# DES-005 P3 / architect ruling msg 8607: the chosen role's prompt lives in the
+# agent's CLAUDE.md between a DELIMITER PAIR, and the entrypoint rewrites what
+# is between them on EVERY boot. The old form appended once behind a
+# presence-of-marker check -- which asks "has this ever been written" when the
+# question is "does this still match" -- so provision_agent(replace=True), which
+# keeps the data root, preserved the marker and every re-provision with a new
+# role SILENTLY kept the old one. An edit form would report success and change
+# nothing. The role prompt is DERIVED from the environment, so it tracks the
+# environment; everything OUTSIDE the delimiters is the agent's own working
+# memory and survives untouched. Rewrite is atomic (same discipline as patch()
+# above): a torn CLAUDE.md is an agent that boots confused.
+if [ -n "${REVEILLE_ROLE_PROMPT:-}" ]; then
+  python3 - <<'PY'
+import os, pathlib
+path = pathlib.Path.home() / ".claude" / "CLAUDE.md"
+OPEN, CLOSE = "<!-- reveille role -->", "<!-- /reveille role -->"
+block = f"{OPEN}\n# reveille role\n{os.environ['REVEILLE_ROLE_PROMPT']}\n{CLOSE}"
+try:
+    text = path.read_text()
+except OSError:
+    text = ""
+if OPEN in text and CLOSE in text:
+    head, _, rest = text.partition(OPEN)
+    _, _, tail = rest.partition(CLOSE)
+    text = head + block + tail
+elif "# reveille role" in text:
+    # Migration: the pre-0.2.7 single-marker form has no closing delimiter, so
+    # the region must be INFERRED: marker to the next markdown heading, else
+    # EOF. Sound because no shipped role prompt contains a line-start "#"
+    # (checked against ROLE_PROMPTS), while an agent appending its own notes
+    # after the role block plausibly starts with one -- those notes are its
+    # working memory and must survive. One block either way: an agent reading
+    # contradictory role text in its own CLAUDE.md is worse than a stale role.
+    head, _, rest = text.partition("# reveille role")
+    tail_lines = rest.splitlines(keepends=True)[1:]   # drop the marker line
+    tail = ""
+    for i, ln in enumerate(tail_lines):
+        if ln.startswith("#"):
+            tail = "".join(tail_lines[i:])
+            break
+    text = (head.rstrip("\n") + ("\n\n" if head.strip() else "")
+            + block + "\n" + ("\n" + tail if tail else ""))
+else:
+    text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + block + "\n"
+path.parent.mkdir(parents=True, exist_ok=True)   # a fresh volume has no ~/.claude yet
+tmp = path.with_suffix(".tmp")
+tmp.write_text(text)
+os.replace(tmp, path)
+PY
 fi
 
 # Claude Code first-run wizard: a provisioned agent boots into `claude` with no
