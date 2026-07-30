@@ -8,6 +8,45 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import daemon  # noqa: E402
 
+# The bus page, now a flat file (ui/bus/index.html) read through the same
+# fixed-table loader the server uses -- so what these tests inspect is what
+# chat_http serves.
+PAGE = daemon._ui_read("index.html")
+
+
+def test_ui_loader_serves_only_the_fixed_table(tmp_path, monkeypatch):
+    # Ruling 8635: no request-derived component may reach the filesystem, and
+    # REVEILLE_UI_PATH makes the base operator-controlled -- so the table is
+    # the whole reachable set, traversal included.
+    for name in ("../daemon.py", "index.html/../../store.py", "app.js", ""):
+        try:
+            daemon._ui_read(name)
+            raise AssertionError(f"loader read {name!r} -- outside the table")
+        except ValueError:
+            pass
+    # the override is read PER CALL (live edit needs no restart), and only
+    # a file of the served NAME is reachable inside it
+    (tmp_path / "index.html").write_text("<body>DEV</body>")
+    monkeypatch.setenv("REVEILLE_UI_PATH", str(tmp_path))
+    assert daemon._ui_read("index.html") == "<body>DEV</body>"
+    (tmp_path / "index.html").write_text("<body>DEV2</body>")
+    assert daemon._ui_read("index.html") == "<body>DEV2</body>"
+    monkeypatch.delenv("REVEILLE_UI_PATH")
+    assert daemon._ui_read("index.html") == PAGE
+
+
+def test_ui_override_announces_itself(monkeypatch):
+    # The forward_anthropic class: an ambient env var silently changing what a
+    # pinned tag serves. Chosen AND legible -- absent the override, /version
+    # is the bare string every probe parses.
+    import asyncio
+    monkeypatch.delenv("REVEILLE_UI_PATH", raising=False)
+    r = asyncio.run(daemon.version_http(None))
+    assert r.body.decode() == daemon.__version__
+    monkeypatch.setenv("REVEILLE_UI_PATH", "/tmp/devui")
+    r = asyncio.run(daemon.version_http(None))
+    assert "ui override: /tmp/devui" in r.body.decode()
+
 
 def test_usage_names_the_hive_in_standing_doctrine():
     """Boot-doctrine gap (msg 8407): brief/recall/memory_add must appear in the STANDING
@@ -219,7 +258,7 @@ def test_nav_link_escapes_operator_supplied_text():
 
 
 def test_unconfigured_page_renders_no_link_element():
-    page = daemon.WEBCHAT.replace("<!--NAVLINK-->", daemon.nav_link_html("", ""))
+    page = PAGE.replace("<!--NAVLINK-->", daemon.nav_link_html("", ""))
     assert '<a class="navlink"' not in page     # the CSS rule may exist; no element
     assert "<!--NAVLINK-->" not in page         # and no leftover placeholder
 
@@ -255,7 +294,7 @@ def test_unicast_wakes_its_recipient_on_either_plane():
 def test_shout_parameter_is_gone_from_the_served_surface():
     # A retired parameter that still appears in doctrine is a parameter people
     # keep sending. Clean cutover: no shout in the UI, the handler, or usage.
-    assert "shout" not in daemon.WEBCHAT
+    assert "shout" not in PAGE
     assert "shout=true" not in daemon.USAGE
     assert "shout" not in (daemon.send_http.__doc__ or "")
 
@@ -282,7 +321,7 @@ def test_the_ui_only_tries_to_render_what_the_server_serves_inline():
     # An <img> pointed at an octet-stream download is a broken tile, and a
     # broken tile reads as a corrupt upload -- which is the exact bug this
     # slice exists to kill. So the UI's list is checked against the server's.
-    m = re.search(r"const IMG_RE=/\\\.\(([^)]+)\)\$/i;", daemon.WEBCHAT)
+    m = re.search(r"const IMG_RE=/\\\.\(([^)]+)\)\$/i;", PAGE)
     assert m, "the UI's inline-image test moved; this invariant needs re-aiming"
     for alt in m.group(1).split("|"):
         for ext in ("." + alt.replace("jpe?g", "jpeg"), "." + alt.replace("?", "")):
@@ -324,7 +363,7 @@ def test_agents_base_is_normalised_and_cannot_close_the_script_tag():
 
 
 def test_the_page_renders_no_agents_control_when_unconfigured():
-    page = daemon.WEBCHAT.replace("<!--AGENTSNAV-->", daemon.agents_nav_html(""))
+    page = PAGE.replace("<!--AGENTSNAV-->", daemon.agents_nav_html(""))
     assert 'id="agentsNav"' not in page
     assert "const AGBASE=" not in page      # nothing to click, nothing declared
     assert "<!--AGENTSNAV-->" not in page   # the placeholder itself never ships
@@ -336,7 +375,7 @@ def test_api_carries_the_status_so_callers_need_not_parse_the_message():
     # string for digits. That silently fails on any endpoint answering
     # {"error": ...}: the launcher's own 401 does exactly that, so the digit test
     # called a live-but-unauthenticated service "not reachable".
-    api = daemon.WEBCHAT[daemon.WEBCHAT.index("async function api(path,opts)"):]
+    api = PAGE[PAGE.index("async function api(path,opts)"):]
     api = api[:api.index("\n}")]
     assert "err.status=r.status" in api, "the status must survive the throw"
 
@@ -346,8 +385,8 @@ def test_the_pane_tells_a_wrong_answer_apart_from_no_answer():
     # all three is what sent a reviewer after the wrong service for a whole pass
     # (msg 8589): a 404 from the WRONG service, an expired session, and a
     # launcher that genuinely is not there.
-    block = daemon.WEBCHAT[daemon.WEBCHAT.index("U6: agents, embedded"):
-                           daemon.WEBCHAT.index("The presence poll is armed once")]
+    block = PAGE[PAGE.index("U6: agents, embedded"):
+                           PAGE.index("The presence poll is armed once")]
     # Assert before indexing: a bare .index() raises ValueError on the unfixed
     # head, which reads as a broken test rather than a caught defect.
     assert "agUnavailable(e.status" in block, "the pane must branch on the status"
@@ -366,8 +405,8 @@ def test_every_launcher_call_in_the_embedded_pane_is_prefixed():
     # The defect: U6 called api('/agents') and api('/profile') -- unprefixed, so
     # the proxy routed them to the BROKER, which 404s. Reachable service, wrong
     # address. Every launcher-owned path must go through lapi().
-    block = daemon.WEBCHAT[daemon.WEBCHAT.index("U6: agents, embedded"):
-                           daemon.WEBCHAT.index("The presence poll is armed once")]
+    block = PAGE[PAGE.index("U6: agents, embedded"):
+                           PAGE.index("The presence poll is armed once")]
     # Comments in that block QUOTE the old wrong calls on purpose (that is the
     # explanation), so scan code lines only.
     code = "\n".join(ln for ln in block.splitlines()
@@ -396,8 +435,8 @@ def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
 
     import ui_copy
     for s in ui_copy.BUS_PAGE:
-        assert s in daemon.WEBCHAT, f"single-origin-smoke asserts {s!r}"
-    ui = revlaunch.LAUNCH_UI
+        assert s in PAGE, f"single-origin-smoke asserts {s!r}"
+    ui = revlaunch._ui_read("index.html")
     for s in ui_copy.LAUNCHER_PAGE:
         assert s in ui, f"launcher-api-smoke asserts {s!r}"
     assert ui_copy.DISCLOSURE_OPEN not in ui, \

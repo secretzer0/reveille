@@ -20,7 +20,7 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import daemon, store  # noqa: E402
 
-UI = daemon.WEBCHAT
+UI = daemon._ui_read("index.html")   # the served page, now a flat file
 # The memory plane's entire render surface, memText through the end of
 # openMemories -- the only place agent-authored memory text meets HTML.
 MEM = UI[UI.index("function memText"):UI.index("async function openUsers")]
