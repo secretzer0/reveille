@@ -430,16 +430,24 @@ def test_every_launcher_call_in_the_embedded_pane_is_prefixed():
     # The defect: U6 called api('/agents') and api('/profile') -- unprefixed, so
     # the proxy routed them to the BROKER, which 404s. Reachable service, wrong
     # address. Every launcher-owned path must go through lapi().
-    block = PAGE[PAGE.index("U6: agents, embedded"):
-                           PAGE.index("The presence poll is armed once")]
-    # Comments in that block QUOTE the old wrong calls on purpose (that is the
-    # explanation), so scan code lines only.
-    code = "\n".join(ln for ln in block.splitlines()
-                     if not ln.lstrip().startswith("//"))
-    for path in ("'/agents'", "'/agents/'", "'/profile'", "'/rooms-mine'"):
-        # every bare api(<path>) must be the tail of an lapi(<path>)
-        assert code.count(f"api({path}") == code.count(f"lapi({path}"), path
-        assert code.count(f"lapi({path}") > 0, path
+    # /profile followed the credentials block into the Account tab (operator,
+    # msg 8752: those are the USER's credentials, not any agent's), so the pane
+    # no longer owns that path. The rule went with it rather than lapsing: each
+    # region is scanned for the paths it actually calls.
+    pane = PAGE[PAGE.index("U6: agents, embedded"):
+                PAGE.index("The presence poll is armed once")]
+    acct = PAGE[PAGE.index("function openAccount()"):
+                PAGE.index("function pruneAgent(")]
+    for block, paths in ((pane, ("'/agents'", "'/agents/'", "'/rooms-mine'")),
+                         (acct, ("'/profile'",))):
+        # Comments in these blocks QUOTE the old wrong calls on purpose (that is
+        # the explanation), so scan code lines only.
+        code = "\n".join(ln for ln in block.splitlines()
+                         if not ln.lstrip().startswith("//"))
+        for path in paths:
+            # every bare api(<path>) must be the tail of an lapi(<path>)
+            assert code.count(f"api({path}") == code.count(f"lapi({path}"), path
+            assert code.count(f"lapi({path}") > 0, path
 
 
 def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
@@ -480,6 +488,45 @@ def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
     for s in ui_copy.BUS_PAGE_FORBIDDEN:
         assert s not in PAGE, \
             f"the bus page must not contain {s!r} -- terminals live on one page"
+
+
+def test_the_manage_rail_hides_and_reads_what_it_claims():
+    """U9, from two operator screenshots (msgs 8751, 8752).
+
+    Both defects were CSS beating markup, which is exactly the class no diff
+    review catches: the JS said hide it and the rule said display, the JS said
+    this is a status word and the rule said this is a 7px dot. Each assertion
+    below is the property, not the wording.
+    """
+    # 1. [hidden] is the lowest-specificity rule there is, so #fmode's own
+    #    display: silently won and the chat filter stayed on screen in manage
+    #    mode -- a control that does nothing to what is in front of you.
+    assert "#fmode[hidden]{display:none}" in PAGE, \
+        "FROM/TO sets display, so it needs its own [hidden] rule to be hideable"
+    # 2. The roster's status is a WORD; .agent .st is the presence DOT. Every
+    #    geometry property the dot sets must be reset, not the ones that showed:
+    #    half a reset is the same overlap one property along.
+    st = PAGE[PAGE.index("#roster .st{"):]
+    st = st[:st.index("}")]
+    for prop in ("width:auto", "height:auto", "border:0", "border-radius:0"):
+        assert prop in st, f"#roster .st must reset {prop} off the presence dot"
+    # 3. A roster row is a button: Tab reaches every agent, Enter opens it.
+    #    A clickable <div> looks identical in a screenshot and is unreachable.
+    assert "#roster button.agent{" in PAGE, "roster rows must be real buttons"
+    assert "class=\"agent'+" in PAGE and "data-rost=" in PAGE
+    # 4. The well is the terminal. A management list, a create disclosure or a
+    #    credentials block down there is something competing for the space the
+    #    operator asked to give back to tmux -- and the credentials are the
+    #    USER's, so they live in the Account tab now.
+    well = PAGE[PAGE.index('<div id="agentsWell">'):PAGE.index('<div id="toasts">')]
+    for gone in ('id="agList"', 'class="addAgent"', 'id="agCredClaude"'):
+        assert gone not in well, f"{gone} must not be in the agents well"
+    assert '<div class="pSec">CREDENTIALS</div>' in \
+        PAGE[PAGE.index("function openAccount()"):], \
+        "the user's credentials belong to the user, in the Account tab"
+    # 5. The claude token field is dead: the browser login replaced it, and a
+    #    second way to set the same credential is a second thing to keep true.
+    assert "claude token (setup-token or API key)" not in PAGE
 
 
 def test_a_humans_presence_is_their_open_tab():

@@ -44,6 +44,13 @@
   border-color:var(--gold);color:var(--gold)}
  #fmode{display:flex;margin:0 1rem .45rem;border:1px solid var(--line);border-radius:7px;
   overflow:hidden}
+ /* [hidden] is a UA rule at the LOWEST specificity, so the display above beat
+    it and the attribute did nothing: railMode() hid this control in manage
+    mode and it stayed on screen anyway, offering a chat filter over a rail
+    that was no longer a chat filter (operator screenshot, msg 8751). Any
+    element that sets display AND toggles hidden needs its own [hidden] rule --
+    this is that rule, not a workaround for one. */
+ #fmode[hidden]{display:none}
  #fmode button{flex:1;background:none;border:0;color:var(--faint);font:inherit;
   font-size:.72rem;letter-spacing:.08em;padding:.28rem 0;cursor:pointer}
  #fmode button.on{background:var(--hover);color:var(--gold)}
@@ -51,10 +58,64 @@
  /* U8 roster: same box as #agents so switching modes does not move the rail
     around underneath the pointer. Shares .agent for the entries, so a roster
     row and a chat row read as the same KIND of thing in the same place. */
- #roster{overflow-y:auto;flex:1;padding:0 .5rem .8rem}
+ #roster{overflow-y:auto;overflow-x:hidden;flex:1;padding:0 .5rem .8rem}
  #roster .agent.sel{background:var(--hover)}
- #roster .st{margin-left:auto;font-size:.66rem;color:var(--faint)}
+ /* The roster's status is a WORD. `.agent .st` is the presence DOT -- a 7px
+    circle with a border -- so sharing .agent rendered every roster state
+    INSIDE that circle: text over the name, and a rail wide enough to scroll
+    sideways (operator screenshot, msg 8751). Reset every geometry property the
+    dot rule sets, not the ones that happened to show: half a reset is the same
+    defect one property along. */
+ #roster .st{width:auto;height:auto;border:0;border-radius:0;background:none;
+  margin-left:auto;font-size:.66rem;color:var(--faint);white-space:nowrap;flex:none}
  #roster .st.err{color:var(--bad,#e06c6c)}
+ /* Rooms are a TREE, not a flat list (operator, msg 8751): an agent can hold
+    several rooms and appears under each, because "which rooms does it reach"
+    is the question this rail exists to answer. Native <details>/<summary> --
+    Tab reaches the summary, Enter/Space toggles it, and a screen reader
+    announces expanded/collapsed on its own. No ARIA of ours to keep true. */
+ #roster .rgrp{margin:0 0 .3rem}
+ #roster .rgrp>summary{display:flex;align-items:center;gap:.4rem;cursor:pointer;
+  padding:.28rem .35rem;border-radius:6px;font-size:.64rem;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--faint);list-style:none}
+ #roster .rgrp>summary::-webkit-details-marker{display:none}
+ #roster .rgrp>summary::before{content:'\25B8';font-size:.72rem;line-height:1;
+  transition:transform .12s ease}
+ @media (prefers-reduced-motion:reduce){#roster .rgrp>summary::before{transition:none}}
+ #roster .rgrp[open]>summary::before{transform:rotate(90deg)}
+ #roster .rgrp>summary:hover{background:var(--hover);color:var(--dim)}
+ #roster .rgrp>summary:focus-visible{outline:2px solid var(--gold);outline-offset:1px}
+ #roster .rgrp>summary .cnt{margin-left:auto;font-variant-numeric:tabular-nums}
+ #roster .rgrp .agent{margin-left:.5rem}
+ /* Sticky headers: scrolling a long room must never leave you unsure which
+    room you are in. The rail's own background, so rows pass behind it. */
+ #roster .rgrp>summary{position:sticky;top:0;background:var(--rail);z-index:1}
+ /* A roster row is a BUTTON, not a clickable div: Tab reaches every agent and
+    Enter opens it, which is the whole keyboard path for this rail. */
+ #roster button.agent{width:100%;background:none;border:0;font:inherit;
+  text-align:left;color:var(--dim)}
+ #roster button.agent:focus-visible{outline:2px solid var(--gold);
+  outline-offset:-2px}
+ #roster .agent .nm{min-width:0}
+ #roster .agent.sel{outline:1px solid var(--gold)}
+ #roster .agent.sel .nm{color:var(--gold)}
+ /* Fill AND ring, never colour alone (see the row comment in the script). */
+ #roster .dot{width:8px;height:8px;border-radius:50%;flex:none;background:none;
+  border:1.5px solid var(--faint)}
+ #roster .agent.run .dot{background:var(--green);border-color:var(--green);
+  box-shadow:0 0 0 2px rgba(62,207,106,.2)}
+ #roster .agent.bad .dot{border-color:#e8555a;box-shadow:0 0 0 2px rgba(232,85,90,.25)}
+ #roster .agent.gone .dot{opacity:.35}
+ #roster .agent.gone .nm{color:var(--faint)}
+ #roster .fold{display:block;width:100%;margin:.15rem 0 .1rem .5rem;background:none;
+  border:0;color:var(--faint);font:inherit;font-size:.66rem;text-align:left;
+  padding:.2rem .55rem;border-radius:6px;cursor:pointer}
+ #roster .fold:hover{background:var(--hover);color:var(--dim)}
+ #roster .fold:focus-visible{outline:2px solid var(--gold);outline-offset:-2px}
+ #rostFilter{margin:0 1rem .45rem;background:var(--bg);border:1px solid var(--line);
+  border-radius:7px;color:var(--fg);padding:.3rem .55rem;font:inherit;font-size:.78rem}
+ #rostFilter:focus{outline:none;border-color:var(--gold)}
+ #rostFilter[hidden]{display:none}
  /* The create item is an ACTION, not an agent, so it must not look like a
     roster row that happens to be named "new agent" -- dashed, gold, and
     separated by a rule above it. */
@@ -63,21 +124,47 @@
  #roster .newAgent button{width:100%;background:none;border:1px dashed var(--line);
    color:var(--gold);font:inherit;padding:.45rem;border-radius:7px;cursor:pointer}
  #roster .newAgent button:hover{background:var(--hover)}
- /* U8 tab strip + frames. */
- #agTabs{display:flex;gap:.25rem;flex-wrap:wrap;margin:.5rem 0 0}
+ /* U8 tab strip + frames. U9: the tab is where an agent's ACTIONS live, so the
+    well below it is the terminal and nothing else (operator, msg 8751). */
+ #agTabs{display:flex;gap:.25rem;flex-wrap:wrap;margin:.5rem 0 0;flex:none}
  #agTabs .tab{display:flex;align-items:center;gap:.4rem;padding:.35rem .6rem;
    border:1px solid var(--line);border-bottom:0;border-radius:7px 7px 0 0;
    background:none;color:var(--faint);font:inherit;cursor:pointer}
  #agTabs .tab.on{background:var(--hover);color:var(--gold)}
  #agTabs .tab.err{color:var(--bad,#e06c6c)}
- #agTabs .tab .x{opacity:.6;padding:0 .15rem}
- #agTabs .tab .x:hover{opacity:1}
+ /* Every action is a real <button> with its own label, never a clickable span:
+    the icon carries the meaning for the eye, the aria-label carries it for a
+    screen reader, and Tab reaches all of them in the order they are read. */
+ #agTabs .tab .acts{display:flex;align-items:center;gap:.05rem;margin-left:.15rem}
+ #agTabs .tab button{background:none;border:0;color:inherit;font:inherit;
+   line-height:1;cursor:pointer;padding:.1rem .25rem;border-radius:5px;opacity:.65}
+ #agTabs .tab button:hover{opacity:1;background:var(--line)}
+ #agTabs .tab button:focus-visible{opacity:1;outline:2px solid var(--gold);
+   outline-offset:1px}
+ #agTabs .tab button.danger:hover{color:#e8555a}
+ #agNote{flex:none;margin:.45rem 0 0;background:rgba(232,85,90,.07);
+   border-left:2px solid #e8555a;border-radius:0 6px 6px 0;padding:.15rem .6rem}
+ #agNote .pAsk{padding-left:0}
  #agFrames{border:1px solid var(--line);border-radius:0 7px 7px 7px;
-   height:60vh;position:relative}
+   flex:1;min-height:14rem;position:relative}
  /* Inactive frames are HIDDEN, never removed -- see the markup comment. */
  #agFrames .fr{position:absolute;inset:0;width:100%;height:100%;border:0}
  #agFrames .fr[hidden]{display:none}
- #agFrames .frErr{position:absolute;inset:0;padding:1rem;overflow:auto}
+ #agFrames .frErr,#agFrames .frState{position:absolute;inset:0;padding:1rem;
+   overflow:auto}
+ #agFrames .frState[hidden],#agFrames .frErr[hidden]{display:none}
+ #agEmpty{color:var(--faint);font-size:.82rem;padding:1.2rem .2rem}
+ /* One modal shell for every per-agent act. It is the SAME markup the pane
+    used inline -- edit form, retire/erase confirm, create -- moved behind a
+    focus-managed dialog rather than rewritten, so the copy those gates hold
+    still ships byte-for-byte. */
+ #agDlg{position:fixed;inset:0;background:rgba(6,8,11,.82);backdrop-filter:blur(4px);
+   display:none;align-items:center;justify-content:center;z-index:22}
+ #agDlg.on{display:flex}
+ #agDlgCard{background:var(--card);border:1px solid var(--line);border-radius:14px;
+   padding:.9rem 1.2rem 1.1rem;width:min(44rem,92vw);max-height:86vh;overflow-y:auto;
+   box-shadow:0 12px 48px rgba(0,0,0,.5);text-align:left}
+ #agDlgCard .pRow:first-child b{font-size:.9rem}
  /* Live updates are down, so this rail is a LAST-KNOWN reading. A presence list
     that stopped updating looks exactly like a room where nobody moved -- the
     phantom-watcher class in the UI layer, so say which one it is. */
@@ -424,9 +511,12 @@
     adding it is a no-op until .hidden is toggled on. */
  #chatWell{display:contents}
  #chatWell.hidden{display:none}
- #agentsWell{display:none;flex:1;min-height:0;overflow-y:auto;
-  padding:1.1rem 1.4rem 2rem;text-align:left}
- #agentsWell.on{display:block}
+ #agentsWell{display:none;flex:1;min-height:0;
+  padding:1.1rem 1.4rem 1.4rem;text-align:left}
+ /* A COLUMN, so the terminal takes every pixel the header and tabs do not
+    (operator, msg 8751). The well itself never scrolls -- the frame does, and
+    a terminal inside a scrolling parent is a terminal you chase down the page. */
+ #agentsWell.on{display:flex;flex-direction:column;overflow:hidden}
  #agentsWell .lnk{color:var(--dim);cursor:pointer;font-size:.78rem}
  #agentsWell .lnk:hover{color:var(--fg);text-decoration:underline}
  #agUnavail{color:#e8555a;background:rgba(232,85,90,.08);border-left:2px solid #e8555a;
@@ -517,6 +607,12 @@
       for one thing (DES-006 6.4). The well then shows only what you have
       OPEN, so a roster entry and a tab mean different things by construction.
  -->
+ <!-- Past ~20 rows, filtering beats grouping: the tree answers "what is in
+      this room", the box answers "where is roc-api-dev", which is the question
+      actually asked. A match force-opens its group -- a group that hid a hit
+      would be a search that lies -- and Esc clears. -->
+ <input id="rostFilter" hidden placeholder="Filter agents&hellip;"
+  aria-label="filter agents by name" autocomplete="off">
  <div id="roster" hidden></div>
  <div id="meWrap">
   <div id="meMenu">
@@ -599,45 +695,28 @@
       attach, so re-selecting a tab would silently reconnect as a second
       driver and be refused by its own predecessor. -->
  <div id="agTabs" hidden></div>
+ <!-- The active agent's boot problems, next to the terminal they explain.
+      They used to annotate a management row; the rows are gone and the fact
+      is not, so it moves to the one place that is still about THIS agent. -->
+ <div id="agNote" hidden></div>
  <div id="agFrames" hidden></div>
- <div id="agList"></div>
- <details class="addAgent" id="addAgent"><summary>Add agent</summary>
- <div class="pRow">
-  <input id="agName" placeholder="agent name (e.g. senior-dev)">
-  <select id="agRole"><option value="">no role template</option></select>
- </div>
- <div class="pRow">
-  <input id="agAppend" placeholder="anything to append to the role prompt (optional)"
-   style="flex:1">
- </div>
- <div class="pChips" id="agRooms"></div>
- <div class="pRow"><input id="agRepo" placeholder="repo URL (blank = your profile default)"></div>
- <div class="pRow"><input id="agModel" placeholder="model (blank = the account default)"></div>
- <div class="pRow">
-  <button id="agCreate">create agent</button>
-  <span class="pDim">the token is minted from your session and never shown</span>
- </div>
- <div id="agStatus" class="pDim"></div>
- </details>
- <div class="pSec">CREDENTIALS</div>
- <div id="agCredState" class="pDim"></div>
- <div class="pRow">
-  <input id="agCredClaude" placeholder="claude token (setup-token or API key)">
-  <button id="agCredClaudeClear">clear</button>
- </div>
- <div class="pRow">
-  <input id="agCredGithub" placeholder="github token">
-  <button id="agCredGithubClear">clear</button>
- </div>
- <div class="pRow"><input id="agCredRepo" placeholder="default repo URL"></div>
- <div class="pRow">
-  <button id="agCredSave">save credentials</button>
-  <span class="pDim">stored 0600 on the launcher host; values are never echoed back</span>
- </div>
- <div id="agCredNotes" class="pDim"></div>
+ <!-- U9: no management list here. The rail says what exists, a tab says what
+      you opened, and every act on an agent hangs off its tab -- so this well
+      is the terminal, full size, with nothing competing for the space
+      (operator, msg 8751). Creation lives on the rail's "+ New Agent", the one
+      entry point; it was in two places, which is one selector too many. -->
+ <div id="agEmpty" class="pDim">Pick an agent in the rail to open it. Its
+  terminal fills this area, and its actions -- start, stop, edit, destroy --
+  live on the tab above.</div>
 </div>
 </div>
 <div id="toasts"></div>
+<!-- Per-agent modals (edit, destroy, create). role=dialog + aria-modal so a
+     screen reader treats the page behind it as inert; Esc closes it, and focus
+     returns to the control that opened it -- the tab icon you were on. -->
+<div id="agDlg" role="dialog" aria-modal="true" aria-labelledby="agDlgTitle">
+ <div id="agDlgCard"></div>
+</div>
 <div id="dlg">
  <div id="dlgCard">
   <div id="dlgTitle"></div>
@@ -1407,7 +1486,6 @@ function lapi(path,opts){return api(AGBASE+path,opts);}
 // point below is try/caught so a launcher that is down or absent degrades
 // ONLY this pane to #agUnavail; chat/rooms/memory/presence never know,
 // because nothing here is on their path.
-let agConfirm=null;   // {agent} -- at most one destroy-confirm open at a time
 // Reconfig 2. {agent, cfg, rooms, result} -- the open edit form, at most one.
 // `cfg` is what the CONTAINER holds (GET .../config), never the request that
 // created it; `result` is the per-field verdict a PUT read back. We render the
@@ -1445,6 +1523,7 @@ function railMode(manage){
  $('fmode').hidden=manage;
  $('agents').hidden=manage;
  $('roster').hidden=!manage;
+ $('rostFilter').hidden=!manage;
  const h=document.querySelector('#rail h2');
  if(h)h.textContent=manage?'MANAGE AGENTS':'AGENTS';
 }
@@ -1463,13 +1542,20 @@ function closeAgentsWell(){
  if(nav){nav.textContent='Agents';nav.setAttribute('aria-pressed','false');}
  railMode(false);
 }
-// ---- U8 terminal tabs ---------------------------------------------------
-// What you have OPEN. One entry per attach, never derived from the roster:
-// the tell that this model has broken is a tab existing for an agent nobody
+// ---- U8 terminal tabs, U9 actions on the tab ------------------------------
+// What you have OPEN. One entry per open, never derived from the roster: the
+// tell that this model has broken is a tab existing for an agent nobody
 // opened (ruling 8600), and that stays false only because nothing writes to
 // this array except an explicit open.
 let agTabs=[];        // [{agent, gid, url, err}]
 let agTabOn=null;     // gid of the visible tab
+// The last /agents answer, by name. A tab offers only the actions the agent's
+// CURRENT state allows, so the strip redraws from this -- never from whatever
+// was true at the moment the tab was opened.
+let agRows={};
+let agAll=[];         // that answer in order, for the roster to redraw locally
+// agent -> [room id]. See tokenRooms().
+let agTokRooms=null;
 // A failure inside an iframe looks identical whatever caused it (ruling
 // 8718): a refused second driver, an unreachable launcher and a dead
 // container all render as nothing. So every failure carries WHICH ONE, taken
@@ -1480,18 +1566,33 @@ function attachFailure(e){
  if(e&&e.status)return 'the launcher returned '+e.status;
  return 'the launcher is not reachable ('+((e&&e.message)||'no response')+')';
 }
-async function openTerminal(agent){
- if(agTabs.some(t=>t.agent===agent&&!t.err)){
+function agActive(){
+ const t=agTabs.find(x=>x.gid===agTabOn);
+ return t?t.agent:null;
+}
+// OPENING A STOPPED AGENT IS STILL OPENING IT. Before this, only a running
+// agent could be reached from the rail and everything else was a row you
+// could not click -- so the state that most needs an action (stopped, broken,
+// retired) was the state with nowhere to act. A tab opens for any agent; what
+// fills the well is either its terminal or the sentence saying why there is
+// none, and the actions sit on the tab either way.
+async function openAgent(name){
+ const had=agTabs.find(t=>t.agent===name);
+ if(had){
   // Already open: SELECT it rather than minting a second grant. A second
   // driver for an agent you already hold would be refused by your own first
   // session, which is a confusing way to learn you already had it.
-  const t=agTabs.find(x=>x.agent===agent&&!x.err);
-  agTabOn=t.gid;drawTabs();return;
+  agTabOn=had.gid;drawTabs();return;
+ }
+ const a=agRows[name]||{};
+ if(a.status!=='running'){
+  agTabs.push({agent:name,gid:'s-'+name,url:'',err:''});
+  agTabOn='s-'+name;drawTabs();return;
  }
  let pre;
- try{pre=await lapi('/agents/'+encodeURIComponent(agent)+'/grants');}
+ try{pre=await lapi('/agents/'+encodeURIComponent(name)+'/grants');}
  catch(e){
-  agTabs.push({agent,gid:'e-'+agent+'-'+agTabs.length,url:'',
+  agTabs.push({agent:name,gid:'e-'+name+'-'+agTabs.length,url:'',
                err:attachFailure(e)});
   agTabOn=agTabs[agTabs.length-1].gid;drawTabs();return;
  }
@@ -1517,20 +1618,20 @@ async function openTerminal(agent){
  const held=(pre.grants||[]).find(g=>g.mode==='driver'&&!g.revoked_ns&&
    g.grantee!=='me'&&(!g.expiry_ns||g.expiry_ns>now));
  if(held){
-  agTabs.push({agent,gid:'held-'+held.id,url:'',
+  agTabs.push({agent:name,gid:'held-'+held.id,url:'',
    err:'driver refused: grant '+held.id+' already holds the keyboard for '+
-       agent+'. Revoke it, or the owner can flip multi-driver on.'});
+       name+'. Revoke it, or the owner can flip multi-driver on.'});
   agTabOn=agTabs[agTabs.length-1].gid;drawTabs();return;
  }
  try{
-  const g=await lapi('/agents/'+encodeURIComponent(agent)+'/grants',
+  const g=await lapi('/agents/'+encodeURIComponent(name)+'/grants',
    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
-  agTabs.push({agent,gid:g.id,url:AGBASE+g.attach_url,err:''});
+  agTabs.push({agent:name,gid:g.id,url:AGBASE+g.attach_url,err:''});
   agTabOn=g.id;
  }catch(e){
   // A container that is not running fails HERE, at the mint, with a status --
   // so it is nameable before a frame ever opens.
-  agTabs.push({agent,gid:'e-'+agent+'-'+agTabs.length,url:'',
+  agTabs.push({agent:name,gid:'e-'+name+'-'+agTabs.length,url:'',
                err:attachFailure(e)});
   agTabOn=agTabs[agTabs.length-1].gid;
  }
@@ -1547,18 +1648,66 @@ async function closeTab(gid){
  // looks held, the agent looks driven, and nothing says otherwise. The
  // launcher's sweep is what covers the killed-browser case, because it
  // observes the session disappearing rather than being told.
- if(t&&!t.err)try{
+ if(t&&!t.err&&t.url)try{
   await lapi('/agents/'+encodeURIComponent(t.agent)+'/grants/'+
    encodeURIComponent(gid),{method:'DELETE'});
  }catch(e){/* the sweep reclaims it; nothing here should block the close */}
 }
+// The actions, on the tab, for the ACTIVE tab only (operator, msg 8751): an
+// inactive tab is a place to go, not a place to act, and a strip of six tabs
+// each carrying four buttons is a minefield over a one-pixel target.
+// Every one is a real <button> with its own aria-label -- Tab reaches them in
+// the order they read, and the icon is decorative to a screen reader.
+function tabActions(t){
+ if(t.gid!==agTabOn)return '';
+ const a=agRows[t.agent]||{};
+ if(!a.agent)return '';
+ const st=a.state||(a.status==='running'?'running':'stopped');
+ const gone=(st==='retired'||st==='erased');
+ const broken=(a.status==='absent');
+ const b=(k,icon,label,cls)=>'<button type="button" data-agact="'+k+
+  '" data-agent="'+esc(t.agent)+'"'+(cls?' class="'+cls+'"':'')+
+  ' title="'+esc(label)+'" aria-label="'+esc(label)+'">'+
+  '<span aria-hidden="true">'+icon+'</span></button>';
+ let out='';
+ if(a.status==='running')out+=b('stop','&#9632;','stop '+t.agent);
+ else if(gone)out+=b('recreate','&#8635;','recreate '+t.agent);
+ else if(!broken)out+=b('start','&#9654;','start '+t.agent);
+ // Not offered on a BROKEN row: there is no container to read the current
+ // config back from, so the form could only be prefilled with blanks, and
+ // a blank form reads as "this agent is configured with nothing" rather
+ // than "we cannot see it". Destroy is still the honest action there.
+ if(!broken&&!gone)out+=b('edit','&#9998;','edit '+t.agent);
+ if(!gone)out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
+ return '<span class="acts">'+out+'</span>';
+}
+// Why this agent has no terminal, said in the well where the terminal would
+// be. A blank frame and a stopped container look identical otherwise.
+function stateSentence(name){
+ const a=agRows[name]||{};
+ const st=a.state||(a.status==='running'?'running':'stopped');
+ const say=st==='retired'
+   ? 'Retired -- its container is gone and its files are kept. Recreating this name resumes everything it learned locally.'
+  :st==='erased'
+   ? 'Erased -- no container and no files. The hive still holds its messages, memories and lessons.'
+  :a.status==='absent'
+   ? 'Broken -- there is a launcher record for this agent but no container. Destroy clears the stale record.'
+   : 'Stopped -- there is no session to attach to. Start it from the tab above and this becomes its terminal.';
+ return '<b>'+esc(name)+'</b> <span class="pDim">'+esc(st)+'</span>'+
+  '<div class="pAsk">'+say+'</div>';
+}
 function drawTabs(){
  const strip=$('agTabs'),frames=$('agFrames');
  strip.hidden=frames.hidden=!agTabs.length;
+ $('agEmpty').hidden=!!agTabs.length;
  strip.innerHTML=agTabs.map(t=>
   '<span class="tab'+(t.gid===agTabOn?' on':'')+(t.err?' err':'')+
-   '" data-tab="'+esc(t.gid)+'">'+esc(t.agent)+
-   '<span class="x" data-tabx="'+esc(t.gid)+'" title="close">&times;</span></span>'
+   '" data-tab="'+esc(t.gid)+'">'+
+   '<span class="swatch" style="background:'+color(t.agent)+'"></span>'+
+   esc(t.agent)+tabActions(t)+
+   '<button type="button" class="x" data-tabx="'+esc(t.gid)+
+   '" title="close this tab" aria-label="close the tab for '+esc(t.agent)+
+   '"><span aria-hidden="true">&times;</span></button></span>'
  ).join('');
  // Frames are RECONCILED, never re-rendered: rebuilding innerHTML here would
  // recreate every iframe and drop every live attach, so an open tab would die
@@ -1570,55 +1719,450 @@ function drawTabs(){
   if(!el){
    if(t.err){el=document.createElement('div');el.className='frErr';
     el.textContent=t.err;}
+   else if(!t.url){el=document.createElement('div');el.className='frState';}
    else{el=document.createElement('iframe');el.className='fr';el.src=t.url;
     el.title='terminal for '+t.agent;}
    el.dataset.frame=t.gid;frames.appendChild(el);
   }
+  // A state panel is a READING of something that changes underneath it, so it
+  // repaints every draw; an iframe never does, for the reason above.
+  if(el.className==='frState')el.innerHTML=stateSentence(t.agent);
   el.hidden=(t.gid!==agTabOn);
  }
  for(const el of strip.querySelectorAll('[data-tab]'))el.onclick=ev=>{
-  if(ev.target.dataset.tabx)return;
-  agTabOn=el.dataset.tab;drawTabs();
+  if(ev.target.closest('[data-tabx],[data-agact]'))return;
+  agTabOn=el.dataset.tab;drawTabs();drawNote();drawRoster();
  };
  for(const el of strip.querySelectorAll('[data-tabx]'))el.onclick=ev=>{
-  ev.stopPropagation();closeTab(el.dataset.tabx);
+  ev.stopPropagation();closeTab(el.dataset.tabx).then(()=>{drawNote();drawRoster();});
  };
+ for(const el of strip.querySelectorAll('[data-agact]'))el.onclick=ev=>{
+  ev.stopPropagation();
+  const n=el.dataset.agent,k=el.dataset.agact;
+  if(k==='edit')openEdit(n);
+  else if(k==='destroy')openDestroy(n);
+  else if(k==='recreate')openCreate(n);
+  else agLifecycle(n,k);
+ };
+ drawNote();
 }
-// Roster selection. null = nothing picked yet, which is a real state: the well
-// shows the whole list until you choose, so the pane is never an empty frame
-// with no way to find out what exists.
-let agSel=null;
-function drawRoster(agents,defaultImage){
+// THE BOOT REPORT'S PROBLEMS, SAID OUT LOUD, beside the terminal they explain.
+// Not a count and not a badge: "2 problems" sends the reader looking, where
+// the line itself has already answered.
+// ESCAPING IS A SECURITY BOUNDARY HERE, not tidiness. The entrypoint writes
+// this file, but it lives in a home the AGENT can write, and it renders in the
+// OPERATOR's privileged browser -- same posture as the ratify queue rendering
+// memory text. Every field goes through esc() and the body is a <pre>, never
+// innerHTML of raw report text.
+function drawNote(){
+ const el=$('agNote'),n=agActive(),b=n&&agBoot[n];
+ if(!b||!b.problems.length){el.hidden=true;el.innerHTML='';return;}
+ el.hidden=false;
+ el.innerHTML='<div class="pAsk err">'+b.problems.map(esc).join('<br>')+
+  '<br><span class="lnk" data-agboot="'+esc(n)+'" role="button" tabindex="0">'+
+  (b.open?'hide':'full report')+'</span></div>'+
+  (b.open?'<pre class="bootRep">'+esc(b.report||'')+'</pre>':'');
+ const lnk=el.querySelector('[data-agboot]');
+ const flip=()=>{b.open=!b.open;drawNote();};
+ lnk.onclick=flip;
+ lnk.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();flip();}};
+}
+// ---- the roster rail ------------------------------------------------------
+// WHICH ROOMS an agent reaches, from the credential that grants the reach:
+// GET /tokens is owner-scoped and every bound token carries its agent name and
+// its room ids, so this needs no new endpoint and no guess. Presence would
+// only show the agents currently talking, and a stopped agent still belongs to
+// its rooms. Later tokens win: a mint SUPERSEDES the previous bound token for
+// a name, and list_tokens is ordered oldest-first, so the last write is the
+// live membership.
+const agRoomNames={};   // room id -> name, as the tokens themselves report it
+async function tokenRooms(){
+ try{
+  const d=await api('/tokens');const m={};
+  for(const t of d.tokens||[]){
+   if(!t.agent_name)continue;
+   // A token's rooms arrive as {id: name} -- an object, not a list. Reading it
+   // as a list put every agent in "no room" with the data sitting right there,
+   // so both shapes are accepted and the NAMES it carries feed the group
+   // headings: a room the reader is not a member of still gets its name.
+   const r=t.rooms||{};
+   if(Array.isArray(r))m[t.agent_name]=r;
+   else{m[t.agent_name]=Object.keys(r);
+        for(const id in r)agRoomNames[id]=r[id];}
+  }
+  return m;
+ }catch(e){return {};}   // soft: an ungrouped roster still lists every agent
+}
+// Tokens are OWNER-SCOPED. Looking at agents you did not provision yourself
+// answers with an empty list -- and every row lands in "no room" with the
+// rooms sitting one call away. So what the credential cannot say, the ROOMS
+// say for themselves: /agents-seen is room-scoped, readable by any member, and
+// it remembers agents whose container is stopped, which presence cannot.
+// Tokens still win where they exist: they are the live membership, this is the
+// hive's recollection of who has been in the room.
+async function seenRooms(m){
+ // Snapshot the token-backed names FIRST: testing m[name] inside the loop
+ // would treat the first room this fallback added as "already answered" and
+ // an agent in three rooms would show under one.
+ const owned=new Set(Object.keys(m));
+ for(const r of (me&&me.rooms)||[]){
+  try{
+   const d=await api('/agents-seen?room='+encodeURIComponent(r.id));
+   for(const a of d.agents||[]){
+    if(owned.has(a.name))continue;
+    (m[a.name]=m[a.name]||[]).push(r.id);
+   }
+  }catch(e){/* soft, per room: one unreadable room must not ungroup the rest */}
+ }
+ return m;
+}
+let rostOpen={};        // room id -> the human's own collapse choice
+try{rostOpen=JSON.parse(localStorage.revRosterOpen||'{}');}catch(e){rostOpen={};}
+let rostFolds={};       // room id -> its retired/erased fold is expanded
+let rostQ='';           // the filter box
+function roomName(id){
+ const r=((me&&me.rooms)||[]).find(x=>x.id===id);
+ return r?r.name:(agRoomNames[id]||id.slice(0,8));
+}
+function drawRoster(){
  const box=$('roster');
- const st=a=>a.state||(a.status==='running'?'running':'stopped');
- box.innerHTML=agents.map(a=>{
-  const s=st(a);
-  const bad=(s==='erased'||a.status==='absent');
-  return '<div class="agent'+(agSel===a.agent?' sel':'')+'" data-rost="'+
-   esc(a.agent)+'" title="'+esc(a.agent)+' -- '+esc(s)+'">'+
+ const agents=agAll;
+ const behind=a=>!!(a.image&&agDefaultImage&&a.image!==agDefaultImage);
+ const stateOf=a=>a.state||(a.status==='running'?'running':'stopped');
+ const gone=a=>{const s=stateOf(a);return s==='retired'||s==='erased';};
+ // ACTIONABLE FLOATS: what wants a decision sorts to the top of its group,
+ // recovery cases sink. Alphabetical inside each band, so the order is still
+ // predictable enough to build muscle memory on.
+ const band=a=>a.status==='absent'?0:behind(a)?1:a.status==='running'?2:
+   gone(a)?4:3;
+ const q=rostQ.trim().toLowerCase();
+ const hit=a=>!q||a.agent.toLowerCase().indexOf(q)>=0;
+ // EXCEPTIONS CARRY TEXT, NORMAL STATES CARRY A DOT. "running" and "stopped"
+ // are the two states nobody needs to read -- a filled or hollow dot says them
+ // in 8px where the word costs seven characters of a rail that only has
+ // twenty. States that want a decision keep their word. The full state is in
+ // the row's accessible name either way, so a screen reader and a colourblind
+ // reader get exactly what the eye gets -- the dot is never colour alone, it
+ // is fill AND ring.
+ const row=a=>{
+  const s=stateOf(a);
+  const word=a.status==='absent'?'broken':gone(a)?s:behind(a)?'behind':'';
+  return '<button type="button" class="agent'+
+   (agActive()===a.agent?' sel':'')+
+   (a.status==='running'?' run':'')+(gone(a)?' gone':'')+
+   (a.status==='absent'?' bad':'')+'" data-rost="'+esc(a.agent)+'" '+
+   'aria-label="'+esc(a.agent+' -- '+s+(word&&word!==s?', '+word:''))+
+   '" title="'+esc(a.agent+' -- '+s)+'">'+
    '<span class="swatch" style="background:'+color(a.agent)+'"></span>'+
    '<span class="nm">'+esc(a.agent)+'</span>'+
-   '<span class="st'+(bad?' err':'')+'">'+esc(s)+
-    (a.image&&defaultImage&&a.image!==defaultImage?' &middot; behind':'')+
-   '</span></div>';
- }).join('')+
+   '<span class="st'+(a.status==='absent'?' err':'')+'">'+esc(word)+'</span>'+
+   '<span class="dot" aria-hidden="true"></span></button>';
+ };
+ // ONE LEVEL OF TREE, and an agent in three rooms appears three times --
+ // that is the fact the operator asked to see, and duplicates cost nothing
+ // once a group can collapse.
+ const groups=new Map(),none=[];
+ for(const a of agents){
+  const rooms=(agTokRooms&&agTokRooms[a.agent])||[];
+  if(!rooms.length){none.push(a);continue;}
+  for(const rid of rooms){
+   if(!groups.has(rid))groups.set(rid,[]);
+   groups.get(rid).push(a);
+  }
+ }
+ const ordered=[...groups.entries()]
+  .sort((x,y)=>roomName(x[0]).localeCompare(roomName(y[0])));
+ if(none.length)ordered.push(['',none]);
+ const grp=([rid,rows])=>{
+  const shown=rows.filter(hit).sort((x,y)=>band(x)-band(y)||
+    x.agent.localeCompare(y.agent));
+  if(q&&!shown.length)return '';
+  // RECOVERY CASES FOLD. Retired and erased agents are recoverable, so they
+  // stay reachable; they are not daily traffic, so they are not in the way.
+  const live=shown.filter(a=>!gone(a)),dead=shown.filter(gone);
+  const open=rostFolds[rid];
+  // ONE GROUP OPEN BY DEFAULT -- the room you are reading. Fifteen expanded
+  // rooms is the flat list again with extra headings. A filter match overrides
+  // it: a group hiding a hit is a search that lies.
+  const isOpen=q?true:(rid in rostOpen?!!rostOpen[rid]:rid===room);
+  return '<details class="rgrp"'+(isOpen?' open':'')+' data-rgrp="'+esc(rid)+'">'+
+   '<summary>'+esc(rid?roomName(rid):'no room')+
+    '<span class="cnt">'+shown.length+'</span></summary>'+
+   live.map(row).join('')+
+   (dead.length?(open?dead.map(row).join(''):'')+
+     '<button type="button" class="fold" data-fold="'+esc(rid)+'">'+
+     (open?'&minus; hide':'+ '+dead.length)+' retired</button>':'')+
+   '</details>';
+ };
+ const html=ordered.map(grp);
+ box.innerHTML=(agents.length?'':'<div class="pDim">no agents yet</div>')+
+  html.join('')+
+  (q&&!html.some(Boolean)?'<div class="pDim">no agent matches '+
+    esc(rostQ)+'</div>':'')+
   '<div class="newAgent"><button type="button" id="rostNew">+ New Agent</button></div>';
- for(const el of box.querySelectorAll('[data-rost]'))el.onclick=()=>{
-  // Selecting an agent is NOT opening a terminal. The roster says what
-  // exists; opening is a separate act, and conflating them is what would put
-  // a tab on screen for an agent nobody asked to open.
-  agSel=(agSel===el.dataset.rost)?null:el.dataset.rost;
-  agEdit=null;agConfirm=null;
-  refreshAgents();
+ for(const el of box.querySelectorAll('[data-rgrp]'))el.ontoggle=()=>{
+  // Remembered per room, so the rail you left is the rail you come back to.
+  // Not recorded while filtering: the open state is the filter's, not yours.
+  if(rostQ.trim())return;
+  rostOpen[el.dataset.rgrp]=el.open;
+  localStorage.revRosterOpen=JSON.stringify(rostOpen);
  };
+ for(const el of box.querySelectorAll('[data-fold]'))el.onclick=()=>{
+  rostFolds[el.dataset.fold]=!rostFolds[el.dataset.fold];drawRoster();
+ };
+ // THE RAIL DOES NOT ACT. Selecting is opening and that is all it does; every
+ // action on an agent lives on its tab, so nothing here can start, stop or
+ // destroy anything by a mis-click on a 260px column.
+ for(const el of box.querySelectorAll('[data-rost]'))
+  el.onclick=()=>openAgent(el.dataset.rost);
  const nb=$('rostNew');
- if(nb)nb.onclick=()=>{
-  agSel=null;agEdit=null;agConfirm=null;
-  refreshAgents();
-  const det=$('addAgent'),box2=$('agName');
-  if(det)det.open=true;
-  if(box2)box2.focus();
+ if(nb)nb.onclick=()=>openCreate('');
+}
+$('rostFilter').oninput=e=>{rostQ=e.target.value;drawRoster();};
+$('rostFilter').onkeydown=e=>{
+ if(e.key==='Escape'&&rostQ){e.stopPropagation();rostQ='';e.target.value='';drawRoster();}
+};
+// ---- the per-agent modals -------------------------------------------------
+// One shell for edit, destroy and create. The markup inside is the pane's own,
+// moved rather than rewritten: the copy the gates hold ships byte-for-byte.
+let agDlgReturn=null;
+function openAgDlg(html,focusSel){
+ agDlgReturn=document.activeElement;
+ $('agDlgCard').innerHTML=html;
+ $('agDlg').classList.add('on');
+ const f=$('agDlgCard').querySelector(focusSel)||
+   $('agDlgCard').querySelector('input,select,button');
+ if(f)f.focus();
+}
+function closeAgDlg(){
+ $('agDlg').classList.remove('on');
+ $('agDlgCard').innerHTML='';
+ agEdit=null;
+ // Focus goes back to the control that opened this -- the tab icon you were
+ // on. A modal that drops focus to <body> sends a keyboard user back to the
+ // top of the page for every confirm.
+ if(agDlgReturn&&document.contains(agDlgReturn))agDlgReturn.focus();
+ agDlgReturn=null;
+}
+document.addEventListener('keydown',e=>{
+ if(e.key==='Escape'&&$('agDlg').classList.contains('on'))closeAgDlg();});
+$('agDlg').onclick=e=>{if(e.target===$('agDlg'))closeAgDlg();};
+// Tab stays INSIDE the dialog. aria-modal tells a screen reader the page
+// behind is inert; without this, the keyboard disagrees with it and Tab walks
+// off into a chat composer the user cannot see -- and on the destroy modal
+// that means typing the confirm name into the wrong box.
+$('agDlg').addEventListener('keydown',e=>{
+ if(e.key!=='Tab')return;
+ const f=[...$('agDlgCard').querySelectorAll(
+   'input:not([disabled]),select,button:not([disabled]),[href]')]
+  .filter(el=>el.offsetParent!==null);
+ if(!f.length)return;
+ const first=f[0],last=f[f.length-1];
+ if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}
+ else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}
+});
+// Opening the form FETCHES the current config first. Prefilling from the
+// roster would prefill from launcher.db, which records what was requested at
+// provision -- the container is what actually happened, and the gap between
+// those two is the entire reason this slice exists.
+async function openEdit(name){
+ try{
+  // agMeta is fetched at the END of refreshAgents, so on the FIRST open it
+  // is still null and the form would render with an empty role list and no
+  // room checkboxes -- a control that only works the second time you use it,
+  // which reads as a broken feature (unreachable-control-reads-as-missing-
+  // capability). Load it here rather than relying on render order.
+  if(!agMeta)agMeta=await lapi('/rooms-mine');
+  const d=await lapi('/agents/'+encodeURIComponent(name)+'/config');
+  if(!d.config){toast('cannot read '+name+"'s configuration -- no container to "+
+   'read it from; start it first',true);return;}
+  agEdit={agent:name,cfg:d.config,rooms:d.rooms||[],result:null};
+  renderEdit();
+ }catch(e){toast('could not open the editor: '+(e.message||e),true);}
+}
+function renderEdit(){
+ openAgDlg(agEditPanel({agent:agEdit.agent}),'[data-agedrepo]');
+ const box=$('agDlgCard');
+ box.querySelector('[data-agedno]').onclick=closeAgDlg;
+ box.querySelector('[data-agedapply]').onclick=async function(){
+  const b=this,st=box.querySelector('[data-agedstatus]');
+  const q=s=>box.querySelector(s);
+  const body={
+   repo_url:q('[data-agedrepo]').value.trim(),
+   role:q('[data-agedrole]').value,
+   append:q('[data-agedappend]').value.trim(),
+   model:q('[data-agedmodel]').value.trim(),
+   image:q('[data-agedimage]').value.trim(),
+   rooms:[...box.querySelectorAll('[data-agedroom]:checked')].map(c=>c.value)};
+  try{
+   // Say what is actually about to happen. "saving..." would be a lie about
+   // the cost: the container is going away and coming back.
+   st.textContent=' restarting '+b.dataset.agedapply+'...';
+   b.disabled=true;
+   const res=await lapi('/agents/'+encodeURIComponent(b.dataset.agedapply)+
+    '/config',{method:'PUT',body:JSON.stringify(body)});
+   agEdit={agent:b.dataset.agedapply,cfg:res.config||{},
+           rooms:body.rooms,result:res};
+   const keep=agDlgReturn;renderEdit();agDlgReturn=keep;
+   // A restart just rotated the credential and may have moved the agent's
+   // rooms, so the rail's grouping is stale the moment this returns.
+   agTokRooms=await tokenRooms();
+   refreshAgents();
+  }catch(e){
+   b.disabled=false;
+   st.textContent='';
+   toast('edit failed: '+(e.message||e),true);
+  }
  };
+}
+// TWO INTENTS, NOT ONE. U7 made this panel's single button always send
+// purge=1, which made the copy true but left retiring an agent and erasing
+// it as the same irreversible act -- so fixing a mistyped repo URL cost the
+// agent everything it had learned locally. Friction now scales with what is
+// actually unrecoverable: retire is a plain confirm (the container and its
+// grants die, the home survives, recreating the name reuses it), erase
+// still demands the typed name. The safe path is the easy one.
+function openDestroy(name){
+ openAgDlg(
+  '<div class="pRow warn"><b id="agDlgTitle">Destroy '+esc(name)+'?</b></div>'+
+  '<div class="pAsk">Either way its running session and bus grants end now '+
+  '-- that cannot be undone. Hive memory (lessons, decisions, saved state) '+
+  'is kept.</div>'+
+  '<div class="pRow"><b>Retire &mdash; keep its files</b></div>'+
+  '<div class="pAsk">Local repos and everything it learned locally '+
+  '(its ~/.claude): KEPT, and reused if you create an agent with this name '+
+  'again.</div>'+
+  '<div class="pRow"><button data-agretire="'+esc(name)+
+  '">retire '+esc(name)+'</button></div>'+
+  '<div class="pRow"><b>Erase &mdash; take everything</b></div>'+
+  '<div class="pAsk">Container, local repos, and everything it learned '+
+  'locally (its ~/.claude): gone. Nothing local survives.</div>'+
+  '<div class="pRow">Type <b>'+esc(name)+'</b> to erase: '+
+   '<input data-agdelconfirm size="16" autocomplete="off" style="flex:0 0 14rem" '+
+   'aria-label="type '+esc(name)+' to confirm erasing it"></div>'+
+  '<div class="pRow"><button class="danger" data-agdelyes="'+esc(name)+
+  '" disabled>erase '+esc(name)+'</button> '+
+  '<button data-agdelno>cancel</button></div>',
+  // Focus lands on RETIRE, not on the erase field (keyboard/screen-reader
+  // path): the modal opens on the recoverable action, and reaching the
+  // irreversible one is a deliberate move past it rather than the default
+  // landing spot. Erase still needs the name typed, so no keystroke here can
+  // destroy anything by itself.
+  '[data-agretire]');
+ const box=$('agDlgCard');
+ const inp=box.querySelector('[data-agdelconfirm]');
+ const yes=box.querySelector('[data-agdelyes]');
+ // Destroy is irreversible and authority-changing, so a click alone cannot
+ // confirm it: typing the exact name is what enables the button (U7).
+ inp.oninput=()=>{yes.disabled=inp.value!==name;};
+ box.querySelector('[data-agdelno]').onclick=closeAgDlg;
+ const after=async()=>{
+  closeAgDlg();
+  const t=agTabs.find(x=>x.agent===name);
+  if(t)await closeTab(t.gid);
+  agTokRooms=await tokenRooms();
+  refreshAgents();
+ };
+ // Retire: plain DELETE, no purge -- the data root survives, so re-creating
+ // this name picks its files back up. This is the reconfiguration path, and
+ // the reason destroy stopped being the only way to change a setting.
+ box.querySelector('[data-agretire]').onclick=async()=>{
+  try{
+   await lapi('/agents/'+encodeURIComponent(name),{method:'DELETE'});
+   await after();
+   toast('retired '+name+' -- its files are kept',true);
+  }catch(e){toast(e.message);}
+ };
+ yes.onclick=async()=>{
+  if(yes.disabled)return;
+  try{
+   // purge=1: rmtree of the whole agent home, claude/ as well as repos/.
+   // Gated behind the typed name because this is the only irreversible
+   // action in the product.
+   await lapi('/agents/'+encodeURIComponent(name)+'?purge=1',{method:'DELETE'});
+   await after();
+  }catch(e){toast(e.message);}
+ };
+}
+// Creation is a page-level action and it has ONE entry point: the rail's
+// "+ New Agent". It was also a disclosure inside the well, which is two
+// selectors for one thing (operator, msg 8752). Recreate is CREATE with the
+// name filled in -- one provisioning path, no second implementation.
+async function openCreate(name){
+ // Load the roles and rooms BEFORE rendering, never after. A form that opens
+ // with no room checkboxes does not look broken -- it looks like an agent with
+ // no rooms is a normal thing to create, and that agent gets no bus credential
+ // minted at all. The unreachable-control defect with teeth.
+ if(!agMeta)try{agMeta=await lapi('/rooms-mine');}
+ catch(e){toast('cannot read your rooms right now -- '+(e.message||e),true);return;}
+ const roles=(agMeta&&agMeta.roles)||[];
+ const rooms=(agMeta&&agMeta.rooms)||[];
+ openAgDlg(
+  '<div class="pRow"><b id="agDlgTitle">'+(name?'Recreate '+esc(name):'New agent')+
+   '</b></div>'+
+  (name?'<div class="pAsk">Check the role, rooms and repo before anything is '+
+    'built -- recreating provisions a container under this name again.</div>':'')+
+  '<div class="pRow"><input id="agName" placeholder="agent name (e.g. senior-dev)" '+
+   'value="'+esc(name)+'" aria-label="agent name">'+
+   '<select id="agRole" aria-label="role template">'+
+   '<option value="">no role template</option>'+
+   roles.map(r=>'<option value="'+esc(r)+'">'+esc(r)+'</option>').join('')+
+   '</select></div>'+
+  '<div class="pRow"><input id="agAppend" style="flex:1" '+
+   'placeholder="anything to append to the role prompt (optional)" '+
+   'aria-label="append to the role prompt"></div>'+
+  '<div class="pChips" id="agRooms">'+(rooms.length?rooms.map(r=>
+    '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"> '+
+    esc(r.name)+' <span class="pDim">('+esc(r.kind)+')</span></label>').join('')
+   :'<span class="pDim">no rooms yet -- create one from the Rooms tab first</span>')+
+   '</div>'+
+  '<div class="pRow"><input id="agRepo" aria-label="repo URL" '+
+   'placeholder="repo URL (blank = your profile default)"></div>'+
+  '<div class="pRow"><input id="agModel" aria-label="model" '+
+   'placeholder="model (blank = the account default)"></div>'+
+  '<div class="pRow"><button id="agCreate">create agent</button> '+
+   '<button id="agCreateNo">cancel</button>'+
+   '<span class="pDim">the token is minted from your session and never shown</span>'+
+   '</div>'+
+  '<div id="agStatus" class="pDim"></div>','#agName');
+ $('agCreateNo').onclick=closeAgDlg;
+ $('agCreate').onclick=async()=>{
+  const st=$('agStatus');
+  const picked=[...document.querySelectorAll('#agRooms input:checked')]
+   .map(c=>c.value);
+  const n=$('agName').value.trim();
+  try{
+   st.textContent='provisioning...';
+   await lapi('/agents',{method:'POST',body:JSON.stringify({
+    agent:n,rooms:picked,role:$('agRole').value,
+    append:$('agAppend').value.trim(),
+    repo_url:$('agRepo').value.trim(),
+    model:$('agModel').value.trim()})});
+   st.textContent='container up; waiting for the agent to reach the bus...';
+   agTokRooms=await tokenRooms();
+   for(let i=0;i<60;i++){
+    await new Promise(r=>setTimeout(r,2000));
+    const a=await lapi('/agents/'+encodeURIComponent(n));
+    if(a.live){st.textContent='LIVE: '+n+' is on the bus.';refreshAgents();return;}
+   }
+   st.textContent='container is up but not live yet -- check its logs.';
+   refreshAgents();
+  }catch(e){st.textContent='';toast(e.message);}
+ };
+}
+// start/stop from the tab. The tab was showing a state that just changed, so
+// drop what it was showing and reopen it: a started agent lands on its
+// terminal and a stopped one lands on the sentence saying why it has none,
+// without a second click to find out.
+async function agLifecycle(name,verb){
+ try{
+  await lapi('/agents/'+encodeURIComponent(name)+'/'+verb,
+   {method:'POST',body:'{}'});
+ }catch(e){toast(e.message);return;}
+ const t=agTabs.find(x=>x.agent===name);
+ if(t)await closeTab(t.gid);
+ await refreshAgents();
+ await openAgent(name);
 }
 // The button exists only where the launcher's location was declared, so this
 // must not assume it: an unguarded onclick on a missing element throws at
@@ -1632,7 +2176,7 @@ function agUnavailable(msg){
  $('agUnavailMsg').textContent='agent management is unavailable right now ('+
   msg+') -- chat, rooms, and memory are unaffected. ';
  $('agUnavail').hidden=false;
- $('agList').innerHTML='';
+ $('roster').innerHTML='';
 }
 // The edit form and its verdict. Split out of the row map because it is the
 // only branch there that renders a RESULT as well as a control.
@@ -1659,7 +2203,7 @@ function agEditPanel(a){
     ?'<div class="pAsk">Its bus credential was re-minted; the previous one no '+
      'longer answers for this name.</div>':'');
  return '<div data-ageditbox="'+esc(a.agent)+'">'+
-  '<div class="pRow"><b>Edit '+esc(a.agent)+'</b></div>'+
+  '<div class="pRow"><b id="agDlgTitle">Edit '+esc(a.agent)+'</b></div>'+
   // Keep this sentence UNBROKEN in the source. Split across a concatenation it
   // still renders correctly for the user, and tests/ui_copy.py -- which reads
   // the file, not the DOM -- cannot see it. Copy that a gate is answerable for
@@ -1710,141 +2254,20 @@ async function refreshAgents(){
    e.status?'the launcher returned '+e.status+' from '+AGBASE+'/agents':
    'the launcher is not reachable ('+e.message+')');
   return;}
- const list=$('agList');
  agDefaultImage=d.default_image||'';
- // A selection that no longer exists (destroyed in another tab, erased by
- // someone else) must not leave the well showing a row for nothing. Drop it
- // and fall back to the full list rather than rendering an empty detail pane.
- if(agSel&&!d.agents.some(a=>a.agent===agSel))agSel=null;
- drawRoster(d.agents,agDefaultImage);
- // THE WELL SHOWS WHAT YOU PICKED, the rail shows what exists. With nothing
- // picked it shows everything, so the pane is browsable before you know any
- // names. This is the half that keeps roster and well from being two
- // selectors for one thing.
- const shown=agSel?d.agents.filter(a=>a.agent===agSel):d.agents;
- // BEHIND is a comparison, not a version parse: any difference from what the
- // launcher would provision today is worth showing, and inventing an ordering
- // over image tags would be a second thing to keep true. An agent with no
- // recorded image (a hive-only row) is not behind -- it is not running.
- const behind=a=>!!(a.image&&agDefaultImage&&a.image!==agDefaultImage);
- const running=a=>a.status==='running';
- // absent: a launcher.db record with no matching container -- out-of-band
- // `docker rm`, host GC -- derived state that drifted (self-heal-or-report-
- // absence doctrine). Nothing to start or stop, so destroy (which clears the
- // stale record) is the only honest action.
- const broken=a=>a.status==='absent';
- // Only the actions valid for the agent's current state are ever offered --
- // same reasoning as the launcher page's own U6-predecessor fix: a stopped
- // agent shows start, a running one shows watch+stop, both show destroy.
- list.innerHTML=(d.agents.length?'':'<div class="pDim">no agents yet</div>')+
-  (agSel?'<div class="pRow"><b>'+esc(agSel)+'</b>'+
-    '<button id="agShowAll">show all</button></div>':'')+
-  shown.map(a=>{
-   // TWO INTENTS, NOT ONE. U7 made this panel's single button always send
-   // purge=1, which made the copy true but left retiring an agent and erasing
-   // it as the same irreversible act -- so fixing a mistyped repo URL cost the
-   // agent everything it had learned locally. Friction now scales with what is
-   // actually unrecoverable: retire is a plain confirm (the container and its
-   // grants die, the home survives, recreating the name reuses it), erase
-   // still demands the typed name. The safe path is the easy one.
-   if(agConfirm&&agConfirm.agent===a.agent)
-    return '<div data-agconfirmbox="'+esc(a.agent)+'">'+
-     '<div class="pRow warn"><b>Destroy '+esc(a.agent)+'?</b></div>'+
-     '<div class="pAsk">Either way its running session and bus grants end now '+
-     '-- that cannot be undone. Hive memory (lessons, decisions, saved state) '+
-     'is kept.</div>'+
-     '<div class="pRow"><b>Retire &mdash; keep its files</b></div>'+
-     '<div class="pAsk">Local repos and everything it learned locally '+
-     '(its ~/.claude): KEPT, and reused if you create an agent with this name '+
-     'again.</div>'+
-     '<div class="pRow"><button data-agretire="'+esc(a.agent)+
-     '">retire '+esc(a.agent)+'</button></div>'+
-     '<div class="pRow"><b>Erase &mdash; take everything</b></div>'+
-     '<div class="pAsk">Container, local repos, and everything it learned '+
-     'locally (its ~/.claude): gone. Nothing local survives.</div>'+
-     '<div class="pRow">Type <b>'+esc(a.agent)+'</b> to erase: '+
-      '<input data-agdelconfirm size="16" autocomplete="off" '+
-      'aria-label="type '+esc(a.agent)+' to confirm erasing it"></div>'+
-     '<div class="pRow"><button class="danger" data-agdelyes="'+esc(a.agent)+
-     '" disabled>erase '+esc(a.agent)+'</button> '+
-     '<button data-agdelno="'+esc(a.agent)+'">cancel</button></div></div>';
-   // EDIT IN PLACE (reconfig 2). Before this the only way to fix a mistyped
-   // repo URL was to destroy the agent, so the cheapest correction in the
-   // system cost the most -- and after U7 made destroy always purge, it cost
-   // everything the agent had learned locally.
-   //
-   // The panel states the price BEFORE the click, because it is not free:
-   // applying re-provisions, re-provisioning mints, and a mint supersedes the
-   // agent's previous bound token. Every field edit rotates the credential,
-   // not just a rooms change (ruling 8606, widened at 8699). A restart the
-   // user did not expect is a surprise; a restart they were told about is a
-   // decision.
-   if(agEdit&&agEdit.agent===a.agent)
-    return agEditPanel(a);
-   // FOUR STATES, and what each one OFFERS. The launcher derives the state
-   // from container + files + hive; the row's job is to make the difference
-   // legible, because "erased" used to read as gone forever when the hive
-   // still held everything the agent knew.
-   const h=a.hive||{}, st=a.state||(running(a)?'running':'stopped');
-   const held=[h.messages?h.messages+' messages':'',
-               h.memories?h.memories+' memories':'',
-               h.lessons?h.lessons+' lessons':'',
-               h.has_state_note?'a handoff note':''].filter(Boolean).join(', ');
-   if(st==='retired'||st==='erased'){
-    return '<div class="pRow"><b>'+esc(a.agent)+'</b>'+
-     '<span class="pDim">'+(st==='retired'
-       ?'retired &middot; its files are kept'
-       :'erased &middot; no container, no files')+'</span>'+
-     '<button data-agrecreate="'+esc(a.agent)+'">recreate</button>'+
-     '<div class="pAsk">'+(st==='retired'
-       ? 'Recreating resumes everything it learned locally (its ~/.claude) '+
-         'and its repo checkouts, exactly as it left them.'
-       : 'Nothing local survives, but the hive still holds '+
-         (held||'nothing of its own')+
-         (h.has_state_note?' -- recreating brings it back knowing where it '+
-          'stopped.':'.'))+'</div></div>';
-   }
-   return '<div class="pRow"><b>'+esc(a.agent)+'</b>'+
-    '<span class="pDim'+(broken(a)?' err':'')+'">'+
-     (broken(a)?'broken — container missing':esc(a.status))+
-     ' &middot; '+esc(a.image)+'</span>'+
-    // Names the way out, not just the condition -- a notice with no remedy is
-    // a wall, and the remedy is the edit form one button along, whose image
-    // field is prefilled with what is actually running.
-    (behind(a)?'<span class="pDim err"> behind &middot; current is '+
-      esc(agDefaultImage)+'; use edit to move it</span>':'')+
-    // THE BOOT REPORT'S PROBLEMS, SAID OUT LOUD. Not a count and not a badge:
-    // "2 problems" sends the reader looking, where the line itself has already
-    // answered. This agent booted with no repo and no role prompt, both
-    // silently, and reached its first turn only because a human typed at it --
-    // every one of those facts was sitting in a file nobody could see.
-    // ESCAPING IS A SECURITY BOUNDARY HERE, not tidiness. The entrypoint
-    // writes this file, but it lives in a home the AGENT can write, and it
-    // renders in the OPERATOR's privileged browser -- same posture as the
-    // ratify queue rendering memory text. Every field goes through esc() and
-    // the body is a <pre>, never innerHTML of raw report text.
-    ((agBoot[a.agent]&&agBoot[a.agent].problems.length)
-      ? '<div class="pAsk err">'+agBoot[a.agent].problems.map(esc).join('<br>')+
-        ' <span class="lnk" data-agboot="'+esc(a.agent)+'">'+
-        (agBoot[a.agent].open?'hide':'full report')+'</span></div>'+
-        (agBoot[a.agent].open?'<pre class="bootRep">'+
-          esc(agBoot[a.agent].report||'')+'</pre>':'')
-      : '')+
-    (running(a)
-      ? '<button data-agwatch="'+esc(a.agent)+'">watch</button>'+
-        '<button data-agstop="'+esc(a.agent)+'">stop</button>'
-      : broken(a) ? ''
-      : '<button data-agstart="'+esc(a.agent)+'">start</button>')+
-    // Not offered on a BROKEN row: there is no container to read the current
-    // config back from, so the form could only be prefilled with blanks, and
-    // a blank form reads as "this agent is configured with nothing" rather
-    // than "we cannot see it". Destroy is still the honest action there.
-    (broken(a)?'':'<button data-agedit="'+esc(a.agent)+'">edit</button>')+
-    '<button data-agdel="'+esc(a.agent)+'">destroy</button></div>';
-  }).join('');
+ agAll=d.agents;
+ agRows={};
+ for(const a of d.agents)agRows[a.agent]=a;
+ if(!agTokRooms)agTokRooms=await seenRooms(await tokenRooms());
+ drawRoster();
+ // A tab whose agent no longer exists (erased in another browser) must not
+ // keep a frame open over nothing.
+ const dropped=agTabs.filter(t=>!agRows[t.agent]);
+ for(const t of dropped)await closeTab(t.gid);
+ drawTabs();
  // Fetch each agent's boot report ONCE per pane open, in the background. It is
- // a docker cp per agent, so it must not sit in front of the list rendering --
- // the list is useful immediately and the report is an annotation on it.
+ // a docker cp per agent, so it must not sit in front of the rail rendering --
+ // the rail is useful immediately and the report is an annotation on it.
  // Failures are SILENT here on purpose: the pane already reports launcher
  // trouble once, and a second banner for the same cause is noise. An agent
  // whose report cannot be read simply carries no annotation, which is honest
@@ -1856,206 +2279,16 @@ async function refreshAgents(){
    .then(r=>{
     if(!r.problems||!r.problems.length)return;
     agBoot[a.agent]={problems:r.problems,report:r.report||'',open:false};
-    refreshAgents();
+    drawNote();
    })
    .catch(e=>{/* see above: no annotation, and no second banner */});
  }
- for(const el of list.querySelectorAll('[data-agboot]'))el.onclick=()=>{
-  const b=agBoot[el.dataset.agboot];
-  if(b){b.open=!b.open;refreshAgents();}
- };
- for(const b of list.querySelectorAll('[data-agrecreate]'))b.onclick=()=>{
-  // Recreate is CREATE with the name filled in -- one provisioning path, no
-  // second implementation. The disclosure opens so the human sees (and can
-  // change) the role, rooms and repo before anything is built.
-  const n=b.dataset.agrecreate, box=$('agName'), det=$('addAgent');
-  if(det)det.open=true;
-  if(box){box.value=n;box.focus();}
-  toast('recreate '+n+': check the role and rooms, then create');
- };
- // U8: watch opens a TAB on this page. The popup path is gone -- DES-006 6.4
- // is explicit that terminals live on one page, and the operator stated the
- // same sentence as a constraint: never a separate browser tab or window.
- // NOTE: a gate asserts that popup API is ABSENT from this file, so do not
- // write its name here even to say it is banned -- a byte-level negative
- // cannot tell code from the comment explaining the code.
- for(const b of list.querySelectorAll('[data-agwatch]'))
-  b.onclick=()=>openTerminal(b.dataset.agwatch);
- for(const b of list.querySelectorAll('[data-agstart]'))b.onclick=async()=>{
-  try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstart)+'/start',
-   {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
- };
- for(const b of list.querySelectorAll('[data-agstop]'))b.onclick=async()=>{
-  try{await lapi('/agents/'+encodeURIComponent(b.dataset.agstop)+'/stop',
-   {method:'POST',body:'{}'});refreshAgents();}catch(e){toast(e.message);}
- };
- // The way back out of a selection, in the well where the selection is
- // visible -- not only by re-clicking the rail entry, which requires knowing
- // that clicking it again is what clears it.
- const showAll=$('agShowAll');
- if(showAll)showAll.onclick=()=>{agSel=null;agEdit=null;agConfirm=null;refreshAgents();};
- // Opening the form FETCHES the current config first. Prefilling from the
- // row would prefill from launcher.db, which records what was requested at
- // provision -- the container is what actually happened, and the gap between
- // those two is the entire reason this slice exists.
- for(const b of list.querySelectorAll('[data-agedit]'))b.onclick=async()=>{
-  const n=b.dataset.agedit;
-  try{
-   // agMeta is fetched at the END of refreshAgents, so on the FIRST open it
-   // is still null and the form would render with an empty role list and no
-   // room checkboxes -- a control that only works the second time you use it,
-   // which reads as a broken feature (unreachable-control-reads-as-missing-
-   // capability). Load it here rather than relying on render order.
-   if(!agMeta)agMeta=await lapi('/rooms-mine');
-   const d=await lapi('/agents/'+encodeURIComponent(n)+'/config');
-   if(!d.config){toast('cannot read '+n+"'s configuration -- no container to "+
-    'read it from; start it first',true);return;}
-   agEdit={agent:n,cfg:d.config,rooms:d.rooms||[],result:null};
-   agConfirm=null;
-   refreshAgents();
-  }catch(e){toast('could not open the editor: '+(e.message||e),true);}
- };
- for(const b of list.querySelectorAll('[data-agedno]'))b.onclick=()=>{
-  agEdit=null;refreshAgents();};
- for(const b of list.querySelectorAll('[data-agedapply]'))b.onclick=async()=>{
-  const box=b.closest('[data-ageditbox]'), st=box.querySelector('[data-agedstatus]');
-  const q=s=>box.querySelector(s);
-  const body={
-   repo_url:q('[data-agedrepo]').value.trim(),
-   role:q('[data-agedrole]').value,
-   append:q('[data-agedappend]').value.trim(),
-   model:q('[data-agedmodel]').value.trim(),
-   image:q('[data-agedimage]').value.trim(),
-   rooms:[...box.querySelectorAll('[data-agedroom]:checked')].map(c=>c.value)};
-  try{
-   // Say what is actually about to happen. "saving..." would be a lie about
-   // the cost: the container is going away and coming back.
-   st.textContent=' restarting '+b.dataset.agedapply+'...';
-   b.disabled=true;
-   const res=await lapi('/agents/'+encodeURIComponent(b.dataset.agedapply)+
-    '/config',{method:'PUT',body:JSON.stringify(body)});
-   agEdit={agent:b.dataset.agedapply,cfg:res.config||{},
-           rooms:body.rooms,result:res};
-   refreshAgents();
-  }catch(e){
-   b.disabled=false;
-   st.textContent='';
-   toast('edit failed: '+(e.message||e),true);
-  }
- };
- for(const b of list.querySelectorAll('[data-agdel]'))b.onclick=()=>{
-  // Both panels render in the same slot on the same row, so leaving the other
-  // one set would render a destroy confirm and an edit form on top of each
-  // other -- and the one that wins is decided by branch order, not by intent.
-  agEdit=null;
-  agConfirm={agent:b.dataset.agdel};refreshAgents();
- };
- for(const b of list.querySelectorAll('[data-agdelno]'))b.onclick=()=>{
-  agConfirm=null;refreshAgents();
- };
- // Retire: plain DELETE, no purge -- the data root survives, so re-creating
- // this name picks its files back up. This is the reconfiguration path, and
- // the reason destroy stopped being the only way to change a setting.
- for(const b of list.querySelectorAll('[data-agretire]'))b.onclick=async()=>{
-  try{
-   await lapi('/agents/'+encodeURIComponent(b.dataset.agretire),
-    {method:'DELETE'});
-   agConfirm=null;refreshAgents();
-   toast('retired '+b.dataset.agretire+' -- its files are kept',true);
-  }catch(e){toast(e.message);}
- };
- for(const b of list.querySelectorAll('[data-agdelyes]'))b.onclick=async()=>{
-  if(b.disabled)return;
-  try{
-   // purge=1: rmtree of the whole agent home, claude/ as well as repos/.
-   // Gated behind the typed name because this is the only irreversible
-   // action in the product.
-   await lapi('/agents/'+encodeURIComponent(b.dataset.agdelyes)+'?purge=1',
-    {method:'DELETE'});
-   agConfirm=null;refreshAgents();
-  }catch(e){toast(e.message);}
- };
- // Destroy is irreversible and authority-changing, so a click alone can't
- // confirm it: typing the exact name is what enables the button (U7). Wire
- // this per-keystroke locally rather than through refreshAgents() -- a full
- // re-render on every keystroke would drop focus and refetch the agent list
- // for no reason.
- for(const box of list.querySelectorAll('[data-agconfirmbox]')){
-  const inp=box.querySelector('[data-agdelconfirm]');
-  const btn=box.querySelector('[data-agdelyes]');
-  inp.oninput=()=>{btn.disabled=inp.value!==box.dataset.agconfirmbox;};
- }
- // Focus lands on RETIRE, not on the erase field (keyboard/screen-reader
- // path): the panel opens on the recoverable action, and reaching the
- // irreversible one is a deliberate move past it rather than the default
- // landing spot. Erase still needs the name typed, so no keystroke here can
- // destroy anything by itself.
- const cfBtn=list.querySelector('[data-agretire]');
- if(cfBtn)cfBtn.focus();
-
- // The create-agent form and credentials section degrade quietly on their
- // own fetch failures -- the list above already reported the same outage
- // once; a second red banner for the same cause would just be noise.
- try{
-  if(!agMeta){
-   agMeta=await lapi('/rooms-mine');
-   const sel=$('agRole');
-   for(const r of agMeta.roles){
-    const o=document.createElement('option');o.value=o.textContent=r;sel.appendChild(o);}
-  }
-  $('agRooms').innerHTML=agMeta.rooms.map(r=>
-   '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"> '+
-   esc(r.name)+' <span class="pDim">('+esc(r.kind)+')</span></label>').join('')||
-   '<span class="pDim">no rooms yet -- create one from the Rooms tab first</span>';
- }catch(e){/* soft-degrade, see comment above */}
- try{
-  const p=await lapi('/profile');
-  const c=p.credentials||{};
-  $('agCredState').textContent='claude token: '+(c.claude_token||'absent')+
-   ' / github token: '+(c.github_token||'absent');
-  $('agCredRepo').value=c.repo_url||'';
-  $('agCredNotes').textContent=p.notes||'';
- }catch(e){/* soft-degrade, see comment above */}
+ // The create form's roles and rooms degrade quietly on their own fetch
+ // failure -- the rail above already reported the same outage once; a second
+ // red banner for the same cause would just be noise.
+ try{if(!agMeta)agMeta=await lapi('/rooms-mine');}
+ catch(e){/* soft-degrade, see comment above */}
 }
-$('agCreate').onclick=async()=>{
- const st=$('agStatus');
- const rooms=[...document.querySelectorAll('#agRooms input:checked')].map(c=>c.value);
- const name=$('agName').value.trim();
- try{
-  st.textContent='provisioning...';
-  await lapi('/agents',{method:'POST',body:JSON.stringify({
-   agent:name,rooms:rooms,role:$('agRole').value,
-   append:$('agAppend').value.trim(),
-   repo_url:$('agRepo').value.trim(),
-   model:$('agModel').value.trim()})});
-  st.textContent='container up; waiting for the agent to reach the bus...';
-  for(let i=0;i<60;i++){
-   await new Promise(r=>setTimeout(r,2000));
-   const a=await lapi('/agents/'+encodeURIComponent(name));
-   if(a.live){st.textContent='LIVE: '+name+' is on the bus.';refreshAgents();return;}
-  }
-  st.textContent='container is up but not live yet -- check its logs.';
-  refreshAgents();
- }catch(e){st.textContent='';toast(e.message);}
-};
-$('agCredSave').onclick=async()=>{
- const b={repo_url:$('agCredRepo').value.trim()};
- const cl=$('agCredClaude').value.trim();if(cl)b.claude_token=cl;
- const gh=$('agCredGithub').value.trim();if(gh)b.github_token=gh;
- try{
-  await lapi('/profile',{method:'PUT',body:JSON.stringify(b)});
-  $('agCredClaude').value='';$('agCredGithub').value='';
-  refreshAgents();
- }catch(e){toast(e.message);}
-};
-$('agCredClaudeClear').onclick=async()=>{
- try{await lapi('/profile',{method:'PUT',body:'{"claude_token":""}'});refreshAgents();}
- catch(e){toast(e.message);}
-};
-$('agCredGithubClear').onclick=async()=>{
- try{await lapi('/profile',{method:'PUT',body:'{"github_token":""}'});refreshAgents();}
- catch(e){toast(e.message);}
-};
 
 // The presence poll is armed once, here or at boot -- whichever gets a room first. A
 // room-less first-run boots without it, so picking the first room must start it.
@@ -2466,7 +2699,22 @@ function openAccount(){
    '<div class="pSec">CLAUDE LOGIN</div>'+
    '<div class="pDim">One login per user; agents in home-login mode copy it '+
    'when they boot. Re-login switches accounts; restart agents to move them.</div>'+
-   '<div class="pRow" id="acctLogin">checking...</div>':''));
+   '<div class="pRow" id="acctLogin">checking...</div>'+
+   // These are the USER's credentials, not any agent's: one profile file,
+   // injected into every container this user owns. They sat at the foot of the
+   // agents pane, which taught the opposite (operator, msg 8752) -- and the
+   // claude token field is gone with them, because the browser login above
+   // replaced it and a second way in is a second thing to keep true.
+   '<div class="pSec">CREDENTIALS</div>'+
+   '<div id="agCredState" class="pDim"></div>'+
+   '<div class="pRow"><input id="agCredGithub" placeholder="github token" '+
+    'aria-label="github token"><button id="agCredGithubClear">clear</button></div>'+
+   '<div class="pRow"><input id="agCredRepo" placeholder="default repo URL" '+
+    'aria-label="default repo URL"></div>'+
+   '<div class="pRow"><button id="agCredSave">save credentials</button>'+
+    '<span class="pDim">stored 0600 on the launcher host; values are never '+
+    'echoed back</span></div>'+
+   '<div id="agCredNotes" class="pDim"></div>':''));
  $('pwGo').onclick=async()=>{
   if($('pwNew').value!==$('pwNew2').value){toast('the new passwords do not match');return;}
   try{await api('/me/password',{method:'POST',
@@ -2474,7 +2722,39 @@ function openAccount(){
    toast('password changed');openAccount();}catch(e){toast(e.message);}};
  for(const id of ['pwOld','pwNew','pwNew2'])
   $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('pwGo').click();});
- if(typeof AGBASE!=='undefined')refreshLoginSection();
+ if(typeof AGBASE!=='undefined'){refreshLoginSection();wireCredentials();}
+}
+// The credentials block, launcher-fed and fail-soft for the same reason the
+// login section above it is: a dead launcher changes this one area's text and
+// leaves the password control -- core bus UI -- working.
+function wireCredentials(){
+ const state=$('agCredState');
+ const load=async()=>{
+  try{
+   const p=await lapi('/profile');
+   const c=p.credentials||{};
+   state.textContent='github token: '+(c.github_token||'absent');
+   $('agCredRepo').value=c.repo_url||'';
+   $('agCredNotes').textContent=p.notes||'';
+  }catch(e){
+   state.textContent=e.status?'the launcher returned '+e.status+' from '+
+    AGBASE+'/profile':'the launcher is not reachable';
+  }
+ };
+ $('agCredSave').onclick=async()=>{
+  const b={repo_url:$('agCredRepo').value.trim()};
+  const gh=$('agCredGithub').value.trim();if(gh)b.github_token=gh;
+  try{
+   await lapi('/profile',{method:'PUT',body:JSON.stringify(b)});
+   $('agCredGithub').value='';   // never echoed back, so never left on screen
+   toast('credentials saved',true);load();
+  }catch(e){toast(e.message);}
+ };
+ $('agCredGithubClear').onclick=async()=>{
+  try{await lapi('/profile',{method:'PUT',body:'{"github_token":""}'});load();}
+  catch(e){toast(e.message);}
+ };
+ load();
 }
 
 // The browser login (rulings 8644): the launcher runs `claude /login` in a
