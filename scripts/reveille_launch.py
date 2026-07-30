@@ -1512,21 +1512,30 @@ async function refresh(){
    // say what is and is not recoverable, and this product avoids them for
    // exactly that reason elsewhere. Destroy is irreversible and authority-
    // changing, so a click alone can't confirm it: typing the exact name is
-   // what enables the button (U7). Focus lands on that input the moment the
-   // panel opens, so a keyboard or screen-reader user reaches the one field
-   // that matters with no tabbing; "cancel" and the (disabled-until-typed)
-   // "destroy" button are the next two stops.
+   // what enables it. TWO INTENTS, NOT ONE: retiring an agent and erasing it
+   // were the same irreversible act once this always sent purge=1, so fixing a
+   // mistyped repo URL cost the agent everything it had learned. Friction now
+   // scales with what is actually unrecoverable -- retire is a plain confirm
+   // and takes the focus, erase demands the typed name. The safe path is the
+   // easy one; reaching the irreversible one is a deliberate move past it.
    '<div data-delc="'+esc(a.agent)+'" style="display:none;margin-top:.4rem" '+
-    'role="group" aria-label="confirm destroy '+esc(a.agent)+'">'+
-    '<div class="dim">Destroy '+esc(a.agent)+'? Its running session and bus '+
-    'grants end now -- that cannot be undone.</div>'+
-    '<div class="dim">Container, local repos, and everything this agent '+
-    'learned locally (its ~/.claude): gone.</div>'+
-    '<div class="dim">Hive memory (lessons, decisions, saved state): kept.</div>'+
-    '<div class="row">Type <b>'+esc(a.agent)+'</b> to confirm: '+
+    'role="group" aria-label="destroy '+esc(a.agent)+'">'+
+    '<div class="dim">Destroy '+esc(a.agent)+'? Either way its running session '+
+    'and bus grants end now -- that cannot be undone. Hive memory (lessons, '+
+    'decisions, saved state) is kept.</div>'+
+    '<div class="row"><b>Retire &mdash; keep its files</b></div>'+
+    '<div class="dim">Local repos and everything it learned locally (its '+
+    '~/.claude): KEPT, and reused if you create an agent with this name '+
+    'again.</div>'+
+    '<div class="row"><button data-retire="'+esc(a.agent)+'">retire '+
+    esc(a.agent)+'</button></div>'+
+    '<div class="row"><b>Erase &mdash; take everything</b></div>'+
+    '<div class="dim">Container, local repos, and everything it learned '+
+    'locally (its ~/.claude): gone. Nothing local survives.</div>'+
+    '<div class="row">Type <b>'+esc(a.agent)+'</b> to erase: '+
      '<input data-delconfirm size="20" autocomplete="off" '+
-     'aria-label="type '+esc(a.agent)+' to confirm destroy"></div>'+
-    '<button data-delyes="'+esc(a.agent)+'" disabled>yes, destroy '+
+     'aria-label="type '+esc(a.agent)+' to confirm erasing it"></div>'+
+    '<button data-delyes="'+esc(a.agent)+'" disabled>erase '+
     esc(a.agent)+'</button> <button data-delno>cancel</button></div></div>';
   }).join('');
  for(const b of list.querySelectorAll('[data-watch]'))b.onclick=async()=>{
@@ -1551,12 +1560,14 @@ async function refresh(){
   }catch(e){alert(e.message);}
  };
  // Destroy asks in-panel (see the card template above) instead of firing the
- // DELETE straight away; these four just drive that panel open/closed/through.
+ // DELETE straight away; these five drive that panel open/closed/through.
  for(const b of list.querySelectorAll('[data-del]'))b.onclick=()=>{
   const box=list.querySelector('[data-delc="'+CSS.escape(b.dataset.del)+'"]');
   box.style.display='';
   const inp=box.querySelector('[data-delconfirm]');
-  inp.value='';box.querySelector('[data-delyes]').disabled=true;inp.focus();
+  inp.value='';box.querySelector('[data-delyes]').disabled=true;
+  // Focus the RECOVERABLE action, not the erase field.
+  box.querySelector('[data-retire]').focus();
  };
  for(const box of list.querySelectorAll('[data-delc]')){
   const inp=box.querySelector('[data-delconfirm]');
@@ -1566,11 +1577,19 @@ async function refresh(){
  for(const b of list.querySelectorAll('[data-delno]'))b.onclick=()=>{
   b.closest('[data-delc]').style.display='none';
  };
+ // Retire: plain DELETE, no purge -- the data root survives, so re-creating
+ // this name picks its files back up. This is the reconfiguration path.
+ for(const b of list.querySelectorAll('[data-retire]'))b.onclick=async()=>{
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.retire),{method:'DELETE'});
+   refresh();
+  }catch(e){alert(e.message);}
+ };
  for(const b of list.querySelectorAll('[data-delyes]'))b.onclick=async()=>{
   if(b.disabled)return;
   try{
-   // purge=1 (U7): destroy now takes the local repo checkout + claude config
-   // with it, matching the modal's "gone" line -- only hive memory persists.
+   // purge=1: rmtree of the whole agent home, claude/ as well as repos/.
+   // Gated behind the typed name -- the only irreversible action here.
    await api('/agents/'+encodeURIComponent(b.dataset.delyes)+'?purge=1',
     {method:'DELETE'});
    refresh();
