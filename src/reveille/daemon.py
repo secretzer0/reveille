@@ -184,6 +184,14 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.24 WEB UI ONLY, nothing for you to re-read. The Agents pane now tells a
+       service that answered and refused apart from one that never answered:
+       the fetch error carries the HTTP status instead of leaving the caller to
+       infer it from the message text, which broke the moment an endpoint
+       returned {"error": ...} rather than a bare status and reported a live
+       service as unreachable. Bumped rather than folded into 0.2.23 because
+       that image was already built and deployed while this was in review --
+       same rule as below, applied to my own merge.
 0.2.23 WEB UI ONLY -- NOTHING FOR YOU TO RE-READ, and the bump is deliberate
        anyway. No tool, argument, or response shape changed. The version string
        is also the deployed image tag, so shipping changed content under an
