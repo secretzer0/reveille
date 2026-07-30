@@ -755,8 +755,10 @@ def test_login_hands_the_auth_root_to_the_image_uid(monkeypatch, tmp_path):
     args = types.SimpleNamespace(user="acme", image="img", network="net")
     with pytest.raises(SystemExit):
         rl.cmd_login(args)
-<<<<<<< HEAD
-    assert chowned == [(rl.user_auth_root("acme"), "img")], chowned
+    # subdirs=() -- the login home IS the ~/.claude the container mounts, so
+    # the ROOT is owned; chowning claude/repos under it named nothing and
+    # exited 1, breaking the very command the ownership fix protects.
+    assert chowned == [(rl.user_auth_root("acme"), "img", ())], chowned
 
 
 def test_lifecycle_state_names_all_four_and_erased_is_recoverable():
@@ -780,9 +782,3 @@ def test_lifecycle_state_names_all_four_and_erased_is_recoverable():
     assert rl.lifecycle_state("absent", False,
                               {"messages": 0, "memories": 0,
                                "lessons": 0}) == "unknown"
-=======
-    # subdirs=() -- the login home IS the ~/.claude the container mounts, so
-    # the ROOT is owned; chowning claude/repos under it named nothing and
-    # exited 1, breaking the very command the ownership fix protects.
-    assert chowned == [(rl.user_auth_root("acme"), "img", ())], chowned
->>>>>>> origin/fix/login-home-ownership
