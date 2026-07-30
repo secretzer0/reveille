@@ -102,6 +102,12 @@ def test_own_dirs_argv_runs_chown_as_root():
     assert argv[i + 1] == f"{rl.AGENT_UID}:{rl.AGENT_GID}"
     assert argv[i + 2:] == ["/own/claude", "/own/repos"]
     assert "-v" in argv and argv[argv.index("-v") + 1] == "/d/acme/dev:/own"
+    # The USER LOGIN home has no claude/repos beneath it -- it IS the
+    # ~/.claude a login container mounts. Chowning names that do not exist
+    # exits 1, so the ownership fix crashed the command it was protecting
+    # (found live, mid-login, on a fresh login home).
+    root_argv = rl.own_dirs_argv("/d/acme/claude-auth", "img", subdirs=())
+    assert root_argv[root_argv.index("-R") + 2:] == ["/own"]
 
 
 def test_quota_resolution_defaults_and_overrides():
@@ -679,10 +685,14 @@ def test_login_hands_the_auth_root_to_the_image_uid(monkeypatch, tmp_path):
     monkeypatch.setattr(rl, "DEFAULT_DATA", str(tmp_path))
     chowned = []
     monkeypatch.setattr(rl, "_own_agent_dirs",
-                        lambda root, image: chowned.append((root, image)))
+                        lambda root, image, subdirs=("claude", "repos"):
+                        chowned.append((root, image, subdirs)))
     monkeypatch.setattr(rl.os, "execvpe",
                         lambda *a, **k: (_ for _ in ()).throw(SystemExit(0)))
     args = types.SimpleNamespace(user="acme", image="img", network="net")
     with pytest.raises(SystemExit):
         rl.cmd_login(args)
-    assert chowned == [(rl.user_auth_root("acme"), "img")], chowned
+    # subdirs=() -- the login home IS the ~/.claude the container mounts, so
+    # the ROOT is owned; chowning claude/repos under it named nothing and
+    # exited 1, breaking the very command the ownership fix protects.
+    assert chowned == [(rl.user_auth_root("acme"), "img", ())], chowned
