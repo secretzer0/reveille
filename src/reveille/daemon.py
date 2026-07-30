@@ -1982,12 +1982,23 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  .pRow b{flex:1;font-size:.82rem;font-weight:600;min-width:8rem}
  .pRow .on{color:var(--green)}
  .pDim{color:var(--faint);font-size:.72rem}
+ .pDim.err{color:#e8555a}
  .pRow input{flex:1;min-width:7rem;background:var(--bg);border:1px solid var(--line);
   border-radius:6px;color:var(--fg);padding:.3rem .5rem;font:inherit;font-size:.78rem}
  .pRow button{background:var(--chip);border:1px solid var(--line);border-radius:6px;
   color:var(--fg);padding:.25rem .55rem;font:inherit;font-size:.72rem;cursor:pointer}
  .pRow button:hover{border-color:var(--accent)}
  .pRow button.danger{color:#e8555a;border-color:#5a2b2d}
+ .pRow button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line)}
+ /* U7: creation is a page-level action, management is row-level (architect
+    ruling) -- kept collapsed so it is never visually adjacent to a managed
+    row. Native <details>: Tab reaches the summary, Enter/Space toggles, a
+    screen reader announces expanded/collapsed on its own, no ARIA needed. */
+ details.addAgent{margin:.4rem 0}
+ details.addAgent>summary{font-size:.62rem;letter-spacing:.12em;
+  color:var(--faint);cursor:pointer}
+ details.addAgent>summary:focus-visible{outline:2px solid var(--gold);
+  outline-offset:2px}
  /* Inline confirm. Never window.prompt/confirm: they are unstyled, block the page, are
     suppressible by the browser, and prompt() renders a typed PASSWORD in cleartext. */
  /* A room list has exactly one current item -- that is a SELECTOR, not a row of buttons.
@@ -2179,7 +2190,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
  <div id="agUnavail" hidden><span id="agUnavailMsg"></span>
   <span class="lnk" id="agRetry">retry</span></div>
  <div id="agList"></div>
- <div class="pSec">NEW AGENT</div>
+ <details class="addAgent"><summary>Add agent</summary>
  <div class="pRow">
   <input id="agName" placeholder="agent name (e.g. senior-dev)">
   <select id="agRole"><option value="">no role template</option></select>
@@ -2196,6 +2207,7 @@ WEBCHAT = r"""<!doctype html><html><head><meta charset="utf-8"><title>Reveille b
   <span class="pDim">the token is minted from your session and never shown</span>
  </div>
  <div id="agStatus" class="pDim"></div>
+ </details>
  <div class="pSec">CREDENTIALS</div>
  <div id="agCredState" class="pDim"></div>
  <div class="pRow">
@@ -2945,28 +2957,52 @@ async function refreshAgents(){
  $('agUnavail').hidden=true;
  let d;
  try{d=await lapi('/agents');}
- catch(e){agUnavailable(e.message==='401'?'session expired -- reload the page':
-  'the launcher is not reachable');return;}
+ catch(e){
+  // A fetch that COMPLETED with an HTTP error is not the same fault as one
+  // that never got a response -- api() throws the bare status (e.g. "404")
+  // when the body carried no detail/error text, so a numeric message means
+  // the launcher answered and said no, while anything else (a TypeError like
+  // "Failed to fetch") means it truly never answered. Naming which one
+  // points straight at the cause instead of "not reachable" for both.
+  const numeric=/^\d+$/.test(e.message);
+  agUnavailable(e.message==='401'?'session expired -- reload the page':
+   numeric?'the launcher returned '+e.message+' for /agents':
+   'the launcher is not reachable ('+e.message+')');
+  return;}
  const list=$('agList');
  const running=a=>a.status==='running';
+ // absent: a launcher.db record with no matching container -- out-of-band
+ // `docker rm`, host GC -- derived state that drifted (self-heal-or-report-
+ // absence doctrine). Nothing to start or stop, so destroy (which clears the
+ // stale record) is the only honest action.
+ const broken=a=>a.status==='absent';
  // Only the actions valid for the agent's current state are ever offered --
  // same reasoning as the launcher page's own U6-predecessor fix: a stopped
  // agent shows start, a running one shows watch+stop, both show destroy.
  list.innerHTML=(d.agents.length?'':'<div class="pDim">no agents yet</div>')+
   d.agents.map(a=>{
    if(agConfirm&&agConfirm.agent===a.agent)
-    return '<div class="pRow warn"><b>Destroy '+esc(a.agent)+'?</b></div>'+
+    return '<div data-agconfirmbox="'+esc(a.agent)+'">'+
+     '<div class="pRow warn"><b>Destroy '+esc(a.agent)+'?</b></div>'+
      '<div class="pAsk">Its running session and bus grants end now -- that '+
-     'cannot be undone. Its files (repo checkouts, claude config) are kept, '+
-     'and reused if you create an agent with this same name again.</div>'+
+     'cannot be undone.</div>'+
+     '<div class="pAsk">Container and local repo checkout: gone.</div>'+
+     '<div class="pAsk">Hive memory (lessons, decisions, saved state): '+
+     'kept.</div>'+
+     '<div class="pRow">Type <b>'+esc(a.agent)+'</b> to confirm: '+
+      '<input data-agdelconfirm size="16" autocomplete="off" '+
+      'aria-label="type '+esc(a.agent)+' to confirm destroy"></div>'+
      '<div class="pRow"><button class="danger" data-agdelyes="'+esc(a.agent)+
-     '">confirm destroy</button> '+
-     '<button data-agdelno="'+esc(a.agent)+'">cancel</button></div>';
+     '" disabled>confirm destroy</button> '+
+     '<button data-agdelno="'+esc(a.agent)+'">cancel</button></div></div>';
    return '<div class="pRow"><b>'+esc(a.agent)+'</b>'+
-    '<span class="pDim">'+esc(a.status)+' &middot; '+esc(a.image)+'</span>'+
+    '<span class="pDim'+(broken(a)?' err':'')+'">'+
+     (broken(a)?'broken — container missing':esc(a.status))+
+     ' &middot; '+esc(a.image)+'</span>'+
     (running(a)
       ? '<button data-agwatch="'+esc(a.agent)+'">watch</button>'+
         '<button data-agstop="'+esc(a.agent)+'">stop</button>'
+      : broken(a) ? ''
       : '<button data-agstart="'+esc(a.agent)+'">start</button>')+
     '<button data-agdel="'+esc(a.agent)+'">destroy</button></div>';
   }).join('');
@@ -2992,15 +3028,29 @@ async function refreshAgents(){
   agConfirm=null;refreshAgents();
  };
  for(const b of list.querySelectorAll('[data-agdelyes]'))b.onclick=async()=>{
+  if(b.disabled)return;
   try{
-   await lapi('/agents/'+encodeURIComponent(b.dataset.agdelyes),{method:'DELETE'});
+   // purge=1 (U7): destroy now takes the local repo checkout + claude config
+   // with it, matching the modal's "gone" line -- only hive memory persists.
+   await lapi('/agents/'+encodeURIComponent(b.dataset.agdelyes)+'?purge=1',
+    {method:'DELETE'});
    agConfirm=null;refreshAgents();
   }catch(e){toast(e.message);}
  };
- // Focus lands on the confirm button the moment it renders (keyboard/screen-
- // reader path): no tabbing to find the one control that matters this turn.
- const cfBtn=list.querySelector('[data-agdelyes]');
- if(cfBtn)cfBtn.focus();
+ // Destroy is irreversible and authority-changing, so a click alone can't
+ // confirm it: typing the exact name is what enables the button (U7). Wire
+ // this per-keystroke locally rather than through refreshAgents() -- a full
+ // re-render on every keystroke would drop focus and refetch the agent list
+ // for no reason.
+ for(const box of list.querySelectorAll('[data-agconfirmbox]')){
+  const inp=box.querySelector('[data-agdelconfirm]');
+  const btn=box.querySelector('[data-agdelyes]');
+  inp.oninput=()=>{btn.disabled=inp.value!==box.dataset.agconfirmbox;};
+ }
+ // Focus lands on that input the moment the panel renders (keyboard/screen-
+ // reader path): no tabbing to find the one field that matters this turn.
+ const cfInp=list.querySelector('[data-agdelconfirm]');
+ if(cfInp)cfInp.focus();
 
  // The create-agent form and credentials section degrade quietly on their
  // own fetch failures -- the list above already reported the same outage

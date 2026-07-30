@@ -248,7 +248,26 @@ change they were originally pitched as.
   `/agents` itself is untouched (§6.2). Gate: from the bus, reach
   create/start/stop/destroy/creds without leaving `/`; the existing
   `launcher-api-smoke` gate passes unmodified.
-- **U7 — terminal tabs.** BLOCKED on the sweep fix (§6.3). Gate once
+- **U7 — lifecycle states + legal actions (architect GO, msg 8591).** Three
+  states, matching what `launcher.db` + docker actually hold: RUNNING (watch,
+  stop, destroy), STOPPED/exited (start acting on the stored definition,
+  destroy), and BROKEN — a record whose container is gone (out-of-band
+  `docker rm`, host GC), reported rather than silently offered as STOPPED
+  (self-heal-or-report-absence doctrine); destroy is the only legal action on
+  it. UNDEFINED and DESTROYED are not row states — creation is a page-level
+  action (the New Agent form moves behind a collapsed `<details>` disclosure
+  on both `/agents` and the embedded pane, so it is never visually adjacent
+  to a managed row) and a destroyed agent's row simply stops existing. Destroy
+  now requires typing the agent's exact name to enable the button (was
+  click-confirm) and takes `?purge=1` — the modal states both halves of
+  DES-005's split by name: container + local repo checkout gone, hive memory
+  kept. Embedded pane's fail-soft now distinguishes a completed HTTP error
+  response (`the launcher returned 404 for /agents`) from true
+  unreachability, per the U6 postmortem (msg 8589/8591). Gate: 205 units,
+  ruff clean; no real-browser/docker-socket pass from this container (same
+  gap named on U6 — needs verification against a live launcher+docker stack
+  before merge).
+- **U8 — terminal tabs.** BLOCKED on the sweep fix (§6.3). Gate once
   unblocked: N tabs across 2+ agents attach concurrently with no cross-agent
   interference; a second driver tab for an already-held agent is refused and
   the manager shows the refusal rather than a blank tab; killing a tab's
@@ -260,7 +279,7 @@ change they were originally pitched as.
 - Everything in §5 still holds.
 - The launcher's two-gate check (session principal + agent ownership) runs on
   every call U6 makes — U6 adds a caller, never a bypass.
-- Grant verification stays at the container (`attach-gate`); U6/U7 never
+- Grant verification stays at the container (`attach-gate`); U6/U8 never
   become a new authority over attachment.
 
 ### 6.6 REQUIRED by §6.1: the bus degrades when the launcher is down

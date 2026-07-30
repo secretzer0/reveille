@@ -1402,6 +1402,16 @@ label.chip{display:inline-block;margin:.15rem .5rem .15rem 0;color:var(--dim)}
 a{color:var(--gold);text-decoration:none}
 a:hover{text-decoration:underline}
 pre{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim)}
+/* U7: creation is a page-level action, management is row-level (architect
+   ruling) -- kept a deliberately secondary, collapsed affordance so it is
+   never visually adjacent to a managed row. Native <details>: Tab reaches
+   the summary, Enter/Space toggles, a screen reader announces
+   expanded/collapsed on its own -- no ARIA needed. */
+details.addAgent{margin:1.8rem 0 .5rem}
+details.addAgent>summary{font-size:.68rem;letter-spacing:.14em;
+ text-transform:uppercase;color:var(--faint);font-weight:600;cursor:pointer}
+details.addAgent>summary:focus-visible{outline:2px solid var(--gold);
+ outline-offset:2px}
 </style></head><body>
 <header><div class="wrap"><h1>REVEILLE &mdash; your agents</h1>
 <div class="dim"><a href="/">&larr; back to the bus</a> &middot;
@@ -1411,7 +1421,7 @@ pre{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim)}
  <a href="" id="brokerLink">broker UI</a> first, then reload.</div>
 <div id="app" style="display:none">
 <div id="list"></div>
-<h2>NEW AGENT</h2>
+<details class="addAgent"><summary>Add agent</summary>
 <div class="row"><input id="name" placeholder="agent name (e.g. senior-dev)">
 <select id="role"><option value="">no role template</option></select></div>
 <pre id="roleText" class="dim" style="display:none;white-space:pre-wrap;
@@ -1433,6 +1443,7 @@ pre{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim)}
 <div class="row"><button id="create">create agent</button>
  <span class="dim">the token is minted from your session and never shown</span></div>
 <div id="status" class="row dim"></div>
+</details>
 <h2>CREDENTIALS</h2>
 <div id="credState" class="row dim"></div>
 <div class="row"><input id="cClaude" size="40"
@@ -1470,16 +1481,24 @@ async function refresh(){
  // A stopped agent is not a new agent: docker start reuses its data root and
  // its bus identity untouched (sec 7.1), so "start" is the restart path and
  // "stop"/"watch" (which needs a live container to exec attach-gate into)
- // only make sense while running. Showing only the valid actions for the
- // current state means there is no invalid click to handle, rather than
- // hiding the gap behind an error alert.
+ // only make sense while running. "absent" is a different thing entirely --
+ // a launcher.db record whose container is gone (out-of-band `docker rm`,
+ // host GC): derived state that drifted, per the self-heal-or-report-absence
+ // doctrine. There is no container to start or stop, so the only honest
+ // action left is destroy (it clears the stale record). Showing only the
+ // valid actions for the current state means there is no invalid click to
+ // handle, rather than hiding the gap behind an error alert.
  list.innerHTML=(d.agents.length?'':'<div class="dim">no agents yet</div>')+
   d.agents.map(a=>{const running=a.status==='running';
+   const broken=a.status==='absent';
    return '<div class="card"><b>'+esc(a.agent)+'</b> '+
-   '<span class="dim">'+esc(a.status)+' &middot; '+esc(a.image)+'</span> '+
+   '<span class="'+(broken?'err':'dim')+'">'+
+    (broken?'broken — container missing':esc(a.status))+
+    ' &middot; '+esc(a.image)+'</span> '+
    (running
      ? '<button data-watch="'+esc(a.agent)+'">watch</button>'+
        '<button data-stop="'+esc(a.agent)+'">stop</button>'
+     : broken ? ''
      : '<button data-start="'+esc(a.agent)+'">start</button>')+
    '<button data-del="'+esc(a.agent)+'">destroy</button>'+
    '<button data-creds="'+esc(a.agent)+'">creds</button>'+
@@ -1491,17 +1510,23 @@ async function refresh(){
     '<button data-owipe>clear overrides</button></div>'+
    // Styled, in-panel, non-blocking -- never confirm(): a native dialog can't
    // say what is and is not recoverable, and this product avoids them for
-   // exactly that reason elsewhere. Focus lands on "yes" so a keyboard or
-   // screen-reader user gets the warning read immediately, no tabbing to find
-   // it; "cancel" is the very next stop, "destroy" the one before.
+   // exactly that reason elsewhere. Destroy is irreversible and authority-
+   // changing, so a click alone can't confirm it: typing the exact name is
+   // what enables the button (U7). Focus lands on that input the moment the
+   // panel opens, so a keyboard or screen-reader user reaches the one field
+   // that matters with no tabbing; "cancel" and the (disabled-until-typed)
+   // "destroy" button are the next two stops.
    '<div data-delc="'+esc(a.agent)+'" style="display:none;margin-top:.4rem" '+
     'role="group" aria-label="confirm destroy '+esc(a.agent)+'">'+
-    '<span class="dim">Destroy '+esc(a.agent)+'? Its running session and bus '+
-    'grants end now -- that cannot be undone. Its files (repo checkouts, '+
-    'claude config) are kept, and reused if you create an agent with this '+
-    'same name again.</span><br>'+
-    '<button data-delyes="'+esc(a.agent)+'">yes, destroy '+esc(a.agent)+
-    '</button> <button data-delno>cancel</button></div></div>';
+    '<div class="dim">Destroy '+esc(a.agent)+'? Its running session and bus '+
+    'grants end now -- that cannot be undone.</div>'+
+    '<div class="dim">Container and local repo checkout: gone.</div>'+
+    '<div class="dim">Hive memory (lessons, decisions, saved state): kept.</div>'+
+    '<div class="row">Type <b>'+esc(a.agent)+'</b> to confirm: '+
+     '<input data-delconfirm size="20" autocomplete="off" '+
+     'aria-label="type '+esc(a.agent)+' to confirm destroy"></div>'+
+    '<button data-delyes="'+esc(a.agent)+'" disabled>yes, destroy '+
+    esc(a.agent)+'</button> <button data-delno>cancel</button></div></div>';
   }).join('');
  for(const b of list.querySelectorAll('[data-watch]'))b.onclick=async()=>{
   try{
@@ -1525,17 +1550,28 @@ async function refresh(){
   }catch(e){alert(e.message);}
  };
  // Destroy asks in-panel (see the card template above) instead of firing the
- // DELETE straight away; these three just drive that panel open/closed/through.
+ // DELETE straight away; these four just drive that panel open/closed/through.
  for(const b of list.querySelectorAll('[data-del]'))b.onclick=()=>{
   const box=list.querySelector('[data-delc="'+CSS.escape(b.dataset.del)+'"]');
-  box.style.display='';box.querySelector('[data-delyes]').focus();
+  box.style.display='';
+  const inp=box.querySelector('[data-delconfirm]');
+  inp.value='';box.querySelector('[data-delyes]').disabled=true;inp.focus();
  };
+ for(const box of list.querySelectorAll('[data-delc]')){
+  const inp=box.querySelector('[data-delconfirm]');
+  const btn=box.querySelector('[data-delyes]');
+  inp.oninput=()=>{btn.disabled=inp.value!==box.dataset.delc;};
+ }
  for(const b of list.querySelectorAll('[data-delno]'))b.onclick=()=>{
   b.closest('[data-delc]').style.display='none';
  };
  for(const b of list.querySelectorAll('[data-delyes]'))b.onclick=async()=>{
+  if(b.disabled)return;
   try{
-   await api('/agents/'+encodeURIComponent(b.dataset.delyes),{method:'DELETE'});
+   // purge=1 (U7): destroy now takes the local repo checkout + claude config
+   // with it, matching the modal's "gone" line -- only hive memory persists.
+   await api('/agents/'+encodeURIComponent(b.dataset.delyes)+'?purge=1',
+    {method:'DELETE'});
    refresh();
   }catch(e){alert(e.message);}
  };
