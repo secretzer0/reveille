@@ -190,6 +190,26 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.50 THE RAIL SAYS WHAT EXISTS, THE TAB SAYS WHAT YOU ACT ON. Two of the
+manage-agents defects were CSS beating markup, the class no diff review
+catches: #fmode set display, so [hidden] -- the lowest-specificity rule there
+is -- never applied and the chat filter stayed on screen in manage mode; and
+#roster reused .agent, whose .st is the 7px presence DOT, so every roster row
+rendered its state WORD inside that circle, over the name, widening the rail
+until it scrolled sideways. The rail now groups by ROOM (one level, native
+<details>, an agent in three rooms appears three times), takes its membership
+from GET /tokens where the reader owns the agents and /agents-seen per room
+where they do not -- tokens are owner-scoped, so trusting them alone put every
+agent a non-owner could see into "no room". Exceptions carry text (broken,
+behind, retired, erased); running and stopped carry a dot, fill AND ring, with
+the word in every row's accessible name. Rows are real buttons. Every act on
+an agent hangs off its TAB -- start/stop, edit, destroy, each opening the
+pane's own markup in one focus-managed dialog -- so the well is the terminal at
+full height, and opening a stopped agent still opens a tab whose frame says why
+there is no terminal. Credentials moved to Settings > Account, where the claude
+login already lives; the claude token field is gone, the browser login replaced
+it. Creation has one entry point, the rail's "+ New Agent".
+
 0.2.49 YOU CANNOT LOCK YOURSELF OUT OF YOUR OWN AGENT. Attaching mints a fresh
 24h driver grant and nothing released the old one -- a closed tab revokes
 nothing -- so exclusivity refused the OWNER against their own hour-old grant,
