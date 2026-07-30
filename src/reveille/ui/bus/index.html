@@ -1488,6 +1488,13 @@ async function openTerminal(agent){
  // race properly; this cannot and must not replace it. What it buys is the
  // MESSAGE: without it the refusal arrives as text inside a terminal the user
  // has to read, and DES-006's gate asks the manager to show the refusal.
+ //
+ // IF ANYONE LATER TREATS THIS CHECK AS THE GATE, EXCLUSIVITY MOVES TO THE
+ // CLIENT AND THE RACE COMES BACK. This is check-then-act by construction --
+ // two browsers can both read "free" here and both proceed. That is fine
+ // precisely because it decides nothing; it only chooses what to SAY. Deleting
+ // the container-side re-check because "the UI already checks" is the specific
+ // mistake this paragraph exists to prevent (ruling 8728).
  const now=Date.now()*1e6;
  const held=(pre.grants||[]).find(g=>g.mode==='driver'&&!g.revoked_ns&&
    (!g.expiry_ns||g.expiry_ns>now));
