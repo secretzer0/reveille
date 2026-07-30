@@ -3092,20 +3092,33 @@ async function refreshAgents(){
  // agent shows start, a running one shows watch+stop, both show destroy.
  list.innerHTML=(d.agents.length?'':'<div class="pDim">no agents yet</div>')+
   d.agents.map(a=>{
+   // TWO INTENTS, NOT ONE. U7 made this panel's single button always send
+   // purge=1, which made the copy true but left retiring an agent and erasing
+   // it as the same irreversible act -- so fixing a mistyped repo URL cost the
+   // agent everything it had learned locally. Friction now scales with what is
+   // actually unrecoverable: retire is a plain confirm (the container and its
+   // grants die, the home survives, recreating the name reuses it), erase
+   // still demands the typed name. The safe path is the easy one.
    if(agConfirm&&agConfirm.agent===a.agent)
     return '<div data-agconfirmbox="'+esc(a.agent)+'">'+
      '<div class="pRow warn"><b>Destroy '+esc(a.agent)+'?</b></div>'+
-     '<div class="pAsk">Its running session and bus grants end now -- that '+
-     'cannot be undone.</div>'+
-     '<div class="pAsk">Container, local repos, and everything this agent '+
-     'learned locally (its ~/.claude): gone.</div>'+
-     '<div class="pAsk">Hive memory (lessons, decisions, saved state): '+
-     'kept.</div>'+
-     '<div class="pRow">Type <b>'+esc(a.agent)+'</b> to confirm: '+
+     '<div class="pAsk">Either way its running session and bus grants end now '+
+     '-- that cannot be undone. Hive memory (lessons, decisions, saved state) '+
+     'is kept.</div>'+
+     '<div class="pRow"><b>Retire &mdash; keep its files</b></div>'+
+     '<div class="pAsk">Local repos and everything it learned locally '+
+     '(its ~/.claude): KEPT, and reused if you create an agent with this name '+
+     'again.</div>'+
+     '<div class="pRow"><button data-agretire="'+esc(a.agent)+
+     '">retire '+esc(a.agent)+'</button></div>'+
+     '<div class="pRow"><b>Erase &mdash; take everything</b></div>'+
+     '<div class="pAsk">Container, local repos, and everything it learned '+
+     'locally (its ~/.claude): gone. Nothing local survives.</div>'+
+     '<div class="pRow">Type <b>'+esc(a.agent)+'</b> to erase: '+
       '<input data-agdelconfirm size="16" autocomplete="off" '+
-      'aria-label="type '+esc(a.agent)+' to confirm destroy"></div>'+
+      'aria-label="type '+esc(a.agent)+' to confirm erasing it"></div>'+
      '<div class="pRow"><button class="danger" data-agdelyes="'+esc(a.agent)+
-     '" disabled>confirm destroy</button> '+
+     '" disabled>erase '+esc(a.agent)+'</button> '+
      '<button data-agdelno="'+esc(a.agent)+'">cancel</button></div></div>';
    return '<div class="pRow"><b>'+esc(a.agent)+'</b>'+
     '<span class="pDim'+(broken(a)?' err':'')+'">'+
@@ -3139,11 +3152,23 @@ async function refreshAgents(){
  for(const b of list.querySelectorAll('[data-agdelno]'))b.onclick=()=>{
   agConfirm=null;refreshAgents();
  };
+ // Retire: plain DELETE, no purge -- the data root survives, so re-creating
+ // this name picks its files back up. This is the reconfiguration path, and
+ // the reason destroy stopped being the only way to change a setting.
+ for(const b of list.querySelectorAll('[data-agretire]'))b.onclick=async()=>{
+  try{
+   await lapi('/agents/'+encodeURIComponent(b.dataset.agretire),
+    {method:'DELETE'});
+   agConfirm=null;refreshAgents();
+   toast('retired '+b.dataset.agretire+' -- its files are kept',true);
+  }catch(e){toast(e.message);}
+ };
  for(const b of list.querySelectorAll('[data-agdelyes]'))b.onclick=async()=>{
   if(b.disabled)return;
   try{
-   // purge=1 (U7): destroy now takes the local repo checkout + claude config
-   // with it, matching the modal's "gone" line -- only hive memory persists.
+   // purge=1: rmtree of the whole agent home, claude/ as well as repos/.
+   // Gated behind the typed name because this is the only irreversible
+   // action in the product.
    await lapi('/agents/'+encodeURIComponent(b.dataset.agdelyes)+'?purge=1',
     {method:'DELETE'});
    agConfirm=null;refreshAgents();
@@ -3159,10 +3184,13 @@ async function refreshAgents(){
   const btn=box.querySelector('[data-agdelyes]');
   inp.oninput=()=>{btn.disabled=inp.value!==box.dataset.agconfirmbox;};
  }
- // Focus lands on that input the moment the panel renders (keyboard/screen-
- // reader path): no tabbing to find the one field that matters this turn.
- const cfInp=list.querySelector('[data-agdelconfirm]');
- if(cfInp)cfInp.focus();
+ // Focus lands on RETIRE, not on the erase field (keyboard/screen-reader
+ // path): the panel opens on the recoverable action, and reaching the
+ // irreversible one is a deliberate move past it rather than the default
+ // landing spot. Erase still needs the name typed, so no keystroke here can
+ // destroy anything by itself.
+ const cfBtn=list.querySelector('[data-agretire]');
+ if(cfBtn)cfBtn.focus();
 
  // The create-agent form and credentials section degrade quietly on their
  // own fetch failures -- the list above already reported the same outage

@@ -376,3 +376,32 @@ def test_every_launcher_call_in_the_embedded_pane_is_prefixed():
         # every bare api(<path>) must be the tail of an lapi(<path>)
         assert code.count(f"api({path}") == code.count(f"lapi({path}"), path
         assert code.count(f"lapi({path}") > 0, path
+
+
+def test_the_copy_the_docker_gated_smokes_assert_is_still_there():
+    """Both real gates for these two pages need a docker socket, so a change to
+    served copy sails past every check a dev container can run -- that is how a
+    deleted "NEW AGENT" heading broke launcher-api-smoke, and how lowercasing
+    one word here would have broken two gates at once.
+
+    Mirrors the string assertions in tests/single_origin_smoke.py and
+    tests/launcher_api_smoke.py. If you retire one there, retire it here.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "revlaunch", os.path.join(os.path.dirname(__file__), os.pardir,
+                                  "scripts", "reveille_launch.py"))
+    revlaunch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(revlaunch)
+
+    # single_origin_smoke: the destroy modal must not understate purge=1
+    for s in ("~/.claude", "Hive memory"):
+        assert s in daemon.WEBCHAT, f"single-origin-smoke asserts {s!r}"
+    # launcher_api_smoke: same, plus the disclosure property and U1/M3 markers
+    ui = revlaunch.LAUNCH_UI
+    for s in ("~/.claude", "Hive memory", "never shown", "name your first",
+              "CREDENTIALS", "clear overrides",
+              '<details class="addAgent"><summary>Add agent</summary>'):
+        assert s in ui, f"launcher-api-smoke asserts {s!r}"
+    assert '<details class="addAgent" open' not in ui, \
+        "the create form must not ship expanded -- that is the U7 adjacency bug"
