@@ -291,6 +291,13 @@ offline-recovery-smoke: sync
 readmit-gate: sync
 	uv run python tests/readmit_gate.py
 
+# SIGTERM gate: with a /feed socket held open by a client that never hangs up
+# (a browser tab -- the live incident's holder), SIGTERM still exits within the
+# bounded graceful timeout, courtesy frame first. On the unfixed daemon this
+# wedges: listeners closed, process alive, docker reporting Up.
+sigterm-gate: sync
+	uv run python tests/sigterm_gate.py
+
 # Single-origin gate (DES-006 U3/U4/U6): the front door, through the REAL shipped
 # Caddyfile with a REAL session cookie. One login covers both services, the bus
 # page carries the launcher prefix it fetches with, every endpoint the embedded
