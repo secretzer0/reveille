@@ -1112,6 +1112,26 @@ def revoke_token(conn, token_id, owner_id):
         conn.execute("DELETE FROM tokens WHERE id=?", (token_id,))
 
 
+def supersede_bound_tokens(conn, owner_id, agent_name):
+    """Revoke the owner's live tokens bound to agent_name; returns their ids.
+
+    Called at bound-mint time: ONE bus identity, ONE live credential (operator
+    ruling 2026-07-30 -- only one agent with a name is ever active, so a second
+    live credential for the name is never intent). Without this, every
+    re-provision minted a fresh token and left the predecessor alive: the
+    operator found FOUR live credentials all answering to one agent. Same
+    shape as the wake-attach rule (DES-003 2.3): a newer attachment supersedes
+    the old one instead of coexisting with it. Owner-scoped on purpose --
+    superseding IS revocation and carries exactly revocation's authority; it
+    must never let minting a name become a lever on another owner's tokens."""
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM tokens WHERE owner_id=? AND agent_name=?",
+        (owner_id, agent_name)).fetchall()]
+    for tid in ids:
+        revoke_token(conn, tid, owner_id)
+    return ids
+
+
 def assign_room(conn, token_id, room_id, actor_id):
     """Put a room on a token. The ONE reach check (DES-004 I1): allowed if the
     actor owns the room, the room is public, or the actor is an invited member.

@@ -1666,6 +1666,34 @@ def test_revoke_deletes_the_token_rather_than_tombstoning_it():
                      (tok["id"],)).fetchone()[0] == 0       # grants went with it
 
 
+def test_bound_mint_supersedes_the_owners_previous_tokens_for_that_name():
+    """One bus identity, one live credential (operator ruling 2026-07-30):
+    every agent re-provision used to mint anew and leave the predecessor
+    alive -- the operator found FOUR live tokens all answering to one agent.
+    Superseding is owner-scoped revocation: another owner's binding of the
+    same name, unbound tokens, and other names are all untouched."""
+    c, admin, room, tok = fixture()
+    t1 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev")
+    t2 = store.create_token(c, admin["id"], "other", agent_name="py-dev")
+    unbound = store.create_token(c, admin["id"], "fleet")
+    other_user = store.create_user(c, "zoe", "hunter2hunter2")
+    theirs = store.create_token(c, other_user["id"], "ui", agent_name="ui-dev")
+
+    gone = store.supersede_bound_tokens(c, admin["id"], "ui-dev")
+    assert gone == [t1["id"]]
+    assert store.resolve_token(c, t1["secret"]) is None      # instantly dead
+    t3 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev")
+    # the re-provision flow: supersede then mint -> exactly ONE live ui-dev
+    mine = [t for t in store.list_tokens(c, admin["id"])
+            if t["agent_name"] == "ui-dev"]
+    assert [t["id"] for t in mine] == [t3["id"]]
+    # collateral check: other name, unbound, and the other OWNER's binding live
+    assert store.resolve_token(c, t2["secret"]) is not None
+    assert store.resolve_token(c, unbound["secret"]) is not None
+    assert store.resolve_token(c, theirs["secret"]) is not None, \
+        "minting a name must never be a lever on another owner's tokens"
+
+
 def test_revoke_works_while_an_agent_is_joined_under_it():
     """members.token_id REFERENCES tokens(id): without orphaning the membership first
     this is a FOREIGN KEY violation and the token can never be revoked at all."""
