@@ -13,7 +13,27 @@
 # Verification is by FLOCK, never presence (a reconnecting daemon reads as
 # disconnected mid-retry) and never pgrep of anything carrying a token
 # (wake-watch carries none, so matching it by name is safe).
-# Fail-open on every doubt: no role, no broker, or a prior block -> allow stop.
+#
+# NOTHING HERE PROBES THE BROKER, and that is the load-bearing property (msg
+# 8573). Everything this hook does is LOCAL: spawn a daemon that dials the bus
+# on its own schedule and retries forever, spawn a local service, and require a
+# watcher that reads a local spool directory. None of it needs the bus to be up,
+# and all of it is most needed precisely when the bus is down.
+#
+# This hook used to open with `curl "$url/version" || exit 0` -- fail-open, so a
+# broker outage could not block every agent's turn. The intent was right and the
+# placement was fatal: it sat ABOVE the supervision blocks, so an unreachable
+# broker meant the agent ended its turn WITH NO WATCHER ARMED. The outage
+# disabled the recovery mechanism at the moment it was needed: when the bus came
+# back, nothing re-armed the watcher, because the only thing that would runs at a
+# turn boundary the agent could no longer reach. One agent sat deaf for 21 hours
+# with 44 rings in its spool while the bus was healthy again.
+#
+# So the rule, for anything appended below: WHAT CAN RUN WITHOUT THE REMOTE RUNS
+# WITHOUT ASKING ABOUT THE REMOTE. If a future block genuinely needs the broker,
+# probe it INSIDE that block and fail open there -- never at the top, where every
+# block below inherits a policy nobody chose for it. That inheritance is exactly
+# how this happened.
 set -u
 
 input="$(cat)"
@@ -22,7 +42,6 @@ case "$input" in *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exi
 role="${REVEILLE_AGENT_ROLE:-}"
 [ -n "$role" ] || exit 0
 url="${REVEILLE_URL:-http://127.0.0.1:8765}"
-curl -fsS --max-time 2 "$url/version" >/dev/null 2>&1 || exit 0
 
 hostport="${url#*://}"; hostport="${hostport%%/*}"
 scheme=ws; [ "${url%%://*}" = "https" ] && scheme=wss
@@ -34,6 +53,9 @@ mkdir -p "$spool"
 # Daemon alive? flock -n SUCCEEDING means nobody holds it -> daemon absent ->
 # spawn one. The daemon takes the same flock at startup, so a race here
 # resolves itself (the loser exits 0). Token rides the environment, never argv.
+# The URL is handed over unprobed on purpose: waked's own connect loop retries
+# forever, so spawning it against a dead broker is how the agent is already
+# waiting when the broker returns.
 if flock -n "$spool/.lock" true 2>/dev/null; then
   waked="$bindir/reveille-waked"; [ -x "$waked" ] || waked="reveille-waked"
   nohup "$waked" --url "$scheme://$hostport/wake" --name "$role" \
@@ -74,7 +96,10 @@ if [ -f "$lenv" ]; then
     fi ) &
 fi
 
-# Watcher armed? wake-watch takes no secret, so a cmdline match is safe.
+# Watcher armed? wake-watch takes no secret, so a cmdline match is safe. This
+# block is the LAST thing and blocks the stop when unarmed -- including while the
+# broker is down, because wake-watch reads a local directory and an armed watcher
+# is what makes the agent recover by itself when the bus returns.
 pgrep -f "wake-watch $role( |\$)" >/dev/null 2>&1 && exit 0
 
 watch_bin="$bindir/wake-watch"; [ -x "$watch_bin" ] || watch_bin="wake-watch"
