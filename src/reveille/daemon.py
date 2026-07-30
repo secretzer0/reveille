@@ -3023,7 +3023,8 @@ async function refreshAgents(){
      '<div class="pRow warn"><b>Destroy '+esc(a.agent)+'?</b></div>'+
      '<div class="pAsk">Its running session and bus grants end now -- that '+
      'cannot be undone.</div>'+
-     '<div class="pAsk">Container and local repo checkout: gone.</div>'+
+     '<div class="pAsk">Container, local repos, and everything this agent '+
+     'learned locally (its ~/.claude): gone.</div>'+
      '<div class="pAsk">Hive memory (lessons, decisions, saved state): '+
      'kept.</div>'+
      '<div class="pRow">Type <b>'+esc(a.agent)+'</b> to confirm: '+

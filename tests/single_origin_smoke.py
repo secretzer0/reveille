@@ -123,6 +123,11 @@ def main():
         assert code == 200 and 'id="agentsNav"' in page, code
         assert f'const AGBASE="{AGENTS_PATH}"' in page, \
             "the page does not carry the launcher prefix it must fetch with"
+        # Destroy sends purge=1, which rmtree's the whole agent home. The modal
+        # has to say so: "local repo checkout" alone reads as "what it learned
+        # survives", and the copy lives in a different file from the rmtree.
+        assert "~/.claude" in page and "Hive memory" in page, \
+            "the destroy modal understates what purge=1 removes"
 
         # -- 3. every endpoint the pane calls, at AGBASE ----------------------
         for path, key in ((f"{AGENTS_PATH}/agents", "agents"),

@@ -1520,7 +1520,8 @@ async function refresh(){
     'role="group" aria-label="confirm destroy '+esc(a.agent)+'">'+
     '<div class="dim">Destroy '+esc(a.agent)+'? Its running session and bus '+
     'grants end now -- that cannot be undone.</div>'+
-    '<div class="dim">Container and local repo checkout: gone.</div>'+
+    '<div class="dim">Container, local repos, and everything this agent '+
+    'learned locally (its ~/.claude): gone.</div>'+
     '<div class="dim">Hive memory (lessons, decisions, saved state): kept.</div>'+
     '<div class="row">Type <b>'+esc(a.agent)+'</b> to confirm: '+
      '<input data-delconfirm size="20" autocomplete="off" '+

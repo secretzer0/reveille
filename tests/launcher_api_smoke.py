@@ -217,8 +217,20 @@ def main():
         # the launcher UI page serves (content sanity only; the real-browser
         # pass is the P3 gate proper)
         ui = req(L, "/ui", ana)
-        assert "NEW AGENT" in ui and "never shown" in ui
+        assert "never shown" in ui
+        # U7: creation is a page-level action behind a COLLAPSED disclosure, never
+        # rendered adjacent to a managed row -- that adjacency is what read as
+        # "redefine it to restart it". Asserted as the property, not the wording:
+        # a <details> that ships `open` would look identical to a reviewer reading
+        # the diff and would reintroduce the whole defect.
+        assert "<details class=\"addAgent\"><summary>Add agent</summary>" in ui
+        assert "<details class=\"addAgent\" open" not in ui
         assert "name your first" in ui   # M3: the first-run chain ships
+        # The destroy modal must name what purge=1 ACTUALLY removes. It deletes
+        # the whole agent home -- claude/ as well as repos/ -- and the copy said
+        # only "local repo checkout", which reads as "what it learned survives".
+        # Pinned here because the copy and the rmtree live in different files.
+        assert "~/.claude" in ui and "Hive memory" in ui
         assert "CREDENTIALS" in ui and "clear overrides" in ui   # U1 ships
 
         # -- stop, destroy, profile ------------------------------------------
@@ -228,8 +240,27 @@ def main():
         assert st.stdout.strip() == "false"
         prof = json.loads(req(L, "/profile", ana))
         assert prof["user"] == "ana" and prof["containers"] == 1
+        # DESTROY KEEPS THE DATA ROOT unless asked; the web UI's destroy asks
+        # (?purge=1, U7). This is the only irreversible thing the launcher does
+        # over HTTP and nothing gated it, so both halves are pinned here.
+        root = os.path.join(tmp, "data", "ana", "dev")
+        assert os.path.isdir(root), root
         responses.append(req(L, "/agents/dev", ana, "DELETE"))
         assert json.loads(req(L, "/agents", ana))["agents"] == []
+        assert os.path.isdir(root), "plain DELETE must not touch the data root"
+
+        # ...and with purge=1 the WHOLE agent home goes -- claude/ as well as
+        # repos/, which is what the destroy modal has to say out loud. If this
+        # assertion ever narrows to repos/, the UI copy is what changed.
+        for sub in ("claude", "repos"):
+            os.makedirs(os.path.join(root, sub), exist_ok=True)
+        responses.append(req(L, "/agents", ana, "POST",
+                             {"agent": "dev", "rooms": [room["id"]],
+                              "role": "senior-dev", "network": NET,
+                              "boot_cmd": "sleep infinity", "replace": True}))
+        responses.append(req(L, "/agents/dev?purge=1", ana, "DELETE"))
+        assert not os.path.exists(root), \
+            f"purge=1 left the agent home behind: {os.listdir(root)}"
 
         # -- no secret leaked anywhere (P1 provision token: no file, no
         # response; P2 profile tokens: exactly ONE file -- profile.json --
