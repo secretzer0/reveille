@@ -7,6 +7,7 @@ namespaced names, per-agent data roots, quota resolution, idle decision."""
 import asyncio
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -1273,18 +1274,60 @@ def test_agent_image_check_refuses_a_tag_that_was_never_built():
     and the suite cannot tell the difference because a string is correct either
     way. Three deploys shipped a tag nobody had built (0.2.6, 0.2.7, 0.2.10),
     each caught by a reviewer looking by hand -- which is not a control.
+
+    UNREACHABLE DOCKER IS NOT AN ABSENT IMAGE, and this test must not treat them
+    alike either. An agent container has no docker socket by design, so exit 2
+    (cannot see the image store) is the normal answer there and skipping is
+    right. Exit 1 means docker LOOKED and the tag is not there -- that is the
+    defect the control exists for, and skipping on it would retire the only half
+    that ever fails. Ruling 8744: skip on unreachable, fail on absent.
     """
     script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "agent-image-check"
     if shutil.which("docker") is None:
         pytest.skip("docker not on PATH -- this gate asks docker")
-    res = subprocess.run(["bash", str(script), "reveille-agent:0.0.0-never-built"],
-                         capture_output=True, text=True)
-    assert res.returncode != 0, "a missing agent image must stop the deploy"
-    assert "REFUSING to deploy" in res.stderr
-    # and it passes for one that IS built -- otherwise it refuses everything and
-    # would be turned off within a week
-    res_ok = subprocess.run(["bash", str(script), rl.DEFAULT_IMAGE],
+
+    absent = subprocess.run(["bash", str(script), "reveille-agent:0.0.0-never-built"],
                             capture_output=True, text=True)
-    if res_ok.returncode != 0:
-        pytest.skip(f"{rl.DEFAULT_IMAGE} not built on this host yet")
-    assert "present" in res_ok.stdout
+    if absent.returncode == 2:
+        pytest.skip("docker unreachable from here -- the store cannot be read")
+    assert absent.returncode == 1, "a missing agent image must stop the deploy"
+    assert "REFUSING to deploy" in absent.stderr
+    assert "CANNOT VERIFY" not in absent.stderr, (
+        "a missing tag must not be reported as an unreadable store")
+
+    # The positive half. Docker is reachable -- proven one line up -- so exit 1
+    # here means DEFAULT_IMAGE was bumped and never built, which is exactly the
+    # thing this gate is for. Failing, not skipping.
+    present = subprocess.run(["bash", str(script), rl.DEFAULT_IMAGE],
+                             capture_output=True, text=True)
+    assert present.returncode == 0, (
+        f"{rl.DEFAULT_IMAGE} is not built on this host, and docker can see the "
+        f"store -- build it: make agent-image AGENT_IMAGE={rl.DEFAULT_IMAGE}")
+    assert "present" in present.stdout
+
+
+def test_agent_image_check_says_unknown_when_it_cannot_see_docker():
+    """The blocking half of ruling 8744, measured rather than argued.
+
+    `docker image inspect` fails identically for "no such tag" and "cannot reach
+    the daemon". Reported as the first, the control told a caller with the image
+    genuinely built that it had never been built, and sent them to rebuild it --
+    a probe whose vocabulary cannot express its own inability, reporting a null
+    as a fact. Exit 2 is the vocabulary for unknown.
+
+    Docker is pointed at a socket that is not there, rather than removed from
+    PATH: the client then fails the way it fails in an agent container -- present
+    and unable to reach a daemon -- and the rest of the script's shell tools keep
+    working, so the test measures the probe and not a broken fixture.
+    """
+    script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "agent-image-check"
+    if shutil.which("docker") is None:
+        pytest.skip("docker not on PATH -- nothing to make unreachable")
+    env = dict(os.environ, DOCKER_HOST="unix:///nonexistent/docker.sock")
+    res = subprocess.run(["bash", str(script), "reveille-agent:0.2.11"],
+                         capture_output=True, text=True, env=env)
+    assert res.returncode == 2, "unreachable docker is its own outcome, not absence"
+    assert "CANNOT VERIFY" in res.stderr
+    assert "REFUSING to deploy" not in res.stderr, (
+        "this is the exact confusion the ruling is about: an unreadable store "
+        "must never be reported as a tag that was never built")

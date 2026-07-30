@@ -30,6 +30,26 @@ if [ -z "$image" ]; then
   exit 1
 fi
 
+# ASK WHETHER THE QUESTION IS ANSWERABLE BEFORE ANSWERING IT.
+#
+# `docker image inspect` fails identically for "no such tag" and "cannot reach
+# the daemon" -- and the second is the common case, because an agent container
+# has no docker socket BY DESIGN. Reported as the first, this told a caller the
+# image was never built while it sat in the local store, and sent them to
+# rebuild something that already existed.
+#
+# That is the defect this whole slice is about, one level in: a probe whose
+# vocabulary cannot express its own inability, reporting a null as a fact.
+# Exit 2 means UNKNOWN, and unknown is not the same answer as no.
+if ! docker info >/dev/null 2>&1; then
+  echo "CANNOT VERIFY the agent image: docker is not reachable from here." >&2
+  echo "  wanted: $image" >&2
+  echo "This is not a claim that the tag is missing -- it is a claim that this" >&2
+  echo "process cannot see the image store at all (no socket, no permission, or" >&2
+  echo "no daemon). Run it where docker answers." >&2
+  exit 2
+fi
+
 if docker image inspect "$image" >/dev/null 2>&1; then
   echo "agent image: $image present"
   exit 0

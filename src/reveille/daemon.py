@@ -203,8 +203,12 @@ prior report wherever it lives and a re-provision is when that report matters
 (ruling 8732). (3) `make up` now refuses a DEFAULT_IMAGE tag that does not
 exist on the host, and the suite pins the Makefile's AGENT_IMAGE to it. Three
 deploys shipped a tag nobody had built; each was caught by a reviewer looking
-by hand, and a reviewer who happens to look is not a control. Agent image
-0.2.11.
+by hand, and a reviewer who happens to look is not a control. That check
+distinguishes UNREACHABLE DOCKER (exit 2) from an absent tag (exit 1), because
+`docker image inspect` fails identically for both and an agent container has no
+docker socket by design -- reported as absence, it told a caller with the image
+genuinely built to go build it. Unknown is not the same answer as no, which is
+this entry's own defect one level in. Agent image 0.2.11.
 
 0.2.47 A BROKEN BOOT IS VISIBLE TO THE HUMAN. GET /agents/{agent}/boot-report
 returns the agent's boot report and the row shows the LINES that say something
