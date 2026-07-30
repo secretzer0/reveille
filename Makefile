@@ -113,22 +113,43 @@ unregister:
 # lives in the database. Port published on 0.0.0.0 so the LAN (and remote agents) reach it.
 SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
 SERVER_DATA  ?= $(HOME)/reveille
+# The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
+# agent reaches the bus at http://reveille-server:8765, and container names only
+# resolve on a user-defined network -- the default bridge has no DNS. Must match
+# reveille_launch.py's DEFAULT_NETWORK.
+SERVER_NETWORK ?= reveille
 
 server-image:
 	docker build -t $(SERVER_IMAGE) -f docker/Dockerfile.server .
 
 server-run: server-image
 	@mkdir -p "$(SERVER_DATA)"
+	docker network create $(SERVER_NETWORK) 2>/dev/null || true
 	docker rm -f reveille-server 2>/dev/null || true
 	docker run -d --name reveille-server --restart unless-stopped \
+	  --network $(SERVER_NETWORK) \
 	  -p 8765:8765 \
 	  -v "$(SERVER_DATA)":/data \
 	  $(SERVER_IMAGE)
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-	  curl -sf http://127.0.0.1:8765/health >/dev/null && \
-	    { echo "reveille-server up: http://0.0.0.0:8765  data=$(SERVER_DATA)"; exit 0; }; \
+	  curl -sf http://127.0.0.1:8765/health >/dev/null && break; \
 	  sleep 1; \
-	done; echo "FAILED -- docker logs reveille-server:"; docker logs --tail 5 reveille-server; exit 1
+	  if [ $$i = 10 ]; then \
+	    echo "FAILED (host) -- docker logs reveille-server:"; \
+	    docker logs --tail 5 reveille-server; exit 1; fi; \
+	done
+	@# REACHABLE BY NAME, from the network the agents are on -- not just from the
+	@# host. A deploy that answers on 127.0.0.1 and is invisible to every agent is
+	@# the failure this check exists for: it happened, it cut the whole fleet off
+	@# the bus, and nothing noticed for hours because the host-side probe was green.
+	@docker run --rm --network $(SERVER_NETWORK) --entrypoint /app/.venv/bin/python \
+	  $(SERVER_IMAGE) -c "import urllib.request as u; \
+	  print('reachable by name:', u.urlopen('http://reveille-server:8765/version', \
+	  timeout=5).read().decode())" \
+	  || { echo "FAILED: the broker is up on the host but NOT reachable as" \
+	       "reveille-server on the $(SERVER_NETWORK) network -- every agent" \
+	       "container is cut off from the bus"; exit 1; }
+	@echo "reveille-server up: http://0.0.0.0:8765  data=$(SERVER_DATA)  network=$(SERVER_NETWORK)"
 
 server-stop:
 	docker rm -f reveille-server
