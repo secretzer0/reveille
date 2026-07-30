@@ -1592,6 +1592,72 @@ def deafness(conn, rooms, now=None):
     return {(r["room_id"], r["name"]): r["stuck"] for r in rows}
 
 
+# How recently a bus call must have landed for an agent to read as ACTIVE, and
+# how long "told, no answer yet" stays an honest description before it becomes
+# "no idea". Both well inside DEAF_AFTER: confidence must not outlive evidence.
+ACTIVE_GRACE_NS = int(os.environ.get("REVEILLE_ACTIVE_GRACE", "60")) * 10**9
+WAITING_CEILING_NS = int(os.environ.get("REVEILLE_WAITING_CEILING", "300")) * 10**9
+
+
+def activity(conn, rooms, now=None):
+    """{(room_id, name): 'active'|'waiting'|'unsure'|'idle'} per member, per room.
+
+    ANIMATION FOLLOWS OBSERVATION, NEVER INFERENCE (ruling 8676). The bus cannot
+    see an agent think. It can see three things -- that it rang, that a call
+    landed, and that mail is unread -- and each label here says only which of
+    those is true:
+
+      active   a bus call from this agent landed within ACTIVE_GRACE. OBSERVED.
+               This is the only one anything may animate.
+      waiting  rung, direct mail unread, no call since. "Told, no answer yet."
+      unsure   the same, past WAITING_CEILING. The honest label stops being
+               "no answer yet" and becomes "no idea" long before the 900s deaf
+               verdict -- a crashed agent must stop looking busy in minutes, not
+               a quarter of an hour.
+      idle     replied, or acked everything and gone quiet.
+
+    IDLE ON SILENCE IS REQUIRED, not a convenience: silence is a valid turn is
+    ratified doctrine, so an agent that acks and correctly says nothing must
+    read calm. Any rule that made correct quietness look alarming would teach
+    agents to reply when nothing is owed, which is the broadcast storm we spent
+    a slice removing.
+
+    Computed at read time from the same three inputs deafness() reads, so there
+    is nothing new that can go stale -- per the doctrine this whole family of
+    bugs earned. The cost, accepted and stated in the UI rather than smoothed
+    over: an agent thinking hard without touching the bus falls to `waiting`
+    mid-thought. That is true. The bus genuinely cannot see it."""
+    if not rooms:
+        return {}
+    now = now or time.time_ns()
+    rooms = list(rooms)
+    stuck = {}
+    for r in conn.execute(
+            f"SELECT mem.room_id, mem.name, min(m.ts_ns) AS oldest "
+            f"FROM members mem JOIN messages m "
+            f"  ON m.room = mem.room_id AND m.recipient = mem.name "
+            f"WHERE mem.room_id IN ({_ph(rooms)}) AND mem.left_ns IS NULL "
+            f"  AND m.ts_ns > mem.seen_ns "
+            f"  AND NOT EXISTS (SELECT 1 FROM reads r "
+            f"                  WHERE r.message_id = m.id AND r.agent = mem.name) "
+            f"GROUP BY mem.room_id, mem.name", rooms).fetchall():
+        stuck[(r["room_id"], r["name"])] = r["oldest"]
+
+    out = {}
+    for m in conn.execute(
+            f"SELECT room_id, name, seen_ns FROM members "
+            f"WHERE room_id IN ({_ph(rooms)}) AND left_ns IS NULL", rooms):
+        key = (m["room_id"], m["name"])
+        if now - m["seen_ns"] <= ACTIVE_GRACE_NS:
+            out[key] = "active"                 # a call landed: the one we saw
+        elif key in stuck:
+            out[key] = ("waiting"
+                        if now - stuck[key] <= WAITING_CEILING_NS else "unsure")
+        else:
+            out[key] = "idle"
+    return out
+
+
 def agents_seen(conn, rooms, exclude=()):
     """Every agent name the HIVE still knows in these rooms, with what it has
     of theirs. Operator requirement 2026-07-30: an agent whose container and

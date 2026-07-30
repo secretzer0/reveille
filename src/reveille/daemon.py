@@ -190,6 +190,17 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.40 AN AGENT SHOWS WHAT THE BUS SAW. Presence rows carry `activity`:
+active (a call from that agent landed within the grace -- OBSERVED, and the
+only state the UI animates), waiting (rung, direct mail unread, nothing heard
+-- shown still, never moving), unsure (the same past a few minutes, faded,
+because confidence must not outlive evidence), idle (replied, or acked and
+quiet). Computed at read time from the ring, seen_ns and the unread set --
+the three inputs deafness already reads, so nothing new can lapse. Per ROOM:
+the same agent can be active in one room and idle in another, which is true.
+Silence stays a valid turn -- an agent that acks and correctly says nothing
+reads idle, never alarming.
+
 0.2.39 OPENING A ROOM IS JOINING IT. A web session that opens a room's feed
 becomes a MEMBER at that instant, not when its 15s poll next fires -- before
 this, a newcomer was in the watcher set but in nobody's presence list, so
@@ -780,11 +791,22 @@ def _push_presence(room):
         return                                  # nobody watching: nothing to tell
     agents = store.presence(_conn, [room])
     _annotate_deafness(agents, [room])
+    _annotate_activity(agents, [room])
     _human_live(agents)
     for a in agents:
         a["connected"] = _reachable(a)
         a.pop("token_id", None)
     _feed_push(room, {"event": "presence", "room": room, "agents": agents})
+
+
+def _annotate_activity(agents, rooms):
+    """Stamp `activity` onto presence rows, at read time, from the same inputs
+    deafness reads. See store.activity: the label names what the bus SAW, never
+    what the agent is doing inside, because only `active` is observed and only
+    `active` may animate."""
+    act = store.activity(_conn, rooms)
+    for a in agents:
+        a["activity"] = act.get((a["room"], a["name"]), "idle")
 
 
 def _annotate_deafness(agents, rooms):
@@ -946,6 +968,14 @@ def _seen(name, rooms, token_id=None):
             if back:
                 log.info("%s readmitted to %s room(s) (membership had lapsed)",
                          name, len(back))
+    # ANY call is the observation that makes this agent ACTIVE, so push it here
+    # rather than only at send: the transition the operator most wants to see is
+    # ring -> agent calls inbox() -> the icon starts moving, and waiting 15s for
+    # a poll to notice would miss the start of every turn. _push_presence returns
+    # immediately when nobody is watching the room, which is what keeps this cheap
+    # on a call that runs constantly.
+    for _rid in rooms:
+        _push_presence(_rid)
 
 
 # ---- MCP tools (async -> run on the loop thread, so one sqlite conn is safe) ----
@@ -1231,6 +1261,8 @@ async def send(to: str, body: str, subject: str = "",
     # with a person behind it; nothing here can loop.
     woke = res["wake"] if to != store.BROADCAST else []
     _notify(rid, woke, res["id"], p.name, subject)
+    _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
+                          # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
@@ -1419,6 +1451,7 @@ async def presence(ctx: Context = None) -> dict:
     p = _me(ctx.request_context.request)
     agents = store.presence(_conn, p.rooms)
     _annotate_deafness(agents, p.rooms)
+    _annotate_activity(agents, p.rooms)
     _human_live(agents)
     for a in agents:
         a["connected"] = _reachable(a)
@@ -1681,6 +1714,7 @@ async def presence_http(request):
                 store.join(_conn, me, tag=f"web:{me}", room_id=rid, fresh=True)
     agents = store.presence(_conn, rooms)
     _annotate_deafness(agents, rooms)
+    _annotate_activity(agents, rooms)
     _human_live(agents)
     for a in agents:
         a["connected"] = _reachable(a)
@@ -1727,6 +1761,8 @@ async def send_http(request):
     # reach is indistinguishable from one that does not exist.
     woke = res["wake"]
     _notify(rid, woke, res["id"], sender, d.get("subject") or "")
+    _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
+                          # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": sender, "to": to,
                 "subject": d.get("subject") or "", "body": body,
