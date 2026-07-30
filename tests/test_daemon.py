@@ -6,7 +6,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from reveille import daemon  # noqa: E402
+from reveille import __version__, daemon  # noqa: E402
 
 # The bus page, now a flat file (ui/bus/index.html) read through the same
 # fixed-table loader the server uses -- so what these tests inspect is what
@@ -46,6 +46,20 @@ def test_ui_override_announces_itself(monkeypatch):
     monkeypatch.setenv("REVEILLE_UI_PATH", "/tmp/devui")
     r = asyncio.run(daemon.version_http(None))
     assert "ui override: /tmp/devui" in r.body.decode()
+
+
+def test_changes_newest_entry_is_this_version():
+    """A version bump and its CHANGES entry ship together or neither ships.
+
+    0.2.35 merged with both missing: the code changed, pyproject still said
+    0.2.34, and server-image REFUSES an existing tag -- so main was
+    undeployable and the version number named the wrong artifact. Nobody
+    forgot the rule; the rule had nowhere to fail. It fails here now."""
+    newest = next(ln for ln in daemon.CHANGES.splitlines()
+                  if ln[:1].isdigit())
+    assert newest.split()[0] == __version__, (
+        f"CHANGES newest entry is {newest.split()[0]!r} but the package is "
+        f"{__version__!r} -- bump both or neither")
 
 
 def test_usage_names_the_hive_in_standing_doctrine():
