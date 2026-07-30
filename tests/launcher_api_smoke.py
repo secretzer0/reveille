@@ -95,7 +95,12 @@ def main():
     lenv = dict(os.environ,
                 REVEILLE_LAUNCH_DB=os.path.join(tmp, "launcher.db"),
                 REVEILLE_LAUNCH_DATA=os.path.join(tmp, "data"),
-                REVEILLE_LAUNCH_AUDIT=os.path.join(tmp, "audit.log"))
+                REVEILLE_LAUNCH_AUDIT=os.path.join(tmp, "audit.log"),
+                # Without this the launcher falls back to DEFAULT_BROKER
+                # ("reveille-server") and _ensure_network drags the LIVE broker
+                # onto NET -- which then survives teardown, because you cannot
+                # `network rm` a network that still holds an active endpoint.
+                REVEILLE_LAUNCH_BROKER=f"http://127.0.0.1:{bport}")
     api = subprocess.Popen(
         LAUNCH + ["serve", "--port", str(lport),
                   "--auth-url", f"http://127.0.0.1:{bport}"],
