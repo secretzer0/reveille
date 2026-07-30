@@ -1085,6 +1085,10 @@ function connect(){
  ws.onopen=()=>{$('status').classList.add('on');$('meDot').classList.add('on');
   $('meDot').title='connected to the room feed';loadBacklog(false);checkVersion();};
  ws.onmessage=e=>{const m=JSON.parse(e.data);
+  // The server's keepalive. It exists so a socket that died WITHOUT a close frame
+  // fails a write and stops counting as a watcher -- presence is computed from the
+  // watcher set, so a phantom is someone reading as live in a room they left.
+  if(m.ping)return;
   if(m.error){if(m.error==='bad_token')showLogin('session expired -- sign in again');return;}
   if(m.deleted){
    for(const el of [...$('inner').children])
