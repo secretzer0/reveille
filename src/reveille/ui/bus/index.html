@@ -1978,6 +1978,9 @@ async function refreshLoginSection(){
     el.innerHTML=((L.needed_by||[]).length
      ?'<b>No login on file.</b> Your agents '+esc(L.needed_by.join(', '))+
       ' cannot work until you log in. '
+     :L.needed
+     ?'<b>No login on file.</b> Your credential mode is home-login: you will '+
+      'need this before you can create an agent. '
      :'No login on file (needed only by home-login agents). ')+
      '<button id="lgStart">log in via browser</button>'+
      '<span class="pDim"> or in a terminal: '+cmd+'</span>';
@@ -2044,7 +2047,7 @@ fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+
  if(typeof AGBASE!=='undefined')(async()=>{
   try{
    const p=await lapi('/profile');const L=p.claude_login||{};
-   if(!L.present&&(L.needed_by||[]).length){
+   if(!L.present&&L.needed){
     openAccount();
     toast('first run: your agents need a claude login -- the Account tab has the one command');
    }

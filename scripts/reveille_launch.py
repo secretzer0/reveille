@@ -1680,6 +1680,26 @@ def revoke_minted_token(auth_url, cookie_header, token_id):
     _broker_json(auth_url, cookie_header, "DELETE", f"/tokens/{token_id}")
 
 
+def login_need(prof, agent_names):
+    """Will this user NEED a login to proceed? Pure. The predicate is the
+    CONDITION -- a human about to be blocked -- not its exclusions (ruling
+    8648, correcting 8633): the shipped version counted only EXISTING agents,
+    so a user who set claude_mode=home-login before creating their first
+    agent saw nothing at sign-in and met the provision refusal instead. The
+    directive must arrive BEFORE the wall. needed = the GLOBAL mode resolves
+    home-login OR any existing agent's mode does; needed_by still names the
+    affected agents so the copy can say who, and is empty on the
+    before-first-agent path where the copy says "before you can create one".
+    Token-mode users still see nothing -- the noise concern 8633 protected,
+    intact."""
+    needed_by = sorted(
+        a for a in agent_names
+        if resolve_credentials(prof, a)["claude_mode"] == "home-login")
+    needed = bool(needed_by) or \
+        resolve_credentials(prof, "")["claude_mode"] == "home-login"
+    return {"needed": needed, "needed_by": needed_by}
+
+
 def claude_login_state(user, base=None):
     """A READING of the user's login home (operator requirement 2026-07-30:
     login state is managed in the settings area, and its absence is the first
@@ -2008,16 +2028,11 @@ def build_api(auth_url):
         q = _quotas_for(conn, p["user"])
         used = conn.execute("SELECT count(*) FROM containers WHERE user=?",
                             (p["user"],)).fetchone()[0]
-        # needed_by: which EXISTING agents resolve to home-login -- the
-        # first-run callout fires only for users this actually applies to
-        # (ruling 8633: a directive that does not apply to you is noise).
         prof = load_profile(p["user"])
         cl = claude_login_state(p["user"])
-        cl["needed_by"] = sorted(
-            r["agent"] for r in conn.execute(
-                "SELECT agent FROM containers WHERE user=?", (p["user"],))
-            if resolve_credentials(prof, r["agent"])["claude_mode"]
-            == "home-login")
+        cl.update(login_need(
+            prof, [r["agent"] for r in conn.execute(
+                "SELECT agent FROM containers WHERE user=?", (p["user"],))]))
         return JSONResponse({"user": p["user"], "quotas": q,
                              "containers": used,
                              "credentials": masked_profile(prof),

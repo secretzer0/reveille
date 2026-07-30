@@ -185,6 +185,12 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.32 THE LOGIN DIRECTIVE ARRIVES BEFORE THE WALL. A user whose credential
+mode resolves to home-login with no login on file is told at SIGN-IN --
+including before their first agent exists (0.2.31 counted only existing
+agents, so the directive arrived as a provision refusal instead). Token-mode
+users still see nothing.
+
 0.2.31 LOG IN FROM THE BROWSER. Settings > Account can now drive the whole
 claude login: start, click the link, paste the one code, done -- the launcher
 runs the same login container the terminal command uses, preselects the
