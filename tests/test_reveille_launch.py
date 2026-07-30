@@ -222,6 +222,27 @@ def test_login_argv_is_per_user_and_credential_free():
     assert argv[-1] == rl._DEBUG_SEED   # lands in a seeded bash, no wizard
 
 
+def test_login_need_fires_before_the_wall():
+    # Ruling 8648 correcting 8633: the predicate is the CONDITION (a human
+    # about to be blocked), not its exclusions. The operator hit the gap
+    # live: global home-login, zero agents, no prompt, then the provision
+    # refusal -- the directive arrived after the wall.
+    # 1. zero agents + global home-login -> needed, nobody named yet
+    n = rl.login_need({"claude_mode": "home-login"}, [])
+    assert n == {"needed": True, "needed_by": []}
+    # 2. token-mode user -> silent (the noise concern 8633 protected)
+    assert rl.login_need({"claude_mode": "token"}, ["dev"])["needed"] is False
+    assert rl.login_need({}, ["dev"])["needed"] is False
+    # 3. global token but ONE agent overridden to home-login -> needed, named
+    n = rl.login_need({"claude_mode": "token",
+                       "agents": {"ui": {"claude_mode": "home-login"}}},
+                      ["ui", "dev"])
+    assert n == {"needed": True, "needed_by": ["ui"]}
+    # 4. agents exist under global home-login -> needed AND named
+    n = rl.login_need({"claude_mode": "home-login"}, ["b", "a"])
+    assert n == {"needed": True, "needed_by": ["a", "b"]}
+
+
 def test_claude_login_state_is_a_reading(tmp_path):
     # Absent -> present tracks the FILE, computed fresh each call -- never a
     # stored flag that can lapse. No values ever ride the reading.

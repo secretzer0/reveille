@@ -142,6 +142,11 @@ def main():
         _, body = get(f"{AGENTS_PATH}/profile")
         login = json.loads(body)["claude_login"]
         assert login["present"] is False and login["needed_by"] == [], login
+        assert login["needed"] is False, (
+            "a token-mode user with no agents must not be told to log in", login)
+        # and the page's first-run callout is guarded on BOTH halves: needed,
+        # and not already present -- it must stop nagging once satisfied
+        assert "!L.present&&L.needed" in page
 
         # -- 4. unprefixed is the BUG, and must not answer --------------------
         for path in ("/rooms-mine", "/profile"):
