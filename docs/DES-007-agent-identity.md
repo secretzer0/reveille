@@ -28,6 +28,17 @@ the key**, because the requirement is that one `(user, name)` maps to
 time somebody declines a resurrect. The operator asked which it should be;
 their own spec answers it.
 
+### 1.1 The benefit, in one line
+
+**An agent cannot read what it wrote before it was recreated, and this fixes
+that.** State notes are scoped `agent:<token_id>` (§4.2), so recreating an
+agent mints a new token, yields a new scope, and orphans the note — which
+means "recreate resumes its old state" is currently a claim rather than a
+promise. The architect confirmed on the live broker: **one** orphaned
+agent-scoped memory exists today, whose token no longer exists. Small now, and
+0.2.28 made recreate-with-a-fresh-token routine, so it grows from here. A fix,
+not an emergency — and the most legible payoff of the whole design.
+
 ## 2. The model
 
 ```
@@ -115,6 +126,20 @@ in one conversation must be distinguishable* — which is what makes `to=` and
 `reply_to` mean anything at all. `join()` already enforces this per room; it
 survives unchanged and refuses on identity rather than on string.
 
+### 3.1 DECIDED: none of this is exposed to agents over MCP
+
+Raised by the operator ("most of what we have talked about recently are human
+interactive requirements"), agreed and ruled (8665). Recorded as a **decision**
+so it is not re-opened later as an oversight: **the absence of these tools is
+the design.**
+
+Provisioning, resurrect, purge and ownership are human acts. An agent that
+could mint or resurrect its own identity would defeat ownership at the root —
+the owner would be the agent. `join`, `rooms`, `leave` and `presence` already
+cover the agent side completely, and the only agent-facing addition this
+design earns is a field, not a tool: `whoami()` returns the agent's id and
+owner once the table exists.
+
 ## 4. Where the NAME is load-bearing
 
 The architect named tokens, messages, memories, members, presence, `whoami`,
@@ -129,10 +154,12 @@ moment a name carries two histories, purging one identity **deletes the
 other's messages too**. This is the operator's own purge control, and it
 becomes silently destructive under the very feature that motivated the work.
 
-Must become `prune_agent(conn, agent_id, room_id)`. It is also the strongest
-argument for doing the id migration *before* the resurrect UI ships, not
-after: the feature that creates second identities and the control that
-destroys them are the same slice's blast radius.
+Must become `prune_agent(conn, agent_id, room_id)`.
+
+**RATIFIED ORDERING (architect, 8665), and it is not negotiable: the id
+migration lands BEFORE the resurrect UI.** The thing that creates second
+identities and the thing that deletes by name are the same blast radius.
+Stated here in one sentence so the ordering survives whoever picks this up.
 
 ### 4.2 `memories.scope = 'agent:<token_id>'` — a THIRD identity notion, already broken
 
@@ -179,10 +206,27 @@ directive means.
 
 Not caused by DES-007, but it lands in the same code and the same table, and
 under DES-007 the fix is natural: leaving is a fact about an **identity's**
-membership, so `join()` must not clear a `left_ns` it did not set. Proposed:
-`join()` skips rooms where `left_ns IS NOT NULL` and reports them, so the
-agent can see it is deliberately out of a room rather than silently back in.
-Wants its own slice and its own ruling — flagged here so it is not lost.
+membership, so `join()` must not clear a `left_ns` it did not set.
+
+**RULED (architect, 8665): make `join` symmetric with `leave`.** My first
+proposal — `join()` skips deliberately-left rooms and reports them — was right
+about the boot ritual and left a hole: `join()` is the only door, so an agent
+that left a room could then never return, and a directive is not a life
+sentence. The shape `leave` already has, read backwards:
+
+| `leave()` | leaves every room | `join()` | joins every room **not deliberately left**, and REPORTS the ones it skipped |
+| `leave(room=X)` | leaves one room | `join(room=X)` | joins X explicitly, **clearing** a prior leave |
+
+**The bare call is the ritual and must never undo a directive; the named call
+is a deliberate act and may.** One line to learn, because it is the rule the
+agent already knows from `leave()`. `DIRECTIVE:LEAVE` then holds across
+restarts, and an agent told to come back has a door.
+
+The skipped rooms are reported **by name**, not merely omitted: an agent that
+cannot tell "I left this" from "I was never given this" will ask a peer why
+its mail is not arriving.
+
+Its own slice, first after this doc — live, independent, small.
 
 ### 4.6 Confirmed, unremarkable
 
