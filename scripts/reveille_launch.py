@@ -29,12 +29,21 @@ somebody meant it.
   reveille-launch quota <user> [--cpus N] [--mem 8g] [--pids N] [--max-containers N]
       Show (bare) or override (flags) one user's quotas.
   reveille-launch profile <user> [--agent A] [--claude-token] [--github-token]
-                                 [--repo-url URL] [--clear-claude] [--clear-github]
+                                 [--repo-url URL] [--claude-mode token|home-login]
+                                 [--clear-claude] [--clear-github]
       Show (masked) or set stored credentials (DES-005 P2): claude setup-token
       or API key (told apart by prefix), github token, default repo URL --
       per-user globals, --agent for a per-agent override. Values arrive on
       stdin/prompt, land 0600 in data/<user>/profile.json (a sibling of the
       agent dirs, so no container mounts it), and are echoed by nothing.
+      claude_mode=home-login: no token env at all; agents copy the user's
+      `login` credential at boot (NOT zero-touch -- log in first).
+  reveille-launch login <user>
+      Interactive `claude /login` in the user's login home
+      (data/<user>/claude-auth) -- ONE login shared by ALL that user's
+      home-login agents as a boot-time COPY into each agent's own ~/.claude.
+      Re-run anytime to switch subscription accounts, then RESTART agents to
+      move them; agent homes stay otherwise 100% unique.
   reveille-launch grant <user> <agent> <grantee> [--mode viewer|driver] [--ttl 86400]
       Mint a per-grant URL token (docker exec attach-gate mint -- the secret never
       leaves the container) and record the grant. The token is PRINTED ONCE, never
@@ -112,7 +121,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.7")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.8")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -188,14 +197,29 @@ def data_root(user, agent, base=None):
     return os.path.join(base or DEFAULT_DATA, user, agent)
 
 
+def user_auth_root(user, base=None):
+    """The per-USER login home (operator requirement, 2026-07-30): the ONE
+    place a human performs `claude /login`, shared into every agent of that
+    user as a boot-time COPY of the credentials file -- never as a shared
+    mount. Agent homes stay 100% unique (identity confusion between agents
+    sharing state is exactly what the hive exists to prevent); the login is
+    the only thing they have in common, so re-logging-in here and restarting
+    the agents moves the whole fleet to the newly logged-in account."""
+    return os.path.join(base or DEFAULT_DATA, user, "claude-auth")
+
+
 def docker_run_argv(user, agent, image, network, quotas,
-                    boot_cmd=None, data_base=None, extra_env=()):
+                    boot_cmd=None, data_base=None, extra_env=(),
+                    auth_mount=None):
     """The docker-run command as argv. `-e NAME` entries pass values BY NAME from the
     child's env, so no secret is ever a token in this list -- the test asserts exactly
     that. quotas is a resolved QUOTA_DEFAULTS-shaped dict. `--restart no` is explicit
     although it is docker's default: reboot and crash both leave the container down,
-    so 'running' always means somebody meant it (sec 7.1). Pure: no env read, no
-    side effects."""
+    so 'running' always means somebody meant it (sec 7.1). auth_mount (home-login
+    mode) is the user's login home, mounted READ-ONLY at /run/reveille-auth; the
+    entrypoint copies the credentials file into the agent's own home at every
+    boot, so a restart picks up whatever account the user last logged in. Pure:
+    no env read, no side effects."""
     root = data_root(user, agent, base=data_base)
     argv = [
         "docker", "run", "-d",
@@ -213,6 +237,8 @@ def docker_run_argv(user, agent, image, network, quotas,
         "-e", "REVEILLE_URL",
         "-e", "REVEILLE_REPO_URL",
     ]
+    if auth_mount:
+        argv += ["-v", f"{auth_mount}:/run/reveille-auth:ro"]
     for name in ENV_PASSTHROUGH_SECRET:
         argv += ["-e", name]
     # There is deliberately NO ambient-Anthropic fallback here. This function
@@ -535,14 +561,23 @@ def save_profile(user, prof, base=None):
         json.dump(prof, f)
 
 
+CLAUDE_MODES = ("token", "home-login")
+
+
 def merge_profile(prof, updates, agent=None):
     """Apply updates (None value = clear) to the globals, or to one agent's
-    override block. Pure; returns the new profile."""
+    override block. Pure; returns the new profile. claude_mode is validated
+    HERE because both the CLI and the HTTP PUT flow through this function --
+    a mode is a CHOICE (msg 8629), and an unknown choice must be refused at
+    write time, not discovered as a silent default at provision time."""
     prof = json.loads(json.dumps(prof))   # deep copy, no surprises
     target = prof
     if agent is not None:
         target = prof.setdefault("agents", {}).setdefault(agent, {})
-    for k in ("claude_token", "github_token", "repo_url"):
+    if updates.get("claude_mode") and updates["claude_mode"] not in CLAUDE_MODES:
+        raise LaunchError(f"claude_mode must be one of {CLAUDE_MODES}, "
+                          f"not {updates['claude_mode']!r}")
+    for k in ("claude_token", "github_token", "repo_url", "claude_mode"):
         if k in updates:
             if updates[k]:
                 target[k] = updates[k]
@@ -561,6 +596,7 @@ def resolve_credentials(prof, agent, repo_url_req=""):
 
     return {"claude_token": pick("claude_token"),
             "github_token": pick("github_token"),
+            "claude_mode": pick("claude_mode") or "token",
             "repo_url": repo_url_req or pick("repo_url") or ""}
 
 
@@ -571,6 +607,31 @@ def credential_kind(token):
     if not token:
         return "none"
     return ("api-key" if token.startswith("sk-ant-api") else "subscription-token")
+
+
+def credential_env(creds):
+    """(env_names, env_values, kind) a container or debug shell receives for
+    the resolved credentials. Pure. The ONE place the claude_mode choice takes
+    effect (msg 8629): in home-login mode NO claude env var is passed at all,
+    even when a token is also stored -- claude's own precedence would let the
+    env var shadow the file credential the operator logged in, which is the
+    silent-billing-switch defect class wearing the fix as a disguise. The
+    credential in that mode is the file `claude /login` wrote into the agent's
+    persisted home; if it is absent, the agent boots to a visible login
+    prompt, which is honest. kind is the reportable word for audit lines and
+    responses: home-login | api-key | subscription-token | none."""
+    names, env = [], {}
+    if creds.get("claude_mode") == "home-login":
+        kind = "home-login"
+    else:
+        kind = credential_kind(creds["claude_token"])
+        if creds["claude_token"]:
+            names.append(claude_env_name(creds["claude_token"]))
+            env[names[-1]] = creds["claude_token"]
+    if creds["github_token"]:
+        names.append("GITHUB_TOKEN")
+        env["GITHUB_TOKEN"] = creds["github_token"]
+    return names, env, kind
 
 
 def claude_env_name(token):
@@ -641,18 +702,8 @@ def debug_argv(user, agent, image, network, extra_env=(), entrypoint="bash",
     return argv
 
 
-def cmd_debug(a):
-    creds = resolve_credentials(load_profile(a.user), a.agent, "")
-    kind = credential_kind(creds["claude_token"])
-    env = dict(os.environ)
-    extra = []
-    if creds["claude_token"]:
-        extra.append(claude_env_name(creds["claude_token"]))
-        env[extra[-1]] = creds["claude_token"]
-    if creds["github_token"]:
-        extra.append("GITHUB_TOKEN")
-        env["GITHUB_TOKEN"] = creds["github_token"]
-    managed = container_name(a.user, a.agent)
+def _refuse_if_running(user, agent, force, doing):
+    managed = container_name(user, agent)
     if _docker("inspect", "-f", "{{.State.Running}}", managed,
                check=False, capture=True).stdout.strip() == "true":
         # Same ~/.claude, two claudes: shared sqlite state and stepped-on locks.
@@ -663,25 +714,79 @@ def cmd_debug(a):
         # in this file refuses (deploy-preflight, server-image, the
         # credential-less boot); a debug tool aimed at a billing investigation
         # is not the place to make an exception, because the operator running it
-        # is by definition not yet sure what is going on.
-        if not a.force:
+        # is by definition not yet sure what is going on. For `login` the
+        # refusal is doubly binding (msg 8629): a login written while the agent
+        # runs is a credential swap under a running process.
+        if not force:
             raise LaunchError(
                 f"{managed} is RUNNING and shares ~/.claude with this shell. "
                 f"Two claudes on one home step on each other's sqlite state. "
-                f"Stop it first (reveille-launch stop {a.user} {a.agent}), or "
-                f"pass --force if you genuinely want both at once.")
+                f"Stop the agent first (reveille-launch stop {user} {agent}), "
+                f"then {doing}; or pass --force if you genuinely want both at "
+                f"once.")
         print(f"WARNING: {managed} is RUNNING and shares this home -- "
               f"--force given, proceeding.", file=sys.stderr)
+
+
+def cmd_debug(a):
+    creds = resolve_credentials(load_profile(a.user), a.agent, "")
+    names, cred_env, kind = credential_env(creds)
+    env = dict(os.environ, **cred_env)
+    _refuse_if_running(a.user, a.agent, a.force, "debug")
+    home_note = ("  claude auths from the login COPIED into the agent home at "
+                 "boot (home-login mode); no token env is passed -- if it asks "
+                 f"to log in, run `reveille-launch login {a.user}` and restart "
+                 "the agent.\n" if kind == "home-login" else "")
     print(f"debug shell into {a.user}/{a.agent}: image {a.image}, "
-          f"credential: {kind}\n"
+          f"credential: {kind}\n{home_note}"
           f"  inside, try:  claude /status   (whose account, which billing)\n"
           f"                claude /usage    (subscription limit bars -- absent "
           f"means not on a subscription seat)\n"
           f"  exits clean: --rm, nothing to clean up; the agent home persists.",
           file=sys.stderr)
     argv = debug_argv(a.user, a.agent, a.image, a.network,
-                      extra_env=extra, entrypoint=a.entrypoint)
+                      extra_env=names, entrypoint=a.entrypoint)
     os.execvpe("docker", argv, env)   # foreground: the tty is the point
+
+
+def login_argv(user, image, network, data_base=None):
+    """The per-USER login shell as argv: the user's login home mounted as
+    ~/.claude, seeded past the first-run wizard, landing in bash. NO agent
+    mounts, NO credential env -- this container exists so `claude /login` can
+    write the ONE credential file every agent of this user copies at boot.
+    Pure: no env read."""
+    return ["docker", "run", "--rm", "-ti",
+            "--name", f"rev-{user}-login",
+            "--network", network,
+            "-v", f"{user_auth_root(user, data_base)}:/home/agent/.claude",
+            "--entrypoint", "python3", image, "-c", _DEBUG_SEED]
+
+
+def cmd_login(a):
+    """The per-USER interactive login for home-login mode (operator
+    requirement, 2026-07-30): ONE login shared by ALL of the user's agents as
+    a boot-time copy, so with several subscription accounts the user re-logs
+    in here when one is exhausted and restarts the agents -- the whole fleet
+    moves to the new account. Re-login while agents run is safe and expected:
+    each agent holds its own COPY and picks up the new login on its next
+    restart, never mid-session. The launcher never holds this credential; it
+    lives in the user's login home, written by claude itself."""
+    root = user_auth_root(a.user)
+    os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
+    os.chmod(os.path.dirname(root), 0o700)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    had = os.path.isfile(os.path.join(root, ".credentials.json"))
+    print(f"login shell for user {a.user} ({'RE-login: replaces the current '
+          'account for every agent' if had else 'first login'}): image "
+          f"{a.image}, no credential env, no agent home touched.\n"
+          f"  inside, run:  claude /login   (complete the browser flow with "
+          f"the account whose plan should pay)\n"
+          f"  then exit. Agents in claude_mode=home-login copy this login at "
+          f"boot -- RESTART them to move them to the new account; running "
+          f"agents keep their current copy until then.",
+          file=sys.stderr)
+    os.execvpe("docker", login_argv(a.user, a.image, a.network),
+               dict(os.environ))
 
 
 def masked_profile(prof):
@@ -693,6 +798,8 @@ def masked_profile(prof):
             out[k] = "set" if d.get(k) else "absent"
         if d.get("repo_url"):
             out["repo_url"] = d["repo_url"]
+        if d.get("claude_mode"):   # a choice, not a secret
+            out["claude_mode"] = d["claude_mode"]
         return out
     body = mask(prof)
     body["agents"] = {name: mask(o) for name, o in
@@ -707,7 +814,11 @@ PROFILE_NOTES = (
     "limits are your subscription's own; N agents share them. Rotation is "
     "user-side: run `claude setup-token` again and paste the new value. "
     "Whether rotating revokes the previous token is not documented; do not "
-    "assume it does.")
+    "assume it does. claude_mode=home-login uses no token at all: the agent "
+    "auths from the file `claude /login` wrote into its own home "
+    "(reveille-launch login <user> <agent>, once, agent stopped). That mode "
+    "is NOT zero-touch: a freshly provisioned agent sits at a login prompt "
+    "until you log it in.")
 
 
 def own_dirs_argv(root, image):
@@ -779,18 +890,31 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
 
     # P2: the user's stored credentials, override > global > request repo_url.
     creds = resolve_credentials(load_profile(user), agent, repo_url)
-    kind = credential_kind(creds["claude_token"])
+    cred_names, cred_env, kind = credential_env(creds)
     # No claude credential + the default boot (claude itself) = an agent that
     # will hang at a login prompt nobody is watching -- or worse, find some
     # ambient credential and bill it. REFUSE and name the fix. A custom
     # boot_cmd (agent-probe, gates) runs no claude and needs no credential:
-    # the requirement follows the thing that consumes it.
+    # the requirement follows the thing that consumes it. home-login mode has
+    # the same requirement one level up: its credential is the file in the
+    # USER's login home, checkable right here -- refuse-not-create, with the
+    # one command that fixes it named.
     if kind == "none" and not boot_cmd:
         raise LaunchError(
             f"no claude credential for {user}/{agent}: save one in the profile "
-            f"(claude setup-token output for subscription billing) before "
-            f"provisioning -- an agent must never inherit whatever credential "
-            f"is lying around in the launcher's environment")
+            f"(claude setup-token output), or choose claude_mode=home-login "
+            f"and log in once (reveille-launch login {user}) -- an agent must "
+            f"never inherit whatever credential is lying around in the "
+            f"launcher's environment")
+    auth_mount = None
+    if kind == "home-login":
+        auth_mount = user_auth_root(user)
+        if not os.path.isfile(os.path.join(auth_mount, ".credentials.json")) \
+                and not boot_cmd:
+            raise LaunchError(
+                f"claude_mode=home-login but {user} has no login on file: run "
+                f"`reveille-launch login {user}` first (one interactive "
+                f"`claude /login`; every agent copies it at boot)")
     env = dict(
         os.environ,
         REVEILLE_AGENT_ROLE=agent,
@@ -800,14 +924,9 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         # Per-container gate secret (T1 4.3), minted HERE at provision, injected by
         # name, never stored -- dies with the container, re-provision mints a new one.
         REVEILLE_GATE_SECRET=secrets.token_hex(32),
+        **cred_env,
     )
-    extra_env = []
-    if creds["claude_token"]:
-        extra_env.append(claude_env_name(creds["claude_token"]))
-        env[extra_env[-1]] = creds["claude_token"]
-    if creds["github_token"]:
-        extra_env.append("GITHUB_TOKEN")
-        env["GITHUB_TOKEN"] = creds["github_token"]
+    extra_env = list(cred_names)
     if role_prompt:
         # Sec 5: the role's text lands in the container via env; the entrypoint
         # writes it into ~/.claude/CLAUDE.md (marker-guarded, once).
@@ -834,7 +953,8 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     if replace:
         _docker("rm", "-f", name, check=False, capture=True)
     argv = docker_run_argv(user, agent, image, network, quotas,
-                           boot_cmd=boot_cmd, extra_env=extra_env)
+                           boot_cmd=boot_cmd, extra_env=extra_env,
+                           auth_mount=auth_mount)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
     _record(conn, user, agent, creds["repo_url"], image, broker)
     # The KIND on the audit line and in every response: "provisioned on api-key
@@ -992,6 +1112,8 @@ def cmd_profile(a):
         updates["github_token"] = read_secret(f"github token for {a.user}")
     if a.repo_url is not None:
         updates["repo_url"] = a.repo_url
+    if a.claude_mode:
+        updates["claude_mode"] = a.claude_mode
     if a.clear_claude:
         updates["claude_token"] = ""
     if a.clear_github:
@@ -1576,6 +1698,11 @@ details.addAgent>summary:focus-visible{outline:2px solid var(--gold);
 </details>
 <h2>CREDENTIALS</h2>
 <div id="credState" class="row dim"></div>
+<div class="row"><select id="cMode">
+ <option value="token">credential mode: token (zero-touch)</option>
+ <option value="home-login">credential mode: home-login (one manual login)</option>
+</select></div>
+<div id="cModeNote" class="row dim"></div>
 <div class="row"><input id="cClaude" size="40"
  placeholder="claude token: `claude setup-token` output (an sk-ant-api key bills PER TOKEN, not your subscription)">
  <button id="cClaudeClear">clear</button></div>
@@ -1787,16 +1914,34 @@ async function refresh(){
 }
 // U1 globals: masked set/absent from GET /profile; PUT sends only touched
 // fields (empty repo field clears the default deliberately -- it is prefilled).
+// The zero-touch cost is stated AT CHOOSING TIME (msg 8629), not discovered
+// at provision time.
+const MODE_NOTES={
+ 'token':'token mode: the stored token rides into each container by env; '+
+  'provisioning is zero-touch.',
+ 'home-login':'home-login mode: NO token. You run `reveille-launch login '+
+  '<user>` ONCE in a terminal (interactive browser login); every agent '+
+  'copies that login when it boots. Re-login anytime to switch accounts, '+
+  'then RESTART agents to move them. A new agent cannot work until the '+
+  'login exists -- provisioning is NOT zero-touch in this mode.'};
+function modeNote(){
+ document.getElementById('cModeNote').textContent=
+  MODE_NOTES[document.getElementById('cMode').value]||'';
+}
+document.getElementById('cMode').onchange=modeNote;
 async function loadCreds(){
  const p=await api('/profile');const c=p.credentials||{};
  document.getElementById('credState').textContent=
-  'claude token: '+(c.claude_token||'absent')+' / github token: '+
-  (c.github_token||'absent');
+  'mode: '+(c.claude_mode||'token')+' / claude token: '+
+  (c.claude_token||'absent')+' / github token: '+(c.github_token||'absent');
+ document.getElementById('cMode').value=c.claude_mode||'token';
+ modeNote();
  document.getElementById('cRepo').value=c.repo_url||'';
  document.getElementById('credNotes').textContent=p.notes||'';
 }
 document.getElementById('cSave').onclick=async()=>{
- const b={repo_url:document.getElementById('cRepo').value.trim()};
+ const b={repo_url:document.getElementById('cRepo').value.trim(),
+  claude_mode:document.getElementById('cMode').value};
  const cl=document.getElementById('cClaude').value.trim();if(cl)b.claude_token=cl;
  const gh=document.getElementById('cGithub').value.trim();if(gh)b.github_token=gh;
  try{await api('/profile',{method:'PUT',body:JSON.stringify(b)});
@@ -2352,6 +2497,12 @@ def build_parser():
     pr.add_argument("--github-token", action="store_true",
                     help="read a github token from stdin/prompt")
     pr.add_argument("--repo-url", default=None)
+    pr.add_argument("--claude-mode", default=None, choices=list(CLAUDE_MODES),
+                    help="token: env-injected credential, zero-touch "
+                         "provisioning (default). home-login: NO token env; "
+                         "the agent auths from the file `claude /login` wrote "
+                         "into its home (reveille-launch login <user> <agent>, "
+                         "once) -- NOT zero-touch")
     pr.add_argument("--clear-claude", action="store_true")
     pr.add_argument("--clear-github", action="store_true")
     pr.set_defaults(fn=cmd_profile)
@@ -2443,6 +2594,16 @@ def build_parser():
                           "running (two claudes share one ~/.claude and step on "
                           "each other's state)")
     dbg.set_defaults(fn=cmd_debug)
+
+    lg = sub.add_parser("login", help="interactive `claude /login` for ONE "
+                                      "user, shared by ALL their home-login "
+                                      "agents as a boot-time copy; re-run "
+                                      "anytime to switch accounts, then "
+                                      "restart the agents")
+    lg.add_argument("user")
+    lg.add_argument("--image", default=DEFAULT_IMAGE)
+    lg.add_argument("--network", default=DEFAULT_NETWORK)
+    lg.set_defaults(fn=cmd_login)
 
     j = sub.add_parser("join-here",
                        help="bootstrap THIS terminal for one agent (DES-003 2.4)")
