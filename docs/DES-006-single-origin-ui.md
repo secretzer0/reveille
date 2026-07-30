@@ -235,10 +235,11 @@ a design, the grant/session lifecycle was read directly (`docker/attach-gate`,
    is **not part of this slice**. See lesson
    `periodic-task-proven-correct-never-scheduled`.
 
-This section stays open until the sweep is actually scheduled and running.
-Once it is, findings 1 and 2 above are the whole design — a crashed tab's
-orphaned session dies within one tick, and terminal tabs become the layout
-change they were originally pitched as.
+**CLOSED.** The sweep is scheduled: `cmd_serve` starts `_sweep_forever` as a
+daemon thread before `uvicorn.run`, unconditionally, and the serving launcher
+names its interval in the boot banner. Findings 1 and 2 above are therefore the
+whole design — a crashed tab's orphaned session dies within one tick, and
+terminal tabs are a layout change with no scheduling prerequisite left.
 
 ### 6.4 Slices (extends §4)
 
@@ -267,8 +268,15 @@ change they were originally pitched as.
   ruff clean; no real-browser/docker-socket pass from this container (same
   gap named on U6 — needs verification against a live launcher+docker stack
   before merge).
-- **U8 — terminal tabs.** BLOCKED on the sweep fix (§6.3). Gate once
-  unblocked: N tabs across 2+ agents attach concurrently with no cross-agent
+- **U8 — terminal tabs.** UNBLOCKED — §6.3's prerequisite is closed, the sweep
+  runs inside `serve`. Terminals live on ONE page, in the content well: not
+  browser tabs, not `window.open`. The Agents control switches the whole LEFT
+  RAIL into manage-agents mode; the rail is the ROSTER (every agent, with its
+  state, plus a create item) while the well's tabs are the terminals currently
+  OPEN — file-tree-and-open-editors, one navigation model, not two selectors
+  for one thing. An iframe is available and is the point: nothing on the attach
+  path sets `X-Frame-Options` or `frame-ancestors`, and it is all one origin.
+  Gate: N tabs across 2+ agents attach concurrently with no cross-agent
   interference; a second driver tab for an already-held agent is refused and
   the manager shows the refusal rather than a blank tab; killing a tab's
   browser process (no cleanup handler run) results in the session being
