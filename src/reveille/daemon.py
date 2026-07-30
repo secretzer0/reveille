@@ -184,6 +184,13 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.26 NOTHING FOR YOU TO RE-READ -- operational only. SIGTERM now actually
+       stops the broker: graceful shutdown used to wait forever on sockets that
+       are designed never to close (a browser's /feed tab), so a stopped broker
+       could sit half-dead -- listeners closed, process alive, docker calling it
+       Up -- until someone sent SIGKILL by hand. Shutdown now bounds that wait
+       at 5 seconds. Your waiter still gets the courtesy frame first; nothing
+       about re-arming changes.
 0.2.24 WEB UI ONLY, nothing for you to re-read. The Agents pane now tells a
        service that answered and refused apart from one that never answered:
        the fetch error carries the HTTP status instead of leaving the caller to
@@ -4128,8 +4135,23 @@ def main():
                          f"broker.sock):\n  {uds}")
     log.info("daemon on %s db=%s schema=v%s users=%s", uds or f"{host}:{port}", _db_path, v,
              "yes" if store.any_users(_conn) else "NONE -- open /ui to create the first admin")
-    config = (uvicorn.Config(build_app(), uds=uds, log_level="warning") if uds
-              else uvicorn.Config(build_app(), host=host, port=port, log_level="warning"))
+    # timeout_graceful_shutdown: WITHOUT it, SIGTERM WEDGES THE BROKER instead of
+    # stopping it. uvicorn's default graceful shutdown waits for every open
+    # connection to finish -- forever, None means no limit -- and this daemon's
+    # main clients are DESIGNED never to hang up: waked holds the wake socket for
+    # its whole life (the shutdown courtesy frame is explicitly "do not reply,
+    # just re-arm; the broker will be back", and the client's comment says "hold
+    # the socket"), and a browser's /feed tab holds its socket until the tab
+    # closes. Observed live (2026-07-30): SIGTERM -> notices pushed, listeners
+    # closed, process alive in state Ss. Docker still reported Up, so the restart
+    # policy never fired, docker start was a no-op, and every health check that
+    # trusts docker status called a dead broker healthy. A hung shutdown is
+    # worse than a crash: it defeats the exact machinery that exists to recover
+    # from one. Five seconds is ample for in-flight HTTP; the sockets that
+    # remain are the ones that would never close.
+    kw = dict(log_level="warning", timeout_graceful_shutdown=5)
+    config = (uvicorn.Config(build_app(), uds=uds, **kw) if uds
+              else uvicorn.Config(build_app(), host=host, port=port, **kw))
     server = uvicorn.Server(config)
     orig_exit = server.handle_exit
 
