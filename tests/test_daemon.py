@@ -51,10 +51,21 @@ def test_ui_override_announces_itself(monkeypatch):
 def test_changes_newest_entry_is_this_version():
     """A version bump and its CHANGES entry ship together or neither ships.
 
-    0.2.35 merged with both missing: the code changed, pyproject still said
-    0.2.34, and server-image REFUSES an existing tag -- so main was
-    undeployable and the version number named the wrong artifact. Nobody
-    forgot the rule; the rule had nowhere to fail. It fails here now."""
+    WHAT THIS DOES NOT CATCH, measured rather than assumed (architect, 8663):
+    it does NOT catch the incident that prompted it. 7d8408e changed code and
+    bumped NEITHER -- pyproject said 0.2.34, CHANGES' newest entry said 0.2.34,
+    they agree, and this assertion passes on that exact tree. What caught that
+    was server-image refusing to rebuild an existing tag, at deploy, which
+    cannot be fooled.
+
+    So this covers ONE direction: a bump whose CHANGES entry was forgotten, or
+    an entry whose bump was. The other direction -- code changed with no bump
+    at all -- belongs to the deploy refusal on purpose, because detecting it
+    here means guessing which file changes deserve a bump, and a heuristic
+    guarding a case that is already refused later is worse than nothing.
+
+    Kept honest deliberately: an overclaiming gate is worse than a missing one,
+    because the next person reads the claim and stops looking."""
     newest = next(ln for ln in daemon.CHANGES.splitlines()
                   if ln[:1].isdigit())
     assert newest.split()[0] == __version__, (
