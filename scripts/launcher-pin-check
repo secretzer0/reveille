@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# A DEPLOY IS BOTH HALVES.
+#
+# `make up` builds the broker image, probes it by name and prints its version, so
+# a broker that was merged but not deployed announces itself. The LAUNCHER had no
+# such check: it runs from a pinned clone (~/.reveille/launcher-src) that nothing
+# restarts on merge, so "merged" and "running" could differ indefinitely with
+# nothing saying so.
+#
+# They did. A crash in the login-home ownership fix was found, fixed, reviewed and
+# merged while the live launcher kept running the commit from BEFORE it -- through
+# six subsequent reviews -- and it broke first-time login for every new user, the
+# case browser login exists to serve (msg 8681). Nobody forgot a rule; there was no
+# rule, and no place for one to fail.
+#
+# This refuses at the moment of the mistake, in the path the mistake takes: the
+# deploy. It refuses ONLY when the launcher answers and is stale. An unreachable
+# launcher is not this deploy's business -- the broker must still come up -- and
+# saying so is the difference between a control and an obstacle.
+set -uo pipefail
+
+URL="${LAUNCHER_HEALTH:-http://127.0.0.1:8766/health}"
+REPO_HEAD="$(git -C "$(dirname "$0")/.." rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+BODY="$(curl -fsS --max-time 3 "$URL" 2>/dev/null || true)"
+if [ -z "$BODY" ]; then
+  echo "launcher: not answering at $URL -- broker deploy stands, launcher unchecked"
+  exit 0
+fi
+
+# The launcher answers for what it is RUNNING (its /health carries commit+source).
+# An older launcher answers "ok" with no JSON; that is itself the stale signal,
+# because the endpoint that could prove otherwise is the thing it lacks.
+COMMIT="$(printf '%s' "$BODY" | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+SOURCE="$(printf '%s' "$BODY" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+if [ -z "$COMMIT" ]; then
+  echo "REFUSED: the running launcher cannot say what commit it is serving."
+  echo "  It predates the /health stamp, so it is at least that stale."
+  echo "  Fix:  uv run python scripts/reveille_launch.py pin"
+  echo "        then stop the launcher by its EXACT pid; the Stop hook respawns it"
+  exit 1
+fi
+
+# Stale means: the commit the launcher is serving is not in this repo's history at
+# or before HEAD. Ahead-of-HEAD is not stale -- that is a dev tree, and the boot
+# banner already says so.
+if git -C "$(dirname "$0")/.." merge-base --is-ancestor "$COMMIT" HEAD 2>/dev/null \
+   && [ "$COMMIT" != "$REPO_HEAD" ]; then
+  echo "REFUSED: the launcher is running OLDER code than you just deployed."
+  echo "  launcher: $COMMIT   (source: ${SOURCE:-unknown})"
+  echo "  repo:     $REPO_HEAD"
+  echo "  Every launcher-side fix merged since $COMMIT is NOT live. This is the"
+  echo "  gap that kept a login-home crash running for six reviews after it was"
+  echo "  fixed."
+  echo "  Fix:  uv run python scripts/reveille_launch.py pin"
+  echo "        then stop the launcher by its EXACT pid; the Stop hook respawns it"
+  exit 1
+fi
+
+echo "launcher: $COMMIT matches the deployed tree"
+exit 0
