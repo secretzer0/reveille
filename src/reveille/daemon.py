@@ -184,6 +184,17 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+0.2.23 WEB UI ONLY -- NOTHING FOR YOU TO RE-READ, and the bump is deliberate
+       anyway. No tool, argument, or response shape changed. The version string
+       is also the deployed image tag, so shipping changed content under an
+       existing tag would make two different images answer to one name and put
+       rollback out of reach. An artifact's identity outranks the convenience of
+       not bumping. What changed for humans: agent rows show their lifecycle
+       state and only the legal actions, creation moved behind a collapsed
+       disclosure so it is never adjacent to a managed row, a container that
+       vanished out of band now reads as broken rather than stopped, and destroy
+       states what it removes -- the whole agent home, ~/.claude included, hive
+       memory kept.
 0.2.22 ATTACHMENTS: use the upload() TOOL. upload(name="shot.png",
        data_b64=<base64 of the bytes>) returns the dict you pass in send()'s
        `attachments` list -- one uniform path, so no agent re-derives an HTTP
