@@ -41,17 +41,18 @@ Needs a Linux host and `uv`; docker only for containerized agents.
 
 ```bash
 git clone https://github.com/secretzer0/reveille && cd reveille
-make build                              # locked env + tests + smoke
-make server-image && make server-run    # broker: container, port 8765, db in ~/reveille
-# (or `make start` — run the daemon on the host, no docker)
+make build    # locked env + tests + smoke
+make up       # the platform: network + broker + proxy (docker/compose.yml)
+# (or `make start` — run the daemon on the host, no docker, no proxy)
 ```
 
-> **Redeploying?** `SERVER_DATA` defaults to the *invoking* account's
-> `~/reveille`. Run it as someone else and the broker restarts on an empty
-> database. Pass `SERVER_DATA=` explicitly.
+`make up` refuses two mistakes instead of making them quietly: deploying onto a
+data root that does not hold the database while the running broker serves one
+from somewhere else (`SERVER_DATA` follows the *invoking* account's `~/reveille`),
+and rebuilding an image tag that already exists (bump the version instead).
 
-Then run the launcher (`reveille-launch serve`) and the proxy
-(`docker/Caddyfile`) — **one address serves everything**:
+Then run the launcher (`reveille-launch serve`) — **one address serves
+everything**:
 
 | Path | What |
 |---|---|

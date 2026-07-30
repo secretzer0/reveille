@@ -1,0 +1,84 @@
+# The reveille infrastructure, DECLARED (operator request, 2026-07-30, after a
+# day in which two outages and one near-miss were all infra assembled by hand):
+#   - a broker redeploy recreated the container without the shared network, so
+#     the whole fleet lost the bus BY NAME while the host-side probe stayed green
+#   - a stray SIGTERM left the broker half-dead with nothing to bring it back
+#   - a smoke test dual-homed the LIVE broker because teardown was hand-rolled
+# Everything the platform needs to exist before any agent runs lives here: the
+# network, the broker, the proxy. Idempotent, ordered, supervised -- `make up`.
+#
+# NOT here, deliberately:
+#   - the LAUNCHER: it stays a host process (pinned clone + Stop hook
+#     supervision). Containerising it requires handing a container the docker
+#     socket, a security decision the architect has explicitly left open; this
+#     file must not pre-empt it.
+#   - AGENT containers: the launcher creates those on demand, per user. They
+#     join the network declared here -- which is the exact membership a hand
+#     deploy silently destroyed.
+#
+# The guards (refuse-not-create for SERVER_DATA, refuse-to-rebuild an existing
+# tag) live in `make up` / `make server-image`, not here: compose cannot express
+# a refusal, and a guard that only fires on one path is a guard someone routes
+# around. The Makefile is the one deploy path.
+
+name: reveille
+
+networks:
+  reveille:
+    # A FIXED name, not the project-scoped default: agent containers are created
+    # by the launcher (DEFAULT_NETWORK="reveille") and must land on this same
+    # network, or container DNS cannot resolve the broker for them.
+    name: ${REVEILLE_NET:-reveille}
+
+services:
+  broker:
+    image: ${SERVER_IMAGE:-reveille-server:dev}
+    # No build: -- `make up` builds via server-image, which refuses to rebuild
+    # an existing tag. Compose building on its own would silently produce two
+    # different images answering to one name, the exact ambiguity the refusal
+    # exists to prevent.
+    # The name agents DIAL is the network ALIAS below, which is per-network --
+    # so a scratch stack (the gate) can carry the same alias on its own network
+    # while the container NAME stays unique per host.
+    container_name: ${BROKER_NAME:-reveille-server}
+    restart: unless-stopped
+    networks:
+      reveille:
+        aliases: [reveille-server]
+    ports:
+      - "${REVEILLE_PORT:-8765}:8765"
+    volumes:
+      - ${SERVER_DATA:?set SERVER_DATA explicitly -- an inherited HOME here once nearly deployed an EMPTY database}:/data
+    environment:
+      REVEILLE_AGENTS_PATH: ${AGENTS_PATH:-/agents}
+    # The daemon bounds its own graceful shutdown at 5s (0.2.26); 12 gives it
+    # room plus the courtesy-frame delay before docker escalates to SIGKILL.
+    # Before 0.2.26 a SIGTERM could wedge the process half-dead forever, and
+    # docker's Up was a lie -- the healthcheck below is what makes that state
+    # VISIBLE (unhealthy) instead of silently trusted.
+    stop_grace_period: 12s
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-c",
+             "import urllib.request as u; assert u.urlopen('http://127.0.0.1:8765/health', timeout=3).read() == b'ok'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  proxy:
+    image: ${PROXY_IMAGE:-caddy:2-alpine}
+    container_name: ${PROXY_NAME:-reveille-proxy}
+    restart: unless-stopped
+    # host networking, NOT the reveille network: the launcher binds 127.0.0.1
+    # and must stay unreachable from the LAN and from the docker network; the
+    # proxy reaches it over loopback and publishes one front door for everyone
+    # else. This is DES-006 U3's shape, unchanged.
+    network_mode: host
+    environment:
+      PROXY_PORT: ${PROXY_PORT:-80}
+      BROKER_UPSTREAM: 127.0.0.1:${REVEILLE_PORT:-8765}
+      LAUNCHER_UPSTREAM: 127.0.0.1:${LAUNCHER_PORT:-8766}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      broker:
+        condition: service_healthy

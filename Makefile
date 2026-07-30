@@ -8,7 +8,7 @@ PID  := $(REPO)/reveille.pid
 # launcher.db image records ambiguous.
 AGENT_IMAGE ?= reveille-agent:0.2.7
 
-.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image server-run server-stop
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image up down
 
 help:
 	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
@@ -107,10 +107,11 @@ unregister:
 	claude mcp remove reveille --scope user || true
 
 # ---- the standalone server --------------------------------------------------------
-# The broker as a container: built from this source, run from anywhere. One bind mount
-# ($(SERVER_DATA)) carries the database AND attachments (<db dir>/files). The server
-# needs no agent credentials -- REVEILLE_AGENT_ROLE/REVEILLE_TOKEN are client env; auth
-# lives in the database. Port published on 0.0.0.0 so the LAN (and remote agents) reach it.
+# ---- the platform, declared (docker/compose.yml) -----------------------------------
+# `make up` is THE deploy path: network + broker + proxy, with the two refusals a
+# hand deploy cannot be trusted to remember. The launcher is NOT here -- it stays a
+# host process (pinned clone + Stop hook); agent containers are launcher-created and
+# join the same network.
 SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
@@ -123,63 +124,53 @@ SERVER_NETWORK ?= reveille
 # and the prefix its fetches carry. Empty = no launcher in this deployment, and
 # the bus renders exactly as it did before agent management existed.
 AGENTS_PATH ?= /agents
+PROXY_IMAGE ?= caddy:2-alpine
+PROXY_PORT  ?= 80
+BROKER_NAME ?= reveille-server
+PROXY_NAME  ?= reveille-proxy
+COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
+  REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
+  PROXY_IMAGE=$(PROXY_IMAGE) PROXY_PORT=$(PROXY_PORT) \
+  BROKER_NAME=$(BROKER_NAME) PROXY_NAME=$(PROXY_NAME) \
+  docker compose -f docker/compose.yml
 
+# REFUSES TO REBUILD AN EXISTING TAG. The version string is the image tag; building
+# changed content under a tag that exists makes two images answer to one name and
+# puts rollback out of reach (msg 8595 -- it nearly happened twice in one day, once
+# from each side of a review). "Is this tag built" is a fact with a lifetime; this
+# refusal is what lets nobody hold the timing in their head.
 server-image:
+	@if docker image inspect $(SERVER_IMAGE) >/dev/null 2>&1; then \
+	  echo "REFUSING to rebuild $(SERVER_IMAGE): the tag already exists."; \
+	  echo "If the source changed, bump the version (pyproject.toml) so the"; \
+	  echo "artifact keeps one identity. To discard the old image deliberately:"; \
+	  echo "  docker rmi $(SERVER_IMAGE)"; \
+	  exit 1; \
+	fi
 	docker build -t $(SERVER_IMAGE) -f docker/Dockerfile.server .
 
-server-run: server-image
-	@mkdir -p "$(SERVER_DATA)"
-	docker network create $(SERVER_NETWORK) 2>/dev/null || true
-	docker rm -f reveille-server 2>/dev/null || true
-	docker run -d --name reveille-server --restart unless-stopped \
-	  --network $(SERVER_NETWORK) \
-	  -p 8765:8765 \
-	  -v "$(SERVER_DATA)":/data \
-	  -e REVEILLE_AGENTS_PATH="$(AGENTS_PATH)" \
-	  $(SERVER_IMAGE)
-	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-	  curl -sf http://127.0.0.1:8765/health >/dev/null && break; \
-	  sleep 1; \
-	  if [ $$i = 10 ]; then \
-	    echo "FAILED (host) -- docker logs reveille-server:"; \
-	    docker logs --tail 5 reveille-server; exit 1; fi; \
-	done
-	@# REACHABLE BY NAME, from the network the agents are on -- not just from the
-	@# host. A deploy that answers on 127.0.0.1 and is invisible to every agent is
-	@# the failure this check exists for: it happened, it cut the whole fleet off
-	@# the bus, and nothing noticed for hours because the host-side probe was green.
+up:
+	@bash scripts/deploy-preflight "$(SERVER_DATA)" "$(BROKER_NAME)"
+	@docker image inspect $(SERVER_IMAGE) >/dev/null 2>&1 || $(MAKE) server-image
+	$(COMPOSE) up -d --wait
+	@# REACHABLE BY NAME, from the network the agents are on -- not just the
+	@# host probe. A deploy that answers on 127.0.0.1 and is invisible to every
+	@# agent cut the whole fleet off the bus once already; the healthcheck
+	@# cannot see this because it runs INSIDE the container.
 	@docker run --rm --network $(SERVER_NETWORK) --entrypoint /app/.venv/bin/python \
 	  $(SERVER_IMAGE) -c "import urllib.request as u; \
 	  print('reachable by name:', u.urlopen('http://reveille-server:8765/version', \
 	  timeout=5).read().decode())" \
-	  || { echo "FAILED: the broker is up on the host but NOT reachable as" \
-	       "reveille-server on the $(SERVER_NETWORK) network -- every agent" \
-	       "container is cut off from the bus"; exit 1; }
-	@echo "reveille-server up: http://0.0.0.0:8765  data=$(SERVER_DATA)  network=$(SERVER_NETWORK)"
+	  || { echo "FAILED: broker up on the host but NOT reachable as"; \
+	       echo "reveille-server on the $(SERVER_NETWORK) network -- every agent"; \
+	       echo "container is cut off from the bus"; exit 1; }
+	@echo "reveille up: proxy :$(PROXY_PORT) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
 
-server-stop:
-	docker rm -f reveille-server
-
-# ---- one front door (DES-006 U3) --------------------------------------------------
-# The proxy is the ONLY thing that knows both addresses. --network host because the
-# launcher binds 127.0.0.1 and must stay unreachable from the LAN and the docker
-# network; the proxy reaches it over loopback and publishes :80 for everyone else.
-PROXY_IMAGE ?= caddy:2-alpine
-PROXY_PORT  ?= 80
-
-proxy-run:
-	docker rm -f reveille-proxy 2>/dev/null || true
-	docker run -d --name reveille-proxy --restart unless-stopped --network host \
-	  -v "$(REPO)/docker/Caddyfile":/etc/caddy/Caddyfile:ro \
-	  $(PROXY_IMAGE)
-	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-	  curl -sf http://127.0.0.1:$(PROXY_PORT)/health >/dev/null && \
-	    { echo "reveille-proxy up: http://0.0.0.0:$(PROXY_PORT)  (/ = bus, /agents = launcher)"; exit 0; }; \
-	  sleep 1; \
-	done; echo "FAILED -- docker logs reveille-proxy:"; docker logs --tail 10 reveille-proxy; exit 1
-
-proxy-stop:
-	docker rm -f reveille-proxy
+# Stops the platform containers. Deliberately NOT `compose down`: down removes the
+# network, agent containers live on it, and removing a network with live endpoints
+# half-fails into exactly the hand-assembled state this file exists to end.
+down:
+	$(COMPOSE) stop
 
 # ---- containerised agents ---------------------------------------------------------
 # A container is just another client: it sets the same two env vars and runs the same
@@ -297,6 +288,13 @@ readmit-gate: sync
 # wedges: listeners closed, process alive, docker reporting Up.
 sigterm-gate: sync
 	uv run python tests/sigterm_gate.py
+
+# Compose gate: the platform comes up DECLARED on a scratch project (own name,
+# network, ports, data root -- the live stack untouched), broker healthy and
+# reachable by name, one front door; rebuilding an existing tag refuses;
+# preflight refuses an empty data root over a live db; down keeps the network.
+compose-gate: sync
+	uv run python tests/compose_gate.py
 
 # Single-origin gate (DES-006 U3/U4/U6): the front door, through the REAL shipped
 # Caddyfile with a REAL session cookie. One login covers both services, the bus
