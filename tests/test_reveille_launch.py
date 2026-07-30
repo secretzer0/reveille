@@ -25,7 +25,7 @@ def test_no_secret_in_docker_argv():
     # R1/wake-127: the token and gate secret must ride env by NAME, never appear as a
     # value on the command line. The argv carries the NAMES; that is fine and required.
     argv = rl.docker_run_argv(
-        "acme", "roc-ui", "reveille-agent:0.2.2", "host", Q, forward_anthropic=True)
+        "acme", "roc-ui", "reveille-agent:0.2.2", "host", Q)
     joined = " ".join(argv)
     assert "REVEILLE_TOKEN" in joined  # the NAME is passed
     # no VALUE-shaped secret: every -e is immediately followed by a bare NAME, not NAME=val
@@ -38,7 +38,7 @@ def test_run_argv_enforces_tenancy_and_quotas():
     # DES-005 sec 6/7.1: pid cap present, restart NO, both per-agent binds, and
     # the name/labels carry the (user, agent) pair.
     argv = rl.docker_run_argv(
-        "acme", "dev", "img", "net", Q, forward_anthropic=False, data_base="/data")
+        "acme", "dev", "img", "net", Q, data_base="/data")
     s = " ".join(argv)
     assert "--pids-limit 512" in s
     assert "--restart no" in s
@@ -432,3 +432,28 @@ def test_source_stamp_reads_this_repo(tmp_path):
     commit, branch, version = rl.source_stamp(str(pathlib.Path(__file__).parent.parent))
     assert len(commit) >= 7 and commit != "unknown"
     assert version[0].isdigit()
+
+
+def test_ambient_environment_cannot_select_a_billing_model(monkeypatch):
+    # The deleted defect: with no profile credential and ANTHROPIC_API_KEY
+    # exported in the launcher's shell, agents silently billed per token
+    # (msg 8617). The argv builder is pure now -- the ambient key must not
+    # appear no matter what the environment holds.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-ambient")
+    argv = rl.docker_run_argv("acme", "dev", "img", "net", Q)
+    assert "ANTHROPIC_API_KEY" not in argv
+    # a CHOSEN api key still rides, by name, via the profile path
+    argv = rl.docker_run_argv("acme", "dev", "img", "net", Q,
+                              extra_env=("ANTHROPIC_API_KEY",))
+    assert "ANTHROPIC_API_KEY" in argv
+    assert "sk-ant-api03-ambient" not in " ".join(argv)   # names, never values
+
+
+def test_credential_kind_is_reportable_and_never_the_value():
+    assert rl.credential_kind("") == "none"
+    assert rl.credential_kind("sk-ant-api03-xxxx") == "api-key"
+    assert rl.credential_kind("sk-ant-oat01-xxxx") == "subscription-token"
+    # anything unrecognised rides the OAuth var and reports as subscription --
+    # the same pairing claude_env_name makes, so report and behavior agree
+    for tok in ("sk-ant-oat01-x", "weird-token"):
+        assert (rl.credential_kind(tok) == "subscription-token") ==                (rl.claude_env_name(tok) == "CLAUDE_CODE_OAUTH_TOKEN")

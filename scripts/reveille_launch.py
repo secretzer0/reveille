@@ -185,7 +185,7 @@ def data_root(user, agent, base=None):
     return os.path.join(base or DEFAULT_DATA, user, agent)
 
 
-def docker_run_argv(user, agent, image, network, quotas, forward_anthropic,
+def docker_run_argv(user, agent, image, network, quotas,
                     boot_cmd=None, data_base=None, extra_env=()):
     """The docker-run command as argv. `-e NAME` entries pass values BY NAME from the
     child's env, so no secret is ever a token in this list -- the test asserts exactly
@@ -212,11 +212,14 @@ def docker_run_argv(user, agent, image, network, quotas, forward_anthropic,
     ]
     for name in ENV_PASSTHROUGH_SECRET:
         argv += ["-e", name]
-    if forward_anthropic:
-        # Headless claude needs its Anthropic credential; the claude home carries
-        # a login (R2), but a fresh home has none, so forward the operator's key by
-        # name if they have one. Not a broker secret, not persisted.
-        argv += ["-e", "ANTHROPIC_API_KEY"]
+    # There is deliberately NO ambient-Anthropic fallback here. This function
+    # used to forward the launcher's own ANTHROPIC_API_KEY when the profile had
+    # no claude token -- which made an env var nobody declared into a SILENT
+    # BILLING-MODEL SWITCH: an operator who had ever exported an API key in the
+    # shell that started the launcher got agents billing per token instead of
+    # riding their subscription, invisibly, discoverable only on an invoice
+    # (architect ruling, msg 8617). A billing credential is CHOSEN -- stored in
+    # the profile, where the prefix names its kind -- never inherited.
     for name in extra_env:
         # P2 profile credentials: NAMES here, values in the child env -- the
         # same no-argv discipline as ENV_PASSTHROUGH_SECRET.
@@ -558,6 +561,15 @@ def resolve_credentials(prof, agent, repo_url_req=""):
             "repo_url": repo_url_req or pick("repo_url") or ""}
 
 
+def credential_kind(token):
+    """The BILLING KIND of a claude credential, for responses and audit lines:
+    the kind is reportable, the value never is. Empty token = no claude
+    credential at all (a probe container that never runs claude). Pure."""
+    if not token:
+        return "none"
+    return ("api-key" if token.startswith("sk-ant-api") else "subscription-token")
+
+
 def claude_env_name(token):
     """API keys and setup-token OAuth tokens share one profile field, told
     apart by prefix (sec 3): sk-ant-api... is a key, anything else rides
@@ -661,6 +673,18 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
 
     # P2: the user's stored credentials, override > global > request repo_url.
     creds = resolve_credentials(load_profile(user), agent, repo_url)
+    kind = credential_kind(creds["claude_token"])
+    # No claude credential + the default boot (claude itself) = an agent that
+    # will hang at a login prompt nobody is watching -- or worse, find some
+    # ambient credential and bill it. REFUSE and name the fix. A custom
+    # boot_cmd (agent-probe, gates) runs no claude and needs no credential:
+    # the requirement follows the thing that consumes it.
+    if kind == "none" and not boot_cmd:
+        raise LaunchError(
+            f"no claude credential for {user}/{agent}: save one in the profile "
+            f"(claude setup-token output for subscription billing) before "
+            f"provisioning -- an agent must never inherit whatever credential "
+            f"is lying around in the launcher's environment")
     env = dict(
         os.environ,
         REVEILLE_AGENT_ROLE=agent,
@@ -703,15 +727,14 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     _ensure_network(network, broker)
     if replace:
         _docker("rm", "-f", name, check=False, capture=True)
-    # forward_anthropic is the no-profile fallback (operator's own env key);
-    # a profile claude token supersedes it -- one credential, no ambiguity.
     argv = docker_run_argv(user, agent, image, network, quotas,
-                           forward_anthropic=(not creds["claude_token"] and
-                                              bool(os.environ.get("ANTHROPIC_API_KEY"))),
                            boot_cmd=boot_cmd, extra_env=extra_env)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
     _record(conn, user, agent, creds["repo_url"], image, broker)
-    return name
+    # The KIND on the audit line and in every response: "provisioned on api-key
+    # billing" is one word that turns an invoice surprise into a paste-time fact.
+    _audit("PROVISION", user=user, agent=agent, image=image, credential=kind)
+    return name, kind
 
 
 def destroy_agent(conn, user, agent, purge=False):
@@ -791,19 +814,20 @@ def cmd_new(a):
     conn = _db()
     try:
         token = read_secret(f"bound broker token for {a.agent}")
-        name = provision_agent(conn, a.user, a.agent, a.repo_url, token,
-                               image=a.image, network=a.network,
-                               broker=a.broker, boot_cmd=a.boot_cmd,
-                               replace=a.replace)
+        name, kind = provision_agent(conn, a.user, a.agent, a.repo_url, token,
+                                     image=a.image, network=a.network,
+                                     broker=a.broker, boot_cmd=a.boot_cmd,
+                                     replace=a.replace)
     except LaunchError as e:
         conn.close()
         die(str(e))
     conn.close()
     if a.no_wait:
-        print(f"provisioned {name} on network {a.network} (health wait skipped)")
+        print(f"provisioned {name} on network {a.network} "
+              f"(credential: {kind}; health wait skipped)")
         return 0
-    print(f"provisioned {name} on network {a.network}; waiting for "
-          f"presence live+connected (timeout {a.timeout}s)...")
+    print(f"provisioned {name} on network {a.network} (credential: {kind}); "
+          f"waiting for presence live+connected (timeout {a.timeout}s)...")
     if wait_healthy(a.health_url, a.agent, token, a.timeout):
         print(f"OK: {a.agent} is live+connected (broker {a.broker})")
         return 0
@@ -1447,7 +1471,7 @@ details.addAgent>summary:focus-visible{outline:2px solid var(--gold);
 <h2>CREDENTIALS</h2>
 <div id="credState" class="row dim"></div>
 <div class="row"><input id="cClaude" size="40"
- placeholder="claude token (setup-token or API key)">
+ placeholder="claude token: `claude setup-token` output (an sk-ant-api key bills PER TOKEN, not your subscription)">
  <button id="cClaudeClear">clear</button></div>
 <div class="row"><input id="cGithub" size="40" placeholder="github token">
  <button id="cGithubClear">clear</button></div>
@@ -1751,7 +1775,7 @@ def build_api(auth_url):
             prompt = ROLE_PROMPTS.get(role, "")
             if d.get("append"):
                 prompt = (prompt + "\n\n" + str(d["append"])).strip()
-            name = provision_agent(
+            name, kind = provision_agent(
                 conn, p["user"], (d.get("agent") or "").strip(),
                 (d.get("repo_url") or "").strip(), token,
                 image=d.get("image") or DEFAULT_IMAGE,
@@ -1766,7 +1790,8 @@ def build_api(auth_url):
                 revoke_minted_token(auth_url, request.headers.get("cookie"),
                                     minted_id)
             raise
-        return JSONResponse({"container": name, "agent": d.get("agent")})
+        return JSONResponse({"container": name, "agent": d.get("agent"),
+                             "credential": kind})
 
     @guarded
     async def agent(request, p, conn):
