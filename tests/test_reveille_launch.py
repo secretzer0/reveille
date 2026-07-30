@@ -235,6 +235,59 @@ def test_claude_login_state_is_a_reading(tmp_path):
     assert "NEVER" not in json.dumps(st)
 
 
+# The REAL pane, captured in-container 2026-07-30 (msg 8643), state/challenge
+# redacted -- the parser is tested against what claude actually prints, not
+# what we imagine it prints (fixture-fidelity: resemblance to production).
+_PANE_AWAITING = """\
+  Login
+  Browser didn't open? Use the url below to sign in (c to copy)
+https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%
+3Aprofile+user%3Ainference&code_challenge=REDACTED&code_challenge_method=S256&state=REDACTED
+EOEDnIUqaE
+  Paste code here if prompted >
+  Esc to cancel"""
+_PANE_PICKER = """\
+  Login
+  Select login method:
+  1. Claude account with subscription
+  2. Anthropic Console account
+  Esc to cancel"""
+
+
+def test_login_pane_parser_reads_the_real_flow():
+    st = rl.parse_login_pane(_PANE_AWAITING)
+    assert st["stage"] == "awaiting-code"
+    # tmux wraps the long URL across lines; the parser must reassemble it
+    assert st["url"].startswith("https://claude.com/cai/oauth/authorize")
+    assert "code_challenge=REDACTED" in st["url"]
+    assert rl.parse_login_pane(_PANE_PICKER)["stage"] == "picker"
+    assert rl.parse_login_pane("")["stage"] == "starting"
+
+
+def test_login_code_shape_is_opaque_but_bounded():
+    # Enough validation to refuse key sequences and junk; never enough to
+    # learn anything about the code (ruling 8644: opaque, unparsed).
+    assert rl._LOGIN_CODE_RE.match("EOEDnIUqaE")
+    assert rl._LOGIN_CODE_RE.match("abc-123_XY#z%~.")
+    for bad in ("", "ab", "x" * 300, "code with spaces", "C-c Enter",
+                "a;rm -rf /", "\x1b[A", "code\nEnter"):
+        assert not rl._LOGIN_CODE_RE.match(bad), bad
+
+
+def test_login_bg_argv_is_scoped_and_credential_free():
+    argv = rl.login_bg_argv("acme", "img:1", "net", data_base="/d")
+    assert "rev-acme-login" in argv and "-d" in argv
+    assert "/d/acme/claude-auth:/home/agent/.claude" in argv
+    # NO credential env may ride into a login container -- the whole point is
+    # that claude writes a fresh one; SEED is the only env name passed.
+    names = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
+    assert names == ["SEED"]
+    # and the boot script advances the PICKER itself: choice 1, subscription
+    # -- the picker must never reach a human (ruling 8644)
+    boot = argv[-1]
+    assert "Select login method" in boot and "send-keys -t login 1 Enter" in boot
+
+
 def test_entrypoint_copies_login_at_every_boot():
     # The shipped entrypoint must copy the user's login into the agent home
     # OVERWRITING (the account-rotation workflow is re-login + restart; a

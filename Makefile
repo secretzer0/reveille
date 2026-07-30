@@ -301,6 +301,11 @@ readmit-gate: sync
 deafness-gate: sync
 	uv run python tests/deafness_gate.py
 
+# The code-relay boundary, gated by its NEGATIVE cases (ruling 8644): scoped
+# to the caller's own pending login, one relay, opaque code, zero leakage.
+login-relay-smoke: sync
+	uv run python tests/login_relay_smoke.py
+
 # SIGTERM gate: with a /feed socket held open by a client that never hangs up
 # (a browser tab -- the live incident's holder), SIGTERM still exits within the
 # bounded graceful timeout, courtesy frame first. On the unfixed daemon this

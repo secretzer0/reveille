@@ -1936,28 +1936,73 @@ function openAccount(){
    toast('password changed');openAccount();}catch(e){toast(e.message);}};
  for(const id of ['pwOld','pwNew','pwNew2'])
   $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('pwGo').click();});
- if(typeof AGBASE!=='undefined')(async()=>{
-  const el=$('acctLogin');
-  try{
-   const p=await lapi('/profile');const L=p.claude_login||{};
-   const cmd='<code>reveille-launch login '+esc(p.user)+'</code>';
-   if(L.present){
-    el.innerHTML='logged in ('+esc(new Date(L.logged_in_at_ns/1e6)
-     .toLocaleString())+'). To switch accounts: '+cmd+' in a terminal, then '+
-     'restart your agents.';
-   }else if((L.needed_by||[]).length){
-    el.innerHTML='<b>No login on file.</b> Your agents '+
-     esc(L.needed_by.join(', '))+' cannot work until you run: '+cmd;
+ if(typeof AGBASE!=='undefined')refreshLoginSection();
+}
+
+// The browser login (rulings 8644): the launcher runs `claude /login` in a
+// throwaway container and preselects the SUBSCRIPTION method itself -- the
+// picker never reaches a human, because its other branch is per-token
+// Console billing. This page only shows the URL (never follows it), relays
+// the ONE pasted code, and treats the credential FILE appearing as the only
+// proof of completion. Failure text names the launcher's answer (8633).
+let loginPoll=null;
+async function refreshLoginSection(){
+ const el=$('acctLogin');if(!el)return;
+ clearTimeout(loginPoll);
+ try{
+  const p=await lapi('/profile');const L=p.claude_login||{};
+  const cmd='<code>reveille-launch login '+esc(p.user)+'</code>';
+  if(L.present){
+   el.innerHTML='logged in ('+esc(new Date(L.logged_in_at_ns/1e6)
+    .toLocaleString())+'). <button id="lgStart">re-login (switch account)</button>'+
+    '<span class="pDim"> then restart your agents; or in a terminal: '+cmd+'</span>';
+  }else{
+   const st=await lapi('/login/status');
+   if(st.pending==='awaiting-code'&&st.url){
+    el.innerHTML='<b>1.</b> <a href="'+esc(st.url)+'" target="_blank" '+
+     'rel="noopener noreferrer">Click here and sign in</a> with the account '+
+     'whose plan should pay. <b>2.</b> Paste the code it shows: '+
+     '<input id="lgCode" size="24" autocomplete="off"> '+
+     '<button id="lgSend"'+(st.relayed?' disabled':'')+'>submit</button> '+
+     '<button id="lgCancel">cancel</button>'+
+     (st.relayed?'<div class="pDim">code sent -- waiting for the login to '+
+      'land; if nothing happens, cancel and start again</div>':'');
+    loginPoll=setTimeout(refreshLoginSection,3000);
+   }else if(st.pending){
+    el.innerHTML=(st.pending==='failed'
+     ?'the login flow looks stuck or expired -- '
+     :'starting the login flow... ')+
+     '<button id="lgCancel">cancel</button>';
+    loginPoll=setTimeout(refreshLoginSection,2000);
    }else{
-    el.innerHTML='No login on file. Needed only by home-login agents: '+cmd;
+    el.innerHTML=((L.needed_by||[]).length
+     ?'<b>No login on file.</b> Your agents '+esc(L.needed_by.join(', '))+
+      ' cannot work until you log in. '
+     :'No login on file (needed only by home-login agents). ')+
+     '<button id="lgStart">log in via browser</button>'+
+     '<span class="pDim"> or in a terminal: '+cmd+'</span>';
    }
-  }catch(e){
-   // Named failure, never a dead modal: the password control above must
-   // keep working when the launcher is down (8633's hard constraint).
-   el.textContent=e.status?'the launcher returned '+e.status+' from '+
-    AGBASE+'/profile':'the launcher is not reachable';
   }
- })();
+  if($('lgStart'))$('lgStart').onclick=async()=>{
+   try{await lapi('/login/start',{method:'POST',body:'{}'});
+    refreshLoginSection();}catch(e){toast(e.message);}};
+  if($('lgSend'))$('lgSend').onclick=async()=>{
+   const code=$('lgCode').value.trim();if(!code)return;
+   try{await lapi('/login/code',{method:'POST',
+     body:JSON.stringify({code})});
+    $('lgCode').value='';toast('code sent');refreshLoginSection();}
+   catch(e){toast(e.message);}};
+  if($('lgCode'))$('lgCode').addEventListener('keydown',
+   e=>{if(e.key==='Enter')$('lgSend').click();});
+  if($('lgCancel'))$('lgCancel').onclick=async()=>{
+   try{await lapi('/login/pending',{method:'DELETE'});
+    refreshLoginSection();}catch(e){toast(e.message);}};
+ }catch(e){
+  // Named failure, never a dead modal: the password control above must
+  // keep working when the launcher is down (8633's hard constraint).
+  el.textContent=e.status?'the launcher returned '+e.status+' from '+
+   AGBASE+'/profile':'the launcher is not reachable';
+ }
 }
 
 function pruneAgent(name){

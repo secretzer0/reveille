@@ -185,6 +185,15 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.31 LOG IN FROM THE BROWSER. Settings > Account can now drive the whole
+claude login: start, click the link, paste the one code, done -- the launcher
+runs the same login container the terminal command uses, preselects the
+SUBSCRIPTION method itself (the picker's other branch is per-token Console
+billing and never reaches a human), shows the URL without ever following it,
+relays exactly one pasted code, and treats the credential file APPEARING as
+the only proof of completion. reveille-launch login <user> remains the
+terminal door to the same mechanism.
+
 0.2.30 THE UI IS FLAT FILES. The bus page serves from
 src/reveille/ui/bus/index.html, the launcher's from ui/launcher/ -- real
 files with editors and honest diffs; HTML no longer lives in Python string
