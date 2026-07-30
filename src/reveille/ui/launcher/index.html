@@ -1,0 +1,364 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>Reveille agents</title><style>
+/* U5: the same tokens the bus uses, so one origin reads as one product.
+   Copied deliberately rather than shared -- a stylesheet served by the broker
+   would make this page depend on it, and the whole point is that neither
+   service needs the other to work. */
+:root{
+ color-scheme:dark;
+ --bg:#0e1116;--rail:#0a0d12;--card:#151a21;--line:#242c37;--hover:#1a212b;
+ --fg:#dce3ec;--dim:#8b95a3;--faint:#5a6472;--gold:#e2a63d;--green:#3ecf6a;
+}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--fg);
+ font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+header{background:var(--rail);border-bottom:1px solid var(--line);padding:1rem 0}
+/* One measure for the bar and the page, so the title and the first field sit
+   on the same left edge instead of the header hugging the viewport. */
+.wrap{max-width:46rem;margin:0 auto;padding:0 1.4rem}
+main{margin:1.6rem auto 4rem}
+h1{font-size:1.05rem;letter-spacing:.02em;font-weight:700}
+h2{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;
+ color:var(--faint);margin:1.8rem 0 .5rem;font-weight:600}
+input,select,textarea,button{background:var(--bg);color:var(--fg);
+ border:1px solid var(--line);border-radius:7px;padding:.42rem .6rem;font:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--gold)}
+button{cursor:pointer;background:var(--card)}
+button:hover{border-color:var(--gold)}
+label.chip{display:inline-block;margin:.15rem .5rem .15rem 0;color:var(--dim)}
+.row{margin:.55rem 0}
+.dim{color:var(--dim);font-size:.85rem}
+.err{color:#e2603d}
+.card{border:1px solid var(--line);border-radius:9px;background:var(--card);
+ padding:.7rem .9rem;margin:.5rem 0}
+.card b{color:var(--gold)}
+a{color:var(--gold);text-decoration:none}
+a:hover{text-decoration:underline}
+pre{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim)}
+/* U7: creation is a page-level action, management is row-level (architect
+   ruling) -- kept a deliberately secondary, collapsed affordance so it is
+   never visually adjacent to a managed row. Native <details>: Tab reaches
+   the summary, Enter/Space toggles, a screen reader announces
+   expanded/collapsed on its own -- no ARIA needed. */
+details.addAgent{margin:1.8rem 0 .5rem}
+details.addAgent>summary{font-size:.68rem;letter-spacing:.14em;
+ text-transform:uppercase;color:var(--faint);font-weight:600;cursor:pointer}
+details.addAgent>summary:focus-visible{outline:2px solid var(--gold);
+ outline-offset:2px}
+</style></head><body>
+<header><div class="wrap"><h1>REVEILLE &mdash; your agents</h1>
+<div class="dim"><a href="/">&larr; back to the bus</a> &middot;
+ signed in via your broker session &mdash; no second login</div></div></header>
+<main class="wrap">
+<div id="login" class="err" style="display:none">Not signed in. Log in at the
+ <a href="" id="brokerLink">broker UI</a> first, then reload.</div>
+<div id="app" style="display:none">
+<div id="list"></div>
+<details class="addAgent"><summary>Add agent</summary>
+<div class="row"><input id="name" placeholder="agent name (e.g. senior-dev)">
+<select id="role"><option value="">no role template</option></select></div>
+<pre id="roleText" class="dim" style="display:none;white-space:pre-wrap;
+ max-height:12rem;overflow:auto;border:1px solid #333;border-radius:4px;
+ padding:.5rem"></pre>
+<div class="row"><textarea id="append" rows="2" cols="60"
+ placeholder="anything to append to the role prompt (optional)"></textarea></div>
+<div class="row" id="rooms"></div>
+<div class="row"><input id="repo" size="40"
+ placeholder="repo URL (blank = your profile default)"></div>
+<div class="row"><input id="model" size="40" list="models"
+ placeholder="model (blank = the account default)">
+<datalist id="models"></datalist></div>
+<details class="row"><summary class="dim">advanced</summary>
+<div class="row"><input id="bootCmd" size="40"
+ placeholder="boot command override (ops/diagnostics)"></div>
+<div class="row"><input id="image" size="40" placeholder="image override"></div>
+</details>
+<div class="row"><button id="create">create agent</button>
+ <span class="dim">the token is minted from your session and never shown</span></div>
+<div id="status" class="row dim"></div>
+</details>
+<h2>CREDENTIALS</h2>
+<div id="credState" class="row dim"></div>
+<div class="row"><select id="cMode">
+ <option value="token">credential mode: token (zero-touch)</option>
+ <option value="home-login">credential mode: home-login (one manual login)</option>
+</select></div>
+<div id="cModeNote" class="row dim"></div>
+<div class="row"><input id="cClaude" size="40"
+ placeholder="claude token: `claude setup-token` output (an sk-ant-api key bills PER TOKEN, not your subscription)">
+ <button id="cClaudeClear">clear</button></div>
+<div class="row"><input id="cGithub" size="40" placeholder="github token">
+ <button id="cGithubClear">clear</button></div>
+<div class="row"><input id="cRepo" size="40" placeholder="default repo URL"></div>
+<div class="row"><button id="cSave">save credentials</button>
+ <span class="dim">stored 0600 on the launcher host; values are never echoed back</span></div>
+<div id="credNotes" class="row dim"></div>
+</div>
+</main>
+<script>
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,
+ c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Single origin (DES-006 U3): behind the proxy this page is served under /agents
+// and the proxy strips that prefix, so every fetch must put it back. Served
+// directly on loopback the prefix is empty and nothing changes.
+const B=location.pathname.indexOf('/agents')===0?'/agents':'';
+const api=async(p,o)=>{const r=await fetch(B+p,Object.assign({headers:
+ {'Content-Type':'application/json'}},o));
+ if(r.status===401){throw new Error('401');}
+ const d=await r.json();if(!r.ok)throw new Error(d.error||r.status);return d;};
+async function refresh(){
+ let d;try{d=await api('/agents');}catch(e){
+  if(e.message==='401'){document.getElementById('login').style.display='';
+   document.getElementById('brokerLink').href=
+    // Behind the proxy the bus is "/" on this same origin; hit directly on
+    // loopback there is no proxy, so fall back to the broker's own port.
+    B?'/':location.protocol+'//'+location.hostname+':8765/ui';return;}
+  throw e;}
+ document.getElementById('app').style.display='';
+ const list=document.getElementById('list');
+ // A stopped agent is not a new agent: docker start reuses its data root and
+ // its bus identity untouched (sec 7.1), so "start" is the restart path and
+ // "stop"/"watch" (which needs a live container to exec attach-gate into)
+ // only make sense while running. "absent" is a different thing entirely --
+ // a launcher.db record whose container is gone (out-of-band `docker rm`,
+ // host GC): derived state that drifted, per the self-heal-or-report-absence
+ // doctrine. There is no container to start or stop, so the only honest
+ // action left is destroy (it clears the stale record). Showing only the
+ // valid actions for the current state means there is no invalid click to
+ // handle, rather than hiding the gap behind an error alert.
+ list.innerHTML=(d.agents.length?'':'<div class="dim">no agents yet</div>')+
+  d.agents.map(a=>{const running=a.status==='running';
+   const broken=a.status==='absent';
+   return '<div class="card"><b>'+esc(a.agent)+'</b> '+
+   '<span class="'+(broken?'err':'dim')+'">'+
+    (broken?'broken — container missing':esc(a.status))+
+    ' &middot; '+esc(a.image)+'</span> '+
+   (running
+     ? '<button data-watch="'+esc(a.agent)+'">watch</button>'+
+       '<button data-stop="'+esc(a.agent)+'">stop</button>'
+     : broken ? ''
+     : '<button data-start="'+esc(a.agent)+'">start</button>')+
+   '<button data-del="'+esc(a.agent)+'">destroy</button>'+
+   '<button data-creds="'+esc(a.agent)+'">creds</button>'+
+   '<div data-ovr="'+esc(a.agent)+'" style="display:none;margin-top:.4rem">'+
+    '<span class="dim" data-ostate></span><br>'+
+    '<input data-oc size="26" placeholder="claude token override"> '+
+    '<input data-og size="26" placeholder="github token override"> '+
+    '<button data-osave>save</button> '+
+    '<button data-owipe>clear overrides</button></div>'+
+   // Styled, in-panel, non-blocking -- never confirm(): a native dialog can't
+   // say what is and is not recoverable, and this product avoids them for
+   // exactly that reason elsewhere. Destroy is irreversible and authority-
+   // changing, so a click alone can't confirm it: typing the exact name is
+   // what enables it. TWO INTENTS, NOT ONE: retiring an agent and erasing it
+   // were the same irreversible act once this always sent purge=1, so fixing a
+   // mistyped repo URL cost the agent everything it had learned. Friction now
+   // scales with what is actually unrecoverable -- retire is a plain confirm
+   // and takes the focus, erase demands the typed name. The safe path is the
+   // easy one; reaching the irreversible one is a deliberate move past it.
+   '<div data-delc="'+esc(a.agent)+'" style="display:none;margin-top:.4rem" '+
+    'role="group" aria-label="destroy '+esc(a.agent)+'">'+
+    '<div class="dim">Destroy '+esc(a.agent)+'? Either way its running session '+
+    'and bus grants end now -- that cannot be undone. Hive memory (lessons, '+
+    'decisions, saved state) is kept.</div>'+
+    '<div class="row"><b>Retire &mdash; keep its files</b></div>'+
+    '<div class="dim">Local repos and everything it learned locally (its '+
+    '~/.claude): KEPT, and reused if you create an agent with this name '+
+    'again.</div>'+
+    '<div class="row"><button data-retire="'+esc(a.agent)+'">retire '+
+    esc(a.agent)+'</button></div>'+
+    '<div class="row"><b>Erase &mdash; take everything</b></div>'+
+    '<div class="dim">Container, local repos, and everything it learned '+
+    'locally (its ~/.claude): gone. Nothing local survives.</div>'+
+    '<div class="row">Type <b>'+esc(a.agent)+'</b> to erase: '+
+     '<input data-delconfirm size="20" autocomplete="off" '+
+     'aria-label="type '+esc(a.agent)+' to confirm erasing it"></div>'+
+    '<button data-delyes="'+esc(a.agent)+'" disabled>erase '+
+    esc(a.agent)+'</button> <button data-delno>cancel</button></div></div>';
+  }).join('');
+ for(const b of list.querySelectorAll('[data-watch]'))b.onclick=async()=>{
+  try{
+   const g=await api('/agents/'+encodeURIComponent(b.dataset.watch)+'/grants',
+    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
+   // Relative on purpose (U4): resolves against THIS origin -- the proxy --
+   // so the same URL works for a remote human, which it never did before.
+   window.open(g.attach_url,'_blank');   // shown once, never retrievable
+  }catch(e){alert(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-start]'))b.onclick=async()=>{
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.start)+'/start',
+    {method:'POST',body:'{}'});refresh();
+  }catch(e){alert(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-stop]'))b.onclick=async()=>{
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.stop)+'/stop',
+    {method:'POST',body:'{}'});refresh();
+  }catch(e){alert(e.message);}
+ };
+ // Destroy asks in-panel (see the card template above) instead of firing the
+ // DELETE straight away; these five drive that panel open/closed/through.
+ for(const b of list.querySelectorAll('[data-del]'))b.onclick=()=>{
+  const box=list.querySelector('[data-delc="'+CSS.escape(b.dataset.del)+'"]');
+  box.style.display='';
+  const inp=box.querySelector('[data-delconfirm]');
+  inp.value='';box.querySelector('[data-delyes]').disabled=true;
+  // Focus the RECOVERABLE action, not the erase field.
+  box.querySelector('[data-retire]').focus();
+ };
+ for(const box of list.querySelectorAll('[data-delc]')){
+  const inp=box.querySelector('[data-delconfirm]');
+  const btn=box.querySelector('[data-delyes]');
+  inp.oninput=()=>{btn.disabled=inp.value!==box.dataset.delc;};
+ }
+ for(const b of list.querySelectorAll('[data-delno]'))b.onclick=()=>{
+  b.closest('[data-delc]').style.display='none';
+ };
+ // Retire: plain DELETE, no purge -- the data root survives, so re-creating
+ // this name picks its files back up. This is the reconfiguration path.
+ for(const b of list.querySelectorAll('[data-retire]'))b.onclick=async()=>{
+  try{
+   await api('/agents/'+encodeURIComponent(b.dataset.retire),{method:'DELETE'});
+   refresh();
+  }catch(e){alert(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-delyes]'))b.onclick=async()=>{
+  if(b.disabled)return;
+  try{
+   // purge=1: rmtree of the whole agent home, claude/ as well as repos/.
+   // Gated behind the typed name -- the only irreversible action here.
+   await api('/agents/'+encodeURIComponent(b.dataset.delyes)+'?purge=1',
+    {method:'DELETE'});
+   refresh();
+  }catch(e){alert(e.message);}
+ };
+ // U1 per-agent overrides: PUT /agents/<name>/profile (P2 backend, unchanged).
+ // Masked state only -- the page never sees a stored value.
+ for(const b of list.querySelectorAll('[data-creds]'))b.onclick=async()=>{
+  const box=list.querySelector('[data-ovr="'+CSS.escape(b.dataset.creds)+'"]');
+  const on=box.style.display==='none';
+  box.style.display=on?'':'none';
+  if(on){const p=await api('/profile');
+   const o=(p.credentials.agents||{})[b.dataset.creds]||{};
+   box.querySelector('[data-ostate]').textContent=
+    'override: claude '+(o.claude_token||'absent')+' / github '+(o.github_token||'absent');}
+ };
+ for(const b of list.querySelectorAll('[data-osave]'))b.onclick=async()=>{
+  const box=b.closest('[data-ovr]'),body={};
+  const c=box.querySelector('[data-oc]').value.trim();if(c)body.claude_token=c;
+  const g=box.querySelector('[data-og]').value.trim();if(g)body.github_token=g;
+  if(!Object.keys(body).length)return;
+  try{await api('/agents/'+encodeURIComponent(box.dataset.ovr)+'/profile',
+   {method:'PUT',body:JSON.stringify(body)});refresh();}catch(e){alert(e.message);}
+ };
+ for(const b of list.querySelectorAll('[data-owipe]'))b.onclick=async()=>{
+  const box=b.closest('[data-ovr]');
+  try{await api('/agents/'+encodeURIComponent(box.dataset.ovr)+'/profile',
+   {method:'PUT',body:JSON.stringify({claude_token:'',github_token:''})});
+   refresh();}catch(e){alert(e.message);}
+ };
+ const meta=await api('/rooms-mine');
+ const sel=document.getElementById('role');
+ if(sel.options.length===1)for(const r of meta.roles){
+  const o=document.createElement('option');o.value=o.textContent=r;
+  sel.appendChild(o);}
+ // Show the selected role's full prompt text (textContent -- never HTML), so
+ // the user sees exactly what is supplied and what the append box adds to.
+ sel.onchange=()=>{const t=(meta.role_prompts||{})[sel.value]||'';
+  const el=document.getElementById('roleText');
+  el.textContent=t;el.style.display=t?'':'none';};
+ const dl=document.getElementById('models');
+ if(!dl.options.length)for(const m of (meta.models||[])){
+  const o=document.createElement('option');o.value=m;dl.appendChild(o);}
+ // M3 first-run chain: zero rooms -> name one inline; the launcher creates it
+ // through the broker (the deputy's fifth and last call) and the new room
+ // arrives pre-ticked so the form continues without a context switch.
+ document.getElementById('rooms').innerHTML=meta.rooms.map(r=>
+  '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"> '+
+  esc(r.name)+' <span class="dim">('+esc(r.kind)+')</span></label>').join('')||
+  '<span class="dim">no rooms yet — name your first:</span> '+
+  '<input id="firstRoom" placeholder="room name"> '+
+  '<button id="mkRoom">create room</button>';
+ const mk=document.getElementById('mkRoom');
+ if(mk)mk.onclick=async()=>{
+  const n=document.getElementById('firstRoom').value.trim();
+  if(!n)return;
+  try{
+   const r=await api('/rooms',{method:'POST',body:JSON.stringify({name:n})});
+   document.getElementById('rooms').innerHTML=
+    '<label class="chip"><input type="checkbox" value="'+esc(r.id)+
+    '" checked> '+esc(r.name)+' <span class="dim">(owned)</span></label>';
+  }catch(e){alert(e.message);}
+ };
+ await loadCreds();   // authed by here -- refresh() already returned on a 401
+}
+// U1 globals: masked set/absent from GET /profile; PUT sends only touched
+// fields (empty repo field clears the default deliberately -- it is prefilled).
+// The zero-touch cost is stated AT CHOOSING TIME (msg 8629), not discovered
+// at provision time.
+const MODE_NOTES={
+ 'token':'token mode: the stored token rides into each container by env; '+
+  'provisioning is zero-touch.',
+ 'home-login':'home-login mode: NO token. You run `reveille-launch login '+
+  '<user>` ONCE in a terminal (interactive browser login); every agent '+
+  'copies that login when it boots. Re-login anytime to switch accounts, '+
+  'then RESTART agents to move them. A new agent cannot work until the '+
+  'login exists -- provisioning is NOT zero-touch in this mode.'};
+function modeNote(){
+ document.getElementById('cModeNote').textContent=
+  MODE_NOTES[document.getElementById('cMode').value]||'';
+}
+document.getElementById('cMode').onchange=modeNote;
+async function loadCreds(){
+ const p=await api('/profile');const c=p.credentials||{};
+ document.getElementById('credState').textContent=
+  'mode: '+(c.claude_mode||'token')+' / claude token: '+
+  (c.claude_token||'absent')+' / github token: '+(c.github_token||'absent');
+ document.getElementById('cMode').value=c.claude_mode||'token';
+ modeNote();
+ document.getElementById('cRepo').value=c.repo_url||'';
+ document.getElementById('credNotes').textContent=p.notes||'';
+}
+document.getElementById('cSave').onclick=async()=>{
+ const b={repo_url:document.getElementById('cRepo').value.trim(),
+  claude_mode:document.getElementById('cMode').value};
+ const cl=document.getElementById('cClaude').value.trim();if(cl)b.claude_token=cl;
+ const gh=document.getElementById('cGithub').value.trim();if(gh)b.github_token=gh;
+ try{await api('/profile',{method:'PUT',body:JSON.stringify(b)});
+  document.getElementById('cClaude').value='';
+  document.getElementById('cGithub').value='';
+  loadCreds();}catch(e){alert(e.message);}
+};
+document.getElementById('cClaudeClear').onclick=async()=>{
+ if(!confirm('Clear the stored claude token?'))return;
+ await api('/profile',{method:'PUT',body:'{"claude_token":""}'});loadCreds();};
+document.getElementById('cGithubClear').onclick=async()=>{
+ if(!confirm('Clear the stored github token?'))return;
+ await api('/profile',{method:'PUT',body:'{"github_token":""}'});loadCreds();};
+document.getElementById('create').onclick=async()=>{
+ const st=document.getElementById('status');
+ const rooms=[...document.querySelectorAll('#rooms input:checked')]
+  .map(c=>c.value);
+ const name=document.getElementById('name').value.trim();
+ try{
+  st.textContent='provisioning...';
+  await api('/agents',{method:'POST',body:JSON.stringify({
+   agent:name,rooms:rooms,role:document.getElementById('role').value,
+   append:document.getElementById('append').value.trim(),
+   repo_url:document.getElementById('repo').value.trim(),
+   model:document.getElementById('model').value.trim(),
+   boot_cmd:document.getElementById('bootCmd').value.trim()||undefined,
+   image:document.getElementById('image').value.trim()||undefined})});
+  st.textContent='container up; waiting for the agent to reach the bus...';
+  for(let i=0;i<60;i++){
+   await new Promise(r=>setTimeout(r,2000));
+   const a=await api('/agents/'+encodeURIComponent(name));
+   if(a.live){st.textContent='LIVE: '+name+' is on the bus.';refresh();return;}
+  }
+  st.textContent='container is up but not live yet — check its logs.';
+  refresh();
+ }catch(e){st.textContent='';alert(e.message);}
+};
+refresh();
+</script></body></html>
