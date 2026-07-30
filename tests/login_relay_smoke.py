@@ -38,7 +38,7 @@ from reveille import store  # noqa: E402
 
 LAUNCH = [str(REPO / ".venv" / "bin" / "python"),
           str(REPO / "scripts" / "reveille_launch.py")]
-IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.8")
+IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.9")
 PANE = """\
   Login
   Browser didn't open? Use the url below to sign in (c to copy)

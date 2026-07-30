@@ -400,6 +400,72 @@ def test_idle_decision_matrix():
     assert rl.is_idle(False, 0, 0, 100 * H, 0) is False
 
 
+def test_a_role_less_agent_is_refused_like_a_credential_less_one(tmp_path, monkeypatch):
+    """Architect ruling 8691: a provision whose resolved role prompt is empty and
+    whose boot is claude must REFUSE, naming what is missing.
+
+    Found live: an agent booted with REVEILLE_ROLE_PROMPT absent. The entrypoint's
+    CLAUDE.md rewrite is guarded on the prompt being non-empty, so it correctly
+    did nothing -- no error, no refusal, an agent that reads as provisioned and
+    knows what it is only from its bus name. Same shape as the credential
+    refusal: the requirement follows the thing that consumes it, so a boot_cmd
+    that runs no claude is exempt."""
+    monkeypatch.setenv("REVEILLE_LAUNCH_DATA", str(tmp_path / "data"))
+    # a credential IS present, so the refusal under test is the only one that can
+    # fire -- otherwise this would pass on the credential check and prove nothing
+    monkeypatch.setattr(rl, "credential_env", lambda c: ([], {}, "api-key"))
+    # HERMETIC ON PURPOSE. Proving this red means running it against a tree with
+    # no refusal, which then runs the REST of provision -- and the first draft of
+    # this test created a real container on the live docker host before the
+    # assertion failed. A unit that can reach production while demonstrating a
+    # bug is a worse defect than the one it demonstrates.
+    absent = types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k: absent)
+    monkeypatch.setattr(rl, "_ensure_network", lambda *a, **k: None)
+    monkeypatch.setattr(rl.subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("provision reached a real subprocess")))
+    conn = rl._db(str(tmp_path / "launcher.db"))
+    kw = dict(repo_url=None, token="t", broker="http://b")
+    for empty in (None, "", "   "):
+        try:
+            rl.provision_agent(conn, "ana", "scout", role_prompt=empty, **kw)
+            raise AssertionError(f"role_prompt={empty!r} was accepted")
+        except rl.LaunchError as e:
+            assert "role prompt" in str(e) and "--role-prompt" in str(e), e
+    conn.close()
+
+
+def test_entrypoint_wires_git_credentials_before_the_clone(tmp_path):
+    """The wiring existed ~150 lines BELOW the clone, so every private clone ran
+    unauthenticated and died on "could not read Username for https://github.com"
+    with GITHUB_TOKEN present the whole time. A public repo hides this forever,
+    which is why it survived. Asserted on the SHIPPED script: order is the fix,
+    so order is what a gate has to hold."""
+    ep = (pathlib.Path(__file__).resolve().parent.parent
+          / "docker" / "entrypoint.sh").read_text()
+    wire, clone = ep.find("gh auth setup-git"), ep.find("git clone ")
+    assert wire != -1 and clone != -1, "entrypoint lost its git wiring or clone"
+    assert wire < clone, (
+        "git credentials are wired AFTER the clone that needs them -- a private "
+        "clone will prompt for a username on a terminal nobody is watching")
+
+
+def test_entrypoint_writes_a_report_the_agent_can_read(tmp_path):
+    """A diagnostic is only a diagnostic if the party who needs it can reach it.
+    The clone failure was reported to stderr -> docker logs, and the agent has no
+    docker socket by design, so the only record of its broken boot was where it
+    cannot look."""
+    ep = (pathlib.Path(__file__).resolve().parent.parent
+          / "docker" / "entrypoint.sh").read_text()
+    assert "/home/agent/boot-report.md" in ep, "no report in the agent's own home"
+    for missing in ("role prompt: **MISSING**", "claude credential: **MISSING**"):
+        assert missing in ep, f"the report never names {missing!r}"
+    assert 'sed \'s/^/      /\' /tmp/clone.err' in ep, (
+        "the report must carry git's OWN words -- 'clone failed' without the "
+        "reason sends the agent to a human anyway")
+
+
 # ---- ownership of a NAME (ruling 8660) ---------------------------------------------
 
 def test_a_name_belongs_to_its_first_provisioner_and_survives_destroy(
@@ -410,7 +476,8 @@ def test_a_name_belongs_to_its_first_provisioner_and_survives_destroy(
     fact to enforce against. Ownership is now its own durable record, written at
     provision, keyed on the name, and untouched by destroy."""
     monkeypatch.setenv("REVEILLE_LAUNCH_DATA", str(tmp_path / "data"))
-    monkeypatch.setattr(rl, "_docker", lambda *a, **k: None)
+    absent = types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k: absent)
     conn = rl._db(str(tmp_path / "launcher.db"))
     assert rl.claim_agent_name(conn, "ana", "scout", now_ns=100)["user"] == "ana"
     # re-provisioning does not move ownership -- otherwise the rule is only
