@@ -1005,3 +1005,94 @@ console.log("ok");
                          capture_output=True, text=True)
     assert res.returncode == 0, res.stderr or res.stdout
     assert "ok" in res.stdout
+
+
+# ---- the boot report, made reachable ------------------------------------
+
+def test_boot_report_problems_returns_the_lines_not_a_count():
+    """A row saying "2 problems" sends the reader looking for them; a row
+    saying "role prompt: MISSING" has already answered the question. So this
+    returns the LINES, verbatim, and the UI shows what is wrong rather than
+    that something is.
+
+    Marker-based on purpose: the report's own header promises its reader that
+    MISSING or FAILED is how a problem announces itself, so this reads the
+    format the report documents rather than guessing at prose.
+    """
+    report = "\n".join([
+        "# reveille boot report",
+        "",
+        "- agent: reveille-senior-ui-ux",
+        "## inputs",
+        "- role prompt: **MISSING** -- no REVEILLE_ROLE_PROMPT was passed, so",
+        "  you know what you are only from your bus name and brief().",
+        "- github token: present",
+        "- claude login: copied from the user's shared login home",
+        "## repo",
+        "- clone of https://example.invalid/r.git **FAILED**.",
+        "  git credential helper at clone time:",
+        "      (none configured)",
+    ])
+    got = rl.boot_report_problems(report)
+    assert got == [
+        "role prompt: **MISSING** -- no REVEILLE_ROLE_PROMPT was passed, so",
+        "clone of https://example.invalid/r.git **FAILED**.",
+    ], got
+    # A clean boot has NO problems -- and "present"/"absent" prose must not be
+    # mistaken for one, or every healthy agent would wear a warning and the
+    # marker would stop meaning anything.
+    clean = "\n".join(["# reveille boot report",
+                       "- role prompt: present (written into ~/.claude/CLAUDE.md)",
+                       "- github token: absent (private clones will not authenticate)",
+                       "- cloned https://example.invalid/r.git -> ~/repos/work"])
+    assert rl.boot_report_problems(clean) == []
+    # No report at all is not a problem list -- it is nothing to show.
+    assert rl.boot_report_problems(None) == []
+    assert rl.boot_report_problems("") == []
+
+
+def test_read_boot_report_uses_cp_so_a_stopped_container_still_answers():
+    """docker cp, never exec: exec needs a RUNNING container, and "why did this
+    agent never come up" is asked precisely about one that is not running.
+
+    Asserted on the argv rather than by running docker, for the reason the uid
+    lessons established: an argv test runs anywhere and cannot be satisfied by
+    a local coincidence, and this container has no docker socket at all.
+    """
+    calls = []
+
+    def fake_docker(*args, check=True, capture=False):
+        calls.append(args)
+        if args[0] == "inspect":
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[0] == "cp":
+            with open(args[2], "w") as f:
+                f.write("# reveille boot report\n- role prompt: **MISSING** -- x\n")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker call {args!r}")
+
+    orig = rl._docker
+    rl._docker = fake_docker
+    try:
+        text = rl.read_boot_report("acme", "ui")
+    finally:
+        rl._docker = orig
+    assert "**MISSING**" in text
+    cp = next(c for c in calls if c[0] == "cp")
+    assert cp[1].endswith(":" + rl.BOOT_REPORT_PATH), cp
+    assert not any(c[0] == "exec" for c in calls), \
+        "exec cannot read a stopped container -- the state this exists for"
+
+
+def test_read_boot_report_is_nothing_to_show_not_an_error():
+    """No container, or a container with no report, is not a failure: an agent
+    never provisioned and one whose boot predates the report both mean nothing
+    to show, and raising would make the whole pane fail-soft to unavailable for
+    a condition that is entirely normal."""
+    orig = rl._docker
+    rl._docker = lambda *a, **k: types.SimpleNamespace(
+        returncode=1, stdout="", stderr="no such container")
+    try:
+        assert rl.read_boot_report("acme", "ghost") is None
+    finally:
+        rl._docker = orig
