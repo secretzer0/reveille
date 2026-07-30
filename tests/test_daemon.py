@@ -330,6 +330,38 @@ def test_the_page_renders_no_agents_control_when_unconfigured():
     assert "<!--AGENTSNAV-->" not in page   # the placeholder itself never ships
 
 
+def test_api_carries_the_status_so_callers_need_not_parse_the_message():
+    # api() used to throw away r.status whenever the body carried any text, so a
+    # caller wanting "did this service answer, and how" had to sniff the message
+    # string for digits. That silently fails on any endpoint answering
+    # {"error": ...}: the launcher's own 401 does exactly that, so the digit test
+    # called a live-but-unauthenticated service "not reachable".
+    api = daemon.WEBCHAT[daemon.WEBCHAT.index("async function api(path,opts)"):]
+    api = api[:api.index("\n}")]
+    assert "err.status=r.status" in api, "the status must survive the throw"
+
+
+def test_the_pane_tells_a_wrong_answer_apart_from_no_answer():
+    # Three distinct causes must read differently, because "not reachable" for
+    # all three is what sent a reviewer after the wrong service for a whole pass
+    # (msg 8589): a 404 from the WRONG service, an expired session, and a
+    # launcher that genuinely is not there.
+    block = daemon.WEBCHAT[daemon.WEBCHAT.index("U6: agents, embedded"):
+                           daemon.WEBCHAT.index("The presence poll is armed once")]
+    # Assert before indexing: a bare .index() raises ValueError on the unfixed
+    # head, which reads as a broken test rather than a caught defect.
+    assert "agUnavailable(e.status" in block, "the pane must branch on the status"
+    branch = block[block.index("agUnavailable(e.status"):]
+    branch = branch[:branch.index(");") + 2]
+    # Branch on the STATUS, never on the message text -- the message is prose.
+    assert "e.status===401" in branch          # session expired, not "unreachable"
+    assert "'the launcher returned '+e.status" in branch
+    assert "e.message" in branch               # only the no-response case uses it
+    assert "/^\\d+$/" not in block, "digit-sniffing the message is the old defect"
+    # A status that names no address is barely better than "not reachable".
+    assert "AGBASE" in branch, "say WHICH url answered"
+
+
 def test_every_launcher_call_in_the_embedded_pane_is_prefixed():
     # The defect: U6 called api('/agents') and api('/profile') -- unprefixed, so
     # the proxy routed them to the BROKER, which 404s. Reachable service, wrong

@@ -2930,7 +2930,16 @@ for(const b of document.querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.ta
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();});
 async function api(path,opts){
  const r=await fetch(path,Object.assign({headers:{'content-type':'application/json'}},opts||{}));
- if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||e.error||r.status);}
+ if(!r.ok){const e=await r.json().catch(()=>({}));
+  // The message is for a human; the STATUS is data, and it used to be thrown
+  // away whenever the body carried any text at all. Callers that wanted to
+  // know "did this service answer, and how" were left inferring it from the
+  // message string -- which silently fails the moment an endpoint returns
+  // {"error": ...} instead of a bare status (the launcher's 401 does exactly
+  // that). Carry it explicitly. Additive: every other caller reads .message.
+  const err=new Error(e.detail||e.error||r.status);
+  err.status=r.status;
+  throw err;}
  return r.json();
 }
 
@@ -2996,14 +3005,15 @@ async function refreshAgents(){
  try{d=await lapi('/agents');}
  catch(e){
   // A fetch that COMPLETED with an HTTP error is not the same fault as one
-  // that never got a response -- api() throws the bare status (e.g. "404")
-  // when the body carried no detail/error text, so a numeric message means
-  // the launcher answered and said no, while anything else (a TypeError like
-  // "Failed to fetch") means it truly never answered. Naming which one
-  // points straight at the cause instead of "not reachable" for both.
-  const numeric=/^\d+$/.test(e.message);
-  agUnavailable(e.message==='401'?'session expired -- reload the page':
-   numeric?'the launcher returned '+e.message+' for /agents':
+  // that never got a response, and saying "not reachable" for both is what
+  // sent senior-dev looking at the wrong service for a whole debugging pass
+  // (msg 8589). e.status exists only when a response actually arrived, so it
+  // IS the distinction -- no response, no status, genuinely unreachable.
+  // This used to test the message text for digits, which looked equivalent
+  // and was not: the launcher's own 401 answers {"error":"no session"}, so
+  // the message is prose and the digit test called a live service dead.
+  agUnavailable(e.status===401?'session expired -- reload the page':
+   e.status?'the launcher returned '+e.status+' from '+AGBASE+'/agents':
    'the launcher is not reachable ('+e.message+')');
   return;}
  const list=$('agList');
