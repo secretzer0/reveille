@@ -1946,6 +1946,15 @@ function openAccount(){
 // the ONE pasted code, and treats the credential FILE appearing as the only
 // proof of completion. Failure text names the launcher's answer (8633).
 let loginPoll=null;
+// paint(): re-render ONLY when the rendered content actually changed. The
+// section polls while a login is pending, and a blind innerHTML= every tick
+// WIPES WHAT THE HUMAN IS TYPING into the code box -- caught with the
+// operator mid-flow, one keystroke from losing their code. The signature
+// compare makes the poll invisible to anyone typing.
+function paint(el,html){
+ if(el.dataset.sig===html)return false;
+ el.dataset.sig=html;el.innerHTML=html;return true;
+}
 async function refreshLoginSection(){
  const el=$('acctLogin');if(!el)return;
  clearTimeout(loginPoll);
@@ -1953,29 +1962,29 @@ async function refreshLoginSection(){
   const p=await lapi('/profile');const L=p.claude_login||{};
   const cmd='<code>reveille-launch login '+esc(p.user)+'</code>';
   if(L.present){
-   el.innerHTML='logged in ('+esc(new Date(L.logged_in_at_ns/1e6)
+   paint(el,'logged in ('+esc(new Date(L.logged_in_at_ns/1e6)
     .toLocaleString())+'). <button id="lgStart">re-login (switch account)</button>'+
-    '<span class="pDim"> then restart your agents; or in a terminal: '+cmd+'</span>';
+    '<span class="pDim"> then restart your agents; or in a terminal: '+cmd+'</span>');
   }else{
    const st=await lapi('/login/status');
    if(st.pending==='awaiting-code'&&st.url){
-    el.innerHTML='<b>1.</b> <a href="'+esc(st.url)+'" target="_blank" '+
+    paint(el,'<b>1.</b> <a href="'+esc(st.url)+'" target="_blank" '+
      'rel="noopener noreferrer">Click here and sign in</a> with the account '+
      'whose plan should pay. <b>2.</b> Paste the code it shows: '+
      '<input id="lgCode" size="24" autocomplete="off"> '+
      '<button id="lgSend"'+(st.relayed?' disabled':'')+'>submit</button> '+
      '<button id="lgCancel">cancel</button>'+
      (st.relayed?'<div class="pDim">code sent -- waiting for the login to '+
-      'land; if nothing happens, cancel and start again</div>':'');
+      'land; if nothing happens, cancel and start again</div>':''));
     loginPoll=setTimeout(refreshLoginSection,3000);
    }else if(st.pending){
-    el.innerHTML=(st.pending==='failed'
+    paint(el,(st.pending==='failed'
      ?'the login flow looks stuck or expired -- '
      :'starting the login flow... ')+
-     '<button id="lgCancel">cancel</button>';
+     '<button id="lgCancel">cancel</button>');
     loginPoll=setTimeout(refreshLoginSection,2000);
    }else{
-    el.innerHTML=((L.needed_by||[]).length
+    paint(el,((L.needed_by||[]).length
      ?'<b>No login on file.</b> Your agents '+esc(L.needed_by.join(', '))+
       ' cannot work until you log in. '
      :L.needed
@@ -1983,7 +1992,7 @@ async function refreshLoginSection(){
       'need this before you can create an agent. '
      :'No login on file (needed only by home-login agents). ')+
      '<button id="lgStart">log in via browser</button>'+
-     '<span class="pDim"> or in a terminal: '+cmd+'</span>';
+     '<span class="pDim"> or in a terminal: '+cmd+'</span>');
    }
   }
   if($('lgStart'))$('lgStart').onclick=async()=>{
@@ -2003,6 +2012,7 @@ async function refreshLoginSection(){
  }catch(e){
   // Named failure, never a dead modal: the password control above must
   // keep working when the launcher is down (8633's hard constraint).
+  el.dataset.sig='';   // a recovered launcher must repaint, not match a stale sig
   el.textContent=e.status?'the launcher returned '+e.status+' from '+
    AGBASE+'/profile':'the launcher is not reachable';
  }
