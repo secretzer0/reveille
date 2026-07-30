@@ -581,6 +581,33 @@ def claude_env_name(token):
             else "CLAUDE_CODE_OAUTH_TOKEN")
 
 
+# ~/.claude.json is CONTAINER-LOCAL (the bind mounts cover ~/.claude and
+# ~/repos, not the file beside them), so a fresh debug container boots claude
+# into the first-run wizard: theme picker, then a LOGIN flow -- and completing
+# that login would write new credentials into the agent's SHARED mounted home.
+# The managed entrypoint (docker/entrypoint.sh) seeds these same keys for the
+# same reason; this is that seed, minus settings.json (which lives in the
+# persisted home and is already there). setdefault-merge, then exec bash: an
+# operator re-entering a container they configured keeps their choices.
+_DEBUG_SEED = """\
+import json, os, pathlib
+p = pathlib.Path.home() / ".claude.json"
+try:
+    d = json.loads(p.read_text())
+except Exception:
+    d = {}
+d.setdefault("hasCompletedOnboarding", True)
+d.setdefault("theme", "dark")
+d.setdefault("autoMode", True)
+d.setdefault("autoModeOptInDismissed", True)
+pr = d.setdefault("projects", {})
+for path in ("/home/agent/repos", "/home/agent"):
+    pr.setdefault(path, {}).setdefault("hasTrustDialogAccepted", True)
+p.write_text(json.dumps(d, indent=2))
+os.execlp("bash", "bash")
+"""
+
+
 def debug_argv(user, agent, image, network, extra_env=(), entrypoint="bash",
                data_base=None):
     """`docker run --rm -ti` mirroring what provision gives the agent -- same
@@ -592,17 +619,25 @@ def debug_argv(user, agent, image, network, extra_env=(), entrypoint="bash",
     Entrypoint defaults to bash ON PURPOSE -- the debugging question is "what
     does claude do in this env", so the operator runs claude by hand; the full
     entrypoint would also demand a bus token and spawn the waiter, which is
-    plumbing noise around a billing question. Pure: no env read."""
+    plumbing noise around a billing question. The default bash arrives AFTER
+    the _DEBUG_SEED first-run seed (see above): without it claude opens the
+    wizard whose login step can rewrite the agent's shared credentials.
+    An explicit --entrypoint runs raw. Pure: no env read."""
     root = data_root(user, agent, base=data_base)
     argv = ["docker", "run", "--rm", "-ti",
             "--name", f"{container_name(user, agent)}-debug",
             "--network", network,
             "-v", f"{os.path.join(root, 'claude')}:/home/agent/.claude",
-            "-v", f"{os.path.join(root, 'repos')}:/home/agent/repos",
-            "--entrypoint", entrypoint]
+            "-v", f"{os.path.join(root, 'repos')}:/home/agent/repos"]
+    if entrypoint == "bash":
+        tail = [image, "-c", _DEBUG_SEED]
+        argv += ["--entrypoint", "python3"]
+    else:
+        tail = [image]
+        argv += ["--entrypoint", entrypoint]
     for name in extra_env:
         argv += ["-e", name]     # names only -- values ride the child env
-    argv.append(image)
+    argv += tail
     return argv
 
 

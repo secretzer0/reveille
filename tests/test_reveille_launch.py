@@ -464,7 +464,13 @@ def test_debug_argv_is_interactive_selfremoving_and_secretless():
                          extra_env=("CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN"))
     assert "--rm" in argv and "-ti" in argv
     assert "rev-acme-dev-debug" in argv          # never the managed name
-    assert argv[argv.index("--entrypoint") + 1] == "bash"
+    # default bash rides BEHIND the first-run seed: ~/.claude.json is
+    # container-local, and without the seed claude opens a login wizard whose
+    # completion would rewrite the agent's SHARED mounted credentials
+    assert argv[argv.index("--entrypoint") + 1] == "python3"
+    assert argv[-1] == rl._DEBUG_SEED and argv[-2] == "-c"
+    assert 'execlp("bash", "bash")' in rl._DEBUG_SEED
+    assert '"hasCompletedOnboarding"' in rl._DEBUG_SEED
     # credential env rides by NAME; no value can appear in this list
     assert "CLAUDE_CODE_OAUTH_TOKEN" in argv
     assert not any(a.startswith("sk-") for a in argv)
@@ -472,3 +478,8 @@ def test_debug_argv_is_interactive_selfremoving_and_secretless():
     joined = " ".join(argv)
     assert "/claude:/home/agent/.claude" in joined
     assert "/repos:/home/agent/repos" in joined
+    # an explicit entrypoint runs RAW -- the seed execs bash, which would
+    # swallow whatever the operator actually asked for
+    raw = rl.debug_argv("acme", "dev", "img:1", "net", entrypoint="sh")
+    assert raw[raw.index("--entrypoint") + 1] == "sh"
+    assert raw[-1] == "img:1"
