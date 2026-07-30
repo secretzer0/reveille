@@ -453,6 +453,28 @@ def test_entrypoint_wires_git_credentials_before_the_clone(tmp_path):
         "clone will prompt for a username on a terminal nobody is watching")
 
 
+def test_entrypoint_installs_plugins_into_the_MOUNTED_home(tmp_path):
+    """Fourth installed-not-reachable (senior-ui-ux, 8713): caveman and ponytail
+    were installed at BUILD time into the image's /home/agent/.claude -- correct
+    when that path was a named volume, which docker seeds from the image, and
+    void once DES-005 made it a BIND MOUNT, which shadows it instead.
+
+    The env vars kept declaring the intent, so every check that read the
+    environment reported "configured" while neither skill existed. So the install
+    has to happen at BOOT, in the mounted home, and the report has to say whether
+    it did -- an absent capability that looks configured is the invisible-absence
+    class this report exists for."""
+    ep = (pathlib.Path(__file__).resolve().parent.parent
+          / "docker" / "entrypoint.sh").read_text()
+    assert "claude plugin install" in ep, (
+        "plugins are installed only at build time, into a home the bind mount "
+        "shadows -- so they are in the image and not in the container")
+    assert "## plugins" in ep, "the boot report never mentions plugin state"
+    # the marketplaces must come from the image clones, not the network: a boot
+    # that needs github is a boot that fails offline and pins nothing
+    assert "-marketplace" in ep and "claude plugin marketplace add" in ep
+
+
 def test_entrypoint_writes_a_report_the_agent_can_read(tmp_path):
     """A diagnostic is only a diagnostic if the party who needs it can reach it.
     The clone failure was reported to stderr -> docker logs, and the agent has no

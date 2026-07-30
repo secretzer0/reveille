@@ -190,6 +190,16 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.45 YOUR PLUGINS ARE ACTUALLY INSTALLED. caveman and ponytail were baked
+into the image's ~/.claude at build time -- correct when that path was a named
+volume (docker seeds those from the image) and void once the agent home became
+a BIND MOUNT, which shadows it. So both were present in the image, absent in
+every container, while CAVEMAN_DEFAULT_MODE and PONYTAIL_DEFAULT_MODE stayed
+set and made every env-reading check report "configured". The entrypoint now
+installs them at boot into the mounted home, from the image's own pinned
+marketplace clones (no network), and the boot report says which ones landed.
+Agent image 0.2.10.
+
 0.2.44 AN AGENT IDENTITY IS A UUID (DES-007 step 2, schema v16). New `agents`
 table: id (uuid), owner_id, name, created_ns, retired_ns, released_ns/by. The
 NAME is a label on the identity, not a key -- declining a resurrect mints a new
