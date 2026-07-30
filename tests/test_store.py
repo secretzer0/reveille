@@ -293,6 +293,45 @@ def test_clear_leave_false_does_not_resurrect_even_when_aimed_at_the_left_room()
     assert not store.known(c, "bot", [room["id"]])
 
 
+def test_activity_animates_only_what_was_observed():
+    """ANIMATION FOLLOWS OBSERVATION, NEVER INFERENCE (ruling 8676).
+
+    The bus cannot see an agent think. It sees a call land, mail sit unread, and
+    time pass -- so each label names one of those and nothing else. Only `active`
+    is an observation, and only `active` may animate: an equalizer bouncing for a
+    crashed agent is a lie that costs an afternoon."""
+    c, admin, room, tok = fixture()
+    rid, sec = room["id"], 10**9
+    store.join(c, "bot", "T", rid, tok["id"])
+    store.join(c, "peer", "T2", rid, tok["id"])
+    now = time.time_ns()
+
+    # a call just landed -> ACTIVE, the one thing we actually saw
+    assert store.activity(c, [rid], now)[(rid, "bot")] == "active"
+
+    # SILENCE IS A VALID TURN: quiet with nothing owed reads calm, never alarming.
+    # A rule that made correct quietness look busy would teach agents to reply
+    # when nothing is owed -- the broadcast storm, re-taught by an icon.
+    quiet = now + store.ACTIVE_GRACE_NS + sec
+    assert store.activity(c, [rid], quiet)[(rid, "bot")] == "idle"
+
+    # rung and unanswered -> WAITING: told, no answer yet. Still, not moving.
+    store.send(c, "peer", "bot", "ping", room=rid)
+    rung = now + store.ACTIVE_GRACE_NS + sec
+    assert store.activity(c, [rid], rung)[(rid, "bot")] == "waiting"
+
+    # ...and confidence must not outlive evidence: past the ceiling the honest
+    # label stops being "no answer yet" and becomes "no idea" -- well before the
+    # 900s deaf verdict, so a dead agent stops looking busy in minutes.
+    assert store.WAITING_CEILING_NS < store.DEAF_AFTER_NS
+    late = now + store.WAITING_CEILING_NS + 2 * sec
+    assert store.activity(c, [rid], late)[(rid, "bot")] == "unsure"
+
+    # the REPLY path the operator asked for: any call, and it is active again
+    store.touch(c, "bot", [rid])
+    assert store.activity(c, [rid])[(rid, "bot")] == "active"
+
+
 # ---- room resolution ---------------------------------------------------------
 
 def test_single_room_token_never_names_a_room():

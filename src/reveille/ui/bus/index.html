@@ -52,6 +52,21 @@
     that stopped updating looks exactly like a room where nobody moved -- the
     phantom-watcher class in the UI layer, so say which one it is. */
  #agents.stale{opacity:.55}
+ /* The working indicator. Four bars, staggered delays, one keyframe -- no JS loop,
+    no timer, nothing to leak. It runs ONLY while the row is `active`, which is the
+    only state the bus actually observed. */
+ .agent .eq{display:inline-flex;align-items:flex-end;gap:1px;height:9px;flex:none}
+ .agent .eq i{width:2px;height:100%;background:var(--grn,#5cd6a0);border-radius:1px;
+  transform-origin:bottom;animation:eqbounce .9s ease-in-out infinite}
+ .agent .eq i:nth-child(2){animation-delay:.15s;animation-duration:1.1s}
+ .agent .eq i:nth-child(3){animation-delay:.35s;animation-duration:.75s}
+ .agent .eq i:nth-child(4){animation-delay:.5s;animation-duration:1.25s}
+ @keyframes eqbounce{0%,100%{transform:scaleY(.25)}50%{transform:scaleY(1)}}
+ /* Rung and unanswered: PRESENT and still. Motion here would be the inference we
+    refuse to make. Faded once "no answer yet" stops being an honest description. */
+ .agent.act-waiting .nm{color:var(--gold)}
+ .agent.act-unsure .nm{color:var(--gold);opacity:.6}
+ @media (prefers-reduced-motion:reduce){.agent .eq i{animation:none;transform:scaleY(.6)}}
  #agents.stale::before{content:'last known -- live updates down';display:block;
   font-size:.62rem;letter-spacing:.04em;text-transform:uppercase;color:var(--gold);
   padding:.2rem .4rem .35rem}
@@ -1051,14 +1066,33 @@ function renderPresence(agents){
   const el=document.createElement('div');
   el.className='agent'+(a.live?' live':'')+(a.connected?' conn':'')
     +(a.deaf?' deaf':'')+(selAgents.has(a.name)?' sel':'');
+  const web=(a.tag||'').startsWith('web:');
+  // ANIMATION FOLLOWS OBSERVATION, NEVER INFERENCE (ruling 8676). Only `active`
+  // moves, and `active` means one thing: a bus call from this agent landed within
+  // the grace. It is not a claim about what the agent is doing inside -- the bus
+  // cannot see that, and an equalizer bouncing for a crashed agent is a lie that
+  // costs an afternoon. `waiting` and `unsure` are STILL, and `unsure` is faded,
+  // because confidence must not outlive evidence.
+  if(!web&&(a.activity==='active'||a.activity==='waiting'||a.activity==='unsure'))
+   el.classList.add('act-'+a.activity);
+  const eq=(!web&&a.activity==='active')
+   ? '<span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>' : '';
   el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
-    +'<span class="nm">'+esc(a.name)+'</span><span class="st"></span>';
+    +'<span class="nm">'+esc(a.name)+'</span>'+eq+'<span class="st"></span>';
   // Same three states, said in the vocabulary of what the row actually is: a person has
   // a tab where an agent has a waiter, and telling a human their "waiter is down" is noise
   // about a thing they were never going to run.
-  const web=(a.tag||'').startsWith('web:');
   el.title=a.connected?(web?'here -- watching this room live':'wake armed -- rings on unicast')
    :a.live?(web?'signed in, not watching this room':'live, waiter down -- mail queues'):'stale';
+  // The activity title says what we SAW, and says it PER ROOM -- the same agent can
+  // be working in another room and idle here, which is true and surprising, so it
+  // gets a sentence rather than arriving later as a bug report.
+  if(!web&&a.activity&&a.activity!=='idle')
+   el.title={active:'working -- a bus call landed just now (in THIS room; it may be '
+             +'idle in others)',
+             waiting:'told, no answer yet -- rung with mail unread, nothing heard back',
+             unsure:'no idea -- rung several minutes ago, still nothing heard'
+            }[a.activity];
   // DEAF outranks the happy titles: direct mail is sitting undelivered-in-practice
   // and nothing on the agent's side has stirred since it landed. The human who
   // found every such outage by INVESTIGATING now finds it in the hover.
