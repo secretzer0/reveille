@@ -11,10 +11,10 @@ fix is whether it can fail while everyone involved knows the rule and is
 trying to follow it.** If it can, it is a rule, not a control, and it will
 fail on the day attention is elsewhere -- which is the only day that matters.
 
-## Part 1: fixture fidelity has three failure faces
+## Part 1: fixture fidelity has four failure faces
 
 A gate is only as good as its resemblance to the thing it guards, and
-resemblance fails three ways. All three happened here, in one week, each
+resemblance fails four ways. All four happened here, in one week, each
 producing green over red.
 
 **Dirtier than production** -- the fixture inherits live state the guarded
@@ -43,6 +43,20 @@ host where the uids differ. **A uid match is not a design**, and neither is
 a free port, an installed tool, or any other host fact the mechanism relies
 on without enforcing or asserting it.
 
+**Richer than production** -- the fixture is a strict subset, and production
+holds shapes the fixture's author never imagined, so the code is correct on
+everything it was shown and wrong on everything else. This face is the
+inverse of "cleaner": there the fixture omitted state the author knew about;
+here the author did not know the state existed. Worked example (architect,
+msg 8658): the lifecycle classifier passed its fixtures and then, run against
+the LIVE bus, misread both host agents as erased-and-recreatable and missed
+state notes entirely -- because notes are scoped `agent:<token_id>`, not the
+room, a fact no fixture encoded. The live bus was RICHER than the fixture,
+not dirtier. The discipline it earns is separate from the other three: for
+any classifier over real-world data, RUN IT ON PRODUCTION DATA BEFORE
+SHIPPING IT and read the output row by row. Enumerating what your fixture
+lacks cannot surface a shape you have never seen; only the real data can.
+
 The disciplines that follow, each now practiced here:
 
 1. Enumerate BOTH directions: what does the fixture have that production
@@ -56,8 +70,12 @@ The disciplines that follow, each now practiced here:
    shaped so the dev host cannot hide the failure (argv-shaped units for
    uid behavior, because a docker smoke on a uid-1000 host cannot see it).
 4. Prove the gate FAILS on the unfixed head. A gate never seen red is
-   unverified in both directions. This catches all three faces at once,
-   which is why it is the one non-negotiable.
+   unverified in both directions. This catches the first three faces at
+   once, which is why it is the one non-negotiable.
+5. If the code CLASSIFIES real-world data, run it against production data
+   and read the output before shipping. Nothing above catches the fourth
+   face, because you cannot enumerate the absence of a shape you have never
+   seen.
 
 ## Part 2: the rules that failed were the ones living in heads
 
@@ -130,8 +148,10 @@ When the next incident proposes its fix, ask:
    takes? Refusals that live one step away get routed around honestly.
 3. Does it remove the situation instead of guarding it? Deleting the moment
    beats surviving it.
-4. If it is a gate: has it been seen RED on the unfixed head, and does its
-   fixture resemble production in both directions plus the accidental one?
+4. If it is a gate: has it been seen RED on the unfixed head, does its
+   fixture resemble production in both directions plus the accidental one,
+   and -- if it classifies real data -- has it been run against the real
+   data?
 5. Does its summary line advertise everything it covers? An under-reported
    gate invites the next person to re-add or route around a step (msg
    2edad90's amendment).
