@@ -168,6 +168,15 @@ up:
 	  || { echo "FAILED: broker up on the host but NOT reachable as"; \
 	       echo "reveille-server on the $(SERVER_NETWORK) network -- every agent"; \
 	       echo "container is cut off from the bus"; exit 1; }
+	@# A DEPLOY IS BOTH HALVES. The launcher is the second deploy unit and was
+	@# the unverified one: it runs from a pinned clone that nothing restarts on
+	@# merge, so a fix could be merged, reviewed and NOT RUNNING with nothing
+	@# saying so -- which is exactly what happened to the login-home crash, for
+	@# six reviews (msg 8681). Refuses only when the launcher ANSWERS and is
+	@# stale: an unreachable launcher is not this deploy's business, but a
+	@# reachable one running code older than main means you just shipped a
+	@# mismatched pair.
+	@bash scripts/launcher-pin-check || exit 1
 	@echo "reveille up: proxy :$(PROXY_PORT) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
 
 # `make up` with the working tree's UI mounted LIVE (docker/compose.dev.yml):
@@ -300,6 +309,13 @@ readmit-gate: sync
 # ordinary call clears it. The verdict is computed at read time, never stored.
 deafness-gate: sync
 	uv run python tests/deafness_gate.py
+
+# Deploy-both-halves gate: `make up` refuses when the LAUNCHER answers and is
+# running older code than the tree being deployed. The broker's version was
+# probed on every deploy; the launcher's was never checked, so a merged fix sat
+# un-run for six reviews and broke first-time login the whole time.
+launcher-pin-check-gate: sync
+	uv run python tests/launcher_pin_check.py
 
 # Room-events gate: the room PUSHES its own events, so a browser learns that
 # someone arrived or left without asking. Every /feed frame names its event

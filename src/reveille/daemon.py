@@ -190,6 +190,14 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.41 A DEPLOY IS BOTH HALVES. The launcher's /health now answers with the
+commit, branch and source tree it is actually running, and `make up` REFUSES
+when that launcher is reachable but serving older code than the tree being
+deployed. The broker's version was probed on every deploy; the launcher's was
+never checked, and it ships from a pinned clone nothing restarts on merge -- so
+a fix could be merged, reviewed and not running, which is what kept a
+first-time-login crash alive for six reviews after it was fixed.
+
 0.2.40 AN AGENT SHOWS WHAT THE BUS SAW. Presence rows carry `activity`:
 active (a call from that agent landed within the grace -- OBSERVED, and the
 only state the UI animates), waiting (rung, direct mail unread, nothing heard

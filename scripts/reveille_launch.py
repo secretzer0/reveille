@@ -2336,8 +2336,24 @@ def build_api(auth_url):
                 await websocket.close()
 
     async def health(_request):
-        from starlette.responses import PlainTextResponse
-        return PlainTextResponse("ok")
+        """ANSWERS FOR WHAT IT IS RUNNING, not merely that it is up.
+
+        The launcher is the fleet's SECOND deploy unit and the only unverified
+        one: `make up` builds the broker image, probes it by name and prints its
+        version, so a merged-but-undeployed broker announces itself. The launcher
+        ships from a pinned clone that nothing restarts on merge, so "merged" and
+        "running" could differ indefinitely with nothing saying so -- and did.
+        A login-home crash was fixed, reviewed and merged while the process kept
+        running the commit from before it, for six reviews (msg 8681).
+
+        A banner at boot could not close that: it is read once, by whoever
+        happened to restart. An endpoint can be ASKED, which is what makes the
+        deploy able to refuse."""
+        from starlette.responses import JSONResponse
+        src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        commit, branch, version = source_stamp(src)
+        return JSONResponse({"ok": True, "version": version, "commit": commit,
+                             "branch": branch, "source": src})
 
     async def ui(_request):
         from starlette.responses import HTMLResponse
