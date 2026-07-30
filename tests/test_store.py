@@ -260,6 +260,39 @@ def test_leave_only_named_rooms():
     assert store.known(c, "bot", [room["id"]]) and not store.known(c, "bot", [r2["id"]])
 
 
+def test_left_rooms_names_exactly_what_was_left():
+    """What the bare join() reads to decide which rooms it must NOT rejoin.
+
+    Deliberately not called a boot-ritual test: the ritual lives in the join
+    TOOL, so a store-level loop that filters correctly would pass on the broken
+    daemon too. The end-to-end claim is gated in tests/leave_sticks_gate.py.
+    """
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "Second")
+    store.assign_room(c, tok["id"], r2["id"], admin["id"])
+    both = [room["id"], r2["id"]]
+    for rid in both:
+        store.join(c, "bot", "T", rid, tok["id"])
+    assert store.left_rooms(c, "bot", both) == set()
+    store.leave(c, "bot", [r2["id"]])
+    assert store.left_rooms(c, "bot", both) == {r2["id"]}
+    # a leave is not a life sentence: the NAMED call is the door back
+    store.join(c, "bot", "T", r2["id"], tok["id"], clear_leave=True)
+    assert store.left_rooms(c, "bot", both) == set()
+    assert store.known(c, "bot", [r2["id"]])
+
+
+def test_clear_leave_false_does_not_resurrect_even_when_aimed_at_the_left_room():
+    """The flag is the guard, not the caller's filtering. A caller that passes the
+    left room anyway must still not resurrect it -- otherwise the invariant lives
+    in the call site and every future call site has to remember it."""
+    c, admin, room, tok = fixture()
+    store.join(c, "bot", "T", room["id"], tok["id"])
+    store.leave(c, "bot", [room["id"]])
+    store.join(c, "bot", "T", room["id"], tok["id"], clear_leave=False)
+    assert not store.known(c, "bot", [room["id"]])
+
+
 # ---- room resolution ---------------------------------------------------------
 
 def test_single_room_token_never_names_a_room():

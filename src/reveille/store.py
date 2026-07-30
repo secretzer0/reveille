@@ -1432,11 +1432,29 @@ def _present(conn, room_id, name):
         (room_id, name)).fetchone() is not None
 
 
-def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None):
+def left_rooms(conn, name, rooms):
+    """Of `rooms`, the ones this name deliberately LEFT and has not rejoined.
+
+    The bare join() skips these (DES-007 4.5): a directive that a restart undoes
+    is not a directive."""
+    if not rooms:
+        return set()
+    rooms = list(rooms)
+    return {r["room_id"] for r in conn.execute(
+        f"SELECT room_id FROM members WHERE name=? AND left_ns IS NOT NULL "
+        f"AND room_id IN ({_ph(rooms)})", [name] + rooms)}
+
+
+def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
+         clear_leave=True):
     """Sign up under `name` in one room. Fails if a *live* agent holds that name in
     THIS room under a different tag -- names are per-room now, so the same name in
     another room is not a collision. Replays only the last CATCHUP_NS of the room's
-    backlog; fresh=True skips it."""
+    backlog; fresh=True skips it.
+
+    clear_leave=False refuses to resurrect a membership the agent deliberately
+    ended: the caller has already decided this room is not one of them, and the
+    upsert must not quietly undo a leave it was not asked to undo."""
     valid_name(name)
     now = time.time_ns()
     cur = _member(conn, room_id, name)
@@ -1447,7 +1465,8 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None):
         "INSERT INTO members(room_id, name, tag, url, token_id, joined_ns, seen_ns) "
         "VALUES(?,?,?,?,?,?,?) "
         "ON CONFLICT(room_id, name) DO UPDATE SET tag=excluded.tag, url=excluded.url, "
-        "token_id=excluded.token_id, seen_ns=excluded.seen_ns, left_ns=NULL",
+        "token_id=excluded.token_id, seen_ns=excluded.seen_ns" +
+        (", left_ns=NULL" if clear_leave else ""),
         (room_id, name, tag, url, token_id, now, now))
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.

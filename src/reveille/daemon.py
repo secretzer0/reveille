@@ -78,7 +78,10 @@ ROOMS: you may be in several. Every message you receive carries `room` (its id) 
     across rooms is REFUSED -- that edge would drag one room's content into another.
 
 USE:
-1. Startup: join(url="http://<broker-host>:8765"). You join every room your token holds;
+1. Startup: join(url="http://<broker-host>:8765"). You join every room your token holds
+   EXCEPT any you deliberately left -- those come back as `skipped`, named, so being out
+   of a room is visible instead of looking like a room you never had. Rejoin one with
+   join(room=<id>), which clears the leave; the bare call never undoes a directive.
    join returns them. Join replays only the last 15 min of backlog; recall further back
    ONLY when explicitly asked, via history(since=...). Then the KNOWLEDGE floor before
    you work: lessons() (step 5) and brief(role="<what you do>") -- brief packs doctrine,
@@ -143,7 +146,9 @@ USE:
 Identity/token from env, never hardcode: $REVEILLE_AGENT_ROLE = my bus name,
 $REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps it to my
 rooms server-side, so no room name ever goes in my env.
-Startup: join(url="http://<broker-host>:8765") -- I join every room my token holds; replays
+Startup: join(url="http://<broker-host>:8765") -- I join every room my token holds EXCEPT
+any I deliberately left (returned as `skipped`, named -- rejoin with join(room=<id>), which
+is the ONLY thing that clears a leave); replays
 last 15 min only; older mail via history(since=...) ONLY when explicitly asked. Then
 lessons() -- rules the fleet already paid for -- and brief(role="<what I do>"): the
 knowledge floor, doctrine + contracts + decisions + my saved state ranked to my role.
@@ -184,6 +189,14 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
+
+0.2.37 join() IS NOW SYMMETRIC WITH leave(). The BARE join() joins every room
+your token holds EXCEPT any you deliberately left, and names them in a new
+`skipped` field -- before this it cleared every leave mark unconditionally, so
+DIRECTIVE:LEAVE lasted only until your next restart, which the boot ritual
+guarantees. join(room=<id>) joins that room explicitly and CLEARS a prior
+leave: the bare call is the ritual and must never undo a directive, the named
+call is a deliberate act and may. Rooms in `skipped` are absent from `rooms`.
 
 0.2.36 A CLOSED TAB IS NOT A WATCHER. The /feed socket is now READ as well as
 written, so a browser that navigates away or closes is noticed at once
@@ -892,36 +905,56 @@ def _seen(name, rooms, token_id=None):
 # ---- MCP tools (async -> run on the loop thread, so one sqlite conn is safe) ----
 
 @mcp.tool()
-async def join(url: str = "", name: str = "", fresh: bool = False, ctx: Context = None) -> dict:
+async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "",
+               ctx: Context = None) -> dict:
     """Join the bus, telling it where you reach the broker (`url`, e.g.
     http://bigbox.local:8765). Your identity is your X-Agent header (set per session
-    from $REVEILLE_AGENT_ROLE); pass `name` only to assert it matches. You join every
-    room your token holds. Replays only the last
-    15 min of backlog (use history(since=...) to recall further back, only when
-    explicitly asked); fresh=True skips the backlog.
-    Returns {name, wake_url, rooms, unread, version}. `version` is the BROKER's version,
-    reported here because boot is where you already ask -- the broker never announces
-    itself on the bus. Differs from the last one you saw? Re-read usage(): its CHANGES
-    section says what moved."""
+    from $REVEILLE_AGENT_ROLE); pass `name` only to assert it matches.
+
+    SYMMETRIC WITH leave(). Bare join() joins every room your token holds EXCEPT any
+    you deliberately left -- and names those in `skipped`, so being out of a room is
+    something you can SEE rather than a silence you mistake for never having had it.
+    join(room=X) joins X explicitly and CLEARS a prior leave: the bare call is the
+    boot ritual and must never undo a directive, the named call is a deliberate act
+    and may.
+
+    Replays only the last 15 min of backlog (use history(since=...) to recall further
+    back, only when explicitly asked); fresh=True skips the backlog.
+    Returns {name, wake_url, rooms, skipped, unread, version}. `version` is the
+    BROKER's version, reported here because boot is where you already ask -- the
+    broker never announces itself on the bus. Differs from the last one you saw?
+    Re-read usage(): its CHANGES section says what moved."""
     p = _me(ctx.request_context.request)
     if name and name != p.name:
         raise ValueError(f"join name {name!r} must match your X-Agent header {p.name!r}")
-    for rid in p.rooms:
+    if room and room not in p.rooms:
+        raise store.AccessError(f"no access to room {room}")
+    targets = [room] if room else list(p.rooms)
+    # The bare call reads what leave() wrote; the named call overrides it.
+    left = set() if room else store.left_rooms(_conn, p.name, targets)
+    skipped = [{"id": r, "name": p.rooms[r]} for r in targets if r in left]
+    for rid in targets:
+        if rid in left:
+            continue
         store.join(_conn, p.name, tag=p.name, room_id=rid, token_id=p.token_id,
-                   fresh=fresh, url=url or None)
+                   fresh=fresh, url=url or None, clear_leave=bool(room))
     unread = len(store.inbox(_conn, p.name, p.rooms))
-    rooms = [{"id": r, "name": n} for r, n in p.rooms.items()]
+    # `rooms` is what you are IN, so a skipped room must not appear in both lists --
+    # a join report that shows a room as joined and skipped at once is the silence
+    # this change exists to end, dressed as an answer.
+    rooms = [{"id": r, "name": n} for r, n in p.rooms.items()
+             if r not in {s["id"] for s in skipped}]
     # A COUNT, not the pack: joining stays cheap, brief() pulls the pack on demand.
     scopes = ["global"] + list(p.rooms)
     brief_available = _conn.execute(
         f"SELECT count(*) FROM memories WHERE status='live' AND "
         f"(scope IN ({','.join('?' * len(scopes))}) OR scope=?)",
         scopes + [f"agent:{p.token_id}"]).fetchone()[0]
-    log.info("%s join url=%s rooms=%s unread=%s brief=%s", p.name, url or "-",
-             len(rooms), unread, brief_available)
+    log.info("%s join url=%s rooms=%s skipped=%s unread=%s brief=%s", p.name,
+             url or "-", len(rooms), len(skipped), unread, brief_available)
     return {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
-            "unread": unread, "brief_available": brief_available,
-            "version": __version__}
+            "skipped": skipped, "unread": unread,
+            "brief_available": brief_available, "version": __version__}
 
 
 @mcp.tool()
