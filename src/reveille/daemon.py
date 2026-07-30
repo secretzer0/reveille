@@ -190,6 +190,17 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.38 THE ROOM PUSHES ITS OWN EVENTS. Every /feed frame now carries an
+`event` type -- message | deleted | presence | ping | error -- instead of
+being told apart by which fields happen to be present, because many more
+room-level events are coming. The first new one is `presence`: when anyone
+joins or leaves a room (a browser opening or closing its feed, an agent
+calling join/leave), every watcher of that room is sent the room's WHOLE
+presence list at once, so a missed frame is corrected by the next rather than
+leaving a browser drifting. The 15s poll stays as the fallback that repairs
+it. Unknown event types are ignored, not errors -- a newer broker must not
+break an older page.
+
 0.2.37 join() IS NOW SYMMETRIC WITH leave(). The BARE join() joins every room
 your token holds EXCEPT any you deliberately left, and names them in a new
 `skipped` field -- before this it cleared every leave mark unconditionally, so
@@ -736,9 +747,38 @@ _feed: dict = {}  # queue -> (room, name)
 
 
 def _feed_push(room, msg):
+    """Send ONE room event to every browser watching that room.
+
+    Every frame carries `event` (0.2.38). Before that the UI discriminated by
+    which fields happened to be present -- m.ping, m.error, m.deleted, else
+    treat-it-as-a-message -- four ad-hoc tests with no room for a fifth, and the
+    operator's answer to "what else is coming" was MANY more room-level events.
+    One discriminator, checked here so no call site can forget it."""
+    assert "event" in msg, f"feed frame without an event type: {sorted(msg)}"
     for q, (r, _n) in list(_feed.items()):
         if r == room:
             q.put_nowait(msg)
+
+
+def _push_presence(room):
+    """Room presence, pushed the moment it CHANGES, to everyone in that room.
+
+    STATE, NOT A DIFF (8652): the frame carries the room's whole presence list,
+    so a browser that missed one is corrected by the next instead of drifting,
+    and no sequence numbers are needed to make that safe. A room holds a handful
+    of members; there is no size argument for diffs here.
+
+    The 15s poll stays as the fallback -- this makes it the self-heal for a
+    stream that missed something rather than the primary path."""
+    if not room or not any(r == room for _q, (r, _n) in _feed.items()):
+        return                                  # nobody watching: nothing to tell
+    agents = store.presence(_conn, [room])
+    _annotate_deafness(agents, [room])
+    _human_live(agents)
+    for a in agents:
+        a["connected"] = _reachable(a)
+        a.pop("token_id", None)
+    _feed_push(room, {"event": "presence", "room": room, "agents": agents})
 
 
 def _annotate_deafness(agents, rooms):
@@ -938,6 +978,7 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
             continue
         store.join(_conn, p.name, tag=p.name, room_id=rid, token_id=p.token_id,
                    fresh=fresh, url=url or None, clear_leave=bool(room))
+        _push_presence(rid)     # an AGENT arriving is the same room event
     unread = len(store.inbox(_conn, p.name, p.rooms))
     # `rooms` is what you are IN, so a skipped room must not appear in both lists --
     # a join report that shows a room as joined and skipped at once is the silence
@@ -1184,7 +1225,7 @@ async def send(to: str, body: str, subject: str = "",
     # with a person behind it; nothing here can loop.
     woke = res["wake"] if to != store.BROADCAST else []
     _notify(rid, woke, res["id"], p.name, subject)
-    _feed_push(rid, {"id": res["id"], "thread_id": res["thread_id"],
+    _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": attachments or [], "ts_ns": time.time_ns()})
@@ -1388,6 +1429,8 @@ async def leave(room: str = "", ctx: Context = None) -> str:
     if room and room not in p.rooms:
         raise store.AccessError(f"no access to room {room}")
     store.leave(_conn, p.name, targets)
+    for rid in targets:
+        _push_presence(rid)
     log.info("%s left %s room(s)", p.name, len(targets))
     return f"left: {p.name}"
 
@@ -1678,7 +1721,7 @@ async def send_http(request):
     # reach is indistinguishable from one that does not exist.
     woke = res["wake"]
     _notify(rid, woke, res["id"], sender, d.get("subject") or "")
-    _feed_push(rid, {"id": res["id"], "thread_id": res["thread_id"],
+    _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": sender, "to": to,
                 "subject": d.get("subject") or "", "body": body,
                 "room": rid, "room_name": p.rooms.get(rid),
@@ -1893,7 +1936,7 @@ async def delete_http(request):
                              "readers": store.readers(_conn, mid, exclude=sender)},
                             status_code=409)
     for rid in p.rooms:
-        _feed_push(rid, {"deleted": mid})
+        _feed_push(rid, {"event": "deleted", "id": mid})
     log.info("%s retracted message %s (unseen)", sender, mid)
     return JSONResponse({"deleted": mid})
 
@@ -1918,7 +1961,7 @@ async def _feed_sender(ws, q):
         try:
             await ws.send_json(await asyncio.wait_for(q.get(), FEED_PING_SECONDS))
         except TimeoutError:
-            await ws.send_json({"ping": 1})
+            await ws.send_json({"event": "ping"})
 
 
 async def feed_ws(ws: WebSocket):
@@ -1928,7 +1971,7 @@ async def feed_ws(ws: WebSocket):
     try:
         p = _principal(ws)
     except store.AuthError:
-        await ws.send_json({"error": "bad_token"})
+        await ws.send_json({"event": "error", "error": "bad_token"})
         await ws.close(code=4401)
         return
     q: asyncio.Queue = asyncio.Queue()
@@ -1936,6 +1979,10 @@ async def feed_ws(ws: WebSocket):
     _feed[q] = (room if room in p.rooms else (next(iter(p.rooms)) if p.rooms else ""),
                 p.name)
     log.info("%s feed connected (%s watching)", p.name, len(_feed))
+    # A person ARRIVING in a room is a room event, and this is the moment it
+    # happens -- after 0.2.36 a human's presence IS this socket, so the set
+    # changing and the fact changing are the same instant.
+    _push_presence(_feed[q][0])
     try:
         # A parked sender NEVER learns the browser left. The close frame arrives on
         # the RECEIVE path, which this coroutine used not to read, so a tab that
@@ -1960,8 +2007,10 @@ async def feed_ws(ws: WebSocket):
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        _feed.pop(q, None)
+        gone = _feed.pop(q, None)
         log.info("feed disconnected (%s watching)", len(_feed))
+        if gone:
+            _push_presence(gone[0])   # ...and DEPARTING is the same event
 
 
 # ---- web chat: live color-coded feed of all bus traffic + composer ----------------

@@ -48,6 +48,13 @@
   font-size:.72rem;letter-spacing:.08em;padding:.28rem 0;cursor:pointer}
  #fmode button.on{background:var(--hover);color:var(--gold)}
  #agents{overflow-y:auto;flex:1;padding:0 .5rem .8rem}
+ /* Live updates are down, so this rail is a LAST-KNOWN reading. A presence list
+    that stopped updating looks exactly like a room where nobody moved -- the
+    phantom-watcher class in the UI layer, so say which one it is. */
+ #agents.stale{opacity:.55}
+ #agents.stale::before{content:'last known -- live updates down';display:block;
+  font-size:.62rem;letter-spacing:.04em;text-transform:uppercase;color:var(--gold);
+  padding:.2rem .4rem .35rem}
  .agent{display:flex;align-items:center;gap:.55rem;padding:.34rem .55rem;border-radius:7px;
   cursor:pointer;color:var(--dim);font-size:.86rem}
  .agent:hover{background:var(--hover)}
@@ -1006,7 +1013,14 @@ async function loadPresence(){
  const r=await fetch('/presence'+qs()+'&me='+encodeURIComponent(myName));
  if(r.status===401){showLogin('session expired -- sign in again');return;}
  if(!r.ok)return;
- agentList=(await r.json()).agents
+ renderPresence((await r.json()).agents);
+}
+
+// The room pushes presence the moment it CHANGES (0.2.38); the poll above is the
+// fallback that repairs a stream which missed one. Both land here, so there is one
+// renderer and no chance of the two paths drifting into different rails.
+function renderPresence(agents){
+ agentList=agents
   .sort((a,b)=>(b.connected-a.connected)||(b.live-a.live)||a.name.localeCompare(b.name));
  $('agents').innerHTML='';
  // "everyone" is a FILTER SCOPE, not a being: it has no presence, so it gets no presence
@@ -1083,21 +1097,36 @@ function connect(){
  const proto=location.protocol==='https:'?'wss':'ws';
  ws=new WebSocket(proto+'://'+location.host+'/feed'+qs());
  ws.onopen=()=>{$('status').classList.add('on');$('meDot').classList.add('on');
+  $('agents').classList.remove('stale');$('agents').title='';loadPresence();
   $('meDot').title='connected to the room feed';loadBacklog(false);checkVersion();};
+ // ONE discriminator (0.2.38). This used to dispatch on which fields happened to
+ // be present -- m.ping, m.error, m.deleted, else assume-a-message -- which is four
+ // ad-hoc tests and no room for a fifth, and many more room-level events are coming.
  ws.onmessage=e=>{const m=JSON.parse(e.data);
-  // The server's keepalive. It exists so a socket that died WITHOUT a close frame
-  // fails a write and stops counting as a watcher -- presence is computed from the
-  // watcher set, so a phantom is someone reading as live in a room they left.
-  if(m.ping)return;
-  if(m.error){if(m.error==='bad_token')showLogin('session expired -- sign in again');return;}
-  if(m.deleted){
+  switch(m.event){
+  case 'ping':return;   // keepalive: a socket that died without a close frame must
+                        // fail a WRITE, or it lingers as a phantom watcher (0.2.36)
+  case 'error':
+   if(m.error==='bad_token')showLogin('session expired -- sign in again');
+   return;
+  case 'deleted':
    for(const el of [...$('inner').children])
-    if(+el.dataset.id===m.deleted)el.remove();
-   msgs.delete(m.deleted);return;
-  }
-  add(m);};
+    if(+el.dataset.id===m.id)el.remove();
+   msgs.delete(m.id);return;
+  case 'presence':
+   if(m.room===room)renderPresence(m.agents);
+   return;
+  case 'message':return add(m);
+  default:return;       // an event this build does not know is not an error --
+  }                     // the broker may be newer, and the poll still covers us
+ };
  ws.onclose=()=>{$('status').classList.remove('on');$('meDot').classList.remove('on');
   $('meDot').title='reconnecting';
+  // A presence list that stopped updating looks exactly like a room where nobody
+  // moved. Say which one it is: with the stream down, the rail is a LAST-KNOWN
+  // reading, not a current one.
+  $('agents').classList.add('stale');
+  $('agents').title='live updates disconnected -- this is the last known presence';
   if(!$('login').classList.contains('on'))setTimeout(connect,2000);};
 }
 
