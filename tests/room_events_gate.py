@@ -53,10 +53,15 @@ def main():
         import urllib.request
 
         def browser(name):
-            """A signed-in web session, and the ONE presence poll the page makes at
-            boot -- which is what turns a viewer into a member row. Without it a
-            watcher is in the socket set but in nobody's presence list, and the
-            push would have nothing to say about them."""
+            """A signed-in web session and NOTHING ELSE -- deliberately no poll.
+
+            The first version of this fixture polled /presence once "as the page
+            does at boot", which quietly created the member row and hid a real
+            defect: opening a room made you a WATCHER but not a MEMBER, so an
+            arrival was invisible to everyone else until the newcomer's own 15s
+            poll fired. Departures pushed instantly, arrivals did not, and the
+            operator saw exactly that. A fixture that does the client's work for
+            it tests a client nobody ships."""
             jar = http.cookiejar.CookieJar()
             o = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
             o.open(urllib.request.Request(
@@ -64,7 +69,6 @@ def main():
                 data=json.dumps({"name": name, "password": PASS}).encode(),
                 headers={"Content-Type": "application/json"}), timeout=10)
             ck = "; ".join(f"{c.name}={c.value}" for c in jar)
-            o.open(f"{b.base}/presence?room={room['id']}&me={name}", timeout=10).read()
             return o, ck
 
         web, cookie = browser(USER)
@@ -106,7 +110,8 @@ def main():
         second = wsc.connect(url, additional_headers={"Cookie": bobcookie})
         f = wait_presence(lambda f: live_of(f, "bob") is True,
                           "no presence frame showing bob live when he opened the "
-                          "room -- ana learns only by polling")
+                          "room: opening a room must make you a MEMBER, not just a "
+                          "watcher, or an arrival is invisible until a poll")
         assert f["room"] == room["id"], f
         # -- 5. state, not a diff --------------------------------------------
         assert isinstance(f["agents"], list) and f["agents"], f
