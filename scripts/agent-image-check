@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# REFUSES A DEPLOY WHOSE AGENT IMAGE DOES NOT EXIST ON THIS HOST.
+#
+# DEFAULT_IMAGE names the tag every provision runs. Bumping it is a one-line
+# edit; building it is a separate command, and the gap between them is invisible
+# to the whole test suite -- unit tests assert the STRING, and a string is
+# correct whether or not the tag was ever built. So the failure lands on the
+# next human to provision an agent, as a docker pull error for an image that
+# only ever existed on a developer's box.
+#
+# Three times now: 0.2.6, 0.2.7, 0.2.10. Each caught by a reviewer who happened
+# to check by hand. A reviewer who happens to look is not a control, so this is
+# the control: the deploy asks docker, and docker either has the tag or the
+# deploy stops.
+#
+# Deliberately LOCAL-ONLY (image inspect, never pull): these images are built on
+# the host and pushed nowhere, so "docker can find it" and "it exists here" are
+# the same question.
+set -u
+
+src="$(dirname "$0")/.."
+image="${1:-}"
+if [ -z "$image" ]; then
+  image="$(grep -m1 '^DEFAULT_IMAGE' "$src/scripts/reveille_launch.py" \
+           | sed -n 's/.*"\(reveille-agent:[^"]*\)".*/\1/p')"
+fi
+
+if [ -z "$image" ]; then
+  echo "REFUSING: could not read DEFAULT_IMAGE out of scripts/reveille_launch.py" >&2
+  exit 1
+fi
+
+if docker image inspect "$image" >/dev/null 2>&1; then
+  echo "agent image: $image present"
+  exit 0
+fi
+
+echo "REFUSING to deploy: the agent image this build provisions does not exist." >&2
+echo "  DEFAULT_IMAGE: $image" >&2
+echo "  present here:  $(docker images reveille-agent --format '{{.Repository}}:{{.Tag}}' \
+                         | tr '\n' ' ')" >&2
+echo "Every provision would fail on a tag that was never built. Build it first:" >&2
+echo "  make agent-image AGENT_IMAGE=$image" >&2
+exit 1
