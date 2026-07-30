@@ -245,7 +245,8 @@ def main():
         # there for why each one is load-bearing. The list is shared with
         # single-origin-smoke and test_daemon so it cannot drift between them.
         for _s in ui_copy.LAUNCHER_PAGE:
-            assert _s in ui, f"the launcher page lost copy a gate asserts: {_s!r}"
+            assert _s in ui_copy.joined(ui), \
+                f"the launcher page lost copy a gate asserts: {_s!r}"
         assert ui_copy.DISCLOSURE_OPEN not in ui, \
             "the create form must not ship expanded -- the U7 adjacency bug"
 
