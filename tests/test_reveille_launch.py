@@ -7,6 +7,8 @@ namespaced names, per-agent data roots, quota resolution, idle decision."""
 import importlib.util
 import json
 import pathlib
+import shutil
+import subprocess
 import sqlite3
 import types
 
@@ -944,3 +946,51 @@ def test_agent_rooms_now_returns_room_ids_for_that_agent_only():
     finally:
         rl._broker_json = orig
     assert calls == [("GET", "/presence")], calls
+
+
+# ---- reconfig 3: behind the current image -------------------------------
+
+def test_behind_predicate_runs_the_bytes_that_ship():
+    """Reconfig 3's judgement lives in the served page, so test THAT, not a
+    copy of it: extract the predicate from the shipped file and execute it.
+
+    A grep for the source line would pass against a predicate that had been
+    inverted, and testing a re-implementation here would be a mirror -- the
+    defect class this fleet spent a day removing. Extraction fails LOUDLY if
+    the line is renamed or moved, which is correct for a gate: a predicate a
+    gate can no longer find is a predicate it is no longer checking.
+
+    The rule under test: BEHIND is a comparison, never a version parse. Any
+    difference from what the launcher would provision today is worth showing,
+    and inventing an ordering over image tags would be a second thing to keep
+    true. An agent with no recorded image is not behind -- it is not running.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not on PATH -- served-JS gates need it")
+    page = pathlib.Path(
+        rl.__file__).parent.parent / "src/reveille/ui/bus/index.html"
+    line = next((ln.strip() for ln in page.read_text().splitlines()
+                 if ln.strip().startswith("const behind=")), None)
+    assert line, "the behind predicate is gone or renamed in ui/bus/index.html"
+    prog = line + """
+const cases = [
+  // [agent image, default image, expected]
+  ["reveille-agent:0.2.4", "reveille-agent:0.2.8", true ],  // the live case
+  ["reveille-agent:0.2.8", "reveille-agent:0.2.8", false],  // current
+  ["",                     "reveille-agent:0.2.8", false],  // hive-only row
+  ["reveille-agent:0.2.4", "",                     false],  // default unknown
+  ["reveille-agent:0.2.9", "reveille-agent:0.2.8", true ],  // NEWER still differs
+];
+for (const [image, def, want] of cases) {
+  agDefaultImage = def;
+  const got = behind({image});
+  if (got !== want)
+    throw new Error(`behind(${image}||'empty') vs ${def||'empty'}: ${got} != ${want}`);
+}
+console.log("ok");
+"""
+    res = subprocess.run([node, "-e", "let agDefaultImage='';" + prog],
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert "ok" in res.stdout

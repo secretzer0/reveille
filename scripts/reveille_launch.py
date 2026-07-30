@@ -2097,7 +2097,13 @@ def build_api(auth_url):
             seen = _broker_json(auth_url, request.headers.get("cookie"),
                                 "GET", "/agents-seen") or {}
             hive = {a["name"]: a for a in seen.get("agents", [])}
-            return JSONResponse({"agents": _agent_status(conn, p["user"], hive)})
+            # default_image rides the list so a row can say whether it is
+            # BEHIND (reconfig 3). Records pin the image at provision, so an
+            # agent never follows a bump -- and the gap is invisible from
+            # inside the container, which is how one ran for days with no Stop
+            # hook while every health signal it could see stayed green.
+            return JSONResponse({"agents": _agent_status(conn, p["user"], hive),
+                                 "default_image": DEFAULT_IMAGE})
         d = await request.json()
         # P3: no token in the body + rooms ticked -> the LAUNCHER mints the
         # bound state-tier token through the broker's session routes with THIS
