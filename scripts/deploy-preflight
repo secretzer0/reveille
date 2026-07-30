@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Deploy preflight (architect ruling, msg 8595): REFUSE rather than silently
+# create. SERVER_DATA follows whoever invokes the deploy ($(HOME)/reveille by
+# default), so the same `make up` that upgrades the broker under one account
+# would, under another, recreate it on an EMPTY database -- every message, room,
+# memory and user gone from view, the real file untouched on disk with nothing
+# pointing at it. That is not a deploy step to be careful about; it is a defect,
+# and it was caught by luck (an inspect before acting), which is not a control.
+#
+# The rule: if the target data root does not already hold the database, AND the
+# container being replaced is currently serving one from somewhere else, stop
+# and say so. A first boot (no database anywhere, nothing running) is legitimate
+# and proceeds. Overriding is deliberate: point SERVER_DATA at the real root, or
+# remove the old container first if a fresh database is genuinely intended.
+set -u
+
+data="${1:?usage: deploy-preflight <SERVER_DATA> [broker-container]}"
+broker="${2:-reveille-server}"
+
+current="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' \
+           "$broker" 2>/dev/null || true)"
+
+if [ ! -f "$data/broker.db" ] && [ -n "$current" ] && [ "$current" != "$data" ]; then
+  echo "REFUSING to deploy: SERVER_DATA=$data holds no broker.db, but the running" >&2
+  echo "$broker is serving one from: $current" >&2
+  echo "Deploying now would bring the bus back EMPTY -- every message, room and" >&2
+  echo "user invisible, with the real database orphaned on disk." >&2
+  echo "  intended upgrade:      make up SERVER_DATA=$current" >&2
+  echo "  intended fresh start:  docker rm -f $broker, then re-run" >&2
+  exit 1
+fi
+
+mkdir -p "$data"
