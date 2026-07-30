@@ -1946,3 +1946,43 @@ def test_an_agent_that_left_is_not_deaf_it_is_gone():
     _age(c, room["id"], "dev", 1001)
     store.leave(c, "dev", [room["id"]])
     assert store.deafness(c, [room["id"]]) == {}
+
+
+def test_agents_seen_remembers_what_an_erased_agent_left():
+    """The hive half of the lifecycle view: an agent whose container and files
+    are gone is still KNOWN here, with what it left behind. Humans (web tags)
+    are excluded -- a person is not a recoverable agent."""
+    c, admin, room, tok = fixture()
+    store.join(c, "ui-dev", "T", room["id"], tok["id"])
+    store.send(c, "ui-dev", "*", "shipped the thing", room=room["id"])
+    store.join(c, "ana", "T", room["id"], tok["id"])
+    store.send(c, "ui-dev", "ana", "one for you", room=room["id"])
+    kw = dict(author="ui-dev", token_id=tok["id"], agent_bound=True,
+              tier="write", is_admin=False, rooms=[room["id"]],
+              owned_rooms=[room["id"]], scope=room["id"])
+    store.memory_add(c, fact="stopped mid-slice", kind="state", **kw)
+    store.add_lesson(c, author="ui-dev", slug="s", symptom="x",
+                     root_cause="y", rule="z", detection="d",
+                     room_id=room["id"])
+    # the container and files are gone; the hive is not
+    c.execute("DELETE FROM members WHERE name='ui-dev'")
+
+    seen = {a["name"]: a for a in store.agents_seen(c, [room["id"]])}
+    assert "ui-dev" in seen, "an erased agent must still be findable"
+    e = seen["ui-dev"]
+    assert e["messages"] >= 2 and e["lessons"] == 1
+    # the state note is scoped to the AGENT, not the room -- a room-only query
+    # cannot see it, and it is precisely the resume point
+    assert e["has_state_note"] is True, \
+        "the state note is the resume point -- the UI must be able to say it exists"
+    # excluded names never appear (the human case)
+    assert "ui-dev" not in {a["name"] for a in
+                            store.agents_seen(c, [room["id"]], exclude={"ui-dev"})}
+    assert store.agents_seen(c, []) == []
+    # present = alive right now: a caller must never offer to "recreate" a
+    # working agent (my own name and the architect's showed as erased on the
+    # live bus before this -- host agents with no container under this user)
+    assert e["present"] is False
+    store.join(c, "ui-dev", "T", room["id"], tok["id"])
+    back = {a["name"]: a for a in store.agents_seen(c, [room["id"]])}
+    assert back["ui-dev"]["present"] is True

@@ -1573,6 +1573,65 @@ def deafness(conn, rooms, now=None):
     return {(r["room_id"], r["name"]): r["stuck"] for r in rows}
 
 
+def agents_seen(conn, rooms, exclude=()):
+    """Every agent name the HIVE still knows in these rooms, with what it has
+    of theirs. Operator requirement 2026-07-30: an agent whose container and
+    files were erased is NOT unrecoverable -- its messages, lessons and its
+    own saved state note survive here, and recreating the name resumes from
+    them. Nothing in the UI could say so, because nothing could ask.
+
+    A READING, computed per call from live rows: names from messages and from
+    authored memories, with counts and the last time each was seen. `exclude`
+    drops the human names the caller already knows are people (web tags), so
+    a person never appears as a recoverable agent.
+
+    The broker learns nothing about containers here -- it answers only "who
+    does the hive remember", which is its own question to answer (G4 intact)."""
+    if not rooms:
+        return []
+    ph = _ph(list(rooms))
+    seen = {}
+
+    def bump(name, ts, key):
+        if not name or name == "*" or name in exclude:
+            return
+        e = seen.setdefault(name, {"name": name, "messages": 0,
+                                   "memories": 0, "lessons": 0,
+                                   "has_state_note": False, "last_ns": 0})
+        e[key] = e[key] + 1 if key in ("messages", "memories", "lessons") else e[key]
+        e["last_ns"] = max(e["last_ns"], ts or 0)
+
+    for r in conn.execute(
+            f"SELECT sender, recipient, ts_ns FROM messages WHERE room IN ({ph})",
+            list(rooms)):
+        bump(r["sender"], r["ts_ns"], "messages")
+        bump(r["recipient"], r["ts_ns"], "messages")
+    for r in conn.execute(
+            f"SELECT author, kind, created_ns FROM memories "
+            f"WHERE scope IN ({ph}) AND status='live'", list(rooms)):
+        bump(r["author"], r["created_ns"],
+             "lessons" if r["kind"] == "lesson" else "memories")
+    # A state note is scoped to the AGENT (scope='agent:<token_id>'), never to
+    # a room, so the room query above cannot see it -- and the state note is
+    # exactly the resume point this feature exists to surface. Asked
+    # separately, for names the caller can already see in their rooms, and
+    # only ever as a BOOLEAN: whether one exists, never a word of what it says.
+    if seen:
+        names = list(seen)
+        for r in conn.execute(
+                f"SELECT DISTINCT author FROM memories WHERE kind='state' "
+                f"AND status='live' AND author IN ({_ph(names)})", names):
+            seen[r["author"]]["has_state_note"] = True
+    # PRESENT means alive right now -- on someone else's host, in another
+    # user's container, anywhere. Carried so a caller never offers to
+    # "recreate" an agent that is currently working: remembered by the hive
+    # and gone are different facts, and only the second is a recovery case.
+    here = {a["name"] for a in presence(conn, rooms)}
+    for name, e in seen.items():
+        e["present"] = name in here
+    return sorted(seen.values(), key=lambda e: e["name"])
+
+
 def presence(conn, rooms):
     """Everyone across the caller's rooms. Each entry carries its room: names are
     per-room now, so a flat list would be ambiguous."""
