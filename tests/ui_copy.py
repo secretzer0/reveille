@@ -30,7 +30,16 @@ _SEAM = re.compile(r"'\s*\+\s*'")
 
 
 def joined(page):
-    """The served page with its JS string-concatenation seams closed."""
+    """The served page with its JS string-concatenation seams closed.
+
+    Applied to the WHOLE page for every list, token-level ones included, and
+    that is the correct default rather than a convenient one: a token split
+    across a seam is a token the USER reads as whole. If a page ever renders
+    'Hive '+'memory', the reader sees "Hive memory" and the gate should too.
+    Do not add a per-list knob -- it would let a gate disagree with the user's
+    eye on purpose, which is the opposite of why these gates exist (ruling
+    8740).
+    """
     return _SEAM.sub("", page)
 
 # The destroy modal must not understate what erase removes. It rmtree's the
