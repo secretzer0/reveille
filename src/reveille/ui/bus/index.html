@@ -1087,12 +1087,22 @@ function renderPresence(agents){
   // The activity title says what we SAW, and says it PER ROOM -- the same agent can
   // be working in another room and idle here, which is true and surprising, so it
   // gets a sentence rather than arriving later as a bug report.
-  if(!web&&a.activity&&a.activity!=='idle')
+  // Quiet is only worrying when nothing is LISTENING. Reachability is a separate
+  // observation (the wake socket is attached or it is not), and it is the one that
+  // says future mail will land -- so the two are said together rather than leaving
+  // someone to combine a dot and an icon in their head. Operator, 2026-07-30: "as
+  // long as the websocket to the agent is still active, we know that future comms
+  // will work".
+  if(!web&&a.activity&&a.activity!=='idle'){
+   const reach=a.connected
+    ? ' -- wake socket attached, so mail will reach it'
+    : ' -- and its wake socket is NOT attached, so mail is queueing';
    el.title={active:'working -- a bus call landed just now (in THIS room; it may be '
              +'idle in others)',
-             waiting:'told, no answer yet -- rung with mail unread, nothing heard back',
-             unsure:'no idea -- rung several minutes ago, still nothing heard'
+             waiting:'told, no answer yet -- rung with mail unread'+reach,
+             unsure:'no idea -- rung several minutes ago, still nothing heard'+reach
             }[a.activity];
+  }
   // DEAF outranks the happy titles: direct mail is sitting undelivered-in-practice
   // and nothing on the agent's side has stirred since it landed. The human who
   // found every such outage by INVESTIGATING now finds it in the hover.

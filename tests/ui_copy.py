@@ -42,5 +42,14 @@ DISCLOSURE_OPEN = '<details class="addAgent" open'
 ACCOUNT_LOGIN = ("CLAUDE LOGIN", "reveille-launch login ",
                  "the launcher is not reachable", "the launcher returned ")
 
-BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN
+# The activity indicator says what the bus SAW, and pairs it with the separate
+# question of whether anything is LISTENING -- quiet only worries when the wake
+# socket is gone (operator, 2026-07-30). Pinned here so neither half can be
+# dropped without a gate noticing.
+ACTIVITY = ("wake socket attached, so mail will reach it",
+            "wake socket is NOT attached, so mail is queueing",
+            "told, no answer yet",
+            "in THIS room; it may be ")
+
+BUS_PAGE = DESTROY_MODAL + ACCOUNT_LOGIN + ACTIVITY
 LAUNCHER_PAGE = DESTROY_MODAL + LAUNCHER_ONLY + (DISCLOSURE,)
