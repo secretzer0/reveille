@@ -2624,6 +2624,21 @@ async def purge_room_http(request):
 
 
 @_guard
+async def agent_footprint_http(request):
+    """GET /agents/<name>/footprint?room=<rid> -- what a prune would NOT remove.
+
+    Read-only, and it exists so the confirm dialog can state the cost BEFORE it is
+    paid: the hive rows this agent authored (its lessons above all -- every agent
+    reads those at boot) and the live facts distilled from its messages, which keep
+    their claim and lose their evidence. Same room check as the prune itself."""
+    p = _user_principal(request)
+    rid = request.query_params.get("room") or ""
+    if rid not in p.rooms:
+        raise store.AccessError(f"no access to room {rid}")
+    return JSONResponse(store.agent_hive_footprint(_conn, request.path_params["name"], rid))
+
+
+@_guard
 async def prune_agent_http(request):
     """DELETE /agents/<name>?room=<rid> -- erase an agent's trace from a room. Survivors
     that replied to it are reparented to their thread root, never cascade-deleted."""
@@ -2634,8 +2649,15 @@ async def prune_agent_http(request):
         raise store.AccessError(f"no access to room {rid}")
     snap = store.snapshot(_conn, _snap_path(f"prune-{name}"))
     out = store.prune_agent(_conn, name, rid)
-    log.info("%s pruned %s from %s (%s messages, %s reparented) snapshot=%s",
-             p.name, name, rid, out["messages"], out["reparented"], snap)
+    # The store owns rows and returns the stored names it orphaned; the bytes are
+    # ours because _files_dir is ours. missing_ok: a blob already gone is the state
+    # we want, not an error to fail a completed prune on.
+    for stored in out["files"]:
+        (_files_dir / stored).unlink(missing_ok=True)
+    log.info("%s pruned %s from %s (%s messages, %s reparented, %s files, "
+             "hive kept: %s authored %s citing) snapshot=%s",
+             p.name, name, rid, out["messages"], out["reparented"], len(out["files"]),
+             out["hive"]["counts"]["authored"], out["hive"]["counts"]["citing"], snap)
     return JSONResponse({**out, "snapshot": snap})
 
 
@@ -2885,6 +2907,7 @@ def build_app():
                   methods=["GET", "POST"]),
             Route("/rooms/{rid}/members/{name}", room_member_http,
                   methods=["DELETE"]),
+            Route("/agents/{name}/footprint", agent_footprint_http, methods=["GET"]),
             Route("/agents/{name}", prune_agent_http, methods=["DELETE"]),
             Route("/tokens", tokens_http, methods=["GET", "POST"]),
             Route("/tokens/{tid}", token_http, methods=["PATCH", "DELETE"]),

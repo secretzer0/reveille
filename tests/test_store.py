@@ -1471,6 +1471,104 @@ def test_retention_drops_whole_threads_and_defaults_to_infinite():
     assert store.tail(c, rooms=[room["id"]]) == []
 
 
+# ---- a citation outlives the message it cites (msg 8857) ---------------------
+# The column used to be ON DELETE SET NULL, so every path that deletes a message
+# rewrote the facts distilled from it into facts that never had a source. These
+# assert the ID SURVIVES -- not that the row does, and not that trace() still
+# works, both of which are supposed to stop.
+
+def _cited_fact(c, admin, room, tok, sender="mallory", body="the claim"):
+    """A live decision distilled from one agent's message. Returns (uid, msg id)."""
+    store.join(c, sender, f"T{sender}", room["id"], tok["id"])
+    m = store.send(c, sender, store.BROADCAST, body, room=room["id"])
+    mem = store.memory_add(c, author="architect", token_id=tok["id"], agent_bound=False,
+                           tier="ratify", is_admin=True, rooms=[room["id"]],
+                           owned_rooms=[room["id"]], fact="the fact he taught",
+                           kind="decision", scope=room["id"], source=m["id"])
+    return mem["id"], m["id"]
+
+
+def _src_of(c, uid):
+    return c.execute("SELECT source_msg_id FROM memories WHERE uid=?", (uid,)).fetchone()[0]
+
+
+def test_prune_leaves_the_citation_pointing_at_the_deleted_message():
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)
+    store.prune_agent(c, "mallory", room["id"])
+    assert _src_of(c, uid) == mid, "prune nulled the citation instead of keeping it"
+
+
+def test_retention_sweep_leaves_the_citation_too():
+    """The gate that proves the fix is at the COLUMN and not in prune_agent.
+    sweep_retention runs on a timer with nobody present, so a guard placed in the
+    delete's callers would have left the one automatic path still laundering."""
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)
+    old = time.time_ns() - 10 * 86400 * 1_000_000_000
+    c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (old, mid))
+    store.set_retention(c, room["id"], admin["id"], 5 * 86400 * 1_000_000_000)
+    assert store.sweep_retention(c) == 1                  # the fixture really expired
+    assert c.execute("SELECT 1 FROM messages WHERE id=?", (mid,)).fetchone() is None
+    assert _src_of(c, uid) == mid, "the retention sweep nulled the citation"
+
+
+def test_a_deleted_source_renders_as_deleted_not_as_absent():
+    """Assert the MARKER, never the absence of source_message: a memory that never
+    cited anything produces that same absence, so an absence assertion passes on
+    the defect."""
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)
+    store.prune_agent(c, "mallory", room["id"])
+    item = store.memory_detail(c, uid)
+    assert item["source_message"]["deleted"] is True
+    assert item["source_message"]["id"] == mid
+    assert store.recall(c, rooms=[room["id"]], token_id=tok["id"], caller="architect",
+                        tier="ratify", is_admin=True,
+                        query="taught")["memories"][0]["source_deleted"] is True
+    text = store.brief(c, rooms={room["id"]: "Reveille"}, token_id=tok["id"],
+                       role="", budget=28000)["text"]
+    assert f"[src msg {mid} DELETED]" in text
+    # ...and a live citation must NOT wear the marker, or it means nothing.
+    uid2, mid2 = _cited_fact(c, admin, room, tok, sender="alice", body="still here")
+    assert "deleted" not in store.memory_detail(c, uid2)["source_message"]
+
+
+def test_the_footprint_names_what_he_wrote_AND_what_cites_him():
+    """A footprint listing only authorship misses half the poison, and it is the half
+    that reads as sourced -- a fact somebody ELSE wrote from his message, which
+    nothing about his name would otherwise surface."""
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)          # architect's, cites mallory
+    store.add_lesson(c, author="mallory", slug="his-rule", symptom="s", root_cause="rc",
+                     rule="obey this", detection="d", room_id=room["id"])
+    f = store.agent_hive_footprint(c, "mallory", room["id"])
+    assert [x["uid"] for x in f["citing"]] == [uid]
+    assert [x["slug"] for x in f["authored"]] == ["his-rule"]
+    assert f["counts"] == {"authored": 1, "citing": 1}
+    # The receipt says the same thing after the fact, measured before the delete.
+    out = store.prune_agent(c, "mallory", room["id"])
+    assert out["hive"]["counts"] == {"authored": 1, "citing": 1}
+    assert store.lessons(c, rooms=[room["id"]])[0]["slug"] == "his-rule"   # KEPT, not retracted
+
+
+def test_prune_removes_his_orphaned_upload_and_keeps_a_reattached_one():
+    """Both halves, or the gate ratifies collateral damage."""
+    c, admin, room, tok = fixture()
+    for n in ("alice", "mallory"):
+        store.join(c, n, f"T{n}", room["id"], tok["id"])
+    store.record_file(c, "1-his.png", room["id"], "mallory")
+    store.record_file(c, "2-shared.png", room["id"], "mallory")
+    store.send(c, "mallory", store.BROADCAST, "mine", room=room["id"],
+               attachments=[{"url": "/files/1-his.png", "name": "his.png", "bytes": 1}])
+    store.send(c, "alice", store.BROADCAST, "hers, reusing his upload", room=room["id"],
+               attachments=[{"url": "/files/2-shared.png", "name": "s.png", "bytes": 1}])
+    out = store.prune_agent(c, "mallory", room["id"])
+    assert out["files"] == ["1-his.png"]                  # named, so the route can unlink it
+    left = {r["stored"] for r in c.execute("SELECT stored FROM files")}
+    assert left == {"2-shared.png"}, "a survivor's attachment lost its file"
+
+
 # ---- migration ---------------------------------------------------------------
 
 def _v0_db():
@@ -2191,3 +2289,158 @@ def test_agents_seen_remembers_what_an_erased_agent_left():
     store.join(c, "ui-dev", "T", room["id"], tok["id"])
     back = {a["name"]: a for a in store.agents_seen(c, [room["id"]])}
     assert back["ui-dev"]["present"] is True
+
+
+def _v16_db_with_the_old_column(tmp_path):  # noqa: D401
+    """A v16 database carrying the PRE-v17 memories table: source_msg_id as a live
+    reference with ON DELETE SET NULL. Built by migrating to current and then putting
+    the old definition back, because that is what every deployed database looks like
+    and the fresh path lays the NEW column directly -- a gate that only ever sees a
+    fresh db would pass identically if _upgrade_v16 did not exist (architect, 8876).
+    """
+    os.makedirs(str(tmp_path), exist_ok=True)
+    db = str(tmp_path / "v16.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("DROP TABLE IF EXISTS memories_fts")
+    c.execute("ALTER TABLE memories RENAME TO memories_new")
+    c.execute("""
+        CREATE TABLE memories (
+            id            INTEGER PRIMARY KEY,
+            uid           TEXT NOT NULL UNIQUE,
+            kind          TEXT NOT NULL,
+            scope         TEXT NOT NULL,
+            fact          TEXT NOT NULL,
+            entities      TEXT NOT NULL DEFAULT '',
+            source_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+            supersedes_id INTEGER REFERENCES memories(id),
+            slug          TEXT,
+            symptom       TEXT, root_cause TEXT, rule TEXT, detection TEXT,
+            author        TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'live',
+            occurred_ns   INTEGER,
+            created_ns    INTEGER NOT NULL,
+            expires_ns    INTEGER
+        )""")
+    c.execute("DROP TABLE memories_new")
+    c.execute("""CREATE VIRTUAL TABLE memories_fts USING fts5(
+        fact, entities, symptom, root_cause, rule, detection,
+        content='memories', content_rowid='id',
+        tokenize="unicode61 tokenchars '-_'")""")
+    c.execute("PRAGMA foreign_keys=ON")
+    c.execute("PRAGMA user_version=16")
+    return c, db
+
+
+def _mem_sql(c):
+    return c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()[0]
+
+
+def test_migration_v16_to_v17_rebuilds_the_table_and_keeps_every_row(tmp_path):
+    c, db = _v16_db_with_the_old_column(tmp_path)
+    assert "ON DELETE SET NULL" in _mem_sql(c), "the fixture is not the old shape"
+    # Two rows and a supersession between them, plus a searchable term, because a
+    # rebuild can lose any of the three quietly. Seeded with foreign keys OFF: the
+    # citation points at a message this scratch db never had, which is the state the
+    # rebuild has to carry -- a dangling id IS the "source was deleted" reading.
+    c.execute("PRAGMA foreign_keys=OFF")
+    for uid, fact, sup in (("m-one", "the older claim about wake-127", None),
+                           ("m-two", "the newer claim about wake-127", 1)):
+        c.execute(
+            "INSERT INTO memories(uid, kind, scope, fact, entities, source_msg_id, "
+            "supersedes_id, author, status, created_ns) "
+            "VALUES(?,'decision','r1',?,'wake-127',4242,?,'architect','live',1)",
+            (uid, fact, sup))
+    c.execute("INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
+              "rule, detection) SELECT id, fact, entities, symptom, root_cause, rule, "
+              "detection FROM memories")
+    c.execute("PRAGMA foreign_keys=ON")
+    before = [tuple(r) for r in c.execute(
+        "SELECT id, uid, fact, source_msg_id, supersedes_id FROM memories ORDER BY id")]
+
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
+
+    assert "ON DELETE SET NULL" not in _mem_sql(c), \
+        "the rebuilt table still nulls citations on delete"
+    assert [tuple(r) for r in c.execute(
+        "SELECT id, uid, fact, source_msg_id, supersedes_id FROM memories ORDER BY id"
+    )] == before, "rows, ids, citations or supersession links changed in the rebuild"
+    # An external-content FTS index that survives the rebuild EMPTY is a silent
+    # search outage: every row is still there and nothing can find it.
+    # The term is quoted: the tokenizer keeps wake-127 as ONE token (that is the
+    # point of tokenchars '-_'), but the QUERY parser reads a bare dash as a
+    # column filter, so an unquoted probe fails on syntax rather than on coverage.
+    hits = c.execute(
+        'SELECT rowid FROM memories_fts WHERE memories_fts MATCH \'"wake-127"\'').fetchall()
+    assert len(hits) == 2, f"the rebuilt index finds {len(hits)} of 2 rows"
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 17
+
+
+def test_migration_v16_to_v17_is_rerunnable_within_one_second(tmp_path):
+    """The nanosecond snapshot name, proven rather than argued: snapshot() refuses an
+    existing path, so a second-resolution filename makes a rebuild un-re-runnable
+    inside one second -- which is exactly when a partial chain gets re-run."""
+    c, db = _v16_db_with_the_old_column(tmp_path)
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
+    c.execute("PRAGMA user_version=16")
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
+    assert "ON DELETE SET NULL" not in _mem_sql(c)
+
+
+def test_a_chain_interrupted_before_v17_does_not_claim_to_have_run_it(tmp_path):
+    """BLOCKING 1 of msg 8876, and the architect ran it before I did.
+
+    Every _upgrade_vN used to stamp SCHEMA_VERSION, so _upgrade_v14 -- three steps
+    before this one -- stamped the version THIS step has to earn. A power cut between
+    them left a database saying 17 with the old column still on it, and migrate()
+    early-returns on that number, so the next healthy boot never looks again and the
+    laundering is permanent on that database.
+
+    The fixture is the interrupt: run the chain from 14 with the step AFTER v14 raising.
+    """
+    c, db = _v16_db_with_the_old_column(tmp_path)
+    c.execute("PRAGMA user_version=14")
+    boom = store._upgrade_v15
+
+    def die(conn, path):
+        raise RuntimeError("power cut")
+
+    store._upgrade_v15 = die
+    try:
+        try:
+            store.migrate(c, db)
+            assert False, "the fixture did not interrupt anything"
+        except RuntimeError:
+            pass
+        crashed = c.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        store._upgrade_v15 = boom
+    assert crashed < 17, (
+        f"a step before v17 stamped {crashed} -- a crashed chain claims to have run "
+        f"the rebuild, and migrate() will early-return on the next boot")
+    assert store.migrate(c, db) == store.SCHEMA_VERSION      # the next boot repairs it
+    assert "ON DELETE SET NULL" not in _mem_sql(c)
+
+
+def test_every_arm_from_v9_reaches_the_rebuild(tmp_path):
+    """The ladder is a hand-written arm per start version, so a step appended to
+    some arms and not others is invisible until a database sits at the wrong one.
+    Pin the property instead of the arms: from every version this fixture can
+    honestly represent, migrate() ends at 17 with the new column.
+
+    WHAT THIS DOES NOT COVER, said rather than implied: start versions below 9.
+    Their steps expect the OLD table shapes (v2 drops a column that no longer
+    exists), so stamping a current database back to 3 does not represent one --
+    it would fail on the fixture, not on the ladder. Those arms are covered by
+    their own dedicated gates above, one shape each.
+    """
+    for start in range(9, 17):
+        c, db = _v16_db_with_the_old_column(tmp_path / f"s{start}")
+        c.execute(f"PRAGMA user_version={start}")
+        assert store.migrate(c, db) == store.SCHEMA_VERSION
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 17, \
+            f"a chain starting at v{start} did not reach 17"
+        assert "ON DELETE SET NULL" not in _mem_sql(c), \
+            f"a chain starting at v{start} reached 17 without the rebuild"

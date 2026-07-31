@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -315,7 +315,17 @@ CREATE TABLE IF NOT EXISTS memories (
     scope         TEXT NOT NULL,
     fact          TEXT NOT NULL CHECK (length(fact) <= 1000),
     entities      TEXT NOT NULL DEFAULT '',
-    source_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    -- A CITATION IS A HISTORICAL FACT, NOT A LIVE REFERENCE (architect, msg 8857).
+    -- No FK action, deliberately: ON DELETE SET NULL made "cited message N" and
+    -- "never cited anything" the same value, so every message delete -- prune,
+    -- purge_room, retract, and the retention sweep that runs on a timer with
+    -- nobody watching -- silently turned a sourced fact into an unsourceable one.
+    -- The id survives the message. messages.id is INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- so sqlite never reuses one and a dangling citation can never re-bind to a
+    -- different message. Readers get three states from two columns and no new
+    -- status: NULL = never cited; id with no row = the source was DELETED; id with
+    -- a row = trace() works.
+    source_msg_id INTEGER,
     supersedes_id INTEGER REFERENCES memories(id),
     slug          TEXT,
     symptom       TEXT, root_cause TEXT, rule TEXT, detection TEXT,
@@ -530,32 +540,55 @@ def migrate(conn, db_path):
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
         _upgrade_v14(conn, db_path)
+        _upgrade_v16(conn, db_path)
     elif v == 10:
         _upgrade_v10(conn, db_path)
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
         _upgrade_v14(conn, db_path)
+        _upgrade_v16(conn, db_path)
     elif v == 11:
         _upgrade_v11(conn, db_path)
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
         _upgrade_v14(conn, db_path)
+        _upgrade_v16(conn, db_path)
     elif v == 12:
         _upgrade_v12(conn, db_path)
         _upgrade_v13(conn, db_path)
         _upgrade_v14(conn, db_path)
+        _upgrade_v16(conn, db_path)
     elif v == 13:
         _upgrade_v13(conn, db_path)
         _upgrade_v14(conn, db_path)
+        _upgrade_v16(conn, db_path)
     elif v == 14:
         _upgrade_v14(conn, db_path)
         _upgrade_v15(conn, db_path)
+        _upgrade_v16(conn, db_path)
     elif v == 15:
         _upgrade_v15(conn, db_path)
-    # Chains from <=v8 need no v9+ steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
-    # which already carries the current index shape, status set, and audit
-    # tables, and backfills through _memory_insert.
+        _upgrade_v16(conn, db_path)
+    elif v == 16:
+        _upgrade_v16(conn, db_path)
+    # Chains that start below the memory plane run its steps too. This used to be a
+    # comment saying they need not -- _upgrade_v8 lays _MEMORIES_SCHEMA at the current
+    # shape, so the later steps had nothing to do -- and that was true of every step
+    # that existed when it was written, all of them ADDITIVE. It stopped being true at
+    # the first non-additive one (v17 rebuilds the table to drop an FK action), and the
+    # only thing that had been keeping those chains correct was that nothing yet
+    # required work they skipped. Running the steps costs a rebuild on a database old
+    # enough to be at v8; being wrong costs a database that says 17 and is not.
+    if 2 <= v <= 8:
+        _upgrade_v9(conn, db_path)
+        _upgrade_v10(conn, db_path)
+        _upgrade_v11(conn, db_path)
+        _upgrade_v12(conn, db_path)
+        _upgrade_v13(conn, db_path)
+        _upgrade_v14(conn, db_path)
+        _upgrade_v15(conn, db_path)
+        _upgrade_v16(conn, db_path)
     return SCHEMA_VERSION
 
 
@@ -570,7 +603,7 @@ def _upgrade_v2(conn, db_path):
                      "(SELECT id FROM tokens WHERE revoked_ns IS NOT NULL)")
         conn.execute("DELETE FROM tokens WHERE revoked_ns IS NOT NULL")  # already dead
         conn.execute("ALTER TABLE tokens DROP COLUMN revoked_ns")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=3")
 
 
 def _upgrade_v3(conn, db_path):
@@ -586,7 +619,7 @@ def _upgrade_v3(conn, db_path):
             "SELECT replace(a.url, rtrim(a.url, replace(a.url, '/', '')), ''), "
             "       m.room, m.sender, m.ts_ns "
             "  FROM attachments a JOIN messages m ON m.id = a.message_id").rowcount
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=4")
     return n
 
 
@@ -608,7 +641,7 @@ def _upgrade_v4(conn, db_path):
         conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('delete-all')")
         n = conn.execute("INSERT INTO messages_fts(rowid, subject, body) "
                          "SELECT id, subject, body FROM messages").rowcount
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=5")
     return n
 
 
@@ -634,7 +667,7 @@ def _upgrade_v5(conn, db_path):
                      extract_entities(f"{r['subject']} {r['body']}")]
         conn.executemany(
             "INSERT OR IGNORE INTO message_entities(entity, message_id) VALUES(?,?)", rows)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=6")
     return len(rows)
 
 
@@ -643,8 +676,11 @@ def _upgrade_v6(conn, db_path):
     word-dash-number, found live: entity=des-001 was empty with the naming thread
     right there), and an extraction change without a re-extract would leave history
     indexed under the OLD rules -- two vocabularies pretending to be one index.
-    Same body as v5: the backfill is already a delete-and-rebuild."""
-    return _upgrade_v5(conn, db_path)
+    Same body as v5: the backfill is already a delete-and-rebuild -- but the STAMP
+    is this step's own, because v5's says 6 and finishing here means 7. A step that
+    borrows another's body must not borrow its version (msg 8876)."""
+    _upgrade_v5(conn, db_path)
+    conn.execute("PRAGMA user_version=7")
 
 
 def _upgrade_v7(conn, db_path):
@@ -659,7 +695,7 @@ def _upgrade_v7(conn, db_path):
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tokens)")}
         if "agent_name" not in cols:
             conn.execute("ALTER TABLE tokens ADD COLUMN agent_name TEXT")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=8")
 
 
 def _upgrade_v8(conn, db_path):
@@ -685,7 +721,7 @@ def _upgrade_v8(conn, db_path):
                     slug=r["slug"], symptom=r["symptom"], root_cause=r["root_cause"],
                     rule=r["rule"], detection=r["detection"], created_ns=r["created_ns"])
             conn.execute("DROP TABLE lessons")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=9")
 
 
 def _upgrade_v9(conn, db_path):
@@ -711,7 +747,7 @@ def _upgrade_v9(conn, db_path):
             "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
             "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
             "rule, detection FROM memories")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=10")
 
 
 def _upgrade_v10(conn, db_path):
@@ -744,7 +780,7 @@ def _upgrade_v10(conn, db_path):
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
             raise BusError(f"v11 migration left {len(bad)} FK violations")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=11")
 
 
 def _upgrade_v11(conn, db_path):
@@ -754,7 +790,7 @@ def _upgrade_v11(conn, db_path):
     missing."""
     with tx(conn):
         _exec_script(conn, _MEMORIES_SCHEMA)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=12")
 
 
 def _upgrade_v12(conn, db_path):
@@ -774,7 +810,7 @@ def _upgrade_v12(conn, db_path):
             "    AND n.scope=m.scope AND n.slug=m.slug AND "
             "    (n.created_ns>m.created_ns OR "
             "     (n.created_ns=m.created_ns AND n.id>m.id))))")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=13")
 
 
 def _upgrade_v13(conn, db_path):
@@ -797,7 +833,7 @@ def _upgrade_v14(conn, db_path):
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(members)")}
         if "left_ns" not in cols:
             conn.execute("ALTER TABLE members ADD COLUMN left_ns INTEGER")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=15")
 
 
 def _upgrade_v15(conn, db_path):
@@ -821,7 +857,52 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_live
     ON agents(owner_id, name) WHERE retired_ns IS NULL;
 CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
 """)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=16")
+
+
+def _upgrade_v16(conn, db_path):
+    """v16 -> v17: memories.source_msg_id stops being a live reference (msg 8857).
+
+    It was INTEGER REFERENCES messages(id) ON DELETE SET NULL, so deleting a message
+    rewrote every fact distilled from it to look like a fact that never had a source.
+    Four paths delete messages -- prune_agent, purge_room, retract_message and
+    sweep_retention -- and the last runs on a timer with nobody present, so guarding
+    the callers would have left the only automatic one intact. The column is the fix.
+
+    NON-ADDITIVE, which is why it stamps its own target rather than SCHEMA_VERSION:
+    the full-schema replay that has been quietly healing additive drift on truncated
+    chains cannot heal this one -- CREATE TABLE IF NOT EXISTS sees the old table and
+    leaves its FK action alone (msg 8804). Rebuild, the same way v11 did: sqlite
+    cannot ALTER a column's foreign-key action, and the external-content FTS rides
+    the table's identity, so it is dropped first and rebuilt after.
+
+    Citations already nulled by a delete before this landed are NOT recoverable --
+    the value is gone, not hidden. This stops the next one.
+    """
+    # Nanoseconds, not seconds: snapshot() refuses an existing path, and a step that
+    # cannot run twice in the same second cannot be re-run after a partial chain --
+    # which is exactly when a rebuild is most likely to be re-run. The second-
+    # resolution names on the older steps are a latent version of this and are not
+    # mine to change in this slice.
+    snapshot(conn, f"{db_path}.pre-v17-{time.time_ns()}.bak")
+    with tx(conn):
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute("ALTER TABLE memories RENAME TO memories_old")
+        _exec_script(conn, _MEMORIES_SCHEMA)   # new table, indexes, fts, audit
+        cols = ("id, uid, kind, scope, fact, entities, source_msg_id, "
+                "supersedes_id, slug, symptom, root_cause, rule, detection, "
+                "author, status, occurred_ns, created_ns, expires_ns")
+        conn.execute(f"INSERT INTO memories({cols}) "
+                     f"SELECT {cols} FROM memories_old")
+        conn.execute("DROP TABLE memories_old")
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
+            "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
+            "rule, detection FROM memories")
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise BusError(f"v17 migration left {len(bad)} FK violations")
+        conn.execute("PRAGMA user_version=17")
 
 
 def _upgrade_v0(conn, db_path):
@@ -2319,6 +2400,42 @@ def _rethread(conn, root_id):
                      conn.execute("SELECT id FROM messages WHERE parent_id=?", (n,))]
 
 
+def agent_hive_footprint(conn, name, room_id):
+    """What a prune will NOT remove: the hive rows tied to this agent.
+
+    Prune neither retracts nor refuses (msg 8857) -- DES-005 7.1 keeps contributions,
+    and retraction is a per-fact ratify-tier judgement that message deletion has no
+    authority over. What prune owes instead is the COST, stated before it is paid and
+    again as a receipt afterwards, so poison is retracted deliberately by name rather
+    than being assumed gone with the messages.
+
+    Two halves, and a footprint with only the first misses the half that matters most:
+      authored  live memories this name wrote -- including its LESSONS, which every
+                agent in the room reads at boot, so a lesson is the most-obeyed thing
+                a pruned agent can leave behind
+      citing    live memories distilled FROM its messages. These keep their claim and
+                lose their evidence (the citation survives as a DELETED marker), and
+                they are authored by SOMEONE ELSE, so nothing about the pruned name
+                would ever surface them.
+    Global scope is included for authorship on purpose: fleet law it wrote outlives
+    the room, and it is already readable by everyone through lessons().
+    """
+    valid_name(name)
+    doomed = [r["id"] for r in conn.execute(
+        "SELECT id FROM messages WHERE room=? AND (sender=? OR recipient=?)",
+        (room_id, name, name))]
+    cols = "uid, kind, scope, slug, fact, status, source_msg_id"
+    authored = [dict(r) for r in conn.execute(
+        f"SELECT {cols} FROM memories WHERE author=? AND status='live' "
+        f"AND scope IN (?, 'global') ORDER BY kind, created_ns", (name, room_id))]
+    citing = [dict(r) for r in conn.execute(
+        f"SELECT {cols} FROM memories WHERE status='live' AND source_msg_id IN "
+        f"({_ph(doomed) if doomed else 'NULL'}) ORDER BY kind, created_ns",
+        doomed).fetchall()] if doomed else []
+    return {"authored": authored, "citing": citing,
+            "counts": {"authored": len(authored), "citing": len(citing)}}
+
+
 def prune_agent(conn, name, room_id):
     """Erase an agent from a room: its membership and every message to or from it.
 
@@ -2331,6 +2448,9 @@ def prune_agent(conn, name, room_id):
     (thread_id is copied at insert, never derived, so it does not follow on its own).
     """
     valid_name(name)
+    # The receipt is measured BEFORE the delete: `citing` is found through his
+    # message ids, so afterwards there is nothing left to find it by.
+    hive = agent_hive_footprint(conn, name, room_id)
     with tx(conn):
         # recipient=name matches literally, never '*' (NAME_RE forbids it), so
         # broadcasts he RECEIVED survive -- deleting those would erase everyone's mail.
@@ -2366,7 +2486,30 @@ def prune_agent(conn, name, room_id):
             _rethread(conn, r)
         conn.execute("DELETE FROM reads WHERE agent=?", (name,))
         conn.execute("DELETE FROM members WHERE room_id=? AND name=?", (room_id, name))
-    return {"messages": len(doomed), "reparented": len(new_roots)}
+        orphans = _orphaned_uploads(conn, name, room_id)
+        if orphans:
+            conn.execute(f"DELETE FROM files WHERE stored IN ({_ph(orphans)})", orphans)
+    # The BLOB is the caller's to unlink -- the store owns rows and knows nothing
+    # about where the daemon put the bytes. Returning the names rather than a count
+    # is what makes the two halves testable apart and impossible to drift: the route
+    # deletes exactly what the store said it orphaned.
+    return {"messages": len(doomed), "reparented": len(new_roots),
+            "files": orphans, "hive": hive}
+
+
+def _orphaned_uploads(conn, name, room_id):
+    """Stored names this agent uploaded to this room that NOTHING references now.
+
+    DES-005 7.1 wipes an account's files, so prune must not be softer than the act
+    one level above it -- but it must not be broader either. A file re-attached by
+    somebody else's surviving message STAYS: the rule is erase the agent, never the
+    survivors' work, the same rule the reparenting follows. Run AFTER the message
+    delete, so "referenced" means referenced by what is left.
+    """
+    return [r["stored"] for r in conn.execute(
+        "SELECT f.stored FROM files f WHERE f.room_id=? AND f.uploaded_by=? "
+        "AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.url='/files/'||f.stored)",
+        (room_id, name))]
 
 
 # ---- files -------------------------------------------------------------------
@@ -2610,6 +2753,11 @@ def recall(conn, *, rooms, token_id, caller="", tier="state", is_admin=False,
     for final, comp, r in scored[:limit]:
         depth, fork = _chain_info(conn, r)
         m = _mem_dict(r, chain=depth, fork=fork)
+        # A hit still carrying source_msg_id whose message is gone says so, or the
+        # caller trace()s an id and gets a bare "no such message" that reads like
+        # their own mistake rather than a deleted source (msg 8857).
+        if r["source_msg_id"] and not _message_exists(conn, r["source_msg_id"]):
+            m["source_deleted"] = True
         if explain:
             m["score"] = {"final": round(final, 4),
                           **{k: round(v, 4) for k, v in comp.items()}}
@@ -2644,6 +2792,13 @@ def memory_audit_rows(conn, memory_uid=None, limit=200):
     return [dict(r) for r in rows]
 
 
+def _message_exists(conn, mid):
+    """Is the cited message still in the log? One indexed primary-key lookup. The
+    answer is what separates "the source was deleted" from "never had one" -- the
+    citation column alone can no longer tell them apart, and that is deliberate."""
+    return conn.execute("SELECT 1 FROM messages WHERE id=?", (mid,)).fetchone() is not None
+
+
 def _provenance(conn, r):
     """The 14.2 package for one memory row: the claim, the evidence inline (source
     message), and -- for a supersede -- the displaced text and author side by side.
@@ -2655,8 +2810,12 @@ def _provenance(conn, r):
         m = conn.execute(
             "SELECT id, sender, subject, body, ts_ns FROM messages WHERE id=?",
             (r["source_msg_id"],)).fetchone()
-        if m:
-            item["source_message"] = dict(m)
+        # Absent row means the message was DELETED, and that must not render the
+        # same as never having cited one: the fact still claims a source, and a
+        # reader who cannot tell the two apart reads an uncheckable claim as an
+        # unsourced one. Deleted is a state, not a gap (msg 8857).
+        item["source_message"] = dict(m) if m else {
+            "id": r["source_msg_id"], "deleted": True}
     if r["supersedes_id"]:
         old = conn.execute("SELECT * FROM memories WHERE id=?",
                            (r["supersedes_id"],)).fetchone()
@@ -2823,6 +2982,15 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
         ents = set(r["entities"].split())
         return len(ents & role_ents)
 
+    def src(r):
+        """The citation suffix. A fact whose source message has been deleted says
+        DELETED rather than dropping the reference: brief() is the boot text, so a
+        silently unsourced fact here is a claim the whole fleet reads as checked."""
+        n = r["source_msg_id"]
+        if not n:
+            return ""
+        return f" [src msg {n}]" if _message_exists(conn, n) else f" [src msg {n} DELETED]"
+
     carry = 0  # unused share flows to the NEXT section, never backwards
 
     def section(title, rows, render, cap_share):
@@ -2861,8 +3029,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
     section("doctrine", drows, lambda r, _: f"- {r['fact']}", 0.25)
     # 3. live contracts (supersession already resolved by status='live')
     section("contracts", mem_rows("contract"),
-            lambda r, _: f"- {r['fact']}"
-                         + (f" [src msg {r['source_msg_id']}]" if r["source_msg_id"] else ""),
+            lambda r, _: f"- {r['fact']}" + src(r),
             0.20)
     # 4. decisions -- last 30d first, older by role relevance
     cutoff = time.time_ns() - 30 * 24 * 3600 * 10**9
@@ -2870,8 +3037,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
     dec = sorted(dec, key=lambda r: (r["created_ns"] < cutoff, -overlap(r),
                                      -r["created_ns"]))
     section("decisions", dec,
-            lambda r, _: f"- {r['fact']}"
-                         + (f" [src msg {r['source_msg_id']}]" if r["source_msg_id"] else ""),
+            lambda r, _: f"- {r['fact']}" + src(r),
             0.20)
     # 5. own state (restart case) -- only ever the caller's own bucket
     srows = conn.execute(
