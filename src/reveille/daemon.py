@@ -190,6 +190,36 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.59 A CITATION NOW OUTLIVES THE MESSAGE IT CITES, AND THE ESCAPE HATCH IS NOT
+GATED ON THE STATE IT ESCAPES. Four accepted branches.
+
+memories.source_msg_id was ON DELETE SET NULL, so deleting a message rewrote
+every fact distilled from it into a fact that never had a source -- silently,
+and one of the four callers is sweep_retention, which runs on a timer with
+nobody watching. The FK action is gone: messages.id is AUTOINCREMENT and never
+re-binds, so NULL means never cited, an id with no row means the source was
+DELETED, and an id with a row means live. That is total, and it costs one
+migration and no new column. The erase control that made this visible was
+itself unreachable -- pruneAgent() shipped as a fully written confirm dialog
+that nothing called, which is indistinguishable from a feature nobody built,
+and its dialog now states the hive it KEEPS rather than only what it destroys.
+
+The login cancel button rendered only while the page believed a login was
+pending. The failure mode was the page believing wrong, so the way out was
+hidden in exactly the state that needed it -- the root cause under 0.2.58's fix,
+which made the strand rarer and left the class intact. Cancel now renders
+whenever a login container exists, so a misreading in either direction costs one
+click. THE RULE, worth more than the fix: a recovery control conditioned on the
+state it recovers from is unavailable precisely when it is needed, and a guard
+that can be wrong must fail toward the recoverable side.
+
+Also here: clicking an agent in the rail left the highlight on the previous one,
+because agTabOn moves in eight places and only the tab strip's own handler
+repainted the rail. And the README now carries the deploy sequence -- both
+halves, in order, with what brings the launcher back after you kill it. There
+was no written instruction beyond `make up`, which deploys the broker and then
+refuses because the launcher was never restarted.
+
 0.2.58 A SUCCESSFUL LOGIN WAS THE ONE CASE WITH NOTHING LEFT TO CLEAN IT UP, AND
 THE SCAN 0.2.57 ASKED FOR. The browser login left its container running after it
 worked, and the user could not log in again. `claude /login` returns to its own
