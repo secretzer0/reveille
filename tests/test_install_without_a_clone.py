@@ -1,0 +1,187 @@
+"""`reveille init`, driven end to end against a fake `claude` and a fake broker.
+
+Nobody in this fleet can run the real thing -- that is the whole point of the
+slice -- so what is gated is every step's SHAPE plus the two properties a green
+run will not give you: that a second run changes nothing, and that a failure
+part way through leaves no half-configured machine. The second one is
+manufactured rather than hoped for.
+"""
+import http.server
+import json
+import os
+import subprocess
+import threading
+
+import pytest
+
+from reveille import cli, install
+
+
+class Broker(http.server.BaseHTTPRequestHandler):
+    code = 200
+
+    def do_GET(self):
+        self.send_response(self.code)
+        self.end_headers()
+        self.wfile.write(b"0.2.62")
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def broker():
+    Broker.code = 200
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Broker)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_port}"
+    srv.shutdown()
+
+
+def fake_claude(tmp_path, rc=0, listed=""):
+    """A `claude` that records its argv. The real binary is not on this box and
+    would not be on a fresh host either -- what matters is the command we hand
+    it, which is the same one docker/entrypoint.sh already runs."""
+    log = tmp_path / "claude.log"
+    p = tmp_path / "claude"
+    p.write_text(f'''#!/bin/sh
+if [ "$2" = "list" ]; then printf '%s' '{listed}'; exit 0; fi
+printf '%s\\n' "$*" >> {log}
+exit {rc}
+''')
+    p.chmod(0o755)
+    return str(p), log
+
+
+def run(tmp_path, url, claude, **kw):
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    os.environ["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+    argv = ["init", url, "dev-agent", "-", "--claude", claude, "--home", str(home)]
+    for k, v in kw.items():
+        argv += [f"--{k}", v] if v is not True else [f"--{k}"]
+    return argv, home
+
+
+def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, capsys):
+    claude, log = fake_claude(tmp_path)
+    argv, home = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+
+    # 1. the MCP registration, by its argv rather than by its effect
+    said = log.read_text()
+    assert "mcp add --transport http --scope user reveille" in said
+    assert f"{broker}/mcp" in said
+    assert "Authorization: Bearer sekrit" in said and "X-Agent: dev-agent" in said
+
+    # 2. the hook, landing in THIS home
+    settings = json.loads((home / ".claude" / "settings.json").read_text())
+    cmds = [h["command"] for g in settings["hooks"]["Stop"] for h in g["hooks"]]
+    assert any("stop-hook" in c for c in cmds), cmds
+
+    # 3. the credential file, and its mode
+    env = cli.env_file(home)
+    assert "REVEILLE_TOKEN=sekrit" in env.read_text()
+    assert oct(env.stat().st_mode)[-3:] == "600"
+
+    # 4. it PROVED it worked rather than asserting it did
+    assert "bus answered: 0.2.62" in out
+
+
+def test_the_token_never_has_to_ride_argv(tmp_path, broker, monkeypatch):
+    """A documented form that puts the token in argv puts it in .bash_history on
+    every machine that runs it. Environment first, stdin second, flag last."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "from-env")
+    assert cli.read_token(None) == "from-env"
+    monkeypatch.delenv("REVEILLE_TOKEN")
+
+    class FakeIn:
+        def isatty(self):
+            return False
+
+        def read(self):
+            return "from-stdin\n"
+
+    assert cli.read_token(None, FakeIn()) == "from-stdin"
+    assert cli.read_token("-", FakeIn()) == "from-stdin"
+
+
+def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
+    claude, log = fake_claude(tmp_path, listed="reveille")
+    argv, home = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 0
+    first = (home / ".claude" / "settings.json").read_text()
+    assert cli.main(argv) == 0
+    assert (home / ".claude" / "settings.json").read_text() == first, \
+        "a second run rewrote the hook -- re-running must report, not change"
+    out = capsys.readouterr().out
+    assert "already registered" in out
+    assert "already installed" in out
+
+
+def test_a_broker_that_refuses_the_token_installs_nothing(tmp_path, broker,
+                                                          monkeypatch, capsys):
+    """THE GATE THAT MATTERS, and it is manufactured rather than hoped for: the
+    credential is the one thing no amount of correct installation fixes, so it is
+    checked FIRST and a refusal leaves the machine untouched."""
+    Broker.code = 401
+    claude, log = fake_claude(tmp_path)
+    argv, home = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "wrong")
+    assert cli.main(argv) == 1
+    assert not log.exists(), "it registered an MCP server against a refused token"
+    assert not (home / ".claude" / "settings.json").exists(), "it installed a hook"
+    assert not cli.env_file(home).exists(), "it wrote a credential"
+    assert "REFUSING" in capsys.readouterr().err
+
+
+def test_a_failing_mcp_add_stops_before_the_hook(tmp_path, broker, monkeypatch,
+                                                 capsys):
+    """Step 1 failing must not leave a Stop hook pointing at a bus this machine is
+    not registered with -- that state looks configured and is not."""
+    claude, _ = fake_claude(tmp_path, rc=3)
+    argv, home = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 1
+    assert not (home / ".claude" / "settings.json").exists()
+    assert not cli.env_file(home).exists()
+    assert "step 1 of 3" in capsys.readouterr().err
+
+
+def test_missing_configuration_names_what_is_missing(tmp_path, monkeypatch, capsys):
+    for var in ("REVEILLE_TOKEN", "REVEILLE_URL", "REVEILLE_AGENT_ROLE"):
+        monkeypatch.delenv(var, raising=False)
+
+    class Tty:
+        def isatty(self):
+            return True     # a human at a terminal: nothing is being piped in
+
+    monkeypatch.setattr("sys.stdin", Tty())
+    assert cli.main(["init", "--home", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
+        assert var in err
+
+
+def test_the_hook_command_is_a_name_on_path_not_a_clone_path(tmp_path, monkeypatch):
+    """The item everything else waited on. An absolute path into scripts/ works
+    only on a machine with this repo checked out, so an agent installed by `uv
+    tool install` got a hook naming a file that was never there."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    assert install.main() == 0
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+    assert cmd.endswith("reveille-stop-hook"), cmd
+    assert "/scripts/" not in cmd
+
+
+def test_the_hook_ships_inside_the_package(tmp_path):
+    """The console script execs a file that has to be IN the wheel. If packaging
+    ever drops it, the failure is a hook that exits non-zero on every turn --
+    this is the cheap place to find that out."""
+    from reveille import hook
+    assert hook.hook_path().is_file(), hook.hook_path()
+    assert subprocess.run(["bash", "-n", str(hook.hook_path())]).returncode == 0

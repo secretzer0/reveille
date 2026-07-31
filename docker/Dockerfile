@@ -153,7 +153,7 @@ COPY docker/agent-probe /usr/local/bin/agent-probe
 # Its waked block is a harmless no-op here (the entrypoint's own supervisor holds
 # the flock); what the container needs from it is the WATCHER REQUIREMENT, which
 # is the only thing that makes an agent recover from ending a turn unarmed.
-COPY --chmod=0755 scripts/agent-stop-hook /usr/local/bin/agent-stop-hook
+COPY --chmod=0755 src/reveille/agent-stop-hook /usr/local/bin/agent-stop-hook
 COPY --chown=${UID}:${GID} docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # Interactive claude with "reveille" queued as the first prompt: the agent joins the

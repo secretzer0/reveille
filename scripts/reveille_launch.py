@@ -2857,9 +2857,13 @@ def cmd_join_here(a):
     done["register"] = "reveille -> " + a.broker + "/mcp (headers from env)"
 
     # hook: the waked supervisor + watcher gate, user scope, idempotent.
-    r = subprocess.run([sys.executable, os.path.join(repo, "scripts",
-                                                     "install-hook")],
-                       capture_output=True, text=True)
+    # The hook installer moved INTO the package (DES-008 A): its command has to
+    # be a name on PATH rather than a path into a clone, or a machine installed
+    # without one gets a hook naming a file that was never there. Invoked as a
+    # module so this path works from the repo checkout the launcher runs from.
+    r = subprocess.run([sys.executable, "-m", "reveille.install"],
+                       capture_output=True, text=True, cwd=repo,
+                       env=dict(os.environ, PYTHONPATH=os.path.join(repo, "src")))
     if r.returncode != 0:
         die(f"install-hook failed: {r.stderr.strip()}")
     done["hook"] = r.stdout.strip()

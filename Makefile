@@ -94,7 +94,7 @@ register:
 	claude mcp add --transport http --scope user reveille "$(or $(URL),http://127.0.0.1:8765)/mcp" \
 	  --header 'Authorization: Bearer $${REVEILLE_TOKEN:-}' \
 	  --header 'X-Agent: $${REVEILLE_AGENT_ROLE:-unset-agent}'
-	python3 scripts/install-hook
+	uv run python -m reveille.install
 	@echo "registered. each session: export REVEILLE_AGENT_ROLE=<dev> (and REVEILLE_TOKEN) before 'claude',"
 	@echo "or use: agent <dev>   (see make install-agent)"
 
