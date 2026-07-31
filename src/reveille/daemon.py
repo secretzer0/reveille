@@ -3081,7 +3081,8 @@ async def tokens_http(request):
     # leave an agent with NO live credential.
     t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip(),
                            agent_name=d.get("agent_name"),
-                           mem_tier=(d.get("mem_tier") or "state"))
+                           mem_tier=(d.get("mem_tier") or "state"),
+                           rooms=d.get("rooms"))
     superseded = t["superseded"]
     log.info("%s minted token %s%s%s", p.name, t["id"],
              f" bound to {t['agent_name']}" if t["agent_name"] else "",
