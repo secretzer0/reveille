@@ -80,6 +80,12 @@ curl -s localhost:8766/health                  # must report the commit you pull
 make up                                        # broker image + compose + checks
 ```
 
+**What brings it back:** `scripts/agent-stop-hook` — the same Stop hook that
+supervises the waiter. It respawns the launcher from the *pinned* tree when it
+finds none running, and it declares its state in `~/.reveille/launcher.env`; if
+`kill` gives you nothing back, that file and `~/.reveille/launcher.log` are where
+to look, and an undeclared launcher is deliberately not spawned at all.
+
 **The restart is the deploy; `pin` only stages it.** `/health` stamps its commit
 once, when the process loads, so it answers *what is running* rather than *what
 is pinned* — and those differ for exactly as long as it takes to restart, which
