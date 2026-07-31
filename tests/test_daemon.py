@@ -984,25 +984,52 @@ def _install_fns():
     return "\n".join(out)
 
 
-def test_the_install_block_shows_the_command_and_offers_no_way_to_run_it():
-    """DES-008 section 4, the invariant written never to soften. A native agent's
-    reach is the machine, and that is a grant a shell makes rather than a browser.
-    So the panel must carry no affordance that sends this anywhere.
+SENDS = ("api(", "lapi(", "fetch(", "XMLHttpRequest", "sendBeacon", "window.open")
+
+
+def test_nothing_that_sends_can_ever_take_the_install_command():
+    """DES-008 section 4, gated by following the STRING rather than the
+    neighbourhood (architect, msg 8957).
+
+    The first version of this gate asserted the absence of api( in the region
+    holding the four helper functions -- a region that never had one and never
+    plausibly grows one. The panel is RENDERED inside openTokens, which is full of
+    legitimate api( calls, so the helpful commit this exists to catch ("a run
+    button next to the copy button") would land outside the region and pass. The
+    docstring claimed a property of the panel; the assertion measured a
+    neighbourhood. Widening the region cannot work, because openTokens must call
+    api. Following the value can: wherever the command is built, the only places
+    it may go are the DOM and the clipboard.
     """
-    start = PAGE.index("// ---- DES-008 item D")
-    block = PAGE[start:PAGE.index("async function openTokens()")]
-    # 1. Nothing in this region talks to any server. A "run it for me" button is
-    #    exactly what this must catch, and it would arrive as one of these.
-    for call in ("api(", "lapi(", "fetch(", "XMLHttpRequest", "sendBeacon"):
-        assert call not in block, f"the install panel calls {call} -- it must only DISPLAY"
-    # 2. The token never rides a url, an href or an anchor: those land in history,
-    #    in a referer and in somebody's access log.
-    for sink in ("href", "location.href", "window.open", "src="):
-        assert sink not in block, f"the install panel builds a {sink} -- the token would ride it"
-    # 3. Exactly ONE place builds the command, so a second copy cannot drift.
+    # 1. No sending call may take the command as an argument, anywhere in the file.
+    for send in SENDS:
+        pat = re.escape(send) + r"[^;]{0,400}?installCmds\("
+        hit = re.search(pat, PAGE, re.S)
+        assert not hit, f"{send} is given the install command: {hit.group(0)[:120]!r}"
+    # 2. ...nor may one read it back out of the DOM and send THAT, which is the
+    #    same defect with the string laundered through an element id.
+    for send in SENDS:
+        pat = re.escape(send) + r"[^;]{0,400}?installCmd"
+        hit = re.search(pat, PAGE, re.S)
+        assert not hit, f"{send} is given the rendered command: {hit.group(0)[:120]!r}"
+    # 3. The command reaches exactly two consumers: the DOM and the clipboard. A
+    #    third call site is a new consumer and has to be justified deliberately.
     assert PAGE.count("function installCmds(") == 1
-    assert len(re.findall(r"(?<!function )installCmds\(", PAGE)) == 2, \
-        "installCmds has more or fewer call sites than the block and the copy button"
+    sites = [m.start() for m in re.finditer(r"(?<!function )installCmds\(", PAGE)]
+    assert len(sites) == 2, f"installCmds has {len(sites)} call sites, want 2"
+    consumers = []
+    for i in sites:
+        line = PAGE[:i].rsplit("\n", 1)[-1] + PAGE[i:].split("\n", 1)[0]
+        consumers.append("clipboard" if "clipboard" in line else
+                         "dom" if "<pre" in line or "esc(" in line else "unknown")
+    assert sorted(consumers) == ["clipboard", "dom"], consumers
+    # 4. The token never rides a url or an anchor: those land in history, in a
+    #    referer and in an access log. Checked over the whole helper region, where
+    #    the command and the secret are in scope together.
+    start = PAGE.index("// ---- DES-008 item D")
+    helpers = PAGE[start:PAGE.index("async function openTokens()")]
+    for sink in ("href", "location.href", "window.open", "src="):
+        assert sink not in helpers, f"the install helpers build a {sink}"
 
 
 def test_the_install_command_carries_the_secret_once_and_says_it_is_shown_once():
