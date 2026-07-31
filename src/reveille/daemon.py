@@ -193,6 +193,28 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.71 A TOKEN BINDS TO AN IDENTITY, NOT A SPELLING, AND AN ACCOUNT IS NEVER
+HARD-DELETED. The last cutover of the identity work: tokens store agent_id and
+the agent_name column is GONE -- the name still travels the wire (X-Agent, to=,
+the /tokens JSON, all unchanged) and is resolved by join, but what the binding
+pins is WHICH instance of a label this credential speaks for, so a declined
+resurrect cannot inherit its predecessor's live token. Minting a bound token IS
+the provisioning event: no live identity for that (owner, name) means the mint
+inserts the agents row, owner = the minting user -- one identity path whether
+the agent lives in a container or on somebody's laptop. Supersession happens
+inside the mint's own transaction and its ids ride the return, so a rotation is
+reported rather than silent. The migration REFUSES a bound token whose name
+resolves to no identity or several: binding it to NULL would silently turn a
+bound credential into an unbound one whose X-Agent is self-asserted, and a
+security downgrade performed silently by a migration is the one migration
+defect this week has not produced. Account deletion is now the ruled tombstone:
+the users row stays with deleted_ns stamped, credentials wiped, sessions
+destroyed, tokens revoked, agents released -- so every identity still resolves
+its owner, hive contributions stay attributed, and the username stays taken,
+because reusing it would re-attribute someone else's history to a new person.
+Login refuses a deleted account by name rather than claiming the password is
+wrong. The last-admin guard counts only undeleted admins.
+
 0.2.70 A MIGRATION NEVER GUESSES WHICH AGENT A NAME MEANS. Every place a
 migration resolved a historical name to an identity carried a tie-break --
 prefer the live row, or MIN(id) -- and a deterministic guess is still a guess:
