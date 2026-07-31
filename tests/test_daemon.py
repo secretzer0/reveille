@@ -645,10 +645,29 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
         sites[expr] = sites.get(expr, 0) + 1
     assert sites == {"esc": 1, "safe": 4, "tile": 1, "u": 1}, \
         f"a URL interpolation appeared or moved: {sites} -- every one needs a check"
+    # AND THE SINKS THAT ARE NOT BUILT STRINGS. The regex above sees only
+    # concatenation, so a URL set by PROPERTY ASSIGNMENT was invisible to it --
+    # while the docstring said "every". That is this gate's own failure mode
+    # repeating one level in (architect, msg 8823): el.src=t.url on the
+    # terminal iframe was safe only because of a concatenation two hundred
+    # lines away, stated nowhere and gated nowhere.
+    assigned = dict()
+    for expr in re.findall(r'\.(?:src|href)\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)', PAGE):
+        assigned[expr] = assigned.get(expr, 0) + 1
+    assert assigned == {"frameSrc": 1}, \
+        f"a URL property assignment appeared: {assigned} -- route it through a check"
+    assert "const PATH_URL_RE=/^\\/[^/\\\\]/;" in PAGE, \
+        "an assigned URL must be site-relative: // leaves the origin, \\ is the same trick"
+    assert "function frameSrc(u){return PATH_URL_RE.test(u||'')?u:'about:blank';}" in PAGE, \
+        "a URL that fails the path check must land on about:blank, never on itself"
     # Each name above, and the check that makes it safe. attUrl is the shape
     # check: /files/ paths are same-origin, so a scheme allowlist would prove
     # nothing there -- what matters is that the broker minted it.
-    assert "const FILE_URL_RE=/^\\/files\\/[A-Za-z0-9._-]+$/;" in PAGE, \
+    # The accept-set mirrors the server's sanitiser exactly (senior-dev, msg
+    # 8824) rather than being a second opinion about the same fact: leading
+    # character not a dot, so "." and ".." are refused here instead of relying
+    # on the server to 404 them.
+    assert "const FILE_URL_RE=/^\\/files\\/[A-Za-z0-9_-][A-Za-z0-9._-]*$/;" in PAGE, \
         "attachment urls must be pinned to the shape /upload actually mints"
     assert "function attUrl(u){return FILE_URL_RE.test(u||'')?esc(u+qs()):'';}" in PAGE, \
         "attUrl must both shape-check AND escape -- either alone is not enough"

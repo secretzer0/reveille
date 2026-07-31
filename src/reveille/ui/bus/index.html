@@ -857,8 +857,24 @@ const IMG_RE=/\.(png|jpe?g|gif|webp)$/i;
 // and the caller renders text, never a link.
 // The server should refuse these too, and that is senior-dev's half; this one
 // is the half that still holds the day the server's constraint widens.
-const FILE_URL_RE=/^\/files\/[A-Za-z0-9._-]+$/;
+// The accept-set is senior-dev's, mirrored exactly rather than reinvented
+// (msg 8824): it is what BOTH upload paths already sanitise a stored name to,
+// so anything outside it was never servable. The leading character may not be
+// a dot, which refuses "." and ".." outright instead of leaning on the server
+// to 404 them. Two halves agreeing by construction beats two halves agreeing
+// by comment.
+const FILE_URL_RE=/^\/files\/[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 function attUrl(u){return FILE_URL_RE.test(u||'')?esc(u+qs()):'';}
+// THE SAME ARGUMENT ONE SINK ALONG, for a URL set by PROPERTY ASSIGNMENT
+// rather than built into a string (architect, msg 8823). The terminal iframe's
+// src is AGBASE + attach_url, so it cannot carry a scheme at position zero --
+// but that is a property of a concatenation two hundred lines away, stated
+// nowhere and gated nowhere, which is the exact shape this branch keeps
+// fixing. A site-relative path only: a leading double slash is protocol-
+// relative and would leave the origin, and a backslash is the same trick in
+// the browsers that normalise it.
+const PATH_URL_RE=/^\/[^/\\]/;
+function frameSrc(u){return PATH_URL_RE.test(u||'')?u:'about:blank';}
 
 async function uploadFile(f){
  const r=await fetch('/upload'+qs()+'&name='+encodeURIComponent(f.name),
@@ -1834,7 +1850,8 @@ function drawTabs(){
    if(t.err){el=document.createElement('div');el.className='frErr';
     el.textContent=t.err;}
    else if(!t.url){el=document.createElement('div');el.className='frState';}
-   else{el=document.createElement('iframe');el.className='fr';el.src=t.url;
+   else{el=document.createElement('iframe');el.className='fr';
+    el.src=frameSrc(t.url);
     el.title='terminal for '+t.agent;}
    el.dataset.frame=t.gid;frames.appendChild(el);
   }
