@@ -107,7 +107,11 @@ class _Server:
         return r.status, r.getheader("Content-Type"), r.read()
 
     def close(self):
-        self.srv.shutdown()
+        # shutdown() waits for the handler loop, and a handler blocked on a body
+        # that will never arrive never returns -- so a defect in the read path
+        # would hang TEARDOWN rather than fail a test. Do not wait on it: a gate
+        # whose failure mode is a stuck suite is a gate someone deletes.
+        threading.Thread(target=self.srv.shutdown, daemon=True).start()
         tts_service.SYNTH = None
 
 
@@ -272,7 +276,14 @@ def test_an_oversized_body_is_refused_before_it_is_read(tmp_path):
         c.putrequest("POST", "/speak")
         c.putheader("Content-Length", str(tts_service.MAX_BODY * 1000))
         c.endheaders()
-        r = c.getresponse()
+        # PREDICTED RED, and it must be an assertion rather than a hang: a server
+        # that reads first blocks here until the client timeout, so the timeout is
+        # caught and turned into the sentence that names the defect.
+        try:
+            r = c.getresponse()
+        except (TimeoutError, OSError) as e:
+            raise AssertionError(
+                f"the server began reading a body it should have refused ({e!r})") from e
         assert r.status == 413, f"read the body before refusing it: {r.status}"
         assert "cap is" in json.loads(r.read())["error"]
     finally:
