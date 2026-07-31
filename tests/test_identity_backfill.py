@@ -146,6 +146,25 @@ def test_a_broadcast_recipient_is_not_an_identity(tmp_path):
     assert conn.execute("SELECT count(*) FROM agents WHERE name='*'").fetchone()[0] == 0
 
 
+def test_a_human_sender_is_not_an_identity(tmp_path):
+    """A person posting from the web is a user, not an agent: the refusal list
+    excludes them by name, so the in-transaction recount must too. Field
+    incident 2026-07-31: preflight passed (humans excluded), then the recount
+    counted 74 human-sent messages and the broker restart-looped on a database
+    the preflight had just blessed. Their id stays NULL forever -- there is no
+    agents row to point at and inventing one is forbidden."""
+    conn, path = at_v17(tmp_path)
+    mid = msg(conn, "tmelhiser")
+    msg(conn, "reveille-devops")
+    store.claim_unresolved_names(conn, "u1")
+    assert conn.execute("SELECT count(*) FROM agents WHERE name='tmelhiser'"
+                        ).fetchone()[0] == 0
+    back_to_17(conn)
+    assert store.migrate(conn, path) == store.SCHEMA_VERSION
+    assert conn.execute("SELECT sender_agent_id FROM messages WHERE id=?",
+                        (mid,)).fetchone()[0] is None
+
+
 def test_the_step_is_registered_in_the_chain(tmp_path):
     assert store._UPGRADES.get(17) == "_upgrade_v17"
     assert callable(getattr(store, "_upgrade_v17"))
