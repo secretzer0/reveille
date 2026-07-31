@@ -190,6 +190,36 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.57 THE OTHER END OF THE ATTACHMENT DEFECT, AND THE HALF THAT STOPS THE BAD
+ROW EXISTING. send() inserted an attachment url verbatim from any caller;
+0.2.56 closed what a reader's browser did with such a url, and this closes
+whether it can be stored at all. /files/<stored> is the only url the broker ever
+mints and both upload paths already sanitise the stored name to
+[A-Za-z0-9._-], so the accept-set is exactly what the broker can serve and
+refusing anything else costs no legitimate caller anything -- checked by running
+real filenames through the real sanitiser and then through the check, on both
+sides, because an over-tight constraint here is an outage rather than a bug. A
+message carrying one hostile url is refused WHOLE rather than stored with the
+attachment dropped: a caller holding a message id is entitled to assume the
+attachment went with it. The client half now mirrors this accept-set character
+for character, leading dot refused on both sides, so the two ends agree by
+construction rather than by comment -- and the client keeps its own copy of the
+check deliberately, because it is the one that has to hold if this constraint
+ever widens. Also here: the URL sink that was a property ASSIGNMENT rather than a
+built string (el.src on the terminal iframe) was structurally invisible to a gate
+shaped for concatenation; it routes through frameSrc, and the gate pins
+assignment sinks as their own set. THE SPELLINGS NEITHER GATE CAN SEE were swept
+for rather than assumed -- setAttribute('src'|'href'), assignment with a literal
+prefix, and navigation via location.href or window.open -- and there are none on
+the served page today, which is what makes the two set assertions exhaustive
+NOW and worth re-checking whenever that file is next opened. STILL OPEN AND NOT
+CLOSED BY THIS: rows written before today were never validated by anything, and
+no session in this fleet can read the live database. Scanning for them is a v1
+gate item on whoever holds host access; scan with the CODE (FILE_URL_RE), never
+a hand-written GLOB -- the GLOB first published for that job was measured against
+seeded rows and missed /files/a/../../etc/passwd while reporting the obvious
+cases, which is the wrong-side-of-the-break check wearing a query.
+
 0.2.56 A VARIABLE NAMED `safe` WAS THE ONLY THING GUARDING EVERY READER'S
 BROWSER. The bus UI interpolated an attachment's url raw into href, src and
 data-src, through a local called `safe` that nothing checked -- the name was
