@@ -2730,6 +2730,55 @@ async function openRooms(){
    openRooms();}catch(e){toast(e.message);openRooms();}},openRooms);
 }
 
+// ---- DES-008 item D: the install command, shown and never run ----------------
+// THE UI MINTS AND SHOWS. IT MUST NEVER RUN. DES-008 section 4 is the security
+// half of that design and is written never to soften: a native agent's reach is
+// the MACHINE -- docker socket, every tenant's data root, launcher.db, the deploy
+// path -- and none of that is granted by the bus. It is granted by a shell. So a
+// browser button that installed one would BE a host-shell grant, and every
+// tenancy boundary in DES-005 would be decoration. There is no run affordance
+// here: not behind a confirm, not for an admin, not "just for the operator".
+//
+// The shape is senior-dev's `reveille init` (their items A-C) and it is a
+// CONTRACT between their entry point and this panel, so it lives in one constant
+// with a gate on it -- a drift fails on my branch rather than on the machine
+// where somebody is pasting it.
+const INIT_CMD = 'uvx --from reveille reveille init';
+function installCmds(t, base){
+ // The ONLY place this command is built. One site, so the gate can enumerate it
+ // and so a second copy cannot drift out of agreement with the first.
+ return ['export REVEILLE_URL=' + base,
+         'export REVEILLE_AGENT_ROLE=' + t.agent_name,
+         'export REVEILLE_TOKEN=' + t.secret,
+         INIT_CMD].join('\n');
+}
+function installBlock(t){
+ // Only a BOUND token installs an agent: the name is the identity the mint just
+ // created (DES-008 ruling 8835 -- the mint IS the provisioning event). An
+ // unbound token is a credential and has no agent to install.
+ if(!t.agent_name)return '';
+ return '<div class="pSec">INSTALL THIS AGENT ON A MACHINE WITH A SHELL</div>'+
+  '<div class="pDim">Paste these on the host that will run it. This panel does '+
+  'not run them and never will: installing a native agent gives it the whole '+
+  'machine, and that is a grant a shell makes, not a browser. The token above is '+
+  'in the third line -- it is shown once, here, and nowhere else, so copy it '+
+  'before you leave this screen.</div>'+
+  '<pre class="tokOut" id="installCmd">'+esc(installCmds(t, location.origin))+'</pre>';
+}
+function wireInstallCopy(t){
+ const b=$('copyInstall');
+ if(!b||!t.agent_name)return;
+ b.hidden=false;
+ // COPY IS THE OBVIOUS ACTION because a token retyped by hand is a token typo'd
+ // by hand. The clipboard write is the only thing this button does -- it sends
+ // nothing anywhere, which is the property the gate pins.
+ b.onclick=async()=>{
+  try{await navigator.clipboard.writeText(installCmds(t, location.origin));
+   toast('install command copied -- the token is in it',true);}
+  catch(e){toast('could not reach the clipboard -- select the block and copy it');}
+ };
+}
+
 async function openTokens(){
  // Refresh /me rather than trusting the copy cached at boot: another user can make a room
  // public at any moment, and a stale cache would silently hide it from the checkboxes.
@@ -2775,9 +2824,12 @@ async function openTokens(){
     '<div class="pSec">TOKEN CREATED</div>'+
     '<div class="pDim">Copy it now. Only its hash is stored, so this is the only time it '+
     'is ever shown. Put it in the agent\'s .envrc.</div>'+
-    '<pre class="tokOut">REVEILLE_TOKEN='+esc(t.secret)+'</pre>'+
-    '<div class="pRow"><button id="backTok">done</button></div>');
-   $('backTok').onclick=openTokens;}catch(e){toast(e.message);}};
+    '<pre class="tokOut" id="tokSecret">REVEILLE_TOKEN='+esc(t.secret)+'</pre>'+
+    installBlock(t)+
+    '<div class="pRow"><button id="copyInstall" hidden>copy the install command</button>'+
+    '<button id="backTok">done</button></div>');
+   $('backTok').onclick=openTokens;
+   wireInstallCopy(t);}catch(e){toast(e.message);}};
  for(const b of document.querySelectorAll('[data-rev]'))b.onclick=()=>{
   confirming={kind:'revoke',id:b.dataset.rev};openTokens();};
  if(confirming&&confirming.kind==='revoke')wireAsk(async()=>{
