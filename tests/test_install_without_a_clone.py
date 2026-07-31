@@ -490,3 +490,20 @@ def test_an_ephemeral_run_persists_itself_before_the_hook(monkeypatch, tmp_path)
     calls.clear()
     assert cli.ensure_on_path() is None
     assert not calls
+
+
+def test_the_boot_prompt_arms_the_living_ritual_not_the_retired_one():
+    """The first native agent's boot banner told it to run `wake --once` -- the
+    RETIRED pre-DES-003 arm, which grabs the wake socket itself and fights the
+    supervised reveille-waked for it: stolen slot, or superseded into silent
+    deafness. The living ritual is wake-watch, which watches the spool the
+    daemon writes and is harmless in duplicate."""
+    from reveille import launch
+    src = launch.script_path().read_text()
+    boot = src[src.index('BOOT="'):src.index('# Liveness')]
+    assert "wake-watch $ROLE" in boot
+    assert "--once" not in boot, "the boot prompt prescribes the retired arm again"
+    # and the retired form survives nowhere outside comments in this script
+    code_lines = [ln for ln in src.splitlines()
+                  if "--once" in ln and not ln.lstrip().startswith("#")]
+    assert code_lines == [], code_lines
