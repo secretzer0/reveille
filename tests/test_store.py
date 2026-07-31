@@ -1534,6 +1534,41 @@ def test_a_deleted_source_renders_as_deleted_not_as_absent():
     assert "deleted" not in store.memory_detail(c, uid2)["source_message"]
 
 
+def test_the_footprint_names_what_he_wrote_AND_what_cites_him():
+    """A footprint listing only authorship misses half the poison, and it is the half
+    that reads as sourced -- a fact somebody ELSE wrote from his message, which
+    nothing about his name would otherwise surface."""
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)          # architect's, cites mallory
+    store.add_lesson(c, author="mallory", slug="his-rule", symptom="s", root_cause="rc",
+                     rule="obey this", detection="d", room_id=room["id"])
+    f = store.agent_hive_footprint(c, "mallory", room["id"])
+    assert [x["uid"] for x in f["citing"]] == [uid]
+    assert [x["slug"] for x in f["authored"]] == ["his-rule"]
+    assert f["counts"] == {"authored": 1, "citing": 1}
+    # The receipt says the same thing after the fact, measured before the delete.
+    out = store.prune_agent(c, "mallory", room["id"])
+    assert out["hive"]["counts"] == {"authored": 1, "citing": 1}
+    assert store.lessons(c, rooms=[room["id"]])[0]["slug"] == "his-rule"   # KEPT, not retracted
+
+
+def test_prune_removes_his_orphaned_upload_and_keeps_a_reattached_one():
+    """Both halves, or the gate ratifies collateral damage."""
+    c, admin, room, tok = fixture()
+    for n in ("alice", "mallory"):
+        store.join(c, n, f"T{n}", room["id"], tok["id"])
+    store.record_file(c, "1-his.png", room["id"], "mallory")
+    store.record_file(c, "2-shared.png", room["id"], "mallory")
+    store.send(c, "mallory", store.BROADCAST, "mine", room=room["id"],
+               attachments=[{"url": "/files/1-his.png", "name": "his.png", "bytes": 1}])
+    store.send(c, "alice", store.BROADCAST, "hers, reusing his upload", room=room["id"],
+               attachments=[{"url": "/files/2-shared.png", "name": "s.png", "bytes": 1}])
+    out = store.prune_agent(c, "mallory", room["id"])
+    assert out["files"] == ["1-his.png"]                  # named, so the route can unlink it
+    left = {r["stored"] for r in c.execute("SELECT stored FROM files")}
+    assert left == {"2-shared.png"}, "a survivor's attachment lost its file"
+
+
 # ---- migration ---------------------------------------------------------------
 
 def _v0_db():

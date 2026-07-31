@@ -2383,6 +2383,42 @@ def _rethread(conn, root_id):
                      conn.execute("SELECT id FROM messages WHERE parent_id=?", (n,))]
 
 
+def agent_hive_footprint(conn, name, room_id):
+    """What a prune will NOT remove: the hive rows tied to this agent.
+
+    Prune neither retracts nor refuses (msg 8857) -- DES-005 7.1 keeps contributions,
+    and retraction is a per-fact ratify-tier judgement that message deletion has no
+    authority over. What prune owes instead is the COST, stated before it is paid and
+    again as a receipt afterwards, so poison is retracted deliberately by name rather
+    than being assumed gone with the messages.
+
+    Two halves, and a footprint with only the first misses the half that matters most:
+      authored  live memories this name wrote -- including its LESSONS, which every
+                agent in the room reads at boot, so a lesson is the most-obeyed thing
+                a pruned agent can leave behind
+      citing    live memories distilled FROM its messages. These keep their claim and
+                lose their evidence (the citation survives as a DELETED marker), and
+                they are authored by SOMEONE ELSE, so nothing about the pruned name
+                would ever surface them.
+    Global scope is included for authorship on purpose: fleet law it wrote outlives
+    the room, and it is already readable by everyone through lessons().
+    """
+    valid_name(name)
+    doomed = [r["id"] for r in conn.execute(
+        "SELECT id FROM messages WHERE room=? AND (sender=? OR recipient=?)",
+        (room_id, name, name))]
+    cols = "uid, kind, scope, slug, fact, status, source_msg_id"
+    authored = [dict(r) for r in conn.execute(
+        f"SELECT {cols} FROM memories WHERE author=? AND status='live' "
+        f"AND scope IN (?, 'global') ORDER BY kind, created_ns", (name, room_id))]
+    citing = [dict(r) for r in conn.execute(
+        f"SELECT {cols} FROM memories WHERE status='live' AND source_msg_id IN "
+        f"({_ph(doomed) if doomed else 'NULL'}) ORDER BY kind, created_ns",
+        doomed).fetchall()] if doomed else []
+    return {"authored": authored, "citing": citing,
+            "counts": {"authored": len(authored), "citing": len(citing)}}
+
+
 def prune_agent(conn, name, room_id):
     """Erase an agent from a room: its membership and every message to or from it.
 
@@ -2395,6 +2431,9 @@ def prune_agent(conn, name, room_id):
     (thread_id is copied at insert, never derived, so it does not follow on its own).
     """
     valid_name(name)
+    # The receipt is measured BEFORE the delete: `citing` is found through his
+    # message ids, so afterwards there is nothing left to find it by.
+    hive = agent_hive_footprint(conn, name, room_id)
     with tx(conn):
         # recipient=name matches literally, never '*' (NAME_RE forbids it), so
         # broadcasts he RECEIVED survive -- deleting those would erase everyone's mail.
@@ -2430,7 +2469,30 @@ def prune_agent(conn, name, room_id):
             _rethread(conn, r)
         conn.execute("DELETE FROM reads WHERE agent=?", (name,))
         conn.execute("DELETE FROM members WHERE room_id=? AND name=?", (room_id, name))
-    return {"messages": len(doomed), "reparented": len(new_roots)}
+        orphans = _orphaned_uploads(conn, name, room_id)
+        if orphans:
+            conn.execute(f"DELETE FROM files WHERE stored IN ({_ph(orphans)})", orphans)
+    # The BLOB is the caller's to unlink -- the store owns rows and knows nothing
+    # about where the daemon put the bytes. Returning the names rather than a count
+    # is what makes the two halves testable apart and impossible to drift: the route
+    # deletes exactly what the store said it orphaned.
+    return {"messages": len(doomed), "reparented": len(new_roots),
+            "files": orphans, "hive": hive}
+
+
+def _orphaned_uploads(conn, name, room_id):
+    """Stored names this agent uploaded to this room that NOTHING references now.
+
+    DES-005 7.1 wipes an account's files, so prune must not be softer than the act
+    one level above it -- but it must not be broader either. A file re-attached by
+    somebody else's surviving message STAYS: the rule is erase the agent, never the
+    survivors' work, the same rule the reparenting follows. Run AFTER the message
+    delete, so "referenced" means referenced by what is left.
+    """
+    return [r["stored"] for r in conn.execute(
+        "SELECT f.stored FROM files f WHERE f.room_id=? AND f.uploaded_by=? "
+        "AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.url='/files/'||f.stored)",
+        (room_id, name))]
 
 
 # ---- files -------------------------------------------------------------------
