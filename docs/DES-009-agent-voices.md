@@ -39,8 +39,18 @@ The operator's question, answered as a boundary rather than a preference.
 ```
 browser  --(existing origin, cookie auth)-->  broker  --(server-side)-->  TTS service
    ^                                            |
-   +------- GET /files/tts/<msg-id>.wav --------+
+   +--------- GET /audio/<msg-id>.wav ----------+
 ```
+
+**Its own route, not `/files/` (corrected after review of the serving path).**
+Three reasons, each of which alone would decide it: `FILE_URL_RE` admits no
+slash, so `/files/tts/<id>.wav` is refused by the accept-set that exists to
+refuse `..`; `files_http` authorizes by looking the name up in the `files`
+table, so audio with no row 404s for everyone; and giving it a row would make
+prune's orphaned-upload sweep (msg 8857) delete every audio file its sender
+uploaded, since nothing in `attachments` references them. `/audio/<msg-id>.wav`
+authorizes the honest way — **the audio's room is its message's room** — and the
+id in the path is the only key it needs.
 
 - The **browser** knows one origin, the broker's, exactly as DES-006 requires.
   It fetches audio the same way it fetches an attachment, under the same auth.
@@ -128,10 +138,10 @@ prune, purge, retract, and the retention sweep. **Unlink there and nowhere
 else.** A per-caller unlink is how the orphaned uploads happened (msg 8857), and
 the retention sweep is again the path with nobody watching.
 
-There is **no database row** for an audio file. The message id is the key, the
-filename is the record, and a missing file means a silent message. Nothing to
-migrate, nothing to reconcile, nothing that can lapse into disagreement with the
-bytes on disk.
+There is **no database row** for an audio file. The message id is the key, its
+message's room is the authorization (§3), the filename is the record, and a
+missing file means a silent message. Nothing to migrate, nothing to reconcile,
+nothing that can lapse into disagreement with the bytes on disk.
 
 ## 8. Slice shape
 
@@ -143,7 +153,8 @@ Unversioned branch, three commits, gates named:
    by name.
 2. **The broker worker.** A thread that takes new message ids in order, calls
    the service with stdlib `urllib` (no new dependency), writes
-   `<files>/tts/<msg-id>.wav`, and announces the id on the existing feed.
+   `<files>/tts-<msg-id>.wav`, serves it at `/audio/<msg-id>.wav` with the
+   room check taken from the message, and announces the id on the existing feed.
    Serve WAV; add an opus encode only when bandwidth is measured to hurt —
    browsers play WAV natively and ffmpeg is a dependency nobody has yet needed.
    Gates: the config refusal in §3 fires on a plaintext remote URL; the unlink
