@@ -1575,9 +1575,10 @@ def test_ttyd_names_its_client_options_rather_than_taking_defaults():
     start = ep.find("ttyd -W -a")
     assert start != -1, "the ttyd supervisor is gone or renamed"
     cmd = ep[start:ep.index("attach-gate attach", start)]
-    assert "rendererType=canvas" in cmd, (
-        "the renderer is unnamed again -- ttyd's default is webgl, which is the "
-        "one that dies on a lost GPU context and draws artifacts on the way")
+    assert "rendererType=dom" in cmd, (
+        "canvas and webgl rasterise from a glyph atlas measured in the primary "
+        "font; only the DOM renderer gets the browser's per-glyph fallback, and "
+        "an em dash coming out as an underscore is what that costs")
     assert "-t fontSize=13" in cmd
     for face in ('"DejaVu Sans Mono"', '"Liberation Mono"', '"Noto Sans Mono"', "ui-monospace"):
         assert face in cmd, (
@@ -1601,5 +1602,20 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.12", (
+    assert tag == "reveille-agent:0.2.13", (
         "the entrypoint changed and the tag did not -- two images, one name")
+
+
+def test_the_wheel_scrolls_the_view_not_the_prompt_history():
+    """tmux mouse on, because the alternative rewrites the user's input.
+
+    With mouse off, xterm.js translates a wheel event into ARROW KEYS for a
+    full-screen app -- and arrow-up in the agent's TUI walks prompt history. So
+    scrolling up did not move the view, it replaced what was typed in the
+    composer. That is the wheel doing something destructive to a text box, which
+    is why this is a correctness line and not a preference.
+    """
+    conf = (pathlib.Path(rl.__file__).parent.parent / "docker" / "tmux.conf").read_text()
+    assert "set -g mouse on" in conf, (
+        "the wheel is sending arrow keys again -- scrolling up will edit the "
+        "prompt instead of moving the view")
