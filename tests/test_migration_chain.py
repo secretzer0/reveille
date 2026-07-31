@@ -103,12 +103,30 @@ def test_a_fresh_database_lands_at_the_current_version(tmp_path):
     assert pathlib.Path(path).exists()
 
 
-def test_the_step_table_covers_every_version_that_needs_one(tmp_path):
-    """A version with no step is legitimate (v1 never shipped, v6 is only reached
-    through v5's rebuild) but it must be a DECISION, not an omission -- the loop
-    steps over a gap silently, so the gaps are pinned here by name."""
-    gaps = [v for v in range(0, store.SCHEMA_VERSION) if v not in store._UPGRADES]
-    assert gaps == [1], gaps
+def test_the_step_table_covers_every_version_that_needs_one():
+    """Architect requirement, msg 8903. The loop treats a MISSING entry as a gap
+    to step over, which is right for a version that never had work and wrong for
+    one whose step was forgotten -- and from inside the loop those are the same
+    thing. A SCHEMA_VERSION bump that forgets its table entry would otherwise
+    stamp silently past a real migration, which is the short-arm defect wearing
+    the new mechanism."""
+    gaps = {v for v in range(0, store.SCHEMA_VERSION) if v not in store._UPGRADES}
+    assert gaps == store._UPGRADE_GAPS, (
+        f"versions {sorted(gaps - store._UPGRADE_GAPS)} have no step and are not "
+        f"declared gaps; {sorted(store._UPGRADE_GAPS - gaps)} are declared gaps "
+        f"but have steps. A gap must be a decision, written in _UPGRADE_GAPS.")
+
+
+def test_every_name_in_the_step_table_resolves_to_something_callable():
+    """The table holds STRINGS so that patching store._upgrade_vN reaches
+    dispatch -- which is what keeps the interrupt gates able to fail. The cost is
+    that ruff cannot see inside a string, so a rename or a typo becomes a
+    KeyError on somebody's real database, mid-migration, on the one path with no
+    undo but the snapshot. This is what turns it back into an import-time-shaped
+    failure: a test."""
+    for version, name in sorted(store._UPGRADES.items()):
+        fn = getattr(store, name, None)
+        assert callable(fn), f"_UPGRADES[{version}] = {name!r} resolves to {fn!r}"
 
 
 def test_the_old_ladder_shape_is_gone(tmp_path):

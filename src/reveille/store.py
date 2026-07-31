@@ -938,6 +938,15 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)}
 
+# The versions with NO step, named rather than implied. The loop steps over a
+# missing entry by stamping forward one, which is correct for a version that
+# never had work to do and WRONG for one whose step was forgotten -- and the two
+# are indistinguishable from inside the loop. So the intended gaps are written
+# down here and gated against the table: a SCHEMA_VERSION bump that forgets its
+# entry fails a test instead of silently skipping a migration on a real database.
+# v1 is the only one: it never shipped.
+_UPGRADE_GAPS = frozenset({1})
+
 
 def snapshot(conn, path):
     """Consistent copy of the whole DB. Cheap insurance in front of every
