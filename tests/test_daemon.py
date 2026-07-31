@@ -1012,8 +1012,15 @@ def test_nothing_that_sends_can_ever_take_the_install_command():
         pat = re.escape(send) + r"[^;]{0,400}?installCmd"
         hit = re.search(pat, PAGE, re.S)
         assert not hit, f"{send} is given the rendered command: {hit.group(0)[:120]!r}"
-    # 3. The command reaches exactly two consumers: the DOM and the clipboard. A
-    #    third call site is a new consumer and has to be justified deliberately.
+    # 3. THIS IS THE ASSERTION DOING THE REAL WORK -- do not delete it as redundant
+    #    with 1 and 2 (architect, msg 8961). Those two match a sender within one
+    #    statement, so the obvious dodge is a local:
+    #        const cmd = installCmds(t, origin);  await api('/exec', {cmd});
+    #    The semicolon ends their window and neither fires. What kills it is here: a
+    #    line that only ASSIGNS is neither clipboard nor dom, so it classifies as
+    #    "unknown" and fails. 1 and 2 are the cheap ones; this is the airtight one.
+    #    The command reaches exactly two consumers, and a third call site is a new
+    #    consumer that has to be justified deliberately rather than merely counted.
     assert PAGE.count("function installCmds(") == 1
     sites = [m.start() for m in re.finditer(r"(?<!function )installCmds\(", PAGE)]
     assert len(sites) == 2, f"installCmds has {len(sites)} call sites, want 2"
