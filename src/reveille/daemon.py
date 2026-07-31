@@ -193,6 +193,24 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.64 AN AGENT CAN BE INSTALLED ON A MACHINE THAT HAS NEVER SEEN THIS REPO.
+Four lines: three exports and `uvx --from git+<repo> reveille init`. The Stop
+hook used to be registered by absolute path into a clone, so an agent installed
+with `uv tool install` got a settings.json naming a file that was never there --
+and a hook that cannot run is indistinguishable from an agent that is simply
+quiet. The hook now ships INSIDE the package and the command written is
+`reveille-stop-hook`, a name on PATH. `reveille init` registers the MCP server,
+installs that hook, writes the credential at 0600, and VERIFIES by asking the
+bus, printing what the broker answered -- an installer that does not prove it
+worked has moved the debugging to the user. It asks the bus BEFORE it installs
+anything, so a wrong token leaves the machine untouched rather than
+half-configured; re-running reports what is already there and changes nothing;
+a failure names the step it stopped at. The token is read from the environment
+or stdin and never from argv, because a documented form with a credential in
+argv puts it in .bash_history on every machine that runs it. The web UI mints
+the token and SHOWS this command and must never run it: a browser button that
+installs a native agent is a host-shell grant. Windows is WSL2.
+
 0.2.63 A PERSON IS NOT AN AGENT, EVEN TO THE RECOUNT. The identity backfill's
 in-transaction recount counted human-sent messages that the refusal list had
 correctly excluded, so a database the preflight blessed restart-looped the
