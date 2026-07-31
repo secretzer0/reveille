@@ -193,6 +193,19 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.77 EVERY GREEN CHECK THE DEAF AGENT SAT BEHIND IS NOW A REFUSAL OR THE
+TRUTH. The broker accepted a wake attachment from a valid token holding zero
+rooms -- a waiter _notify can never select, since rings go only to tokens in
+token_rooms -- while the host saw HTTP 101, a stable socket, a held flock and
+an empty log. It refuses now ({"error":"no_rooms"}, close 4404), in the same
+fatal-to-the-client family as bad_token. The installer wrote the Stop hook a
+uv CACHE-ARCHIVE path -- which() found the copy uvx ran from -- a hook that
+dies at the next `uv cache prune` and takes the whole reachability plane with
+it; the hook command is now the durable spelling: ~/.local/bin, a non-cache
+PATH hit, or the bare name a login shell resolves. And info()'s waiter line is
+computed by the ring path's own rule -- a token HOLDING THE ROOM, not the
+caller's own -- so ATTACHED now means a ring would actually arrive.
+
 0.2.76 THE NATIVE BOOT PROMPT ARMS THE LIVING RITUAL. reveille-agent's boot
 banner told the first native agent to arm `wake --once` -- the pre-DES-003
 form, retired when the waiter split landed -- which grabs the wake socket
