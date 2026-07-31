@@ -78,7 +78,12 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     said = log.read_text()
     assert "mcp add --transport http --scope user reveille" in said
     assert f"{broker}/mcp" in said
-    assert "Authorization: Bearer sekrit" in said and "X-Agent: dev-agent" in said
+    # HEADERS FROM ENV, never literals: a baked token goes stale at the first
+    # rotation (supersede-on-remint) and the machine 401s while looking
+    # installed. The credential's one home is agent.env.
+    assert "Bearer ${REVEILLE_TOKEN" in said
+    assert "X-Agent: ${REVEILLE_AGENT_ROLE" in said
+    assert "sekrit" not in said, "the literal token leaked into claude config"
 
     # 2. the hook, landing in THIS home
     settings = json.loads((home / ".claude" / "settings.json").read_text())
@@ -130,7 +135,9 @@ def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
     assert (home / ".claude" / "settings.json").read_text() == first, \
         "a second run rewrote the hook -- re-running must report, not change"
     out = capsys.readouterr().out
-    assert "already registered" in out
+    # registration is remove-then-add every run: "already registered, left
+    # alone" is what kept a stale literal-token config through a rotation
+    assert "mcp: registered" in out
     assert "already installed" in out
 
 
@@ -203,17 +210,6 @@ def test_the_launcher_ships_and_reads_the_credential_file(tmp_path):
                           capture_output=True, text=True,
                           env={"PATH": os.environ["PATH"]})
     assert bare.stdout.strip() == "ABSENT"
-
-
-def test_idempotence_is_not_blindness(tmp_path, broker, monkeypatch, capsys):
-    """A machine registered against a DIFFERENT broker reported "already
-    registered" and stayed wrong. What was found is printed now."""
-    claude, _ = fake_claude(tmp_path, listed="reveille  http://someone-elses-broker/mcp")
-    argv, home = run(tmp_path, broker, claude)
-    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
-    assert cli.main(argv) == 0
-    out = capsys.readouterr().out
-    assert "someone-elses-broker" in out, "it did not say what it found"
 
 
 def test_the_hook_command_is_a_name_on_path_not_a_clone_path(tmp_path, monkeypatch):

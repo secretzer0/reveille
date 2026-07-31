@@ -54,14 +54,23 @@ def read_token(args_token, stdin=None):
 
 
 def mcp_argv(url, name, token, claude="claude"):
-    """The registration command, as argv. Pure, so the shape is gated without a
-    claude binary -- it is the same command docker/entrypoint.sh already runs for
-    every container, which is why this installer is packaging rather than a new
-    mechanism."""
+    """The registration command, as argv -- HEADERS FROM ENV, never literals.
+
+    This is the exact form join-here and the container entrypoint already use
+    (reveille_launch.py:2852), and the first version diverged from it by baking
+    the literal token into the claude config. That broke on the very first
+    rotation: re-running init SUPERSEDES the old token, "already registered
+    (left alone)" kept the stale baked header, and every MCP call 401ed on a
+    machine that looked fully installed. With ${VAR} expansion the credential
+    lives in exactly ONE place -- ~/.reveille/agent.env, which reveille-agent
+    exports into the session -- so a rotation is a one-file rewrite and the
+    registration never goes stale. name and token stay in the signature because
+    callers still validate them; the config carries neither.
+    """
     return [claude, "mcp", "add", "--transport", "http", "--scope", "user",
             "reveille", url.rstrip("/") + "/mcp",
-            "--header", f"Authorization: Bearer {token}",
-            "--header", f"X-Agent: {name}"]
+            "--header", "Authorization: Bearer ${REVEILLE_TOKEN:-}",
+            "--header", "X-Agent: ${REVEILLE_AGENT_ROLE:-}"]
 
 
 def already_registered(claude="claude"):
@@ -456,21 +465,23 @@ def cmd_init(a):
         steps.append(persisted)
     if minted:
         steps.append(minted)
-    have, found = already_registered(claude)
-    if have:
-        steps.append(f"mcp: already registered, left alone -- {found or 'reveille'}\n"
-                     f"     (check that url is the broker you meant; this command "
-                     f"does not replace an existing registration)")
-    else:
-        r = subprocess.run(mcp_argv(url, name, token, claude),
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"reveille init: `claude mcp add` failed at step 1 of 3, so "
-                  f"nothing else was installed -- a Stop hook pointing at a bus "
-                  f"this machine is not registered with looks configured and is "
-                  f"not.\n{(r.stderr or r.stdout).strip()}", file=sys.stderr)
-            return 1
-        steps.append("mcp: registered")
+    # REMOVE THEN ADD, the entrypoint's own idempotence: "already registered,
+    # left alone" kept a stale literal-token registration through a rotation
+    # and the machine 401ed while looking installed. Re-registering is cheap,
+    # carries no secret (headers are ${VAR} references), and converges every
+    # older install to the env form.
+    subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
+                   capture_output=True, text=True)
+    r = subprocess.run(mcp_argv(url, name, token, claude),
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"reveille init: `claude mcp add` failed at step 1 of 3, so "
+              f"nothing else was installed -- a Stop hook pointing at a bus "
+              f"this machine is not registered with looks configured and is "
+              f"not.\n{(r.stderr or r.stdout).strip()}", file=sys.stderr)
+        return 1
+    steps.append("mcp: registered (headers reference $REVEILLE_TOKEN / "
+                 "$REVEILLE_AGENT_ROLE -- the credential lives only in agent.env)")
 
     hook_rc = install.main()
     if hook_rc != 0:
