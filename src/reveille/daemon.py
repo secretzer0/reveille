@@ -193,6 +193,20 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.74 THE INSTALLER OUTLIVES ITS OWN RUN, ROOMS ARE A CHOICE WITH OWNERS
+SHOWN, AND THE MINT PANEL IS IN. The operator's first successful install ended
+in `reveille-agent: command not found`: a uvx run is ephemeral, its console
+scripts live in a GC-able cache, and the Stop hook had captured that cache path
+-- an agent that works today and goes silently deaf at the next `uv cache
+prune`. init now persists itself (`uv tool install`) whenever reveille-agent is
+not on PATH, BEFORE the hook writes any command path. The wizard lists rooms as
+the operator specified -- yours plainly, then "owner -> name" for public rooms,
+because per-owner room names are only unambiguous with the owner shown -- and
+Enter attaches YOUR rooms, not every public room on the broker: the first real
+run attached a stranger's room by default, and that breadth is now a choice.
+Also merged: senior-ui-ux's mint panel, which shows the install command and
+never runs it.
+
 0.2.73 PRUNE ERASES AN IDENTITY, NOT A LABEL. The purge control takes an
 agents.id and resolves the name from it, never the other way: a bare name
 cannot say WHICH history it means, and the day a label carries two, the
