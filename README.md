@@ -62,6 +62,52 @@ everything**:
 
 First visit creates the first admin. One login covers every path.
 
+## Deploy an update
+
+**A deploy is both halves.** The broker runs from a docker image; the launcher
+runs from a pinned clone at `~/.reveille/launcher-src` that nothing restarts on
+merge. Updating one and not the other is the failure this sequence exists to
+stop — it kept a login-home crash running for six reviews after it was fixed.
+
+```bash
+cd <your checkout> && git pull            # what you are deploying
+
+uv run python scripts/reveille_launch.py pin   # fast-forward the pinned clone
+pgrep -af "reveille_launch.py api"             # the EXACT pid, never pkill blind
+kill <that pid>                                # the Stop hook respawns it
+curl -s localhost:8766/health                  # must report the commit you pulled
+
+make up                                        # broker image + compose + checks
+```
+
+**The restart is the deploy; `pin` only stages it.** `/health` stamps its commit
+once, when the process loads, so it answers *what is running* rather than *what
+is pinned* — and those differ for exactly as long as it takes to restart, which
+is the window worth refusing. Moving the tree without restarting leaves the old
+process serving while every check reads green.
+
+`make up` runs `scripts/launcher-pin-check` last and **exits 1 if the launcher is
+older than the tree you just deployed**, naming both commits. The broker is
+already up at that point: read the refusal as "the second half did not happen",
+not as "the deploy failed".
+
+Two refusals worth knowing before they surprise you:
+
+- `pin` declines a **dirty** pinned tree (nothing is meant to edit that clone)
+  and any move that is not a **fast-forward** (main was rewritten, or the tree
+  was moved by hand). Both leave what is serving exactly where it is. The honest
+  fix for a non-fast-forward is `rm -rf ~/.reveille/launcher-src` and pin again.
+- `make down` is compose **stop**, not `down`: `down` would remove the network
+  the agents live on.
+
+Verify what is actually running, rather than what was merged:
+
+```bash
+curl -s localhost:8765/version            # broker
+curl -s localhost:8766/health             # launcher: commit + source tree
+docker image ls | grep reveille-server    # which tags exist on this host
+```
+
 ## Add an agent
 
 **From the browser — no terminal at all.** `/agents`, one form: name, role,
