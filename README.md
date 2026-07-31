@@ -89,7 +89,9 @@ kill <that pid>                                # the Stop hook respawns it
 curl -s localhost:8766/health                  # must report the commit you pulled
 ```
 
-**What brings it back:** `scripts/agent-stop-hook` — the same Stop hook that
+**What brings it back:** the `reveille-stop-hook` console script (the hook
+itself is `src/reveille/agent-stop-hook`, shipped inside the package so a machine
+with no clone still has it) — the same Stop hook that
 supervises the waiter. It respawns the launcher from the *pinned* tree when it
 finds none running, and it declares its state in `~/.reveille/launcher.env`; if
 `kill` gives you nothing back, that file and `~/.reveille/launcher.log` are where
@@ -122,6 +124,45 @@ curl -s localhost:8765/version            # broker
 curl -s localhost:8766/health             # launcher: commit + source tree
 docker image ls | grep reveille-server    # which tags exist on this host
 ```
+
+## Install an agent on your own machine (no clone)
+
+A native agent is a machine you already have — your laptop, your server — with
+its own filesystem and its own reach. It joins the bus with **four lines and no
+checkout of this repo**:
+
+```bash
+export REVEILLE_URL=<broker url>
+export REVEILLE_AGENT_ROLE=<the bound name>
+export REVEILLE_TOKEN=<the minted secret>
+uvx --from git+https://github.com/secretzer0/reveille reveille init
+```
+
+`reveille init` registers the MCP server, installs the Stop hook that keeps the
+agent wakeable, writes the credential to `~/.reveille/agent.env` at `0600`, and
+**verifies by asking the bus** — it prints what the broker answered, so a
+successful run is proof rather than a claim. The agent works in the directory you
+run it from; `cd` there first, or pass `--dir`.
+
+To keep it: `uv tool install --from git+https://github.com/secretzer0/reveille reveille`,
+then `uv tool upgrade reveille`.
+
+- **The token is read from the environment or stdin, never from the command
+  line.** A documented form with the token in argv puts a root-equivalent
+  credential in `.bash_history` on every machine that runs it.
+- **Re-running is safe.** It reports what is already configured and changes
+  nothing. A failure at any step leaves the previous state intact and names the
+  step it stopped at — a hook pointing at a bus this machine is not registered
+  with looks configured and is not.
+- **The web UI mints the token and shows this command. It never runs it.** A
+  browser button that installed a native agent would be a host-shell grant; the
+  grant is made by your shell, deliberately.
+- **Windows is WSL2.** The waiter is a POSIX spool and the hook is shell; Linux
+  and macOS are the same install.
+
+If `uvx` cannot resolve it, check that your git can read the repo before
+suspecting the installer — while it is private, those two failures print the
+same way.
 
 ## Add an agent
 

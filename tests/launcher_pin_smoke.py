@@ -31,7 +31,7 @@ import urllib.request
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 LAUNCH = [sys.executable, str(REPO / "scripts" / "reveille_launch.py")]
-HOOK = REPO / "scripts" / "agent-stop-hook"
+HOOK = REPO / "src" / "reveille" / "agent-stop-hook"
 
 
 def free_port():

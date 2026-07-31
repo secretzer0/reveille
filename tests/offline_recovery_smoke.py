@@ -36,7 +36,7 @@ import urllib.request
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
-HOOK = REPO / "scripts" / "agent-stop-hook"
+HOOK = REPO / "src" / "reveille" / "agent-stop-hook"
 ROLE = "offline-gate"
 from reveille import store  # noqa: E402
 
