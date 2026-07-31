@@ -1096,3 +1096,30 @@ def test_the_init_invocation_is_pinned_because_it_is_a_contract():
     cmds = cmds[:cmds.index("\n}\n")]
     assert "--token" not in cmds and "--role" not in cmds, \
         "a value became a flag -- the token must never be an argument"
+
+
+def test_the_panel_mints_rooms_in_one_call_rather_than_attaching_after():
+    """Architect ruling 9010, from the operator's failed install: a mint that
+    attaches its rooms in a SECOND call has a window where a credential exists and
+    reaches nothing. The installer had that shape and its second call could never
+    succeed, so every --login run produced a token that joined no room. The panel
+    is the other caller of POST /tokens and had the same two-step, on a path where
+    a human notices more slowly.
+    """
+    fn = PAGE[PAGE.index("$('mkTok').onclick"):]
+    fn = fn[:fn.index("\n for(const b of")]
+    # 1. The rooms ride the MINT body.
+    assert "rooms:picked" in fn, "the mint does not carry its rooms"
+    assert "data-newroom" in fn, "nothing collects the rooms before the mint"
+    # 2. ...and no PATCH follows it. The incremental attach stays for EXISTING
+    #    tokens; what must not exist is a second call on the freshly minted one.
+    assert "PATCH" not in fn, "the mint is followed by a PATCH -- that is the window"
+    # 3. Nothing is pre-ticked: a credential that reaches a room by default is
+    #    reach nobody chose. Asserted on the chip builder, where it would be lost.
+    chips = PAGE[PAGE.index("function newRoomChips("):]
+    chips = chips[:chips.index("\n}\n")]
+    assert "checked" not in chips, "a room is pre-ticked -- that is reach nobody chose"
+    assert "the room you are in" in chips, "the current room must be named, not just first"
+    # 4. A zero-room mint is legal and nearly always a mistake, so it is NAMED.
+    assert "This token carries NO ROOMS" in PAGE, \
+        "a token that reaches nothing must say so -- it looks healthy from every angle"

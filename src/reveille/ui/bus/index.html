@@ -2801,6 +2801,20 @@ function wireInstallCopy(t){
  };
 }
 
+// The rooms a NEW token will carry, chosen before the mint rather than ticked
+// after it. The room being viewed sorts first and says so, because it is the one
+// the reader means nine times in ten -- but nothing is pre-ticked: a credential
+// that reaches a room by default is reach nobody chose.
+function newRoomChips(rooms){
+ const here=rooms.filter(r=>r.id===room), rest=rooms.filter(r=>r.id!==room);
+ return here.concat(rest).map(r=>'<label class="chip">'+
+  '<input type="checkbox" data-newroom="'+esc(r.id)+'"> '+
+  esc(r.owner&&r.owner!==myName?r.owner+' \u2192 '+r.name:r.name)+
+  (r.id===room?' <span class="pDim">(the room you are in)</span>':'')+'</label>').join('')
+  ||'<div class="pDim">you hold no rooms yet -- create one first, or this token '+
+    'will reach nothing</div>';
+}
+
 async function openTokens(){
  // Refresh /me rather than trusting the copy cached at boot: another user can make a room
  // public at any moment, and a stale cache would silently hide it from the checkboxes.
@@ -2828,8 +2842,10 @@ async function openTokens(){
    '<button class="danger" data-rev="'+t.id+'">revoke</button>'+
    '</div><div class="pChips">'+chips+'</div>';}).join('')||'<div class="pDim">no tokens</div>';
  panel('tokens',
-  '<div class="pDim">A token is a credential and carries no room. Tick the rooms it may '+
-  'see -- the change lands on the agent\'s very next call. Binding an agent name makes '+
+  '<div class="pDim">A token is a credential and carries no room until you give it one. '+
+  'Pick them BELOW BEFORE you generate -- rooms attach in the same transaction as the '+
+  'mint, so a token either has its rooms or was never created. Ticking a room on an '+
+  'existing token lands on the agent\'s very next call. Binding an agent name makes '+
   'the token BE that agent: a different X-Agent gets a 401. Binding is set here, once; '+
   'rebinding means a new token.</div>'+rows+
   '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)">'+
@@ -2837,15 +2853,34 @@ async function openTokens(){
   '<select id="newTokTier"><option value="state">memory: state (default)</option>'+
   '<option value="write">memory: write</option>'+
   '<option value="ratify">memory: ratify</option></select>'+
-  '<button id="mkTok">generate</button></div>');
+  '<button id="mkTok">generate</button></div>'+
+  // ROOMS ARE PICKED BEFORE THE MINT, not ticked after it (architect ruling
+  // 9010, from the operator's failed install). The panel used to mint and then
+  // PATCH each room, which leaves a window where a credential exists and
+  // reaches nothing -- the installer had the same shape and its second call
+  // could never succeed, so every --login run produced a token that joined no
+  // room. Attaching in the mint body closes it here for the same reason it was
+  // closed there: one call, one transaction, or neither.
+  '<div class="pSec">ROOMS THIS TOKEN MAY SEE</div>'+
+  '<div class="pChips">'+newRoomChips(rooms)+'</div>');
  $('mkTok').onclick=async()=>{
+  const picked=[...document.querySelectorAll('[data-newroom]:checked')]
+    .map(c=>c.dataset.newroom);
   try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim(),
-    agent_name:$('newTokName').value.trim(),mem_tier:$('newTokTier').value})});
+    agent_name:$('newTokName').value.trim(),mem_tier:$('newTokTier').value,
+    rooms:picked})});
    // Shown once, deliberately: only the hash is stored, so there is no second chance.
    panel('tokens',
     '<div class="pSec">TOKEN CREATED</div>'+
     '<div class="pDim">Copy it now. Only its hash is stored, so this is the only time it '+
     'is ever shown. Put it in the agent\'s .envrc.</div>'+
+    // A ZERO-ROOM MINT IS LEGAL AND NEARLY ALWAYS A MISTAKE, so it is named here
+    // rather than prevented above: an agent holding this token would authenticate,
+    // join nothing, and look healthy from every angle -- which is the failure the
+    // operator's install just produced by a different route.
+    (picked.length?'':'<div class="pDim err">This token carries NO ROOMS. An agent '+
+      'using it will authenticate and see nothing -- tick a room below and it '+
+      'lands on the agent\'s next call.</div>')+
     '<pre class="tokOut" id="tokSecret">REVEILLE_TOKEN='+esc(t.secret)+'</pre>'+
     installBlock(t)+
     '<div class="pRow"><button id="copyInstall" hidden>copy the install command</button>'+
