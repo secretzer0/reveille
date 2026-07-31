@@ -1871,10 +1871,10 @@ function drawTabs(){
  // guard has nothing left to catch and is gone. A button inside a button is
  // invalid markup, which is why the actions could never have moved inside it.
  for(const el of strip.querySelectorAll('[data-tab]'))el.onclick=()=>{
-  agTabOn=el.dataset.tab;drawTabs();drawNote();drawRoster();
+  agTabOn=el.dataset.tab;drawTabs();
  };
  for(const el of strip.querySelectorAll('[data-tabx]'))el.onclick=ev=>{
-  ev.stopPropagation();closeTab(el.dataset.tabx).then(()=>{drawNote();drawRoster();});
+  ev.stopPropagation();closeTab(el.dataset.tabx);
  };
  for(const el of strip.querySelectorAll('[data-agact]'))el.onclick=ev=>{
   ev.stopPropagation();
@@ -1888,7 +1888,15 @@ function drawTabs(){
   const cur=strip.querySelector('[data-tab="'+CSS.escape(agTabOn||'')+'"]');
   if(cur)cur.focus();
  }
- drawNote();
+ // EVERYTHING THAT READS agTabOn REPAINTS HERE, because this is the one place
+ // every path that moves it passes through -- the strip click, openAgent's four
+ // returns, and closeTab. The note already did; the roster's selection did not,
+ // so opening a tab FROM the rail left the highlight on the previous agent while
+ // the tab strip and the well both showed the new one (operator screenshot, msg
+ // 8864). Two selection channels for one fact, repainted by different callers, is
+ // the same defect as the tab strip and Settings sharing an unscoped selector: one
+ // reading, one place that draws it.
+ drawNote();drawRoster();
 }
 // THE BOOT REPORT'S PROBLEMS, SAID OUT LOUD, beside the terminal they explain.
 // Not a count and not a badge: "2 problems" sends the reader looking, where

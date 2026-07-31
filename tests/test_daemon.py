@@ -836,3 +836,42 @@ def test_cancel_is_not_gated_on_the_state_it_recovers_from():
     #    is also the state whose missing reap started this.
     assert sec.index("const st=await lapi('/login/status')") < sec.index("if(L.present)"), \
         "status is read inside a branch -- the logged-in state must read it too"
+
+def test_the_rail_selection_is_repainted_wherever_the_active_tab_moves():
+    """Operator screenshot, msg 8864: clicking an agent in the rail opened the
+    right tab and left the HIGHLIGHT on the previously selected agent, so the
+    rail and the tab strip disagreed about which agent you were looking at.
+
+    Cause: agTabOn moves in eight places, all of which call drawTabs(), and
+    drawTabs repainted the note but not the roster -- only the strip's own click
+    handler repainted the rail, which is why clicking a TAB looked correct and
+    clicking the RAIL did not. Two channels for one selection, repainted by
+    different callers.
+    """
+    body = PAGE[PAGE.index("function drawTabs()"):]
+    body = body[:body.index("\n}\n")]
+    # 1. The funnel repaints every reading of the active tab -- in its own TAIL,
+    #    not merely somewhere inside it. "drawRoster() appears in drawTabs" is
+    #    inert: the strip's click handler is written inside drawTabs, so the
+    #    broken version satisfies it too. The tail is the part that runs on every
+    #    call, whatever moved agTabOn.
+    tail = body[body.index("if(refocus)"):]
+    assert "drawRoster()" in tail, \
+        "drawTabs does not repaint the rail on every call -- it can disagree with the strip"
+    assert "drawNote()" in tail, "drawTabs stopped repainting the note"
+    # 2. ...and it is the ONLY repainter here. A second caller inside a click
+    #    handler is what let the two paths drift in the first place: one of them
+    #    had it, the other did not, and both looked reasonable in review.
+    click = body[body.index("[data-tab]"):]
+    click = click[:click.index("};")]
+    assert "drawRoster" not in click, \
+        "the strip click repaints the rail itself -- put it in the funnel, once"
+    # 3. Every place that MOVES the active tab reaches the funnel. Enumerated by
+    #    pattern rather than counted, so a ninth assignment in any spelling is
+    #    caught: openAgent's four returns, the mint, the mint's catch, closeTab,
+    #    and the strip click.
+    sites = [m.start() for m in re.finditer(r"(?<!let )agTabOn=(?!=)", PAGE)]
+    assert len(sites) >= 8, f"only {len(sites)} assignment sites found -- did they move?"
+    for s in sites:
+        assert "drawTabs()" in PAGE[s:s + 400], \
+            f"an agTabOn assignment never reaches drawTabs: {PAGE[s:s + 80]!r}"
