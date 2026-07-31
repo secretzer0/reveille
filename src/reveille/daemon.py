@@ -193,6 +193,21 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.70 A MIGRATION NEVER GUESSES WHICH AGENT A NAME MEANS. Every place a
+migration resolved a historical name to an identity carried a tie-break --
+prefer the live row, or MIN(id) -- and a deterministic guess is still a guess:
+the day a declined resurrect gives one name two identities, it hands the
+retired agent's memory and history to the live one, silently. Now a name is
+resolved only when it has exactly ONE identity; an ambiguous row is left put
+and counted, printed like the backfill's refusal list, because it is the
+operator's to assign. NULL means "not yet attributed" and is recoverable; a
+wrong id is a false record and is not. Write time is different, deliberately:
+a message written now is written by the LIVE instance, so send() still prefers
+the live row, and with several retired rows and no live one it attributes to
+nobody rather than to the wrong one. Cannot bite on any database that exists
+today -- every name is one identity -- which is exactly why it had to die
+before the enforcement slice makes reused names real.
+
 0.2.69 THE INSTALLER IS A WIZARD, AND THE LIVE DATABASE GOT ITS HISTORY BACK.
 `reveille init` with nothing exported now asks for everything it needs -- broker
 url (defaulting to the fleet's), agent type from a menu, agent name suggested
