@@ -8,6 +8,8 @@ it attributes correctly when it can, and that the state-note rescope moves a
 note from a token to an identity, which is the migration's one user-visible
 payoff.
 """
+import pathlib
+
 import pytest
 
 from reveille import store
@@ -220,3 +222,36 @@ def test_an_unbound_token_still_has_its_own_bucket(tmp_path):
     conn.execute("INSERT INTO tokens(id, owner_id, secret_hash, label, mem_tier, "
                  "created_ns) VALUES('t9','u1','h','l','state',1)")
     assert store.agent_scope(conn, "t9") == "agent:t9"
+
+
+def test_the_recount_and_the_refusal_cannot_disagree(tmp_path):
+    """The field incident, as a property rather than as its instance.
+
+    The recount used to ask "is anything unattributed" in fresh SQL while the
+    refusal asked it through unresolved_agent_names. The two spellings disagreed
+    about humans, so a database the preflight had just blessed made the broker
+    restart-loop. Asserting the human case alone would only pin the instance;
+    what is pinned here is that the recount CALLS the refusal, so any future
+    exclusion added to one is automatically in the other.
+    """
+    src = pathlib.Path(store.__file__).read_text()
+    body = src[src.index("def _upgrade_v17("):src.index("def _upgrade_v18(")]
+    after = body[body.index("UPDATE members SET agent_id"):]
+    assert "unresolved_agent_names(conn)" in after, \
+        "the recount must call the refusal, not re-spell it"
+    assert "SELECT count(*) FROM messages WHERE sender_agent_id IS NULL" not in after, \
+        "a second spelling of the rule is back -- that is the defect, not its instance"
+
+
+def test_a_human_sender_never_blocks_the_migration(tmp_path):
+    """The instance, kept because it is the one that cost a boot: a person
+    posting from the web is a user, not an agent, and their messages keep a NULL
+    id forever -- there is no agents row to point at."""
+    conn, path = at_v17(tmp_path)
+    mid = msg(conn, "tmelhiser")
+    msg(conn, "reveille-devops")
+    store.claim_unresolved_names(conn, "u1")
+    back_to_17(conn)
+    assert store.migrate(conn, path) == store.SCHEMA_VERSION
+    assert conn.execute("SELECT sender_agent_id FROM messages WHERE id=?",
+                        (mid,)).fetchone()[0] is None
