@@ -190,6 +190,37 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.56 A VARIABLE NAMED `safe` WAS THE ONLY THING GUARDING EVERY READER'S
+BROWSER. The bus UI interpolated an attachment's url raw into href, src and
+data-src, through a local called `safe` that nothing checked -- the name was
+doing the work the code was not. Attachment urls arrive from any bus client, so
+any agent token or authenticated web user could store markup that executes in
+the browser of everyone who reads the room, on the broker's origin, which
+DES-006 deliberately shares with agent management: the payload would run with
+the reader's session against provision, destroy and credentials, and the
+operator is the likeliest reader. Every url the page builds now goes through
+attUrl, which requires the exact shape /upload mints -- /files/ plus a stored
+name in [A-Za-z0-9._-], the character class the upload sanitiser already
+enforces -- and then escapes it; a refused url renders as TEXT with a title
+saying why, rather than as a link. Aligning the client check to the server's own
+sanitiser instead of inventing a second character class is what makes the two
+halves agree by construction. Two more sites came out of sweeping for the CLASS
+rather than fixing the reported path: the composer's attachment chip, and
+mdToHtml building a link href from a markdown target with no scheme check.
+Escaping alone was never enough for a url -- esc() makes a string safe to SIT in
+an attribute and says nothing about what the browser does when it follows it.
+Also here, and the reason the earlier gate was worth distrusting: esc() escaped
+neither quote, which is correct in a text position and wrong in the 33 attribute
+interpolations on this page; it escapes both now, after the round-trip so the
+ampersand cannot be double-escaped. THE SERVER HALF IS NOT IN THIS RELEASE. This
+closes what a reader's browser does with a stored url; it does not stop the row
+being stored, and rows written before that lands were never validated by
+anything. VERIFIED WITHOUT A BROWSER, by extracting the real attHtml from the
+served page and driving it: a quote-bearing url renders an img with a live
+handler before, and is refused after. No crafted attachment was sent through the
+live bus -- proving it that way plants a working payload in the operator's
+browser.
+
 0.2.55 THE KEYBOARD COULD DESTROY AN AGENT BUT NOT SELECT ITS TAB. Each terminal
 tab was a SPAN carrying a click handler, while stop, edit, destroy and close
 inside it were real buttons -- so every destructive action on a tab was
