@@ -87,9 +87,11 @@ def test_a_state_note_moves_from_the_token_to_the_identity(tmp_path):
     moment an agent is recreated, because recreating mints a new token."""
     conn, path = at_v17(tmp_path)
     msg(conn, "reveille-devops")
-    conn.execute("INSERT INTO tokens(id, owner_id, secret_hash, label, agent_name, "
-                 "mem_tier, created_ns) VALUES('t1','u1','h','l','reveille-devops',"
-                 "'state',1)")
+    # The token is written the way a CURRENT database holds one -- bound to the
+    # identity. The note's OLD scope (agent:t1) is what the rescope must move,
+    # and it resolves through the author, so no name column is needed here.
+    conn.execute("INSERT INTO tokens(id, owner_id, secret_hash, label, "
+                 "mem_tier, created_ns) VALUES('t1','u1','h','l','state',1)")
     conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
                  "created_ns) VALUES('m1','state','agent:t1','what I was doing',"
                  "'reveille-devops','live',1)")
@@ -209,11 +211,17 @@ def test_a_state_note_is_visible_to_the_readers_after_the_move(tmp_path):
     """
     conn, path = at_v17(tmp_path)
     msg(conn, "reveille-devops")
-    conn.execute("INSERT INTO tokens(id, owner_id, secret_hash, label, agent_name, "
-                 "mem_tier, created_ns) VALUES('t1','u1','h','l','reveille-devops',"
-                 "'state',1)")
+    # The token is written the way a CURRENT database holds one -- bound to the
+    # identity. The note's OLD scope (agent:t1) is what the rescope must move,
+    # and it resolves through the author, so no name column is needed here.
     store.claim_unresolved_names(conn, "u1")
     aid = conn.execute("SELECT id FROM agents WHERE name='reveille-devops'").fetchone()[0]
+    # The token as a CURRENT database holds one: bound to the identity. The
+    # note's OLD scope (agent:t1) is what the rescope must move, resolved
+    # through the author -- the token row is only here so agent_scope has a
+    # binding to read at the end.
+    conn.execute("INSERT INTO tokens(id, owner_id, secret_hash, label, agent_id, "
+                 "mem_tier, created_ns) VALUES('t1','u1','h','l',?, 'state',1)", (aid,))
 
     # written BEFORE the move, at the token scope
     conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
