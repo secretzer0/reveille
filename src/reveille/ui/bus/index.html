@@ -1365,6 +1365,12 @@ let agConfirm=null;   // {agent} -- at most one destroy-confirm open at a time
 // time those differed the form would have reported success for a role change
 // that changed nothing.
 let agEdit=null;
+// Reconfig 3. The image the launcher would provision TODAY. A container pins
+// its image at provision and never follows a bump, and the gap is invisible
+// from inside -- reveille-senior-ui-ux ran 0.2.4 for days with no Stop hook,
+// five unprocessed rings in its spool, and every health signal it could see
+// green. So the row says it, because nothing else can.
+let agDefaultImage='';
 let agMeta=null;      // {roles, role_prompts, rooms} from /rooms-mine, cached per open
 // U7 follow-up (operator screenshot, msg 8588): entry and exit used two
 // different controls in two different corners -- the nav button opened it,
@@ -1478,6 +1484,12 @@ async function refreshAgents(){
    'the launcher is not reachable ('+e.message+')');
   return;}
  const list=$('agList');
+ agDefaultImage=d.default_image||'';
+ // BEHIND is a comparison, not a version parse: any difference from what the
+ // launcher would provision today is worth showing, and inventing an ordering
+ // over image tags would be a second thing to keep true. An agent with no
+ // recorded image (a hive-only row) is not behind -- it is not running.
+ const behind=a=>!!(a.image&&agDefaultImage&&a.image!==agDefaultImage);
  const running=a=>a.status==='running';
  // absent: a launcher.db record with no matching container -- out-of-band
  // `docker rm`, host GC -- derived state that drifted (self-heal-or-report-
@@ -1557,6 +1569,11 @@ async function refreshAgents(){
     '<span class="pDim'+(broken(a)?' err':'')+'">'+
      (broken(a)?'broken — container missing':esc(a.status))+
      ' &middot; '+esc(a.image)+'</span>'+
+    // Names the way out, not just the condition -- a notice with no remedy is
+    // a wall, and the remedy is the edit form one button along, whose image
+    // field is prefilled with what is actually running.
+    (behind(a)?'<span class="pDim err"> behind &middot; current is '+
+      esc(agDefaultImage)+'; use edit to move it</span>':'')+
     (running(a)
       ? '<button data-agwatch="'+esc(a.agent)+'">watch</button>'+
         '<button data-agstop="'+esc(a.agent)+'">stop</button>'
