@@ -948,12 +948,16 @@ def _upgrade_v17(conn, db_path):
                             WHERE 'agent:' || t.id = memories.scope)""")
         left = conn.execute(
             "SELECT count(*) FROM messages WHERE sender_agent_id IS NULL "
-            "AND sender <> ?", (BROADCAST,)).fetchone()[0]
+            "AND sender <> ? "
+            "AND sender NOT IN (SELECT name FROM users)",
+            (BROADCAST,)).fetchone()[0]
         if left:
             # Belt AND braces here deliberately, unlike the dual-name checks this
             # repo deletes on sight: the refusal above reads the same tables this
             # UPDATE does, so if the two ever disagree the disagreement is the
-            # bug, and finding it inside the transaction is free.
+            # bug, and finding it inside the transaction is free. Humans are
+            # excluded exactly as the refusal excludes them: a person is not an
+            # agent identity, so a human-sent message keeps a NULL id forever.
             raise BusError(
                 f"identity backfill left {left} messages with no sender_agent_id "
                 f"after resolving every name it was given -- refusing to stamp "

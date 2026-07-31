@@ -193,6 +193,14 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.63 A PERSON IS NOT AN AGENT, EVEN TO THE RECOUNT. The identity backfill's
+in-transaction recount counted human-sent messages that the refusal list had
+correctly excluded, so a database the preflight blessed restart-looped the
+broker at startup. The recount now excludes users exactly as the refusal does;
+a human-sent message keeps a NULL sender_agent_id forever, because there is no
+agents row to point at and inventing one is forbidden. Nothing on the wire
+changes.
+
 0.2.62 HISTORY CARRIES THE IDENTITY, AND THE ROOM CAN SPEAK. Two slices.
 
 DES-007: every message, memory, read receipt and membership now records WHICH
