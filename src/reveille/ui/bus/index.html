@@ -85,6 +85,17 @@
  #roster .rgrp[open]>summary::before{transform:rotate(90deg)}
  #roster .rgrp>summary:hover{background:var(--hover);color:var(--dim)}
  #roster .rgrp>summary:focus-visible{outline:2px solid var(--gold);outline-offset:1px}
+ /* EDGES YOU CAN SEE (operator, msg 8769: "unable to see borders"). The rail
+    was drawn as pure whitespace grouping -- calm at four agents, unreadable at
+    twenty-three, where nothing said which rows belonged to which heading. A
+    rule under the heading and a spine down the open group draw the containment
+    the indent only implied. Both at --line, so this reads as structure and
+    never competes with the one accent colour. */
+ #roster .rgrp>summary{border-bottom:1px solid var(--line)}
+ #roster .rgrp[open]{border-left:1px solid var(--line);border-radius:0 0 0 6px;
+  margin-left:.15rem}
+ #roster .rgrp[open]>summary{border-left:1px solid var(--line);margin-left:-1px;
+  padding-left:.45rem}
  #roster .rgrp>summary .cnt{margin-left:auto;font-variant-numeric:tabular-nums}
  #roster .rgrp .agent{margin-left:.5rem}
  /* Sticky headers: scrolling a long room must never leave you unsure which
@@ -97,8 +108,18 @@
  #roster button.agent:focus-visible{outline:2px solid var(--gold);
   outline-offset:-2px}
  #roster .agent .nm{min-width:0}
- #roster .agent.sel{outline:1px solid var(--gold)}
- #roster .agent.sel .nm{color:var(--gold)}
+ /* A row's own edge appears when you are on it, so the pointer always has a
+    target with a boundary; a permanent line per row would be twenty-three
+    lines of noise. */
+ #roster button.agent{border:1px solid transparent}
+ #roster button.agent:hover{border-color:var(--line)}
+ /* SELECTED = the agent whose tab is in front. A 1px outline lost that at a
+    glance in a rail this dense, so it is a filled left bar plus a tint: the
+    bar is a shape, which survives being small, being dim, and being read by
+    someone who cannot pick gold out of grey. */
+ #roster .agent.sel{background:rgba(226,166,61,.10);border-color:transparent;
+  box-shadow:inset 3px 0 0 var(--gold)}
+ #roster .agent.sel .nm{color:var(--gold);font-weight:600}
  /* Fill AND ring, never colour alone (see the row comment in the script). */
  #roster .dot{width:8px;height:8px;border-radius:50%;flex:none;background:none;
   border:1.5px solid var(--faint)}
@@ -1796,9 +1817,16 @@ async function tokenRooms(){
    // so both shapes are accepted and the NAMES it carries feed the group
    // headings: a room the reader is not a member of still gets its name.
    const r=t.rooms||{};
-   if(Array.isArray(r))m[t.agent_name]=r;
-   else{m[t.agent_name]=Object.keys(r);
-        for(const id in r)agRoomNames[id]=r[id];}
+   const ids=Array.isArray(r)?r:Object.keys(r);
+   // A token with NO rooms answers nothing, so it must not COUNT as an answer:
+   // recording it put the agent in "no room" and, worse, marked the name as
+   // already-answered so the /agents-seen fallback skipped it (operator's own
+   // session, msg 8769: one agent grouped and twenty-two in "no room"). An
+   // empty answer and no answer are the same fact here, and the code has to
+   // treat them the same.
+   if(!ids.length)continue;
+   m[t.agent_name]=ids;
+   if(!Array.isArray(r))for(const id in r)agRoomNames[id]=r[id];
   }
   return m;
  }catch(e){return {};}   // soft: an ungrouped roster still lists every agent
@@ -1896,7 +1924,9 @@ function drawRoster(){
   // it: a group hiding a hit is a search that lies.
   const isOpen=q?true:(rid in rostOpen?!!rostOpen[rid]:rid===room);
   return '<details class="rgrp"'+(isOpen?' open':'')+' data-rgrp="'+esc(rid)+'">'+
-   '<summary>'+esc(rid?roomName(rid):'no room')+
+   '<summary'+(rid?'':' title="No bound token names a room for these, and the '+
+     'hive has not seen them in any room you hold."')+'>'+
+    esc(rid?roomName(rid):'no room')+
     '<span class="cnt">'+shown.length+'</span></summary>'+
    live.map(row).join('')+
    (dead.length?(open?dead.map(row).join(''):'')+
