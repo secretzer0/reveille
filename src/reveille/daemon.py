@@ -190,6 +190,18 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.61 THE ROOM CAN SPEAK, CLIENT SIDE. DES-009 commit 3: the bus page can play
+each message as audio, in message-id order, one at a time. The ordering is the
+feature rather than a detail -- utterances arrive as they are synthesized, which
+is not the order they were said in, and a room that speaks its messages out of
+sequence is worse than one that stays silent. A message whose audio is missing
+is a SILENT message, deliberately: a 404 advances the queue rather than
+surfacing an error, so the page is correct today with no synthesizer running
+anywhere, and stays correct when one is down. Nothing has been HEARD yet -- the
+autoplay-refusal path and the fell-behind marker tone are argued from the spec
+and never observed, and both need a human with speakers to settle. The
+synthesizer and the /audio route are still to come.
+
 0.2.60 THE MIGRATION CHAIN CAN NO LONGER SAY IT IS DONE WHEN IT IS NOT. Every
 upgrade step used to stamp user_version = SCHEMA_VERSION rather than its own
 target, and migrate() branched on the version it FOUND and ran a hand-listed
