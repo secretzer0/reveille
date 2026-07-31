@@ -2743,11 +2743,17 @@ async function openRooms(){
 // CONTRACT between their entry point and this panel, so it lives in one constant
 // with a gate on it -- a drift fails on my branch rather than on the machine
 // where somebody is pasting it.
-// THE GIT URL, NOT A PACKAGE NAME (senior-dev, msg 8956). There is no `reveille`
-// on PyPI and the repo is private, so the git URL is the only fetchable source --
-// `--from reveille` would fail on the operator's machine rather than on either of
-// our branches, which is the whole reason this constant is pinned by a gate.
-// When the repo flips public this URL stays valid and nothing here changes.
+// THE GIT URL, NOT A PACKAGE NAME (senior-dev, msg 8956). `--from reveille` would
+// fail on the operator's machine rather than on either of our branches, which is
+// the whole reason this constant is pinned by a gate.
+//
+// PUBLIC IS NOT PUBLISHED. The repo went public on 2026-07-31 and this line did
+// not change, because visibility and resolvability are different facts: there is
+// still no `reveille` on any index, so a git url remains the only form that
+// resolves on a fresh machine. Anyone reading this later will be tempted to
+// shorten it now that the repo is open -- that is the tidy-up the gate refuses,
+// and it will keep refusing until a package name actually exists on an index, at
+// which point it fails and both halves get changed deliberately.
 const INIT_CMD = 'uvx --from git+https://github.com/secretzer0/reveille reveille init';
 function installCmds(t, base){
  // The ONLY place this command is built. One site, so the gate can enumerate it
