@@ -101,10 +101,19 @@ like what with no state to keep. The knob offset is what stops two agents that
 land on the same bank clip sounding identical — bank alone runs out at about a
 dozen agents, bank plus knobs does not.
 
-The map lives in a `voices.json` the TTS service reads: name, clip path, knobs.
-**No database column.** Dropping a WAV in a directory is a better interface than
-a schema for something that will be touched six times, and an unowned voice is
-not a fact the hive needs.
+**The DIRECTORY is the interface** (senior-ui-ux's implementation, ruled better
+than this document's first version): `voices/<name>.wav` is that name's voice and
+needs no edit anywhere else, `voices/bank/*.wav` is the bank. `voices.json` is an
+OPTIONAL override for what a filename cannot say — a clip shared by two names,
+knobs someone wants to pin — and its absence is normal rather than an error. A
+file that must exist in order to say nothing is a worse interface than no file.
+
+**No database column.** An unowned voice is not a fact the hive needs.
+
+**The device is reported, never inferred.** A synthesizer that falls back to CPU
+because the container cannot see a GPU must say so at load and in `/health`.
+Silent degradation is the failure class this system rules against everywhere
+else, and "why is it slow" must be answerable without a stopwatch.
 
 **Humans are speakers too** (operator, msg 8909). A web user's message is
 synthesized like any other, from their own sample where they have supplied one,
