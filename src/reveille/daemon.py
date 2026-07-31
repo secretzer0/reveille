@@ -193,6 +193,25 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.66 ONE COMMAND AND ONE PASSWORD INSTALLS AN AGENT. `reveille init --login`
+logs in, mints a token BOUND to the agent name, attaches that account's rooms,
+and then follows exactly the same path as a pasted token -- one installer with
+two doors rather than two that drift. The minted token is bound and
+mem_tier=state, least privilege by default, so anything it writes beyond its own
+state note lands as a draft. Re-running rotates rather than accumulating: the
+broker already supersedes an account's previous token for a bound name, and that
+supersession is now reported rather than silent, because a rotation that says
+nothing looks like a mint that did nothing. A token that mints but cannot attach
+a room is REFUSED with its id in the message -- a credential that exists and
+reaches nothing reads as a broken bus rather than a failed install. The password
+comes from a prompt or $REVEILLE_PASSWORD and there is no --password flag, gated
+by its absence: a password in argv is a password in shell history, and this one
+mints credentials. SAID PLAINLY BECAUSE IT IS MORE REACH THAN THE FLOW IT
+REPLACES: with a password this command can mint a credential for any agent name
+the account owns, on any machine it runs on. That is why the web UI still only
+shows the command and must never run it -- a browser button doing this is a
+host-shell grant with a password behind it.
+
 0.2.65 AN INSTALLED AGENT NO LONGER STARTS DEAF, AND THE INSTALLER'S CHECK NOW
 CHECKS THE TOKEN. Two defects in 0.2.64, both found in review. `reveille init`
 wrote the credential file and told you to run `claude` -- and nothing sourced
