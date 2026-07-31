@@ -487,7 +487,25 @@ def _version(conn):
 def migrate(conn, db_path):
     """Bring the DB to SCHEMA_VERSION. Explicit and versioned -- the old blind
     try/except ALTER could not tell "no such table" from "already migrated" from a
-    real failure, and swallowed all three."""
+    real failure, and swallowed all three.
+
+    THE CHAIN IS A LOOP OVER THE VERSION WE ARE AT, not a branch on the version we
+    found. It used to be a ladder of arms, one per start version, each listing the
+    steps to run; and every step stamped SCHEMA_VERSION rather than its own target.
+    Those two together are the defect: an arm that was short by a step still ended
+    with the database claiming to be current, so a truncated chain reported itself
+    complete and nothing could ever notice. The v9 through v13 arms really were
+    short -- they stopped at _upgrade_v14 and never called _upgrade_v15 -- and what
+    hid it was luck, because _upgrade_v13 replays the whole _SCHEMA and a full
+    replay heals ADDITIVE drift. The first non-additive step turns that luck into
+    data loss.
+
+    Here there is no arm to be short. Each step advances user_version to ITS OWN
+    target inside its own transaction, and the loop re-reads the version and runs
+    whatever is next until there is nothing left. A step that fails leaves the
+    version at the last one that COMPLETED, so the next start resumes exactly
+    there instead of skipping what never ran.
+    """
     v = _version(conn)
     if v > SCHEMA_VERSION:
         raise BusError(f"db is newer than this build (user_version={v})")
@@ -497,100 +515,32 @@ def migrate(conn, db_path):
         _exec_script(conn, _SCHEMA)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         return SCHEMA_VERSION
-    # Branch on the version we FOUND, not the one we are at mid-chain: _upgrade_v0 lays
-    # down the current schema, so it lands straight at SCHEMA_VERSION and must not then be
-    # handed to v3's step (which looks for a revoked_ns column v0 never grows).
-    if v == 0:
-        _upgrade_v0(conn, db_path)
-    elif v == 2:
-        _upgrade_v2(conn, db_path)
-        _upgrade_v3(conn, db_path)
-        _upgrade_v4(conn, db_path)
-        _upgrade_v5(conn, db_path)
-        _upgrade_v7(conn, db_path)
-        _upgrade_v8(conn, db_path)
-    elif v == 3:
-        _upgrade_v3(conn, db_path)
-        _upgrade_v4(conn, db_path)
-        _upgrade_v5(conn, db_path)
-        _upgrade_v7(conn, db_path)
-        _upgrade_v8(conn, db_path)
-    elif v == 4:
-        _upgrade_v4(conn, db_path)
-        _upgrade_v5(conn, db_path)
-        _upgrade_v7(conn, db_path)
-        _upgrade_v8(conn, db_path)
-    elif v == 5:
-        _upgrade_v5(conn, db_path)
-        _upgrade_v7(conn, db_path)
-        _upgrade_v8(conn, db_path)
-    elif v == 6:
-        _upgrade_v6(conn, db_path)
-        _upgrade_v7(conn, db_path)
-        _upgrade_v8(conn, db_path)
-    elif v == 7:
-        _upgrade_v7(conn, db_path)
-        _upgrade_v8(conn, db_path)
-    elif v == 8:
-        _upgrade_v8(conn, db_path)
-    elif v == 9:
-        _upgrade_v9(conn, db_path)
-        _upgrade_v10(conn, db_path)
-        _upgrade_v11(conn, db_path)
-        _upgrade_v12(conn, db_path)
-        _upgrade_v13(conn, db_path)
-        _upgrade_v14(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    elif v == 10:
-        _upgrade_v10(conn, db_path)
-        _upgrade_v11(conn, db_path)
-        _upgrade_v12(conn, db_path)
-        _upgrade_v13(conn, db_path)
-        _upgrade_v14(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    elif v == 11:
-        _upgrade_v11(conn, db_path)
-        _upgrade_v12(conn, db_path)
-        _upgrade_v13(conn, db_path)
-        _upgrade_v14(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    elif v == 12:
-        _upgrade_v12(conn, db_path)
-        _upgrade_v13(conn, db_path)
-        _upgrade_v14(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    elif v == 13:
-        _upgrade_v13(conn, db_path)
-        _upgrade_v14(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    elif v == 14:
-        _upgrade_v14(conn, db_path)
-        _upgrade_v15(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    elif v == 15:
-        _upgrade_v15(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    elif v == 16:
-        _upgrade_v16(conn, db_path)
-    # Chains that start below the memory plane run its steps too. This used to be a
-    # comment saying they need not -- _upgrade_v8 lays _MEMORIES_SCHEMA at the current
-    # shape, so the later steps had nothing to do -- and that was true of every step
-    # that existed when it was written, all of them ADDITIVE. It stopped being true at
-    # the first non-additive one (v17 rebuilds the table to drop an FK action), and the
-    # only thing that had been keeping those chains correct was that nothing yet
-    # required work they skipped. Running the steps costs a rebuild on a database old
-    # enough to be at v8; being wrong costs a database that says 17 and is not.
-    if 2 <= v <= 8:
-        _upgrade_v9(conn, db_path)
-        _upgrade_v10(conn, db_path)
-        _upgrade_v11(conn, db_path)
-        _upgrade_v12(conn, db_path)
-        _upgrade_v13(conn, db_path)
-        _upgrade_v14(conn, db_path)
-        _upgrade_v15(conn, db_path)
-        _upgrade_v16(conn, db_path)
-    return SCHEMA_VERSION
-
+    while True:
+        v = _version(conn)
+        if v >= SCHEMA_VERSION:
+            return SCHEMA_VERSION
+        step = _UPGRADES.get(v)
+        if step is not None:
+            # Resolved by NAME at call time, never held as a reference. A table
+            # holding function objects binds them at import, so patching
+            # store._upgrade_vN -- which is how the interrupt gates inject a
+            # failure -- would no longer reach dispatch, and those gates would
+            # pass by measuring nothing. A gate that cannot fail is worse than
+            # the defect it was written for.
+            step = globals()[step]
+        if step is None:
+            # No step for this version: it is one the chain jumps over (v1, v6 on a
+            # path that came through v5's rebuild). Stamping forward one is what the
+            # old ladder did by omission; doing it explicitly keeps the loop honest
+            # and terminating.
+            conn.execute(f"PRAGMA user_version={v + 1}")
+            continue
+        step(conn, db_path)
+        if _version(conn) <= v:                    # a step that did not advance
+            raise BusError(
+                f"migration step for user_version={v} did not advance the version. "
+                f"Every step stamps its own target; one that does not would loop "
+                f"forever, and a database mid-chain is worse than a refusal.")
 
 def _upgrade_v2(conn, db_path):
     """v2 -> v3: tokens.revoked_ns is gone. Revoke deletes the row now, so a tombstone
@@ -679,8 +629,9 @@ def _upgrade_v6(conn, db_path):
     Same body as v5: the backfill is already a delete-and-rebuild -- but the STAMP
     is this step's own, because v5's says 6 and finishing here means 7. A step that
     borrows another's body must not borrow its version (msg 8876)."""
-    _upgrade_v5(conn, db_path)
+    n = _upgrade_v5(conn, db_path)
     conn.execute("PRAGMA user_version=7")
+    return n
 
 
 def _upgrade_v7(conn, db_path):
@@ -976,6 +927,25 @@ def _upgrade_v0(conn, db_path):
             conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
+
+
+# THE CHAIN, as data. One entry per version that has a step; migrate() runs the one
+# for the version the database is AT and re-reads. Adding a step is adding a line
+# here and stamping its own target inside it -- there is no list of arms to also
+# remember to extend, which is what made the v9-v13 arms short of _upgrade_v15 with
+# nothing able to say so. v1 has no entry (it never shipped) and v6 is reachable
+# only from v5's rebuild; the loop steps over a gap by stamping forward one.
+_UPGRADES = {v: f"_upgrade_v{v}" for v in
+             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)}
+
+# The versions with NO step, named rather than implied. The loop steps over a
+# missing entry by stamping forward one, which is correct for a version that
+# never had work to do and WRONG for one whose step was forgotten -- and the two
+# are indistinguishable from inside the loop. So the intended gaps are written
+# down here and gated against the table: a SCHEMA_VERSION bump that forgets its
+# entry fails a test instead of silently skipping a migration on a real database.
+# v1 is the only one: it never shipped.
+_UPGRADE_GAPS = frozenset({1})
 
 
 def snapshot(conn, path):
@@ -1962,6 +1932,29 @@ def agents_seen(conn, rooms, exclude=()):
     for name, e in seen.items():
         e["present"] = name in here
     return sorted(seen.values(), key=lambda e: e["name"])
+
+
+def unresolved_agent_names(conn):
+    """Every agent name the HISTORY carries that no agents row claims, with what
+    each holds. This is the backfill's refusal list (DES-007 6.1).
+
+    The backfill maps a name to an identity by looking the name up in `agents`.
+    A name with no row cannot be mapped, and the two ways to paper over that are
+    both forbidden: inventing an owner, or leaving the id permanently NULL --
+    which is the two-shapes-in-one-column problem the no-legacy rule exists to
+    stop. So the backfill REFUSES and prints this list instead, and a human
+    assigns the missing rows once, deliberately (operator, 2026-07-31: every
+    historical agent on this host is theirs, assigned by hand, never in code).
+
+    Humans are excluded by NAME rather than by tag: a web user is a person, and
+    a person is not a recoverable agent identity. Reads every room, because an
+    identity is global to the broker while agents_seen answers per room.
+    """
+    rooms = [r["id"] for r in conn.execute("SELECT id FROM rooms")]
+    people = {r["name"] for r in conn.execute("SELECT name FROM users")}
+    claimed = {r["name"] for r in conn.execute("SELECT name FROM agents")}
+    return [a for a in agents_seen(conn, rooms, exclude=people)
+            if a["name"] not in claimed]
 
 
 def presence(conn, rooms):
