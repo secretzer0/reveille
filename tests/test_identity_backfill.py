@@ -168,3 +168,55 @@ def test_a_human_sender_is_not_an_identity(tmp_path):
 def test_the_step_is_registered_in_the_chain(tmp_path):
     assert store._UPGRADES.get(17) == "_upgrade_v17"
     assert callable(getattr(store, "_upgrade_v17"))
+
+
+def test_a_state_note_is_visible_to_the_readers_after_the_move(tmp_path):
+    """THE INCIDENT, both halves. v17 moved state notes to agent:<agent_id> while
+    memory_add, recall and brief all still computed agent:<token_id> -- so the
+    rows sat on disk at a scope nothing asked for and the operator's agents could
+    not see their own state (architect, msg 8971).
+
+    Both directions are asserted: a note written under the OLD token scope and a
+    note written under the NEW identity scope must BOTH be readable, because the
+    fix that only handles one of them recreates the incident an hour younger.
+    """
+    conn, path = at_v17(tmp_path)
+    msg(conn, "reveille-devops")
+    conn.execute("INSERT INTO tokens(id, owner_id, secret_hash, label, agent_name, "
+                 "mem_tier, created_ns) VALUES('t1','u1','h','l','reveille-devops',"
+                 "'state',1)")
+    store.claim_unresolved_names(conn, "u1")
+    aid = conn.execute("SELECT id FROM agents WHERE name='reveille-devops'").fetchone()[0]
+
+    # written BEFORE the move, at the token scope
+    conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
+                 "created_ns) VALUES('old','state','agent:t1','before the move',"
+                 "'reveille-devops','live',1)")
+    back_to_17(conn)
+    assert store.migrate(conn, path) == store.SCHEMA_VERSION
+
+    # written INTO THE GAP: after v17 ran, by a writer that had not moved yet
+    conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
+                 "created_ns) VALUES('gap','state','agent:t1','written in the gap',"
+                 "'reveille-devops','live',2)")
+    # the same step that closes the gap, run as the next boot would run it
+    conn.execute("PRAGMA user_version=18")
+    assert store.migrate(conn, path) == store.SCHEMA_VERSION
+
+    scopes = {r["uid"]: r["scope"] for r in
+              conn.execute("SELECT uid, scope FROM memories WHERE kind='state'")}
+    assert scopes["old"] == f"agent:{aid}", scopes
+    assert scopes["gap"] == f"agent:{aid}", "the gap note was left where nothing reads"
+
+    # and the readers ask for that scope rather than the token's
+    assert store.agent_scope(conn, "t1") == f"agent:{aid}"
+
+
+def test_an_unbound_token_still_has_its_own_bucket(tmp_path):
+    """The fallback is not legacy tolerance: an unbound token has no identity to
+    key on, and state writes already refuse it. A reader with one gets the empty
+    bucket it has always had rather than an exception."""
+    conn, path = at_v17(tmp_path)
+    conn.execute("INSERT INTO tokens(id, owner_id, secret_hash, label, mem_tier, "
+                 "created_ns) VALUES('t9','u1','h','l','state',1)")
+    assert store.agent_scope(conn, "t9") == "agent:t9"
