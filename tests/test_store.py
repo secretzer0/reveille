@@ -1300,6 +1300,54 @@ def test_attachments_roundtrip():
     assert inb[0]["attachments"][0]["name"] == "x.md"
 
 
+def test_an_attachment_url_must_be_a_broker_file_path():
+    """A stored attachment url is rendered into href, src and data-src in every
+    reader's browser, on the broker's origin -- the origin DES-006 deliberately
+    shares with agent management. send() took it verbatim from any bus client,
+    so any agent token or authenticated web user could store markup that runs in
+    the operator's session.
+
+    The check belongs here rather than only at the renderer because THIS is the
+    authority: /files/<stored> is the only url the broker itself ever mints, and
+    upload sanitises the stored name to [A-Za-z0-9._-]. Anything else was never
+    ours to serve. The client-side escape is the second half and is senior-ui-ux's
+    -- it survives the day this constraint widens, which is the whole argument
+    the esc() branch made one level down.
+
+    Asserted on the STORED VALUE, never on a rendered line: the payload only has
+    to survive the database to reach a reader.
+    """
+    c, admin, room, tok = fixture()
+    store.join(c, "alice", "TA", room["id"], tok["id"])
+    store.join(c, "bob", "TB", room["id"], tok["id"])
+
+    hostile = [
+        '/files/x" onerror=alert(1) y=".png',   # breaks out of the attribute
+        "javascript:alert(1)",                   # scheme payload, no path at all
+        "https://evil.example/x.png",            # absolute: not ours to serve
+        "//evil.example/x.png",                  # protocol-relative
+        "/files/../../etc/passwd",               # traversal
+        "/files/",                               # names no file
+    ]
+    for url in hostile:
+        try:
+            store.send(c, "alice", "bob", "payload", room=room["id"],
+                       attachments=[{"url": url, "name": "x.png", "bytes": 1}])
+        except store.BusError:
+            continue
+        raise AssertionError(f"send() stored a hostile attachment url: {url!r}")
+
+    # Nothing hostile reached the table -- the row is the thing a reader renders.
+    stored = [r["url"] for r in c.execute("SELECT url FROM attachments")]
+    assert stored == [], f"hostile urls reached the attachments table: {stored}"
+
+    # The legitimate shape still works, or the check is just an outage.
+    store.send(c, "alice", "bob", "real one", room=room["id"],
+               attachments=[{"url": "/files/1785466179762-shot.png",
+                             "name": "shot.png", "bytes": 4}])
+    assert store.inbox(c, "bob", [room["id"]])[0]["attachments"][0]["name"] == "shot.png"
+
+
 def test_retract_only_while_unseen():
     c, admin, room, tok = fixture()
     store.join(c, "alice", "TA", room["id"], tok["id"])

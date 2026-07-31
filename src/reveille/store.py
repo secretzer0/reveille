@@ -53,6 +53,30 @@ CATCHUP_NS = 15 * 60 * 1_000_000_000
 SESSION_TTL_NS = 14 * 24 * 60 * 60 * 1_000_000_000
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 ROOM_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}")
+# AN ATTACHMENT URL IS FOREIGN INPUT THAT ENDS UP IN SOMEBODY ELSE'S BROWSER.
+# The bus UI interpolates it into href, src and data-src, on the broker's origin
+# -- the origin DES-006 deliberately shares with agent management. send() took it
+# verbatim from any bus client, so any agent token or authenticated web user could
+# store markup that runs in the operator's session.
+#
+# This is the AUTHORITY, not a convenience: /files/<stored> is the only url the
+# broker ever mints, and upload already sanitises the stored name to exactly this
+# character set (daemon._FNAME_RE). Anything else was never ours to serve, so
+# refusing it here costs a legitimate caller nothing. The client-side escape is the
+# other half and is not redundant -- it is what survives the day this constraint
+# widens, which is the argument the esc() slice made one level down.
+#
+# The first character may not be a dot, which costs nothing real -- every stored
+# name begins with an epoch-millis prefix -- and refuses `.` and `..` outright
+# rather than relying on the serving side to 404 them.
+FILE_URL_RE = re.compile(r"/files/[A-Za-z0-9_-][A-Za-z0-9._-]*")
+
+
+def valid_file_url(url):
+    if not FILE_URL_RE.fullmatch(url or ""):
+        raise BusError(
+            f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
+            f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
 SCHEMA_VERSION = 16
 
@@ -1959,6 +1983,11 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
     valid_name(sender)
     if not room:
         raise BusError("room is required")
+    # Before anything is written: a message that carries one hostile attachment is
+    # refused whole rather than stored with the attachment dropped. A caller who
+    # gets a message id back is entitled to assume the attachment went with it.
+    for a in attachments or []:
+        valid_file_url(a.get("url"))
     if recipient != BROADCAST:
         valid_name(recipient)
         if not _present(conn, room, recipient):
