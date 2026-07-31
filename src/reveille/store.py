@@ -1584,8 +1584,23 @@ def set_retention(conn, room_id, owner_id, retention_ns):
     conn.execute("UPDATE rooms SET retention_ns=? WHERE id=?", (retention_ns, room_id))
 
 
+# WHERE AUDIO LIVES, set once by the daemon that owns the directory. It is here
+# rather than passed per call because the unlink below must be the ONLY unlink:
+# a per-caller one is exactly how the orphaned uploads happened (msg 8857), and
+# the retention sweep is again the path with nobody watching. None = no voices
+# configured, and then there is nothing to remove.
+AUDIO_DIR = None
+
+
 def _delete_messages(conn, ids):
-    """Drop messages and everything referencing them. Caller holds the transaction."""
+    """Drop messages and everything referencing them. Caller holds the transaction.
+
+    THE AUDIO DIES WITH THE MESSAGE, and this is the single choke point every
+    delete passes through -- prune, purge_room, retract_message, and the
+    retention sweep (DES-009 section 7). An audio file has no database row: the
+    message id is the key and the filename is the record, so there is nothing to
+    reconcile and nothing that can lapse into disagreeing with the bytes.
+    """
     if not ids:
         return
     ids = list(ids)
@@ -1604,6 +1619,13 @@ def _delete_messages(conn, ids):
     conn.execute(f"DELETE FROM reads WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM links WHERE parent_id IN ({ph}) OR child_id IN ({ph})", ids + ids)
     conn.execute(f"DELETE FROM messages WHERE id IN ({ph})", ids)
+    if AUDIO_DIR:
+        for mid in ids:
+            # Best effort by design: a missing file is the normal case (voices
+            # off, service down, message never spoken) and must not fail a
+            # delete. The delete is the authority here; the bytes follow it.
+            with contextlib.suppress(OSError):
+                os.unlink(os.path.join(AUDIO_DIR, f"tts-{mid}.wav"))
 
 
 def purge_room(conn, room_id, owner_id):

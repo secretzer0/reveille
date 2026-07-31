@@ -33,6 +33,9 @@ import contextlib
 import html
 import json
 import logging
+import queue
+import urllib.parse
+import urllib.request
 import os
 import pathlib
 import re
@@ -1167,6 +1170,111 @@ def _feed_push(room, msg):
             q.put_nowait(msg)
 
 
+# ---- voices (DES-009 commits 2) ---------------------------------------------
+# The broker is the ONLY client of the synthesizer, and the browser never meets
+# it (section 3). One worker thread, ids in order, stdlib urllib -- a JSON POST
+# does not earn a dependency, and a thread is already allowed to block.
+
+_tts_q = queue.Queue()
+_tts_on = False        # set by main() only when the config refusal passed
+
+
+def tts_config_refusal(url, token):
+    """Why the voice worker must not start, or None. Pure, so the rule is
+    testable without a network, a thread or a synthesizer.
+
+    A plaintext synthesizer on somebody else's LAN is a bus transcript in
+    flight. Off the loopback and off the compose network, https AND a token are
+    both required -- and the refusal happens at CONFIGURATION time because that
+    is the only place it is cheap. Voices stay off rather than a room going
+    silently unencrypted (DES-009 section 3).
+    """
+    if not url:
+        return None                      # voices not configured at all: not a refusal
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    # A compose-network name has no dots and is not routable off that network;
+    # loopback is loopback. Everything else is somebody else's wire.
+    local = host in ("localhost", "127.0.0.1", "::1") or "." not in host
+    if local:
+        return None
+    if parsed.scheme != "https":
+        return (f"REVEILLE_TTS_URL points off this host ({host}) over "
+                f"{parsed.scheme or 'no scheme'}: every utterance would cross "
+                f"somebody else's network in the clear, and an utterance is a "
+                f"message. Use https, or run the synthesizer on the compose "
+                f"network. Voices are OFF.")
+    if not token:
+        return (f"REVEILLE_TTS_URL points off this host ({host}) with no "
+                f"REVEILLE_TTS_TOKEN: anything that can reach that URL can spend "
+                f"your synthesizer and read what this room says. Voices are OFF.")
+    return None
+
+
+def _tts_speak(url, token, text, timeout):
+    """One synthesis request. Returns wav bytes, or None if the service could not
+    answer -- a missing file is a SILENT message by design (section 7), so every
+    failure here is a return rather than a raise."""
+    body = json.dumps({"text": text, "voice": "default", "knobs": {}}).encode()
+    req = urllib.request.Request(url.rstrip("/") + "/speak", data=body,
+                                 headers={"content-type": "application/json"})
+    if token:
+        req.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except Exception as e:
+        log.warning("tts: %s", e)
+        return None
+
+
+def _tts_worker(url, token, timeout):
+    """Take message ids IN ORDER, synthesize, write <files>/tts-<id>.wav, and
+    announce the id on the existing feed.
+
+    THE TIMEOUT IS GENEROUS ON PURPOSE and there is no retry. The model loads
+    lazily, so the FIRST request of a container's life blocks on that load --
+    minutes on a cold cache, seconds forever after (senior-ui-ux, msg 8944). A
+    short timeout with a retry is the wrong shape twice over: the retry hits the
+    same load, and both attempts then queue behind each other on a
+    single-threaded server. One long wait, one attempt, and a message that
+    arrives silent if it fails.
+    """
+    first = True
+    while True:
+        item = _tts_q.get()
+        if item is None:
+            return
+        mid, room, text = item
+        if first:
+            # TEN MINUTES OF SILENCE IS INDISTINGUISHABLE FROM A HANG unless
+            # something points at the thing that tells them apart. The service's
+            # /health reports {"status","device","loaded"}, so whoever is
+            # watching a first utterance take minutes can ask whether the model
+            # is still loading and on what device -- a container with no GPU
+            # reservation synthesizes on the CPU while looking perfectly healthy
+            # (architect 8946, senior-ui-ux 8944).
+            log.info("tts: the first utterance may block on the model load -- "
+                     "%s/health reports device and loaded", url.rstrip("/"))
+            first = False
+        wav = _tts_speak(url, token, text, timeout)
+        if not wav:
+            continue                      # silent message: the feed already carried it
+        try:
+            (_files_dir / f"tts-{mid}.wav").write_bytes(wav)
+        except OSError as e:
+            log.warning("tts: cannot write audio for %s: %s", mid, e)
+            continue
+        _feed_push(room, {"event": "audio", "id": mid})
+
+
+def _tts_enqueue(mid, room, subject, body):
+    """Queue one message for synthesis, if voices are on. Never blocks the send
+    path: the queue is unbounded and the worker is the only thing that waits."""
+    if _tts_on:
+        _tts_q.put((mid, room, f"{subject}. {body}" if subject else body))
+
+
 def _push_presence(room):
     """Room presence, pushed the moment it CHANGES, to everyone in that room.
 
@@ -1657,6 +1765,7 @@ async def send(to: str, body: str, subject: str = "",
                 "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": attachments or [], "ts_ns": time.time_ns()})
+    _tts_enqueue(res["id"], rid, subject, body)
     log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s woke=%s",
              p.name, to, p.rooms.get(rid), res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
@@ -2158,6 +2267,7 @@ async def send_http(request):
                 "subject": d.get("subject") or "", "body": body,
                 "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
+    _tts_enqueue(res["id"], rid, d.get("subject") or "", body)
     log.info("%s send(web) -> %s room=%s thread=%s id=%s delivered=%s woke=%s",
              sender, to, p.rooms.get(rid), res["thread_id"],
              res["id"], res["wake"], woke)
@@ -2328,6 +2438,39 @@ async def files_http(request):
     media, disp = file_headers(fname)
     return FileResponse(path, media_type=media, headers={
         "Content-Disposition": f'{disp}; filename="{fname}"',
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
+@_guard
+async def audio_http(request):
+    """GET /audio/<msg-id>.wav -> the spoken form of that message, if you are in
+    its room.
+
+    THE ROOM COMES FROM THE MESSAGE AND THE ?room= QUERY IS IGNORED (architect,
+    msg 8922). The client sends one because every other call on that page does;
+    that is consistency, not a claim, and a client-supplied room in an
+    authorization decision is a hole. The audio's room IS its message's room --
+    that is the whole authorization, and it is why this route exists rather than
+    reusing /files/ (section 3).
+
+    A missing file is a 404 and a 404 is a SILENT MESSAGE by design: voices off,
+    service down, or a message that was never spoken all look the same here, and
+    the client advances its queue rather than surfacing an error.
+    """
+    p = _principal(request)
+    raw = request.path_params["mid"]
+    if not raw.isdigit():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    mid = int(raw)
+    row = _conn.execute("SELECT room FROM messages WHERE id=?", (mid,)).fetchone()
+    if row is None or row["room"] not in p.rooms:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = _files_dir / f"tts-{mid}.wav"
+    if not path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="audio/wav", headers={
+        "Content-Disposition": f'inline; filename="tts-{mid}.wav"',
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox"})
 
@@ -2994,6 +3137,7 @@ def build_app():
             Route("/upload", upload_http, methods=["POST"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
+            Route("/audio/{mid}.wav", audio_http),
             WebSocketRoute("/wake", wake_ws),
             WebSocketRoute("/feed", feed_ws),
             Mount("/", app=mcp_app),
@@ -3022,7 +3166,7 @@ def _snap_path(reason):
 
 
 def main():
-    global _conn, _files_dir, _db_path
+    global _conn, _files_dir, _db_path, _tts_on
     import uvicorn
     _setup_logging()
     root = os.environ.get("CLAUDE_AGENT_BUS") or os.path.expanduser("~/.claude/agent-bus")
@@ -3031,6 +3175,30 @@ def main():
     v = store.migrate(_conn, _db_path)   # versioned + transactional; snapshots itself
     _files_dir = pathlib.Path(_db_path).parent / "files"
     _files_dir.mkdir(parents=True, exist_ok=True)
+    # The audio dies with the message, and store owns that choke point. Told
+    # once, here, because the daemon owns the directory and store must not have
+    # to guess it (DES-009 section 7).
+    store.AUDIO_DIR = str(_files_dir)
+    # VOICES ARE OFF UNLESS THE CONFIGURATION EARNS THEM. The refusal is a
+    # startup decision rather than a per-request check: a plaintext synthesizer
+    # off this host is a bus transcript in flight, and refusing here is the only
+    # place refusing is cheap (section 3). The BROKER still starts -- a room with
+    # no voices works; a room speaking in the clear does not.
+    tts_url = os.environ.get("REVEILLE_TTS_URL", "")
+    tts_token = os.environ.get("REVEILLE_TTS_TOKEN", "")
+    if (why := tts_config_refusal(tts_url, tts_token)):
+        print(f"VOICES REFUSED: {why}", flush=True)
+    elif tts_url:
+        _tts_on = True
+        # 600s and no retry: the first request of the service's life blocks on a
+        # lazy model load -- minutes on a cold cache, seconds after. A short
+        # timeout plus a retry queues two of those behind each other on a
+        # single-threaded server (senior-ui-ux, msg 8944).
+        timeout = float(os.environ.get("REVEILLE_TTS_TIMEOUT", "600"))
+        threading.Thread(target=_tts_worker, args=(tts_url, tts_token, timeout),
+                         name="tts", daemon=True).start()
+        print(f"voices ON: {tts_url} (first utterance may block on a model load)",
+              flush=True)
     host = os.environ.get("REVEILLE_HOST", "0.0.0.0")
     port = int(os.environ.get("REVEILLE_PORT", "8765"))
     # REVEILLE_UDS binds a unix socket instead of a TCP port. One broker per tenant means
