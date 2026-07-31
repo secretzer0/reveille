@@ -2754,7 +2754,25 @@ async function openRooms(){
 // shorten it now that the repo is open -- that is the tidy-up the gate refuses,
 // and it will keep refusing until a package name actually exists on an index, at
 // which point it fails and both halves get changed deliberately.
-const INIT_CMD = 'uvx --from git+https://github.com/secretzer0/reveille reveille init';
+// TWO LINES, AND THE EPHEMERAL RUNNER IS GONE (architect ruling 9078, mechanism
+// found in the operator's own commands at 9061). Running the package from a
+// throwaway environment puts a bin directory under ~/.cache/uv first on PATH for
+// that process -- which is how a Stop hook got written pointing into the cache,
+// dead at the next cache prune. senior-dev fixed the resolution in 0.2.77 so no
+// caller can produce that path any more, and this still changes: the throwaway
+// form worked only because `init` performed a durable install as a SIDE EFFECT,
+// and a command whose durability is a side effect of another command is not a
+// command to teach.
+//
+// The retired spelling is NOT written here, deliberately: a gate asserts its
+// absence from this file, and the fleet learned that naming a forbidden token in
+// the file you gate on is how the gate stops being able to tell them apart.
+//
+// The second line is a NAME ON PATH rather than a url, which is also what a human
+// types on the re-run -- when the tool is already installed and the url is the
+// part they no longer remember.
+const INIT_CMD = 'uv tool install --force --from git+https://github.com/secretzer0/reveille reveille\n' +
+                 'reveille init';
 function installCmds(t, base){
  // The ONLY place this command is built. One site, so the gate can enumerate it
  // and so a second copy cannot drift out of agreement with the first.
@@ -2783,9 +2801,11 @@ function installBlock(t){
   // will hit first. The credential half is gone rather than reworded, because a
   // sentence that was load-bearing yesterday is dead weight today and every line
   // here competes with the command it sits under.
-  '<div class="pDim">That last line fetches from git rather than from a package '+
-  'index, so the machine needs git and a route to github. The agent runs in '+
-  'whatever directory you are in, so cd there first.</div>';
+  '<div class="pDim">The install line fetches from git rather than from a package '+
+  'index, so the machine needs git and a route to github. It installs the tool '+
+  'durably -- on a machine that already has it, the second line alone is the '+
+  'whole re-run. The agent starts in whatever directory you are in, so cd there '+
+  'first.</div>';
 }
 function wireInstallCopy(t){
  const b=$('copyInstall');
@@ -2799,6 +2819,20 @@ function wireInstallCopy(t){
    toast('install command copied -- the token is in it',true);}
   catch(e){toast('could not reach the clipboard -- select the block and copy it');}
  };
+}
+
+// The rooms a NEW token will carry, chosen before the mint rather than ticked
+// after it. The room being viewed sorts first and says so, because it is the one
+// the reader means nine times in ten -- but nothing is pre-ticked: a credential
+// that reaches a room by default is reach nobody chose.
+function newRoomChips(rooms){
+ const here=rooms.filter(r=>r.id===room), rest=rooms.filter(r=>r.id!==room);
+ return here.concat(rest).map(r=>'<label class="chip">'+
+  '<input type="checkbox" data-newroom="'+esc(r.id)+'"> '+
+  esc(r.owner&&r.owner!==myName?r.owner+' \u2192 '+r.name:r.name)+
+  (r.id===room?' <span class="pDim">(the room you are in)</span>':'')+'</label>').join('')
+  ||'<div class="pDim">you hold no rooms yet -- create one first, or this token '+
+    'will reach nothing</div>';
 }
 
 async function openTokens(){
@@ -2828,8 +2862,10 @@ async function openTokens(){
    '<button class="danger" data-rev="'+t.id+'">revoke</button>'+
    '</div><div class="pChips">'+chips+'</div>';}).join('')||'<div class="pDim">no tokens</div>';
  panel('tokens',
-  '<div class="pDim">A token is a credential and carries no room. Tick the rooms it may '+
-  'see -- the change lands on the agent\'s very next call. Binding an agent name makes '+
+  '<div class="pDim">A token is a credential and carries no room until you give it one. '+
+  'Pick them BELOW BEFORE you generate -- rooms attach in the same transaction as the '+
+  'mint, so a token either has its rooms or was never created. Ticking a room on an '+
+  'existing token lands on the agent\'s very next call. Binding an agent name makes '+
   'the token BE that agent: a different X-Agent gets a 401. Binding is set here, once; '+
   'rebinding means a new token.</div>'+rows+
   '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)">'+
@@ -2837,15 +2873,34 @@ async function openTokens(){
   '<select id="newTokTier"><option value="state">memory: state (default)</option>'+
   '<option value="write">memory: write</option>'+
   '<option value="ratify">memory: ratify</option></select>'+
-  '<button id="mkTok">generate</button></div>');
+  '<button id="mkTok">generate</button></div>'+
+  // ROOMS ARE PICKED BEFORE THE MINT, not ticked after it (architect ruling
+  // 9010, from the operator's failed install). The panel used to mint and then
+  // PATCH each room, which leaves a window where a credential exists and
+  // reaches nothing -- the installer had the same shape and its second call
+  // could never succeed, so every --login run produced a token that joined no
+  // room. Attaching in the mint body closes it here for the same reason it was
+  // closed there: one call, one transaction, or neither.
+  '<div class="pSec">ROOMS THIS TOKEN MAY SEE</div>'+
+  '<div class="pChips">'+newRoomChips(rooms)+'</div>');
  $('mkTok').onclick=async()=>{
+  const picked=[...document.querySelectorAll('[data-newroom]:checked')]
+    .map(c=>c.dataset.newroom);
   try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim(),
-    agent_name:$('newTokName').value.trim(),mem_tier:$('newTokTier').value})});
+    agent_name:$('newTokName').value.trim(),mem_tier:$('newTokTier').value,
+    rooms:picked})});
    // Shown once, deliberately: only the hash is stored, so there is no second chance.
    panel('tokens',
     '<div class="pSec">TOKEN CREATED</div>'+
     '<div class="pDim">Copy it now. Only its hash is stored, so this is the only time it '+
     'is ever shown. Put it in the agent\'s .envrc.</div>'+
+    // A ZERO-ROOM MINT IS LEGAL AND NEARLY ALWAYS A MISTAKE, so it is named here
+    // rather than prevented above: an agent holding this token would authenticate,
+    // join nothing, and look healthy from every angle -- which is the failure the
+    // operator's install just produced by a different route.
+    (picked.length?'':'<div class="pDim err">This token carries NO ROOMS. An agent '+
+      'using it will authenticate and see nothing -- tick a room below and it '+
+      'lands on the agent\'s next call.</div>')+
     '<pre class="tokOut" id="tokSecret">REVEILLE_TOKEN='+esc(t.secret)+'</pre>'+
     installBlock(t)+
     '<div class="pRow"><button id="copyInstall" hidden>copy the install command</button>'+
