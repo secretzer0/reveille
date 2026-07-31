@@ -838,6 +838,15 @@ def login_argv(user, image, network, data_base=None):
 # followed by us) and relays ONE pasted authorization code back. Completion is
 # OBSERVED: .credentials.json appears in the login home, read fresh -- never
 # the container exiting, never the human claiming.
+#
+# THE CONTAINER ENDS ITSELF ON THE CREDENTIAL, which is why the wait loop reads
+# the file and not only the session. `claude /login` does not leave when the
+# login lands, so waiting on the tmux session waited on a REPL that outlives the
+# flow: the container ran on, and the only thing that ever removed it was a
+# browser polling /login/status -- which the Account tab stops doing the moment
+# the credential appears. The SUCCESSFUL login was the one case with no reaper.
+# The container is the first to know it succeeded; it should not need a witness
+# in order to stop.
 _LOGIN_BOOT = r"""
 python3 -c "$SEED"
 tmux new-session -d -s login -x 220 -y 50 "claude /login"
@@ -848,7 +857,10 @@ for i in $(seq 1 120); do
   fi
   sleep 0.5
 done
-while tmux has-session -t login 2>/dev/null; do sleep 1; done
+while tmux has-session -t login 2>/dev/null; do
+  [ -f "$HOME/.claude/.credentials.json" ] && break
+  sleep 1
+done
 """
 
 # From the REAL pane, captured in-container 2026-07-30 (msg 8643): the flow
@@ -2341,9 +2353,23 @@ def build_api(auth_url):
     # primitive against every agent container; this one cannot address them.
 
     def _login_pending(user):
-        return _docker("inspect", "-f", "{{.State.Running}}",
+        """A login is pending while its tmux SESSION is alive -- not while a
+        container with that name exists. The two came apart on the success
+        path: the container outlived the flow, `docker inspect` kept saying
+        "running", and start refused a re-login on a login that was over. A
+        container whose session is gone is residue, and residue must never be
+        the thing that strands a user; the cancel button that was their only
+        way out is rendered only while the UI believes a login is pending."""
+        return _docker("exec", login_container_name(user), "tmux",
+                       "has-session", "-t", "login",
+                       check=False, capture=True).returncode == 0
+
+    def _login_container(user):
+        """Any container by that name, running or exited -- what has to be
+        REMOVED, which is a wider question than what is pending."""
+        return _docker("inspect", "-f", "{{.State.Status}}",
                        login_container_name(user), check=False,
-                       capture=True).stdout.strip() == "true"
+                       capture=True).returncode == 0
 
     @guarded
     async def login_start(request, p, conn):
@@ -2353,7 +2379,7 @@ def build_api(auth_url):
                 f"cancel it first (one login at a time; two flows would race "
                 f"on one credential file)")
         _docker("rm", "-f", login_container_name(p["user"]), check=False,
-                capture=True)   # a stopped leftover holds the name
+                capture=True)   # a finished or stopped login holds the name
         ensure_login_home(p["user"], DEFAULT_IMAGE)
         env = dict(os.environ, SEED=_SEED_BASE)
         subprocess.run(login_bg_argv(p["user"], DEFAULT_IMAGE, DEFAULT_NETWORK),
@@ -2365,9 +2391,12 @@ def build_api(auth_url):
     async def login_status(request, p, conn):
         """The pending login as a READING: the credential file fresh, the pane
         fresh. Completion is the FILE appearing -- when it has, the container
-        is done being useful and is removed here, on observation."""
+        is done being useful and is removed here, on observation. The removal
+        covers an EXITED container too: the container ends itself on the
+        credential now, so reaping only what still runs would leave the
+        finished one holding the name against the next login."""
         out = dict(claude_login_state(p["user"]))
-        if out["present"] and _login_pending(p["user"]):
+        if out["present"] and _login_container(p["user"]):
             _docker("rm", "-f", login_container_name(p["user"]), check=False,
                     capture=True)
             _audit("LOGIN_DONE", user=p["user"])
