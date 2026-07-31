@@ -2306,7 +2306,9 @@ async def wake_ws(ws: WebSocket):
     # as fatal and exits rather than hot-looping, which is what makes refusing
     # safe.
     if not rooms:
-        await ws.send_json({"error": "no_rooms",
+        # retry:true marks the ONE recoverable refusal on this socket -- the
+        # wire says which family it is, so no client has to keep a list.
+        await ws.send_json({"error": "no_rooms", "retry": True,
                             "detail": "this token holds no rooms, so no ring "
                                       "could ever reach this waiter -- attach a "
                                       "room to the token, then re-arm"})
