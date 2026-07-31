@@ -193,6 +193,20 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.73 PRUNE ERASES AN IDENTITY, NOT A LABEL. The purge control takes an
+agents.id and resolves the name from it, never the other way: a bare name
+cannot say WHICH history it means, and the day a label carries two, the
+name-keyed delete took the survivor's messages as collateral -- measured, 2 of
+2, before the fix. The wire stays name-friendly: DELETE /agents/<name> still
+works while the name means exactly one identity, and refuses with both ids
+listed when it means two. Received direct mail carries no identity column, so
+under a reused name it is left put and counted rather than guessed at --
+unambiguous-or-leave, the same rule as every resolver. And join() now stamps
+the membership with the identity from its token: the backfill filled
+members.agent_id while join kept inserting NULL -- the third
+writer-never-moved defect this cycle -- so pruning a retired identity used to
+take the live successor's SEAT along with the wrong messages.
+
 0.2.72 A MINT ATTACHES ITS ROOMS OR DOES NOT HAPPEN. The operator's first real
 --login install died on its last step: the room attach POSTed to a route that
 takes PATCH, a call that could never succeed anywhere -- and every stub-broker
