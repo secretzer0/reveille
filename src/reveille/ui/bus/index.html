@@ -841,6 +841,24 @@ const attachments=[];           // [{name,url}] pending on the composer
 // corrupt upload. SVG is served as a download on purpose -- image to a human,
 // script host to a browser -- so it is not here.
 const IMG_RE=/\.(png|jpe?g|gif|webp)$/i;
+// AN ATTACHMENT URL IS FOREIGN INPUT, and it was the last unescaped one on this
+// page -- interpolated raw into href, src and data-src through a variable named
+// `safe`, which was the only thing making it look checked. send() accepts
+// attachments from any bus client, the broker stores the url verbatim, and the
+// result renders through innerHTML into the feed of everyone in the room, on
+// the origin that also manages agents. So a message could put an onerror=
+// handler or a javascript: target into the operator's browser with their
+// session behind it (architect, msg 8816).
+// TWO CONDITIONS, BOTH REQUIRED. It must be one of OURS -- a broker-relative
+// /files/ path, which is the only shape /upload ever mints -- and it is escaped
+// on the way into the attribute like every other foreign value. A scheme
+// allowlist alone would not do: these are same-origin paths, so the check that
+// means anything is the SHAPE, not the protocol. Anything else returns empty
+// and the caller renders text, never a link.
+// The server should refuse these too, and that is senior-dev's half; this one
+// is the half that still holds the day the server's constraint widens.
+const FILE_URL_RE=/^\/files\/[A-Za-z0-9._-]+$/;
+function attUrl(u){return FILE_URL_RE.test(u||'')?esc(u+qs()):'';}
 
 async function uploadFile(f){
  const r=await fetch('/upload'+qs()+'&name='+encodeURIComponent(f.name),
@@ -854,8 +872,9 @@ function renderAttchips(){
  const w=$('attchips');w.innerHTML='';
  attachments.forEach((a,i)=>{
   const t=document.createElement('div');t.className='attTile';t.title=a.name;
-  if(IMG_RE.test(a.url)){
-   t.innerHTML='<img src="'+a.url+qs()+'" alt="">';
+  const tile=attUrl(a.url);
+  if(tile&&IMG_RE.test(a.url)){
+   t.innerHTML='<img src="'+tile+'" alt="">';
   }else{
    const ext=(a.name.includes('.')?a.name.split('.').pop():'').toUpperCase().slice(0,4)||'FILE';
    t.innerHTML='<span class="ext">'+esc(ext)+'</span><span class="fn">'+esc(a.name)+'</span>';
@@ -963,11 +982,17 @@ function matches(m){
 function attHtml(list){
  if(!list||!list.length)return '';
  return '<div class="atts">'+list.map(a=>{
-  const safe=a.url+qs();
+  const safe=attUrl(a.url);
+  const label=esc(a.name||a.url||'attachment');
+  // NOT ONE OF OURS: say so in place, as text. Dropping it silently would read
+  // as a message that never had an attachment, and the reader would have no
+  // way to tell a refused link from an absent one.
+  if(!safe)return '<span class="attlink bad" title="not a file this broker '+
+   'stored -- shown as text, not as a link">'+label+'</span>';
   if(IMG_RE.test(a.url))
    return '<a href="'+safe+'" target="_blank" rel="noopener" title="open full size">'
      +'<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'"></a>';
-  const link='<a class="attlink" href="'+safe+'" download>'+esc(a.name||a.url)+'</a>';
+  const link='<a class="attlink" href="'+safe+'" download>'+label+'</a>';
   if(/\.(md|markdown)$/i.test(a.url)&&(a.bytes||0)<300000)
    return link+'<div class="mdview" data-src="'+safe+'">rendering&hellip;</div>';
   return link;
@@ -981,7 +1006,15 @@ function mdToHtml(src){
   .replace(/`([^`]+)`/g,'<code>$1</code>')
   .replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>')
   .replace(/(^|\W)\*([^*\s][^*]*)\*/g,'$1<i>$2</i>')
-  .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // A LINK TARGET OUT OF A MARKDOWN ATTACHMENT IS FOREIGN TOO. The body is
+  // esc()'d first, so nothing can break out of the attribute -- but escaping
+  // says nothing about the scheme, and href acts on the scheme. http, https
+  // and site-relative only; anything else stays on screen as the markdown
+  // source it was, which shows the reader the target instead of hiding it
+  // behind link text somebody else chose.
+  .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,(m,txt,u)=>
+   /^(https?:\/\/|\/)/i.test(u)
+    ? '<a href="'+u+'" target="_blank" rel="noopener">'+txt+'</a>' : m);
  let out='',inCode=false,list=null,inTable=false;
  const closeBlocks=()=>{
   if(list){out+='</'+list+'>';list=null;}

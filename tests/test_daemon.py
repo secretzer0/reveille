@@ -624,23 +624,49 @@ def test_esc_is_safe_where_it_is_actually_used():
         "quote escaping must follow the innerHTML round-trip, never precede it"
 
 
-def test_the_only_href_this_page_builds_checks_its_scheme():
+def test_every_url_this_page_builds_is_checked_not_just_escaped():
     """esc() makes a string safe to SIT in an attribute and says nothing about
-    what the browser DOES with it -- href acts on the scheme, so a javascript:
-    or data: URL is escaped, well-formed and still one click from executing.
+    what the browser DOES with it: href and src act on the value.
 
-    The page builds exactly one href from a value it did not author: the login
-    URL the launcher relays. Server-supplied is a property of today's parse,
-    not a guarantee (architect, msg 8813)."""
+    THIS GATE USED TO ASSERT A FALSE PROPERTY. It said "the page builds exactly
+    one href from a value it did not author" and enforced that by counting one
+    SPELLING -- the esc() form -- so it could not see the three attachment
+    sites written with a bare variable, which is where the stored-XSS path ran
+    (architect, msg 8816). A gate that names a property and then counts one way
+    of writing it is the quoted-line failure one level up, and the assertion's
+    own words are what made the gap invisible.
+
+    So: enumerate EVERY built href/src/data-src by its interpolated expression
+    and pin the whole set. A new one in any spelling changes the set and fails
+    here, which is the only way this stays true as the page grows.
+    """
+    sites = {}
+    for expr in re.findall(r'(?:href|src|data-src)="\'\+([A-Za-z_]+)', PAGE):
+        sites[expr] = sites.get(expr, 0) + 1
+    assert sites == {"esc": 1, "safe": 4, "tile": 1, "u": 1}, \
+        f"a URL interpolation appeared or moved: {sites} -- every one needs a check"
+    # Each name above, and the check that makes it safe. attUrl is the shape
+    # check: /files/ paths are same-origin, so a scheme allowlist would prove
+    # nothing there -- what matters is that the broker minted it.
+    assert "const FILE_URL_RE=/^\\/files\\/[A-Za-z0-9._-]+$/;" in PAGE, \
+        "attachment urls must be pinned to the shape /upload actually mints"
+    assert "function attUrl(u){return FILE_URL_RE.test(u||'')?esc(u+qs()):'';}" in PAGE, \
+        "attUrl must both shape-check AND escape -- either alone is not enough"
+    for name in ("const safe=attUrl(a.url);", "const tile=attUrl(a.url);"):
+        assert name in PAGE, f"{name} -- the raw url must never reach an attribute"
+    # A refused attachment renders as TEXT, in place. Dropping it silently would
+    # read as a message that never had one.
+    assert 'return \'<span class="attlink bad"' in PAGE, \
+        "an attachment url that fails the check is shown as text, not swallowed"
+    # The markdown renderer's link target is foreign too: escaped already, but
+    # escaping says nothing about the scheme.
+    md = PAGE[PAGE.index("function mdToHtml"):]
+    assert "/^(https?:\\/\\/|\\/)/i.test(u)" in md[:md.index("let out=")], \
+        "a markdown link target must be scheme-checked before it becomes an href"
+    # And the login URL, which is where this gate started.
     sec = PAGE[PAGE.index("async function refreshLoginSection"):]
-    sec = sec[:sec.index("\nasync function ") + 1] if "\nasync function " in sec[1:] else sec
-    assert PAGE.count('href="\'+esc(') == 1, \
-        "a second built href needs its own scheme check -- this gate covers one"
     assert "/^https:\\/\\//i.test(" in sec, \
         "the login URL must be scheme-checked, not merely escaped"
-    # The refusal renders the URL as TEXT rather than dropping it: a reader who
-    # can see what came back can judge it, and a silent disappearance would
-    # look like the login flow simply failing.
     assert "will not open: '+esc(st.url)" in sec, \
         "a rejected URL must still be shown, as text"
 
