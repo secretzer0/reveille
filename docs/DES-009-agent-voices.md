@@ -96,6 +96,19 @@ The map lives in a `voices.json` the TTS service reads: name, clip path, knobs.
 a schema for something that will be touched six times, and an unowned voice is
 not a fact the hive needs.
 
+**Humans are speakers too** (operator, msg 8909). A web user's message is
+synthesized like any other, from their own sample where they have supplied one,
+so the other people in a room hear them rather than reading them alone. The name
+is the key either way; nothing in the resolution above distinguishes a person
+from an agent, and nothing should.
+
+**RULED: nobody hears themselves.** A listener never plays audio whose sender is
+their own name — suppressed in the **browser**, which is the only place that
+knows who is watching. The server still synthesizes the message, because
+everyone else in the room needs it: this is a rendering rule, not a synthesis
+rule, and putting it in the worker would make one listener's preference decide
+what exists for the rest.
+
 ## 6. RULED: audio is real time and the bus is not
 
 This room's messages reach four thousand characters. Spoken whole, one message
@@ -148,5 +161,6 @@ Unversioned branch, three commits, gates named:
   which time the synthesis half already exists.
 - **No per-user voice preferences server-side.** Mute and volume are the
   browser's, where they cost nothing.
-- **No speaking of human messages by default.** The operator reading their own
-  room does not need to hear themselves typed back.
+- **No speaking a message back to its own author.** Humans are spoken to
+  everyone else (§5); the author is the one listener who already knows what they
+  said.
