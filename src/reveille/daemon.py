@@ -193,6 +193,26 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.69 THE INSTALLER IS A WIZARD, AND THE LIVE DATABASE GOT ITS HISTORY BACK.
+`reveille init` with nothing exported now asks for everything it needs -- broker
+url (defaulting to the fleet's), agent type from a menu, agent name suggested
+from the type, YOUR username named as yours -- with a flag or env var skipping
+its own prompt and --no-prompt for scripts. The type seeds a starter CLAUDE.md
+naming the role and the boot ritual, and never overwrites one. Minting for an
+existing name warns BEFORE the password prompt that it supersedes: re-running on
+a second machine moves an agent, it does not clone one. Separately, two halves
+earlier cutovers shipped alone, found by reading a copy of the operator's live
+database rather than the suite: send() never wrote sender_agent_id (39 messages
+unattributed within an hour of the backfill deploy), and the state-note rescope
+could only move a note whose minting token still existed -- tokens rotate on
+every re-mint, so 47 of 50 notes were stranded at dead scopes, unreachable by
+the readers that moved in 0.2.67. The writer now resolves the identity itself
+and the rescope resolves through the AUTHOR, whose name survives rotation.
+_upgrade_v19 repairs already-migrated databases: on the operator's copy,
+47 stranded notes -> 0, 39 unattributed messages -> 0, humans stay NULL because
+a person is not an agent identity. One of the evening's own gates had asserted
+the stranding as the design; it is replaced by two that split what it conflated.
+
 0.2.68 THE INSTALLER SAYS WHOSE USERNAME IT IS ASKING FOR, AND THE MIGRATION
 STOPPED ASKING ONE QUESTION TWICE. `reveille init --login` prompted "broker
 username" -- and two identities are in play, only one of which has a password:
