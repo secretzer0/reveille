@@ -101,21 +101,46 @@ def test_a_state_note_moves_from_the_token_to_the_identity(tmp_path):
         == f"agent:{aid}"
 
 
-def test_a_note_whose_token_is_gone_keeps_its_scope(tmp_path):
-    """The other half, and it is a refusal too: with no token row there is
-    nothing to resolve the note through, and guessing would attach one agent's
-    memory to another. An orphaned note stays orphaned rather than becoming
-    somebody else's."""
+def test_a_note_whose_token_is_gone_still_moves_to_its_author(tmp_path):
+    """THIS TEST USED TO ASSERT THE DEFECT.
+
+    It said a note whose token had vanished should keep its old scope, and it
+    passed while 47 of the operator's 50 state notes were being stranded exactly
+    that way -- tokens are SUPERSEDED on every re-mint, so "the token is gone" is
+    the normal state of any note older than one re-provision, not an edge case.
+    Once the readers moved to the identity, those rows were reachable by nobody.
+
+    The author's NAME survives every token rotation, and pre-migration history is
+    one identity per name by definition, so that is the durable link.
+    """
     conn, path = at_v17(tmp_path)
     msg(conn, "reveille-devops")
-    conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
-                 "created_ns) VALUES('m1','state','agent:gone','x','reveille-devops',"
-                 "'live',1)")
     store.claim_unresolved_names(conn, "u1")
+    aid = conn.execute("SELECT id FROM agents WHERE name='reveille-devops'").fetchone()[0]
+    # no tokens row at all: the credential that wrote this is long superseded
+    conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
+                 "created_ns) VALUES('m1','state','agent:dead-token','x',"
+                 "'reveille-devops','live',1)")
     back_to_17(conn)
     assert store.migrate(conn, path) == store.SCHEMA_VERSION
     assert conn.execute("SELECT scope FROM memories WHERE uid='m1'").fetchone()[0] \
-        == "agent:gone"
+        == f"agent:{aid}"
+
+
+def test_a_note_whose_author_is_not_an_agent_stays_put(tmp_path):
+    """The refusal half, unchanged: with no agents row for the author there is
+    nothing to resolve to, and inventing one is what the backfill refuses at
+    migration time. It stays where it is rather than being guessed at."""
+    conn, path = at_v17(tmp_path)
+    msg(conn, "reveille-devops")
+    store.claim_unresolved_names(conn, "u1")
+    conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
+                 "created_ns) VALUES('m2','state','agent:dead','x','someone-else',"
+                 "'live',1)")
+    back_to_17(conn)
+    assert store.migrate(conn, path) == store.SCHEMA_VERSION
+    assert conn.execute("SELECT scope FROM memories WHERE uid='m2'").fetchone()[0] \
+        == "agent:dead"
 
 
 def test_reads_and_members_carry_the_identity_too(tmp_path):

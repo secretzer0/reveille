@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -873,6 +873,33 @@ def _upgrade_v16(conn, db_path):
         conn.execute("PRAGMA user_version=17")
 
 
+def _rescope_state_notes(conn):
+    """Move state notes from agent:<token_id> to agent:<agent_id>.
+
+    RESOLVED THROUGH THE AUTHOR, NOT THE TOKEN, and that is the whole repair.
+    The first version joined tokens, so a note could only move if the token that
+    minted it still existed -- and tokens are SUPERSEDED on every re-mint, which
+    is the normal lifecycle of a re-provisioned agent. Measured on the operator's
+    database: 47 of 50 state notes sat at a scope whose token was long gone,
+    including 37 belonging to the architect, and once the readers moved to the
+    identity those rows were reachable by nobody.
+
+    memories.author is the agent's NAME and it survives every token rotation, so
+    it is the durable link. Pre-migration history is one identity per name by
+    definition (DES-007 6.3), which is exactly what makes this resolution honest
+    rather than a guess. A note whose author has no agents row stays where it is:
+    there is nothing to resolve it to, and inventing one is what the backfill
+    refuses at migration time.
+    """
+    return conn.execute("""
+        UPDATE memories SET scope = 'agent:' || (
+            SELECT a.id FROM agents a WHERE a.name = memories.author
+             ORDER BY a.retired_ns IS NULL DESC, a.created_ns LIMIT 1)
+         WHERE kind='state' AND scope LIKE 'agent:%'
+           AND scope NOT IN (SELECT 'agent:' || id FROM agents)
+           AND EXISTS (SELECT 1 FROM agents a WHERE a.name = memories.author)""").rowcount
+
+
 def _upgrade_v17(conn, db_path):
     """v17 -> v18: history carries the IDENTITY, not only the label (DES-007 6).
 
@@ -937,15 +964,7 @@ def _upgrade_v17(conn, db_path):
         # token's bound name; a note whose token is gone keeps its old scope,
         # because there is nothing left to resolve it through and guessing would
         # attach one agent's memory to another.
-        conn.execute("""
-            UPDATE memories SET scope = 'agent:' || (
-                SELECT MIN(a.id) FROM agents a
-                  JOIN tokens t ON t.agent_name = a.name
-                 WHERE 'agent:' || t.id = memories.scope)
-             WHERE scope LIKE 'agent:%'
-               AND EXISTS (SELECT 1 FROM agents a
-                             JOIN tokens t ON t.agent_name = a.name
-                            WHERE 'agent:' || t.id = memories.scope)""")
+        _rescope_state_notes(conn)
         # THE RECOUNT CALLS THE REFUSAL, it does not re-spell it. The first
         # version asked the same question in fresh SQL and got a different
         # answer: the refusal excludes humans (a person is not an agent
@@ -981,16 +1000,37 @@ def _upgrade_v18(conn, db_path):
     second spelling of the same move.
     """
     with tx(conn):
-        conn.execute("""
-            UPDATE memories SET scope = 'agent:' || (
-                SELECT MIN(a.id) FROM agents a
-                  JOIN tokens t ON t.agent_name = a.name
-                 WHERE 'agent:' || t.id = memories.scope)
-             WHERE scope LIKE 'agent:%'
-               AND EXISTS (SELECT 1 FROM agents a
-                             JOIN tokens t ON t.agent_name = a.name
-                            WHERE 'agent:' || t.id = memories.scope)""")
+        _rescope_state_notes(conn)
         conn.execute("PRAGMA user_version=19")
+
+
+
+def _upgrade_v19(conn, db_path):
+    """v19 -> v20: repair the two halves the writers never learned.
+
+    Both are the same shape and both were measured on the live database rather
+    than reasoned about:
+
+    STATE NOTES: v17 and v18 could only rescope a note whose minting token still
+    existed, and tokens are superseded on every re-mint. 47 of 50 notes stayed at
+    a dead token's scope, unreachable by anyone once the readers moved to the
+    identity. Resolving through the AUTHOR fixes them, because a name outlives
+    its tokens.
+
+    SENDERS: v18 filled messages.sender_agent_id for all of history while send()
+    went on inserting NULL, so every message written after that deploy was
+    unattributed -- 39 within the hour. The write path is fixed in this same
+    commit; this catches the gap it already produced.
+    """
+    with tx(conn):
+        _rescope_state_notes(conn)
+        conn.execute("""
+            UPDATE messages SET sender_agent_id = (
+                SELECT a.id FROM agents a WHERE a.name = messages.sender
+                 ORDER BY a.retired_ns IS NULL DESC, a.created_ns LIMIT 1)
+             WHERE sender_agent_id IS NULL
+               AND EXISTS (SELECT 1 FROM agents a WHERE a.name = messages.sender)""")
+        conn.execute("PRAGMA user_version=20")
 
 
 def _upgrade_v0(conn, db_path):
@@ -1073,7 +1113,7 @@ def _upgrade_v0(conn, db_path):
 # nothing able to say so. v1 has no entry (it never shipped) and v6 is reachable
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
-             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)}
+             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2264,9 +2304,17 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
     now = time.time_ns()
     with tx(conn):
         cur = conn.execute(
-            "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, body, room, ts_ns) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (thread_id, parent_id, sender, recipient, subject, body, room, now))
+            "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, "
+            "body, room, sender_agent_id, ts_ns) VALUES(?,?,?,?,?,?,?,?,?)",
+            (thread_id, parent_id, sender, recipient, subject, body, room,
+             # THE WRITER LEARNS THE IDENTITY TOO. The v18 backfill filled this
+             # column for all of history and send() went on inserting NULL, so
+             # every message after that deploy was unattributed -- 39 of them on
+             # the operator's box within the hour. A migration that fills a
+             # column while the write path ignores it is the same defect as a
+             # data move whose readers did not move: the two halves of one
+             # cutover, shipped apart.
+             agent_id_for(conn, sender), now))
         mid = cur.lastrowid
         # Manual FTS sync (DES-001 S1): external-content tables index nothing on their
         # own; every insert here must be mirrored or the message is unsearchable.
@@ -2838,6 +2886,21 @@ def _chain_info(conn, row):
         if depth > 100:                        # a cycle would be a bug, not a chain
             break
     return depth, fork
+
+
+def agent_id_for(conn, name):
+    """The identity behind a bus NAME, or None for a human or an unknown name.
+
+    Pre-migration history is one identity per name by definition (DES-007 6.3),
+    and going forward the live row is the one that matters -- so: prefer the live
+    instance, then the oldest, deterministically. None is a legitimate answer and
+    means "not an agent": a human's messages carry a name and no identity, and
+    inventing one for them is the failure the backfill refuses at migration time.
+    """
+    row = conn.execute(
+        "SELECT id FROM agents WHERE name=? "
+        "ORDER BY retired_ns IS NULL DESC, created_ns LIMIT 1", (name,)).fetchone()
+    return row["id"] if row else None
 
 
 def agent_scope(conn, token_id):
