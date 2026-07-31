@@ -269,8 +269,9 @@ class Minting(http.server.BaseHTTPRequestHandler):
         return self._json(404, {})
 
     def do_GET(self):
-        if self.path == "/me":
-            return self._json(200, {"rooms": [{"id": "r1", "name": "Reveille2.0"}]})
+        if self.path == "/rooms":
+            return self._json(200, {"owned": [{"id": "r1", "name": "Reveille2.0"}],
+                                    "member": [], "public": []})
         return self._json(200, {"agents": []})
 
     def log_message(self, *a):
@@ -410,7 +411,7 @@ def test_every_call_the_installer_makes_has_a_route_that_takes_it():
     routes = daemon_routes()
     installer_calls = [                       # what cli.py actually sends
         ("POST", "/login"),
-        ("GET", "/me"),
+        ("GET", "/rooms"),
         ("POST", "/tokens"),
         ("POST", "/logout"),
         ("GET", "/presence"),                 # verify()
@@ -448,3 +449,48 @@ def test_the_mint_attaches_its_rooms_or_does_not_happen(tmp_path):
     assert conn.execute("SELECT count(*) FROM tokens WHERE agent_id IN "
                         "(SELECT id FROM agents WHERE name='dev2')").fetchone()[0] == 0, \
         "a failed attach left the minted token behind"
+
+
+def test_the_room_picker_shows_owners_and_defaults_to_yours():
+    """Operator format (msg 9022): yours plainly, public as "owner -> name" --
+    per-owner room names are only unambiguous with the owner shown. And Enter
+    means YOUR rooms, not every public room on the broker: the first real run
+    attached a stranger's room by default, and that breadth must be a choice."""
+    payload = {"owned": [{"id": "r1", "name": "Reveille2.0"}],
+               "member": [{"id": "r2", "name": "OverSiteAI"}],
+               "public": [{"id": "r3", "name": "flappy birds", "owner_name": "bill"}]}
+    text, ordered, n_mine = cli.room_listing(payload)
+    assert "bill -> flappy birds" in text
+    assert "-----" in text
+    assert cli.choose_rooms("", ordered, n_mine) == ["r1", "r2"]     # Enter = yours
+    assert cli.choose_rooms("3", ordered, n_mine) == ["r3"]
+    assert cli.choose_rooms("Reveille2.0, 3", ordered, n_mine) == ["r1", "r3"]
+    import pytest as _p
+    with _p.raises(RuntimeError, match="no such room"):
+        cli.choose_rooms("narnia", ordered, n_mine)
+
+
+def test_an_ephemeral_run_persists_itself_before_the_hook(monkeypatch, tmp_path):
+    """The operator's run ended in `reveille-agent: command not found`: a uvx
+    run is ephemeral, so its console scripts live in a GC-able cache and the
+    Stop hook had captured that cache path. If reveille-agent is not on PATH,
+    init persists the install with the uv that is necessarily running it --
+    BEFORE the hook writes a command path into settings.json."""
+    calls = []
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda n: "/usr/bin/uv" if n == "uv" else None)
+
+    class R:
+        returncode = 0
+        stdout = stderr = ""
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda argv, **k: calls.append(argv) or R())
+    step = cli.ensure_on_path()
+    assert calls and calls[0][:3] == ["/usr/bin/uv", "tool", "install"]
+    assert cli.GIT_SOURCE in calls[0]
+    assert "ephemeral" in step
+    # and a persistent install is left alone
+    monkeypatch.setattr(cli.shutil, "which", lambda n: "/home/x/.local/bin/" + n)
+    calls.clear()
+    assert cli.ensure_on_path() is None
+    assert not calls

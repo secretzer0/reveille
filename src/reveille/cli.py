@@ -152,7 +152,7 @@ def _get(url, path, cookie, timeout=15):
         return json.loads(r.read().decode() or "{}")
 
 
-def mint_token(url, user, password, agent, rooms=None, tier="state"):
+def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None):
     """Log in, mint a token BOUND to `agent`, attach rooms. Returns
     (secret, rooms-attached, note) or raises RuntimeError with what to fix.
 
@@ -167,17 +167,21 @@ def mint_token(url, user, password, agent, rooms=None, tier="state"):
         raise RuntimeError(f"login failed ({code}): {body.get('error') or body}")
     cookie = cookie.split(";", 1)[0]
 
-    me = _get(url, "/me", cookie)
-    have = {r["name"]: r["id"] for r in me.get("rooms", [])}
-    if not have:
+    payload = _get(url, "/rooms", cookie)
+    text, ordered, n_mine = room_listing(payload)
+    if not ordered:
         raise RuntimeError(
-            f"{user} is in no rooms, so a token minted here would reach nothing. "
-            f"Create or join a room first.")
-    want = [r.strip() for r in (rooms or "").split(",") if r.strip()] or list(have)
-    unknown = [r for r in want if r not in have and r not in have.values()]
-    if unknown:
-        raise RuntimeError(f"no such room for {user}: {', '.join(unknown)}. "
-                           f"Available: {', '.join(have)}")
+            f"{user} can reach no rooms, so a token minted here would reach "
+            f"nothing. Create or join a room first.")
+    if rooms:
+        want_ids = choose_rooms(rooms, ordered, n_mine)
+    elif pick:
+        print(f"\nRooms this agent can be assigned to:\n{text}")
+        want_ids = choose_rooms(pick(), ordered, n_mine)
+    else:
+        want_ids = [r["id"] for r in ordered[:n_mine]]
+    by_id = {r["id"]: r["name"] for r in ordered}
+    want = [by_id[i] for i in want_ids]
 
     # ONE call: the mint attaches its rooms in the same broker transaction, or
     # nothing exists afterwards (ruling 9010). The two-step version POSTed its
@@ -189,7 +193,7 @@ def mint_token(url, user, password, agent, rooms=None, tier="state"):
     code, tok, _ = _post(url, "/tokens",
                          {"agent_name": agent, "label": f"native {agent}",
                           "mem_tier": tier,
-                          "rooms": [have.get(r, r) for r in want]}, cookie)
+                          "rooms": want_ids}, cookie)
     if code != 200 or not tok.get("secret"):
         raise RuntimeError(f"mint failed ({code}): {tok.get('error') or tok}")
     attached = want
@@ -205,6 +209,67 @@ def mint_token(url, user, password, agent, rooms=None, tier="state"):
     if tok.get("superseded"):
         note = f" (superseded {len(tok['superseded'])} previous token(s) for {agent})"
     return tok["secret"], attached, note
+
+
+def room_listing(payload):
+    """(display text, ordered room list) from GET /rooms. Yours first, then
+    public rooms as "owner -> name" -- per-owner room names are only unambiguous
+    with the owner shown (the operator's own format, msg 9022)."""
+    mine = list(payload.get("owned", [])) + list(payload.get("member", []))
+    pub = list(payload.get("public", []))
+    lines, ordered = [], []
+    for r in mine:
+        ordered.append(r)
+        lines.append(f"  {len(ordered)}. {r['name']}")
+    if pub:
+        lines.append("  -----")
+        for r in pub:
+            ordered.append(r)
+            lines.append(f"  {len(ordered)}. {r.get('owner_name') or '?'} -> {r['name']}")
+    return "\n".join(lines), ordered, len(mine)
+
+
+def choose_rooms(answer, ordered, n_mine):
+    """Comma-separated numbers or names -> room ids. Empty = YOUR rooms only --
+    not every public room on the broker: the first real run attached a stranger's
+    room by default, and a grant that broad should be a choice, not a silence."""
+    answer = (answer or "").strip()
+    if not answer:
+        return [r["id"] for r in ordered[:n_mine]]
+    picked = []
+    by_name = {r["name"]: r for r in ordered}
+    for part in answer.split(","):
+        part = part.strip()
+        if part.isdigit() and 1 <= int(part) <= len(ordered):
+            picked.append(ordered[int(part) - 1]["id"])
+        elif part in by_name:
+            picked.append(by_name[part]["id"])
+        else:
+            raise RuntimeError(f"no such room: {part!r}")
+    return picked
+
+
+def ensure_on_path():
+    """A uvx run is EPHEMERAL: its console scripts live in a cache that can be
+    garbage-collected, so nothing this run installed survives it -- the closing
+    `reveille-agent <name>` was command-not-found on the operator's first real
+    run, and worse, the Stop hook had captured the CACHE path, which dies at the
+    next uv cache prune. If reveille-agent is not on PATH, make the install
+    persistent with the uv that is necessarily running us. Returns a step line,
+    or None when already persistent."""
+    if shutil.which("reveille-agent"):
+        return None
+    uv = shutil.which("uv") or "uv"
+    r = subprocess.run([uv, "tool", "install", "--force", "--from", GIT_SOURCE,
+                        "reveille"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"uv tool install failed: {(r.stderr or r.stdout).strip()}")
+    # this process's PATH may predate ~/.local/bin; the hook installer resolves
+    # commands with which(), so it must see the durable copies
+    local_bin = os.path.expanduser("~/.local/bin")
+    if local_bin not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
+    return f"persisted: uv tool install reveille -> {local_bin} (uvx runs are ephemeral)"
 
 
 def read_password(user, prompt=None):
@@ -224,6 +289,7 @@ def read_password(user, prompt=None):
 # so scripting is unchanged.
 
 DEFAULT_URL = "https://reveille.mythos.org"
+GIT_SOURCE = "git+https://github.com/secretzer0/reveille"
 
 # The broker's own rule, mirrored so a bad name is refused at the prompt rather
 # than after a password has been typed.
@@ -345,8 +411,10 @@ def cmd_init(a):
                   f"one, it is superseded:\n  the machine holding it stops working "
                   f"on its next call. Two machines means two names.")
         try:
-            token, attached, minted = mint_token(url, user, read_password(user),
-                                                 name, a.rooms, a.tier)
+            token, attached, minted = mint_token(
+                url, user, read_password(user), name, a.rooms, a.tier,
+                pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
+                     if wizard else None)
         except RuntimeError as e:
             print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
                   file=sys.stderr)
@@ -383,6 +451,9 @@ def cmd_init(a):
         return 1
 
     steps = []
+    persisted = ensure_on_path()
+    if persisted:
+        steps.append(persisted)
     if minted:
         steps.append(minted)
     have, found = already_registered(claude)
