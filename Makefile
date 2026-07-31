@@ -170,14 +170,20 @@ up:
 	  || { echo "FAILED: broker up on the host but NOT reachable as"; \
 	       echo "reveille-server on the $(SERVER_NETWORK) network -- every agent"; \
 	       echo "container is cut off from the bus"; exit 1; }
-	@# A DEPLOY IS BOTH HALVES. The launcher is the second deploy unit and was
-	@# the unverified one: it runs from a pinned clone that nothing restarts on
-	@# merge, so a fix could be merged, reviewed and NOT RUNNING with nothing
-	@# saying so -- which is exactly what happened to the login-home crash, for
-	@# six reviews (msg 8681). Refuses only when the launcher ANSWERS and is
-	@# stale: an unreachable launcher is not this deploy's business, but a
-	@# reachable one running code older than main means you just shipped a
-	@# mismatched pair.
+	@# A DEPLOY IS BOTH HALVES, AND NOW IT DOES BOTH. The launcher is the second
+	@# deploy unit: it runs from a pinned clone that nothing restarts on merge,
+	@# so a fix could be merged, reviewed and NOT RUNNING with nothing saying so
+	@# -- which is what happened to the login-home crash, for six reviews (msg
+	@# 8681). The pin check caught that and then asked a human to run three
+	@# commands, which the operator hit twice in one evening and correctly asked
+	@# why it was not simply done. It is done here. deploy-launcher pins,
+	@# restarts by exact pid, and VERIFIES the launcher came back on the new
+	@# commit -- the one thing the instructions could not do, because the Stop
+	@# hook only respawns at the end of an agent turn and a box with no agent
+	@# running has nothing to bring it back.
+	@bash scripts/deploy-launcher || exit 1
+	@# The check stays, now as the assertion that the fix above worked rather
+	@# than as the thing that tells someone to go and do it.
 	@bash scripts/launcher-pin-check || exit 1
 	@echo "reveille up: proxy :$(PROXY_PORT) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
 

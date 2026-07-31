@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# THE SECOND HALF OF A DEPLOY, AS A COMMAND INSTEAD OF AS INSTRUCTIONS.
+#
+# `make up` deployed the broker and then REFUSED, telling the operator to run
+# three more commands by hand: pin, find the exact pid, kill it. The refusal was
+# right -- the launcher really was three versions behind -- but a check that
+# names the fix and then makes a human perform it is a rule where a control
+# belongs. This is the control.
+#
+# It does what the README told a person to do, in the same order and with the
+# same refusals, plus the one thing instructions could not: it VERIFIES the
+# launcher came back on the new commit, and starts it itself if nothing did.
+# That gap is real rather than theoretical -- the Stop hook respawns the
+# launcher at the end of an agent's turn, so a box with no agent running has
+# nothing to bring it back, and "kill it and trust the hook" would leave the
+# launcher down for as long as nobody happened to run a session.
+#
+# Idempotent: a launcher already serving the pinned commit is left alone. That
+# matters because this now runs inside `make up`, which people re-run.
+set -uo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PIN="${REVEILLE_LAUNCH_REPO:-$HOME/.reveille/launcher-src}"
+HEALTH="${LAUNCHER_HEALTH:-http://127.0.0.1:8766/health}"
+AUTH_URL="${REVEILLE_AUTH_URL:-http://127.0.0.1:8765}"
+WAIT="${LAUNCHER_WAIT:-20}"
+
+commit_of() { curl -fsS --max-time 3 "$HEALTH" 2>/dev/null \
+  | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'; }
+
+# NOT RUNNING IS NOT THIS COMMAND'S BUSINESS, same rule the pin check already
+# follows: a host that never ran a launcher is deploying a broker, and refusing
+# there would turn a working deploy into a failed one.
+if [ -z "$(curl -fsS --max-time 3 "$HEALTH" 2>/dev/null)" ]; then
+  echo "launcher: not answering at $HEALTH -- broker deploy stands, launcher untouched"
+  exit 0
+fi
+
+echo "launcher: pinning $PIN to origin/main"
+if ! (cd "$REPO" && uv run python scripts/reveille_launch.py pin --path "$PIN"); then
+  echo "REFUSED by pin -- read its message above. Nothing was restarted, so what"
+  echo "is serving is exactly what was serving before this command."
+  exit 1
+fi
+
+want="$(git -C "$PIN" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ "$(commit_of)" = "$want" ]; then
+  echo "launcher: already serving $want -- nothing to restart"
+  exit 0
+fi
+
+# The EXACT pid, matched on the script path rather than on the word "serve": a
+# blind pkill on this box would reach any python process whose cmdline happens
+# to contain it.
+pids="$(pgrep -f "reveille_launch\.py serve" || true)"
+if [ -z "$pids" ]; then
+  echo "launcher: answering but no serve process found -- something else is on"
+  echo "$HEALTH. Refusing to guess; nothing restarted."
+  exit 1
+fi
+echo "launcher: stopping $(echo "$pids" | tr '\n' ' ')(was $(commit_of), want $want)"
+# shellcheck disable=SC2086
+kill $pids
+
+# The Stop hook respawns it at the end of an agent turn. Wait for that; if no
+# agent is running there is nothing to wait for, so start it ourselves from the
+# PINNED tree -- never from this checkout, which is what made `git checkout` a
+# deployment once already (msg 8568).
+for _ in $(seq 1 "$WAIT"); do
+  [ "$(commit_of)" = "$want" ] && { echo "launcher: back on $want"; exit 0; }
+  sleep 1
+done
+
+echo "launcher: nothing respawned it in ${WAIT}s -- starting it from $PIN"
+py="$PIN/.venv/bin/python"; [ -x "$py" ] || py=python3
+lockdir="$(dirname "${REVEILLE_LAUNCH_DB:-$HOME/.reveille/launcher.db}")"
+mkdir -p "$lockdir"
+nohup "$py" "$PIN/scripts/reveille_launch.py" serve --auth-url "$AUTH_URL" \
+  >>"$lockdir/launcher.log" 2>&1 &
+for _ in $(seq 1 "$WAIT"); do
+  [ "$(commit_of)" = "$want" ] && { echo "launcher: back on $want"; exit 0; }
+  sleep 1
+done
+
+echo "REFUSED: the launcher did not come back on $want within $((WAIT * 2))s."
+echo "  Its log is $lockdir/launcher.log -- the broker deploy stands, but the"
+echo "  launcher half did not, which is the state this command exists to end."
+exit 1
