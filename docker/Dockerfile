@@ -9,6 +9,20 @@ ARG UID=1000
 ARG GID=1000
 
 ENV DEBIAN_FRONTEND=noninteractive
+# A UTF-8 LOCALE, OR THE TERMINAL SPELLS EVERY MULTIBYTE CHARACTER "_".
+#
+# LANG, LC_ALL and LC_CTYPE were all EMPTY, so a tmux CLIENT fell back to ASCII
+# and substituted an underscore for anything it could not represent. The trap is
+# that the damage is invisible from inside: `tmux capture-pane` prints the cells
+# it stores, which were correct UTF-8 the whole time, so every check run in the
+# container said the text was fine while the browser showed em dashes and arrows
+# as underscores. Three fixes were spent on the renderer and the font stack
+# before the characters were captured and turned out to be U+2014 and U+2192 --
+# ordinary, and never a font's fault.
+#
+# C.UTF-8 rather than a generated en_US.UTF-8: it needs no locales package, no
+# locale-gen step, and carries no language policy into someone else's agent.
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # build-essential/pkg-config/cmake: standard C/C++ work is part of what an agent
 # gets asked to do; a dev image without a C toolchain fails at the first
 # node-gyp or pip sdist anyway.

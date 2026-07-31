@@ -92,7 +92,7 @@ attach() {
     # spot and the attach finds nothing.
     audit_attach viewer "$id"
     tmux new-session -d -t agent -s "v-${id}" 2>/dev/null || true
-    exec tmux attach-session -r -t "v-${id}" \; set-option destroy-unattached on
+    exec tmux -u attach-session -r -t "v-${id}" \; set-option destroy-unattached on
   fi
   # Driver (4.6): a per-grant WRITABLE grouped session -- the revocable handle.
   # T1's `exec tmux attach -t agent` left revocation nothing to aim at; d-<id>
@@ -131,7 +131,7 @@ attach() {
     fi
   fi
   audit_attach driver "$id"
-  exec tmux attach-session -t "d-${id}" \; set-option destroy-unattached on
+  exec tmux -u attach-session -t "d-${id}" \; set-option destroy-unattached on
 }
 
 # No catch-all-as-token: an unknown first arg dies. Anything a browser smuggles
