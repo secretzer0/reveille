@@ -101,7 +101,7 @@ register:
 # Install the 'agent <name>' launcher so a pane is one command: `agent roc-api-dev`.
 install-agent:
 	install -d "$(PREFIX)"
-	install -m 0755 scripts/agent "$(PREFIX)/agent"
+	install -m 0755 src/reveille/agent-launch "$(PREFIX)/agent"
 	@echo "installed $(PREFIX)/agent  (ensure $(PREFIX) is on PATH)"
 
 unregister:

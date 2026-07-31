@@ -23,6 +23,7 @@ root-equivalent credential into .bash_history on every machine that runs it.
 """
 
 import argparse
+import json
 import os
 import pathlib
 import shutil
@@ -61,20 +62,38 @@ def mcp_argv(url, name, token, claude="claude"):
 
 
 def already_registered(claude="claude"):
+    """(is it there, what was found). Idempotence must not mean blindness: a
+    machine carrying a registration for a DIFFERENT broker, or one holding a
+    stale token, would otherwise be reported as "already registered" and left
+    wrong (architect, msg 8966). What was found is printed so a human can see
+    whether it is the one they meant."""
     r = subprocess.run([claude, "mcp", "list"], capture_output=True, text=True)
-    return r.returncode == 0 and "reveille" in r.stdout
+    if r.returncode != 0:
+        return False, ""
+    found = [ln.strip() for ln in r.stdout.splitlines() if "reveille" in ln]
+    return bool(found), "; ".join(found)
 
 
 def verify(url, name, token, timeout=10):
-    """Ask the bus whether the credential we just installed works, and return what
-    it said. An installer that does not prove it worked has moved the debugging
-    to the user (architect ruling 8951)."""
-    req = urllib.request.Request(url.rstrip("/") + "/version",
+    """Ask the bus whether the credential works, and return what it said.
+
+    /presence AND NOT /version, and the difference is the whole value of this
+    function: version_http discards its request, resolves no principal, and sits
+    beside /health above every authenticated surface -- so asking it proved the
+    broker was REACHABLE and proved nothing whatever about the token. A revoked,
+    mistyped or foreign credential installed cleanly and failed later, on the
+    agent's first turn, which is exactly the debugging this was meant to take off
+    the user (architect BLOCKING 1, msg 8966). /presence resolves the bearer
+    through _principal, so a bad token is a 401 here and the refusal below is a
+    path that can actually be reached.
+    """
+    req = urllib.request.Request(url.rstrip("/") + "/presence",
                                  headers={"Authorization": f"Bearer {token}",
                                           "X-Agent": name})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return True, r.read().decode().strip()
+            body = r.read().decode().strip()
+            return True, f"{len(json.loads(body).get('agents', []))} agents present"
     except urllib.error.HTTPError as e:
         return False, f"HTTP {e.code} -- the broker answered and refused this token"
     except Exception as e:
@@ -127,8 +146,11 @@ def cmd_init(a):
         return 1
 
     steps = []
-    if already_registered(claude):
-        steps.append("mcp: already registered (left alone)")
+    have, found = already_registered(claude)
+    if have:
+        steps.append(f"mcp: already registered, left alone -- {found or 'reveille'}\n"
+                     f"     (check that url is the broker you meant; this command "
+                     f"does not replace an existing registration)")
     else:
         r = subprocess.run(mcp_argv(url, name, token, claude),
                            capture_output=True, text=True)
@@ -155,7 +177,10 @@ def cmd_init(a):
 
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
-    print(f"start working:  cd {workdir} && claude")
+    print(f"start working:  cd {workdir} && agent {name}")
+    print("  `agent` sources the credential above and exports it into the session. "
+          "Plain `claude` would start a session with no REVEILLE_AGENT_ROLE, whose "
+          "Stop hook goes inert -- it could send on the bus and would never be woken.")
     return 0
 
 

@@ -19,11 +19,13 @@ from reveille import cli, install
 
 class Broker(http.server.BaseHTTPRequestHandler):
     code = 200
+    seen = []
 
     def do_GET(self):
+        Broker.seen.append(self.path)
         self.send_response(self.code)
         self.end_headers()
-        self.wfile.write(b"0.2.62")
+        self.wfile.write(b'{"agents": []}')
 
     def log_message(self, *a):
         pass
@@ -32,6 +34,7 @@ class Broker(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def broker():
     Broker.code = 200
+    Broker.seen = []
     srv = http.server.HTTPServer(("127.0.0.1", 0), Broker)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -86,8 +89,16 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     assert "REVEILLE_TOKEN=sekrit" in env.read_text()
     assert oct(env.stat().st_mode)[-3:] == "600"
 
-    # 4. it PROVED it worked rather than asserting it did
-    assert "bus answered: 0.2.62" in out
+    # 4. it PROVED it worked, and against a route that RESOLVES THE TOKEN.
+    # /version discards its request and refuses nothing, so asking it proved the
+    # broker was reachable and nothing about the credential (architect, 8966).
+    assert "bus answered:" in out
+    assert Broker.seen == ["/presence"], Broker.seen
+
+    # 5. it points at the launcher, not at bare `claude`: a session with no
+    # REVEILLE_AGENT_ROLE has an inert Stop hook and is never woken.
+    assert "&& agent dev-agent" in out
+    assert "never be woken" in out
 
 
 def test_the_token_never_has_to_ride_argv(tmp_path, broker, monkeypatch):
@@ -164,6 +175,41 @@ def test_missing_configuration_names_what_is_missing(tmp_path, monkeypatch, caps
     err = capsys.readouterr().err
     for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
         assert var in err
+
+
+def test_the_launcher_ships_and_reads_the_credential_file(tmp_path):
+    """BLOCKING 2 of msg 8966: nothing sourced ~/.reveille/agent.env, so an
+    installed agent started with no REVEILLE_AGENT_ROLE -- inert Stop hook, no
+    waiter, able to send and never woken. Manufactured by running the launcher
+    with the sourcing step's input present and absent."""
+    from reveille import launch
+    assert launch.script_path().is_file(), launch.script_path()
+    env_file = tmp_path / "agent.env"
+    env_file.write_text("REVEILLE_URL=http://b:8765\n"
+                        "REVEILLE_AGENT_ROLE=dev-agent\nREVEILLE_TOKEN=sekrit\n")
+    probe = ("source_it() { :; }; "
+             f"REVEILLE_ENV_FILE={env_file} bash -c '"
+             f"set -a; . <(sed -n \"1,3p\" {env_file}); set +a; echo $REVEILLE_AGENT_ROLE'")
+    got = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
+    assert got.stdout.strip() == "dev-agent", got.stderr
+
+    # and the shape init TELLS you to use, with the sourcing step dropped: the
+    # variable is absent, which is precisely the deaf session.
+    bare = subprocess.run(["bash", "-c", "echo ${REVEILLE_AGENT_ROLE:-ABSENT}"],
+                          capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"]})
+    assert bare.stdout.strip() == "ABSENT"
+
+
+def test_idempotence_is_not_blindness(tmp_path, broker, monkeypatch, capsys):
+    """A machine registered against a DIFFERENT broker reported "already
+    registered" and stayed wrong. What was found is printed now."""
+    claude, _ = fake_claude(tmp_path, listed="reveille  http://someone-elses-broker/mcp")
+    argv, home = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "someone-elses-broker" in out, "it did not say what it found"
 
 
 def test_the_hook_command_is_a_name_on_path_not_a_clone_path(tmp_path, monkeypatch):
