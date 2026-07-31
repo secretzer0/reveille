@@ -1748,10 +1748,10 @@ def _mem_ctx(p):
     Inheriting the owner's instance-admin bit would let every token minted by an admin
     write global doctrine and ratify globally -- the exact gate DES-001 puts admin
     behind. Admin memory powers flow only through web principals (S6 UI)."""
-    tok = _conn.execute("SELECT agent_name, mem_tier, owner_id FROM tokens WHERE id=?",
+    tok = _conn.execute("SELECT agent_id, mem_tier, owner_id FROM tokens WHERE id=?",
                         (p.token_id,)).fetchone()
     owned = {r["id"] for r in store.list_rooms(_conn, tok["owner_id"])}
-    return bool(tok["agent_name"]), tok["mem_tier"], False, owned
+    return bool(tok["agent_id"]), tok["mem_tier"], False, owned
 
 
 @mcp.tool()
@@ -3053,13 +3053,14 @@ async def tokens_http(request):
     # one bus identity, one live credential. Before this, every agent
     # re-provision minted anew and orphaned the predecessor (four live
     # credentials for one agent, found by the operator in the Tokens tab).
-    superseded = []
-    bound = (d.get("agent_name") or "").strip()
-    if bound:
-        superseded = store.supersede_bound_tokens(_conn, p.user_id, bound)
+    # Supersession moved INTO create_token with the identity cutover: the mint
+    # resolves (or provisions) the identity first, and the two must share one
+    # transaction -- a crash between a separate supersede and the mint would
+    # leave an agent with NO live credential.
     t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip(),
                            agent_name=d.get("agent_name"),
                            mem_tier=(d.get("mem_tier") or "state"))
+    superseded = t["superseded"]
     log.info("%s minted token %s%s%s", p.name, t["id"],
              f" bound to {t['agent_name']}" if t["agent_name"] else "",
              f" (superseded {len(superseded)})" if superseded else "")

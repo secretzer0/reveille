@@ -85,9 +85,12 @@ def test_token_binding_minted_and_resolved():
 
 
 def test_token_binding_migration_v7_to_v8(tmp_path):
-    """Re-run the v7->v8 step against a live table: drop the column, rewind, migrate."""
+    """Re-run the chain from v7 against a live table. The fresh schema binds
+    tokens to agent_id (v21 shape), so the v7-era shape is simulated by dropping
+    THAT column and adding the name column v7's own step expects to add -- the
+    chain then adds agent_name at v8-era steps and v20 cuts it over again."""
     c, admin, room, tok = fixture()
-    c.execute("ALTER TABLE tokens DROP COLUMN agent_name")
+    c.execute("ALTER TABLE tokens DROP COLUMN agent_id")
     c.execute("PRAGMA user_version=7")
     assert store.migrate(c, str(tmp_path / "x.db")) == store.SCHEMA_VERSION
     assert store.resolve_token(c, tok["secret"])["agent_name"] is None
@@ -1985,11 +1988,14 @@ def test_bound_mint_supersedes_the_owners_previous_tokens_for_that_name():
     other_user = store.create_user(c, "zoe", "hunter2hunter2")
     theirs = store.create_token(c, other_user["id"], "ui", agent_name="ui-dev")
 
-    gone = store.supersede_bound_tokens(c, admin["id"], "ui-dev")
-    assert gone == [t1["id"]]
-    assert store.resolve_token(c, t1["secret"]) is None      # instantly dead
+    # Supersession lives INSIDE the mint now (identity cutover): re-minting the
+    # bound name IS the re-provision flow, one transaction, and the superseded
+    # ids ride the return so a rotation is reported rather than silent.
     t3 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev")
-    # the re-provision flow: supersede then mint -> exactly ONE live ui-dev
+    assert t3["superseded"] == [t1["id"]]
+    assert store.resolve_token(c, t1["secret"]) is None      # instantly dead
+    # and the binding is by IDENTITY: both mints resolved to the same agents row
+    assert t3["agent_id"] == t1["agent_id"]
     mine = [t for t in store.list_tokens(c, admin["id"])
             if t["agent_name"] == "ui-dev"]
     assert [t["id"] for t in mine] == [t3["id"]]
