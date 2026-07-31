@@ -193,6 +193,25 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.65 AN INSTALLED AGENT NO LONGER STARTS DEAF, AND THE INSTALLER'S CHECK NOW
+CHECKS THE TOKEN. Two defects in 0.2.64, both found in review. `reveille init`
+wrote the credential file and told you to run `claude` -- and nothing sourced
+that file, so the session had no REVEILLE_AGENT_ROLE, the Stop hook failed open
+and went inert, no waiter was armed, and the agent could SEND while never being
+WOKEN. It looked installed and went quiet. `agent` now ships as a console script
+that reads ~/.reveille/agent.env, exports the three variables and execs claude;
+init names it and says why plain `claude` is not the same thing. The file is
+READ rather than sourced, because a credential file is not a script and sourcing
+one runs whatever a bad umask let somebody append to it. Second: init's
+verification asked /version, which resolves no principal and refuses nobody, so
+it proved the broker was reachable and nothing about the credential -- a revoked
+or mistyped token installed cleanly and failed on the agent's first turn. It
+asks /presence now, which resolves the bearer, and the gate pins which path was
+asked so a later tidy back to /version cannot restore the defect while the rest
+stays green. Also: the installer no longer reports "already registered" for a
+registration pointing at a DIFFERENT broker -- it prints what it found, because
+idempotence must not mean blindness.
+
 0.2.64 AN AGENT CAN BE INSTALLED ON A MACHINE THAT HAS NEVER SEEN THIS REPO.
 Four lines: three exports and `uvx --from git+<repo> reveille init`. The Stop
 hook used to be registered by absolute path into a clone, so an agent installed
