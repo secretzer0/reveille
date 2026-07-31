@@ -53,28 +53,67 @@ def test_a_launcher_that_does_not_answer_is_left_alone(tmp_path):
     assert "pinning" not in r.stdout
 
 
-def test_a_launcher_already_on_the_pinned_commit_is_not_restarted(tmp_path):
-    # Idempotence is load-bearing now that this runs inside `make up`, which
-    # people re-run: restarting a correct launcher would make a no-op deploy
-    # cause a real outage window.
+def pinned_tree(tmp_path):
+    """A pinned clone with a REAL origin/main, because pin refuses a tree that
+    has none -- which is what made the first version of this gate inert: it
+    exited at the pin refusal and never reached the branch it claimed to test.
+    """
+    origin = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True)
+    (work / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0.0.1"\n')
+    for c in (["git", "-C", str(work), "add", "-A"],
+              ["git", "-C", str(work), "-c", "user.email=t@t", "-c", "user.name=t",
+               "commit", "-qm", "x"],
+              ["git", "-C", str(work), "push", "-q", "origin", "main"]):
+        subprocess.run(c, check=True)
     pin = tmp_path / "pinned"
-    pin.mkdir()
-    subprocess.run(["git", "init", "-q", str(pin)], check=True)
-    (pin / "f").write_text("x")
-    subprocess.run(["git", "-C", str(pin), "add", "f"], check=True)
-    subprocess.run(["git", "-C", str(pin), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "x"], check=True)
+    subprocess.run(["git", "clone", "-q", "--branch", "main", str(origin), str(pin)],
+                   check=True)
     sha = subprocess.run(["git", "-C", str(pin), "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True, check=True).stdout.strip()
+    return pin, sha
+
+
+def test_a_launcher_already_on_the_pinned_commit_is_not_restarted(tmp_path):
+    """Idempotence is load-bearing now that this runs inside `make up`, which
+    people re-run: restarting a correct launcher would make a no-op deploy cause
+    a real outage window.
+
+    Asserted by the branch's OWN TEXT, not by the absence of "stopping" -- the
+    pin-refusal path produces that absence too, which is exactly how the first
+    version of this gate passed without ever reaching idempotence (architect,
+    msg 8929).
+    """
+    pin, sha = pinned_tree(tmp_path)
     srv, url = serve(f'{{"commit":"{sha}","source":"{pin}"}}'.encode())
     try:
         r = run({"LAUNCHER_HEALTH": url, "REVEILLE_LAUNCH_REPO": str(pin)})
     finally:
         srv.shutdown()
-    # pin refuses a tree with no origin/main, which is the correct refusal for a
-    # tree nobody pinned -- and it must leave the running launcher alone.
-    assert "stopping" not in r.stdout, r.stdout
-    assert "kill" not in r.stdout
+    assert f"already serving {sha} -- nothing to restart" in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_health_reply_with_no_commit_field_stops_nothing(tmp_path):
+    """BLOCKING 2 of msg 8929. An unreadable version is not a stale one: the
+    launcher answered, so something is alive, and a commit we could not parse
+    made the comparison false for a reason unrelated to staleness -- after which
+    this control's next move was to kill it. A guard that can be wrong must fail
+    toward the recoverable side, and the recoverable side of a control that
+    stops a service is to change nothing.
+    """
+    pin, _ = pinned_tree(tmp_path)
+    srv, url = serve(b'{"status":"ok"}')
+    try:
+        r = run({"LAUNCHER_HEALTH": url, "REVEILLE_LAUNCH_REPO": str(pin)})
+    finally:
+        srv.shutdown()
+    assert r.returncode == 1, r.stdout
+    assert "cannot read a commit" in r.stdout
+    assert "pinning" not in r.stdout, "it must refuse BEFORE touching the pinned tree"
+    assert "stopping" not in r.stdout
 
 
 def test_make_up_runs_the_fix_before_the_check():
