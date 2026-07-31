@@ -1,0 +1,38 @@
+# The DES-009 synthesizer. Its own image on purpose: torch and a 350M model have
+# no business in the broker image, which is 200MB and rebuilt on every version.
+#
+# It answers ONE caller (the broker's voice worker) over the compose network and
+# publishes no host port -- see docker/compose.yml. The service is stdlib-only
+# apart from the model itself, so what is installed here IS the model stack.
+#
+# NEVER BUILT OR RUN BY ANYONE at the time of writing: no agent in this fleet has
+# a docker socket or a GPU. The pins below are what the upstream project
+# documents, and the first execution of this file is the operator's.
+FROM python:3.11-slim
+
+# 3.11 and not 3.14 like the broker: chatterbox-tts pins torch, and torch has no
+# wheels for 3.14 yet. The version that must match the repo is the BROKER's; this
+# container shares no code with it beyond one stdlib module it copies in.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libsndfile1 ffmpeg && rm -rf /var/lib/apt/lists/*
+
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g ${GID} tts && useradd -m -u ${UID} -g ${GID} tts
+
+WORKDIR /app
+# Pinned rather than floating: an image tag has to mean one thing (the agent-image
+# discipline, one plane over). Bumping these is a deliberate act with its own tag.
+RUN pip install --no-cache-dir "chatterbox-tts==0.1.4" "torchaudio>=2.6"
+
+# The service is one file and it is the repo's, so it stays under src/ where the
+# unit suite can import and drive it without this image existing at all.
+COPY src/reveille/tts_service.py /app/tts_service.py
+
+USER tts
+ENV TTS_PORT=8770 TTS_VOICES=/voices
+# Declares the port for a reader; it publishes nothing. Publication is compose's
+# decision and compose deliberately makes none.
+EXPOSE 8770
+VOLUME /voices
+CMD ["python", "/app/tts_service.py"]

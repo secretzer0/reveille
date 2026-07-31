@@ -8,7 +8,7 @@ PID  := $(REPO)/reveille.pid
 # launcher.db image records ambiguous.
 AGENT_IMAGE ?= reveille-agent:0.2.14
 
-.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image up down branch-orphans
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image tts-image up down branch-orphans
 
 help:
 	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
@@ -26,6 +26,7 @@ help:
 	@echo "make unregister      remove the reveille MCP registration"
 	@echo "make lint           ruff check"
 	@echo "make agent-image    build the agent container image ($(AGENT_IMAGE))"
+	@echo "make tts-image     build the DES-009 voice synthesizer image ($(TTS_IMAGE)) -- NOT part of make up"
 	@echo "make branch-orphans commits that live on a branch and nowhere else"
 	@echo "make agent-container ROLE=<name> [WORK=<dir>] [URL=]  run one agent in a container"
 	@echo "make agent-spike    prove a container keeps its knowledge: join from inside it"
@@ -114,6 +115,10 @@ unregister:
 # host process (pinned clone + Stop hook); agent containers are launcher-created and
 # join the same network.
 SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+# DES-009: pinned by the model stack in docker/Dockerfile.tts, not by the repo
+# version -- the broker's identity does not depend on it and it must not be
+# rebuilt on every bump.
+TTS_IMAGE ?= reveille-tts:0.1.0
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
 # agent reaches the bus at http://reveille-server:8765, and container names only
@@ -129,6 +134,7 @@ PROXY_IMAGE ?= caddy:2-alpine
 PROXY_PORT  ?= 80
 BROKER_NAME ?= reveille-server
 PROXY_NAME  ?= reveille-proxy
+TTS_NAME    ?= reveille-tts
 # COMPOSE_EXTRA: overlay files layered by variant targets (up-dev). Empty for
 # the real deploy, so `make up` composes exactly one file.
 COMPOSE_EXTRA =
@@ -136,6 +142,7 @@ COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
   REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
   PROXY_IMAGE=$(PROXY_IMAGE) PROXY_PORT=$(PROXY_PORT) \
   BROKER_NAME=$(BROKER_NAME) PROXY_NAME=$(PROXY_NAME) \
+  TTS_IMAGE=$(TTS_IMAGE) TTS_NAME=$(TTS_NAME) \
   docker compose -f docker/compose.yml $(COMPOSE_EXTRA)
 
 # REFUSES TO REBUILD AN EXISTING TAG. The version string is the image tag; building
@@ -152,6 +159,18 @@ server-image:
 	  exit 1; \
 	fi
 	docker build -t $(SERVER_IMAGE) -f docker/Dockerfile.server .
+
+# DES-009. NOT wired into `up`: this image carries torch and a 350M model, takes
+# minutes to build and gigabytes to hold, and a fleet that has not asked for
+# voices must never pay for it during a deploy. The compose service sits behind
+# the `voices` profile for the same reason, so the two decisions cannot drift.
+#   make tts-image && docker compose --profile voices up -d tts
+# No refuse-to-rebuild here, and that is deliberate rather than an omission: this
+# tag is not a version claim about the repo -- nothing in the broker's identity
+# depends on it, and the model pins live in the Dockerfile where a change is a
+# visible edit.
+tts-image:
+	docker build -t $(TTS_IMAGE) -f docker/Dockerfile.tts .
 
 up:
 	@bash scripts/deploy-preflight "$(SERVER_DATA)" "$(BROKER_NAME)"
