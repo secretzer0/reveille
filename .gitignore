@@ -17,3 +17,9 @@ build/
 # migration snapshots are operational artifacts, never source
 *.bak
 .ropeproject/
+
+# NEVER: a live broker database dropped into the tree for inspection. It holds
+# every room history, password hashes and token hashes, and `git add -A` will
+# take it without asking. It happened once.
+broker.db
+*.db

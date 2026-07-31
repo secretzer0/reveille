@@ -25,6 +25,7 @@ root-equivalent credential into .bash_history on every machine that runs it.
 import argparse
 import contextlib
 import getpass
+import re
 import json
 import os
 import pathlib
@@ -217,9 +218,104 @@ def read_password(user, prompt=None):
     return getpass.getpass(prompt or f"password for {user}: ")
 
 
+# ---- the wizard (operator ask, 2026-07-31) ----------------------------------
+# EVERY PROMPT HAS A DEFAULT AND SAYS WHOSE ANSWER IT WANTS. The installer used
+# to require two exported variables before it would run, which is a scripted
+# install wearing an interactive one's clothes -- and every question the operator
+# asked about it came from having to know what those variables MEANT before they
+# could type anything. A flag or an environment variable still skips its prompt,
+# so scripting is unchanged.
+
+DEFAULT_URL = "https://reveille.mythos.org"
+
+# The broker's own rule, mirrored so a bad name is refused at the prompt rather
+# than after a password has been typed.
+NAME_OK = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}$").match
+
+# The fleet's convention rather than a schema: these are the roles this project
+# actually runs. "other" exists because a list of types that cannot be escaped
+# is a list that starts lying the first time somebody needs a fifth.
+AGENT_TYPES = [
+    ("architect", "reveille-architect", "designs, rules, and issues verdicts"),
+    ("senior-dev", "reveille-senior-dev", "implements slices and ships them green"),
+    ("ui-ux", "reveille-senior-ui-ux", "the web UI and everything a human sees"),
+    ("devops", "reveille-devops", "deploys, hosts, and the machines themselves"),
+    ("other", "", "a name you choose"),
+]
+
+
+def ask(prompt, default="", stdin=None):
+    """One prompt, one default shown in brackets. Enter accepts it."""
+    stdin = sys.stdin if stdin is None else stdin
+    if not stdin.isatty():
+        return default          # piped input: take the default rather than block
+    shown = f"{prompt} [{default}]: " if default else f"{prompt}: "
+    return input(shown).strip() or default
+
+
+def ask_type(stdin=None):
+    """The agent's type, as a numbered menu. Returns (type, suggested name)."""
+    print("\nWhat kind of agent is this?")
+    for i, (t, name, what) in enumerate(AGENT_TYPES, 1):
+        print(f"  {i}. {t:<12} {what}")
+    while True:
+        pick = ask("choose", "2", stdin)
+        if pick.isdigit() and 1 <= int(pick) <= len(AGENT_TYPES):
+            t, suggested, _ = AGENT_TYPES[int(pick) - 1]
+            return t, suggested
+        if pick in {t for t, _, _ in AGENT_TYPES}:
+            return pick, next(n for t, n, _ in AGENT_TYPES if t == pick)
+        print(f"  pick 1-{len(AGENT_TYPES)}, or the type's name")
+
+
+def starter_claude_md(workdir, name, agent_type):
+    """Seed a CLAUDE.md naming the role and the boot ritual, unless one exists.
+
+    Otherwise "type" is a label that changes nothing, which is worse than not
+    asking: the operator would answer a question whose answer had no effect. It
+    never overwrites -- a directory that already has a CLAUDE.md has an opinion,
+    and this is an installer rather than an editor.
+    """
+    path = pathlib.Path(workdir) / "CLAUDE.md"
+    if path.exists():
+        return None
+    path.write_text(
+        f"# {name}\n\n"
+        f"You are the fleet's **{agent_type}**.\n\n"
+        f"## Bus\n"
+        f"Identity and credential come from the environment, never hardcoded:\n"
+        f"$REVEILLE_AGENT_ROLE is your bus name, $REVEILLE_TOKEN your credential.\n"
+        f"Your token does NOT name a room -- the broker maps it to your rooms\n"
+        f"server-side.\n\n"
+        f"Startup: `join()`, then `lessons()`, then `brief(role=\"...\")`. That is\n"
+        f"the knowledge floor: rules the fleet already paid for, plus the doctrine,\n"
+        f"contracts and decisions ranked to what you do.\n\n"
+        f"Per ring: `inbox()`, `ack()` everything, act only if owed, delete the\n"
+        f"spool files you handled, then re-arm `wake-watch $REVEILLE_AGENT_ROLE`.\n"
+        f"Nothing owed -> silence is a valid turn.\n\n"
+        f"Full reference: `usage()`.\n")
+    return path
+
+
 def cmd_init(a):
     url = a.url or os.environ.get("REVEILLE_URL", "")
     name = a.name or os.environ.get("REVEILLE_AGENT_ROLE", "")
+    agent_type = a.type or ""
+    # INTERACTIVE UNLESS TOLD OTHERWISE. Nothing here is required in advance; an
+    # answer supplied as a flag or an env var skips its own prompt and nothing
+    # else. --no-prompt is for a script that would rather fail than block.
+    wizard = sys.stdin.isatty() and not a.no_prompt
+    if wizard and not (url and name and (a.token or os.environ.get("REVEILLE_TOKEN"))):
+        print("reveille: setting this machine up as an agent.\n")
+        url = url or ask("broker url", DEFAULT_URL)
+        if not name:
+            agent_type, suggested = ask_type()
+            name = ask("agent name", suggested)
+            while not NAME_OK(name):
+                print("  names are letters, digits, _ and -, starting with a "
+                      "letter or digit")
+                name = ask("agent name", suggested)
+        a.login = a.login or not (a.token or os.environ.get("REVEILLE_TOKEN"))
     minted = ""
     if a.login:
         # MINT FIRST, then fall into exactly the same path as a pasted token.
@@ -241,6 +337,16 @@ def cmd_init(a):
             print("reveille init --login: needs REVEILLE_URL and an agent name "
                   "(REVEILLE_AGENT_ROLE or the second argument).", file=sys.stderr)
             return 2
+        # SAY WHAT MINTING DOES TO AN EXISTING NAME BEFORE ASKING FOR A PASSWORD.
+        # Binding supersedes this account's previous token for that name, so
+        # re-running on a second machine MOVES the agent rather than cloning it
+        # -- the first machine goes dead on its next call. That is the design
+        # (one identity, one live credential) and it is the kind of thing a
+        # person should read before it happens rather than after.
+        if wizard:
+            print(f"\nMinting a token bound to '{name}'. If that name already has "
+                  f"one, it is superseded:\n  the machine holding it stops working "
+                  f"on its next call. Two machines means two names.")
         try:
             token, attached, minted = mint_token(url, user, read_password(user),
                                                  name, a.rooms, a.tier)
@@ -310,6 +416,11 @@ def cmd_init(a):
     path = write_credential(url, name, token, a.home)
     steps.append(f"credential: {path} (0600)")
     steps.append(f"workdir: {workdir}")
+    if agent_type:
+        seeded = starter_claude_md(workdir, name, agent_type)
+        steps.append(f"role: {agent_type}" + (f", CLAUDE.md written to {seeded}"
+                                              if seeded else
+                                              " (CLAUDE.md already here, left alone)"))
 
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
@@ -344,6 +455,11 @@ def main(argv=None):
     i.add_argument("--tier", default="state",
                    help="memory tier for the minted token (default: state, which "
                         "is least privilege -- everything else lands as a draft)")
+    i.add_argument("--type", help="agent type (architect, senior-dev, ui-ux, "
+                                  "devops, ...) -- seeds a starter CLAUDE.md")
+    i.add_argument("--no-prompt", action="store_true",
+                   help="never ask: fail on anything not supplied. For scripts "
+                        "that would rather stop than block")
     i.add_argument("--force", action="store_true",
                    help="install even if the broker did not answer")
     i.set_defaults(fn=cmd_init)

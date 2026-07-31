@@ -172,7 +172,10 @@ def test_missing_configuration_names_what_is_missing(tmp_path, monkeypatch, caps
             return True     # a human at a terminal: nothing is being piped in
 
     monkeypatch.setattr("sys.stdin", Tty())
-    assert cli.main(["init", "--home", str(tmp_path)]) == 2
+    # --no-prompt is the scripted path: a script would rather be told what is
+    # missing than sit at a prompt nobody is watching. Without it, a terminal
+    # gets the wizard, which is the point of the wizard.
+    assert cli.main(["init", "--no-prompt", "--home", str(tmp_path)]) == 2
     err = capsys.readouterr().err
     for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
         assert var in err
@@ -328,3 +331,65 @@ def test_the_password_never_comes_from_a_flag():
     src = pathlib.Path(cli.__file__).read_text()
     parser = src[src.index("def main("):]
     assert "--password" not in parser, "a --password flag would put it in history"
+
+
+class FakeTTY:
+    """A terminal that answers prompts from a script. isatty() is what the wizard
+    branches on, so a stub that says False would skip everything under test."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return (self.answers.pop(0) if self.answers else "") + "\n"
+
+
+def test_the_wizard_asks_for_everything_and_defaults_what_it_can(monkeypatch, capsys):
+    """Nothing exported in advance: url, type, name. Enter accepts every default,
+    which is the whole ask -- the installer used to require two variables set
+    before it would run, and every question the operator asked came from having
+    to know what they meant first."""
+    for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    answers = iter(["", "4", ""])          # url default, devops, name default
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr("sys.stdin", FakeTTY([]))
+    assert cli.ask("broker url", cli.DEFAULT_URL) == cli.DEFAULT_URL
+    t, suggested = cli.ask_type()
+    assert (t, suggested) == ("devops", "reveille-devops")
+
+
+def test_a_bad_agent_name_is_refused_at_the_prompt(monkeypatch):
+    """The broker's rule, mirrored at the prompt: refusing after a password has
+    been typed is a worse place to find out."""
+    assert cli.NAME_OK("reveille-devops")
+    assert cli.NAME_OK("dev_1")
+    assert not cli.NAME_OK("has space")
+    assert not cli.NAME_OK("-leading-hyphen")
+    assert not cli.NAME_OK("")
+
+
+def test_a_piped_stdin_takes_the_default_rather_than_blocking(monkeypatch):
+    class Piped:
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr("sys.stdin", Piped())
+    assert cli.ask("broker url", cli.DEFAULT_URL) == cli.DEFAULT_URL
+
+
+def test_the_type_seeds_a_claude_md_and_never_overwrites_one(tmp_path):
+    """A type that changes nothing would be a question whose answer had no
+    effect. And a directory that already has a CLAUDE.md has an opinion -- this
+    is an installer, not an editor."""
+    seeded = cli.starter_claude_md(tmp_path, "reveille-devops", "devops")
+    text = seeded.read_text()
+    assert "reveille-devops" in text and "devops" in text
+    assert "join()" in text and "wake-watch" in text, "the boot ritual must be in it"
+    mine = tmp_path / "CLAUDE.md"
+    mine.write_text("my own instructions")
+    assert cli.starter_claude_md(tmp_path, "x", "devops") is None
+    assert mine.read_text() == "my own instructions"
