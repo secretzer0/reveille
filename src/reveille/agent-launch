@@ -14,7 +14,7 @@
 # Sets $REVEILLE_AGENT_ROLE (-> the MCP X-Agent header) and $REVEILLE_TOKEN for the session.
 # The token is a credential, NOT a room: the broker maps it to the rooms this agent may see,
 # so no room name is ever passed here. Wake is
-# native: the boot prompt tells the agent to arm `wake --once` as a harness background task;
+# native: the boot prompt tells the agent to arm `wake-watch <role>` as a background task;
 # its completion notification IS the ring -- no keystroke injection, nothing ever types into
 # a human's half-written prompt. The Stop hook that blocks ending a turn with the waiter
 # unarmed is user-scoped, installed by `make register` (scripts/install-hook). Not in tmux:
@@ -84,26 +84,27 @@ fi
 # Resolve symlinks: agent is usually invoked via a ~/.local/bin/agent symlink, so the raw
 # BASH_SOURCE would put REPO at ~/.local instead of the actual repo.
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-REPO="$(cd "$(dirname "$SELF")/.." && pwd)"
 _hostport="${URL#*://}"; _hostport="${_hostport%%/*}"   # strip scheme + any path
 _scheme=ws; [ "${URL%%://*}" = "https" ] && _scheme=wss
-WAKE_URL="$_scheme://$_hostport/wake"                   # http(s)://host:port[/..] -> ws(s)://host:port/wake
-WAKE_BIN="$REPO/.venv/bin/wake"
-[ -x "$WAKE_BIN" ] || WAKE_BIN="uv run --project $REPO wake"
-
-# Versions for the liveness line + the boot prompt. Combo = daemon + wake, one repo.
-CLIENT_V="$($WAKE_BIN --version 2>/dev/null || echo '?')"
+# THE ARM COMMAND IS wake-watch, NOT wake --once. The old prompt prescribed the
+# RETIRED pre-DES-003 ritual: `wake --once` grabs the wake socket ITSELF, and on
+# a host where the Stop hook supervises reveille-waked -- every host this
+# launcher installs -- the two fight for the one socket: the agent's grab either
+# steals the daemon's slot or is superseded into silent deafness. wake-watch
+# watches the SPOOL the daemon writes; duplicates are harmless and arming early
+# is safe (DES-003). Paid for live: the first native agent's boot banner told it
+# to run the retired command, with a site-packages path in it for garnish.
+CLIENT_V="$(wake-watch --version 2>/dev/null || wake --version 2>/dev/null || echo '?')"
 SERVER_V="$(curl -fsS "$URL/version" 2>/dev/null || echo 'unreachable')"
 
 mm=""
 [ "$SERVER_V" != "$CLIENT_V" ] && [ "$SERVER_V" != "unreachable" ] && mm=" (VERSION MISMATCH -- update)"
-arm_cmd="$WAKE_BIN --once --url $WAKE_URL --name $ROLE"
-[ -n "$TOKEN" ] && arm_cmd="$arm_cmd --token \$REVEILLE_TOKEN"
 BOOT="Reveille boot v$SERVER_V$mm. Do now, in order:
-1. join(url=\"$URL\") then info() to confirm the bus and see which rooms your token holds.
-2. Arm your wake waiter -- Bash with run_in_background=true: $arm_cmd
+1. join(url=\"$URL\") then lessons() and brief(role=\"...\") -- rules the fleet already paid for.
+2. Arm your wake waiter -- Bash with run_in_background=true: wake-watch $ROLE
    Its task-completion notification IS a bus ring: inbox(), ack() everything, act only if
-   a message names you / blocks you / asks you directly, then RE-ARM the same command.
+   a message names you / blocks you / asks you directly, delete the spool files you
+   processed, then RE-ARM the same command.
 3. usage() and refresh the '## Agent bus' block in this repo's CLAUDE.md from it.
 4. Read LESSONS.md at the repo root, if present. Then wait for work; silence is a valid turn."
 
