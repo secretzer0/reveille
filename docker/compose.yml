@@ -61,6 +61,11 @@ services:
       - ${SERVER_DATA:?set SERVER_DATA explicitly -- an inherited HOME here once nearly deployed an EMPTY database}:/data
     environment:
       REVEILLE_AGENTS_PATH: ${AGENTS_PATH:-/agents}
+      # DES-009: the voice worker's address, BY NAME on this network. Unset by
+      # default, and unset means no voice worker at all -- so a deploy that has
+      # not built the model image behaves exactly as it did before voices existed.
+      REVEILLE_TTS_URL: ${REVEILLE_TTS_URL:-}
+      REVEILLE_TTS_TOKEN: ${REVEILLE_TTS_TOKEN:-}
     # The daemon bounds its own graceful shutdown at 5s (0.2.26); 12 gives it
     # room plus the courtesy-frame delay before docker escalates to SIGKILL.
     # Before 0.2.26 a SIGTERM could wedge the process half-dead forever, and
@@ -70,6 +75,58 @@ services:
     healthcheck:
       test: ["CMD", "/app/.venv/bin/python", "-c",
              "import urllib.request as u; assert u.urlopen('http://127.0.0.1:8765/health', timeout=3).read() == b'ok'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # DES-009 commit 1. The synthesizer, reachable BY NAME from the broker and from
+  # nowhere else: NO ports: key, deliberately and permanently. Its audience is one
+  # process, which is what makes "as private as possible" and "hostable off this
+  # network later" the same design rather than a trade-off (DES-009 section 3) --
+  # moving it elsewhere changes REVEILLE_TTS_URL and nothing else.
+  #
+  # OPTIONAL BY CONSTRUCTION: `make up` starts the platform without it unless the
+  # voices profile is asked for. A fleet that has not built the model image must
+  # not have its deploy blocked by a service nobody has configured, and a broker
+  # whose REVEILLE_TTS_URL is unset simply runs no voice worker.
+  tts:
+    profiles: [voices]
+    image: ${TTS_IMAGE:-reveille-tts:dev}
+    container_name: ${TTS_NAME:-reveille-tts}
+    restart: unless-stopped
+    networks:
+      reveille:
+        aliases: [reveille-tts]
+    environment:
+      TTS_PORT: "8770"
+      TTS_VOICES: /voices
+      # Empty on this network, where the absence of a published port IS the
+      # boundary. Required by the broker only when the URL is remote (§3).
+      TTS_TOKEN: ${REVEILLE_TTS_TOKEN:-}
+    volumes:
+      - ${TTS_VOICES_DIR:-./voices}:/voices:ro
+      # The model is about a gigabyte and from_pretrained downloads it into HOME.
+      # Without this, removing the container re-downloads it -- a ten-minute first
+      # start every time, which the operator would meet on their SECOND deploy
+      # rather than their first.
+      - tts-cache:/home/tts/.cache
+    # THE GPU, RESERVED EXPLICITLY. Without this the container has no /dev/nvidia*,
+    # torch.cuda.is_available() is False, and the service synthesizes on the CPU
+    # while looking perfectly healthy -- three GPUs idle and the only symptom is
+    # "it feels slow" (architect, msg 8941). The service also SAYS which device it
+    # took, because a reservation that silently fails to apply is the same defect
+    # one layer up. Behind the voices profile, so a host with no nvidia runtime is
+    # unaffected: that is what the profile buys.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import json,urllib.request as u; assert json.load(u.urlopen('http://127.0.0.1:8770/health', timeout=3))['status'] == 'ok'"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -92,3 +149,10 @@ services:
     depends_on:
       broker:
         condition: service_healthy
+
+volumes:
+  # DES-009. The model cache, and the only named volume in this stack: everything
+  # else here is either a bind mount the operator chose or state that must not
+  # survive. This one holds a downloaded artifact, so losing it costs ten minutes
+  # and nothing else -- which is exactly the thing a named volume is for.
+  tts-cache:
