@@ -2648,10 +2648,18 @@ function provRows(m,rooms){
  let h='';
  if(m.slug)h+='<div class="memMeta">lesson '+memText(m.slug)+' &mdash; symptom (quoted):</div>'+
   '<div class="quote">'+memText(m.symptom)+'</div>';
+ // THREE states, not two. A fact whose source message was deleted still CLAIMS a
+ // source, and rendering that as "no source message attached" tells the ratifier
+ // the claim was never sourced -- which is the one reading that stops them asking.
+ // The id is kept on screen deliberately: it is what the audit trail is searched by
+ // once the message itself is gone (msg 8857).
  h+=m.source_message
-  ?'<div class="memMeta">source msg '+m.source_message.id+' &mdash; '+
-   memText(m.source_message.sender)+' wrote (quoted):</div>'+
-   '<div class="quote">'+memText(m.source_message.body)+'</div>'
+  ?(m.source_message.deleted
+    ?'<div class="memMeta err">source msg '+memText(m.source_message.id)+
+     ' was DELETED &mdash; this fact cites evidence that is no longer in the log</div>'
+    :'<div class="memMeta">source msg '+memText(m.source_message.id)+' &mdash; '+
+     memText(m.source_message.sender)+' wrote (quoted):</div>'+
+     '<div class="quote">'+memText(m.source_message.body)+'</div>')
   :'<div class="memMeta">no source message attached</div>';
  if(m.supersedes_tip)h+='<div class="memMeta">REPLACES text by '+
   memText(m.supersedes_tip.author)+' (quoted):</div>'+

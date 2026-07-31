@@ -1471,6 +1471,69 @@ def test_retention_drops_whole_threads_and_defaults_to_infinite():
     assert store.tail(c, rooms=[room["id"]]) == []
 
 
+# ---- a citation outlives the message it cites (msg 8857) ---------------------
+# The column used to be ON DELETE SET NULL, so every path that deletes a message
+# rewrote the facts distilled from it into facts that never had a source. These
+# assert the ID SURVIVES -- not that the row does, and not that trace() still
+# works, both of which are supposed to stop.
+
+def _cited_fact(c, admin, room, tok, sender="mallory", body="the claim"):
+    """A live decision distilled from one agent's message. Returns (uid, msg id)."""
+    store.join(c, sender, f"T{sender}", room["id"], tok["id"])
+    m = store.send(c, sender, store.BROADCAST, body, room=room["id"])
+    mem = store.memory_add(c, author="architect", token_id=tok["id"], agent_bound=False,
+                           tier="ratify", is_admin=True, rooms=[room["id"]],
+                           owned_rooms=[room["id"]], fact="the fact he taught",
+                           kind="decision", scope=room["id"], source=m["id"])
+    return mem["id"], m["id"]
+
+
+def _src_of(c, uid):
+    return c.execute("SELECT source_msg_id FROM memories WHERE uid=?", (uid,)).fetchone()[0]
+
+
+def test_prune_leaves_the_citation_pointing_at_the_deleted_message():
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)
+    store.prune_agent(c, "mallory", room["id"])
+    assert _src_of(c, uid) == mid, "prune nulled the citation instead of keeping it"
+
+
+def test_retention_sweep_leaves_the_citation_too():
+    """The gate that proves the fix is at the COLUMN and not in prune_agent.
+    sweep_retention runs on a timer with nobody present, so a guard placed in the
+    delete's callers would have left the one automatic path still laundering."""
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)
+    old = time.time_ns() - 10 * 86400 * 1_000_000_000
+    c.execute("UPDATE messages SET ts_ns=? WHERE id=?", (old, mid))
+    store.set_retention(c, room["id"], admin["id"], 5 * 86400 * 1_000_000_000)
+    assert store.sweep_retention(c) == 1                  # the fixture really expired
+    assert c.execute("SELECT 1 FROM messages WHERE id=?", (mid,)).fetchone() is None
+    assert _src_of(c, uid) == mid, "the retention sweep nulled the citation"
+
+
+def test_a_deleted_source_renders_as_deleted_not_as_absent():
+    """Assert the MARKER, never the absence of source_message: a memory that never
+    cited anything produces that same absence, so an absence assertion passes on
+    the defect."""
+    c, admin, room, tok = fixture()
+    uid, mid = _cited_fact(c, admin, room, tok)
+    store.prune_agent(c, "mallory", room["id"])
+    item = store.memory_detail(c, uid)
+    assert item["source_message"]["deleted"] is True
+    assert item["source_message"]["id"] == mid
+    assert store.recall(c, rooms=[room["id"]], token_id=tok["id"], caller="architect",
+                        tier="ratify", is_admin=True,
+                        query="taught")["memories"][0]["source_deleted"] is True
+    text = store.brief(c, rooms={room["id"]: "Reveille"}, token_id=tok["id"],
+                       role="", budget=28000)["text"]
+    assert f"[src msg {mid} DELETED]" in text
+    # ...and a live citation must NOT wear the marker, or it means nothing.
+    uid2, mid2 = _cited_fact(c, admin, room, tok, sender="alice", body="still here")
+    assert "deleted" not in store.memory_detail(c, uid2)["source_message"]
+
+
 # ---- migration ---------------------------------------------------------------
 
 def _v0_db():
