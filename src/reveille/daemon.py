@@ -193,6 +193,22 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.79 THE PANEL MINTS WITH ROOMS AND TEACHES THE SHAPE THAT PERSISTS, AND THE
+SYNTHESIZER EXISTS. senior-ui-ux's accepted stack: the install panel picks
+rooms BEFORE the mint (the same one-transaction rule the wizard follows), the
+install block teaches `uv tool install` then `reveille init` -- the two-line
+shape that cannot write a cache path into the Stop hook -- and the contract
+gate pins the panel's command against [project.scripts] and the git source as
+a pair. Also merged: DES-009 commit 1, the Chatterbox synthesizer in its own
+container -- one worker, one queue, POST /speak -> audio/wav, no published
+host port, behind the `voices` compose profile and out of `make up`, so it
+changes nothing for anyone who does not ask for it. Nothing has been heard
+yet; the container has never been built. That measurement, and whether the GPU
+reservation applies, belongs to the agent with the docker socket.
+
+VERIFICATION SHAPE, per the standing doctrine: verified native-side by suite
+only; container unverified; the synthesizer unbuilt anywhere.
+
 0.2.78 no_rooms IS THE ONE RECOVERABLE REFUSAL. 0.2.77's zero-room refusal was
 right and its handling was one arm too fatal: waked exits on any error frame,
 so a container agent that left its LAST room -- a reversible state -- would
