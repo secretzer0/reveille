@@ -179,23 +179,20 @@ def mint_token(url, user, password, agent, rooms=None, tier="state"):
         raise RuntimeError(f"no such room for {user}: {', '.join(unknown)}. "
                            f"Available: {', '.join(have)}")
 
+    # ONE call: the mint attaches its rooms in the same broker transaction, or
+    # nothing exists afterwards (ruling 9010). The two-step version POSTed its
+    # attach to a PATCH-only route -- impossible on any box, discovered by the
+    # operator's real install, invisible to a stub that accepts any method --
+    # and its failure mode was a minted token reaching nothing, with a message
+    # telling a human to go and revoke it. That state is unrepresentable now,
+    # so the message is gone rather than improved.
     code, tok, _ = _post(url, "/tokens",
                          {"agent_name": agent, "label": f"native {agent}",
-                          "mem_tier": tier}, cookie)
+                          "mem_tier": tier,
+                          "rooms": [have.get(r, r) for r in want]}, cookie)
     if code != 200 or not tok.get("secret"):
         raise RuntimeError(f"mint failed ({code}): {tok.get('error') or tok}")
-
-    attached = []
-    for r in want:
-        rid = have.get(r, r)
-        code, out, _ = _post(url, f"/tokens/{tok['id']}", {"room": rid, "attach": True},
-                             cookie)
-        if code != 200:
-            raise RuntimeError(
-                f"minted the token but could not attach room {r} ({code}). The "
-                f"token exists and reaches nothing -- revoke it in the Tokens tab "
-                f"rather than leaving it: {tok['id']}")
-        attached.append(r)
+    attached = want
     # CLOSE THE SESSION. It was minted for three calls and there is no reason for
     # it to outlive them; leaving it valid means the installer left a live
     # session behind on every machine it ever ran on (architect, msg 8987).

@@ -15,7 +15,7 @@ import threading
 
 import pytest
 
-from reveille import cli, install
+from reveille import cli, daemon, install
 
 
 class Broker(http.server.BaseHTTPRequestHandler):
@@ -294,9 +294,9 @@ def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
     assert rooms == ["Reveille2.0"]
     assert "superseded" in note, "a rotation that supersedes must say so"
     paths = [p for p, _ in Minting.calls]
-    # /logout last: a session minted for three calls must not outlive them, or
-    # the installer leaves a live session behind on every machine it ran on.
-    assert paths == ["/login", "/tokens", "/tokens/t1", "/logout"], paths
+    # /logout last, and NO second attach call: rooms ride the mint (ruling 9010),
+    # and a session minted for three calls must not outlive them.
+    assert paths == ["/login", "/tokens", "/logout"], paths
     # BOUND, and least privilege by default: an unbound or write-tier token here
     # would hand a fresh machine more than it needs.
     assert Minting.calls[1][1]["agent_name"] == "dev-agent"
@@ -314,15 +314,6 @@ def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsy
     assert rc == 1
     assert not log.exists() and not cli.env_file(home).exists()
     assert "login failed" in capsys.readouterr().err
-
-
-def test_a_token_that_cannot_reach_a_room_is_named_not_left_silent(minting, monkeypatch):
-    """Minted-but-unattached is the worst outcome: a credential that exists and
-    reaches nothing, which reads as a broken bus rather than a failed install.
-    It must say the token id so a human can revoke it."""
-    Minting.fail_attach = True
-    with pytest.raises(RuntimeError, match="t1"):
-        cli.mint_token(minting, "tmelhiser", "hunter2", "dev-agent")
 
 
 def test_the_password_never_comes_from_a_flag():
@@ -393,3 +384,67 @@ def test_the_type_seeds_a_claude_md_and_never_overwrites_one(tmp_path):
     mine.write_text("my own instructions")
     assert cli.starter_claude_md(tmp_path, "x", "devops") is None
     assert mine.read_text() == "my own instructions"
+
+
+def daemon_routes():
+    """(path, methods) for every Route(...) in the daemon source. Regex over the
+    source rather than building the app, because building it wants a database
+    and a config this gate does not need -- the route table is literal text."""
+    import re
+    src = pathlib.Path(daemon.__file__).read_text()
+    routes = {}
+    for m in re.finditer(r'Route\("([^"]+)",\s*\w+(?:,\s*methods=\[([^\]]*)\])?', src):
+        methods = ({x.strip().strip('"') for x in m.group(2).split(",")}
+                   if m.group(2) else {"GET"})
+        routes.setdefault(m.group(1), set()).update(methods)
+    return routes
+
+
+def test_every_call_the_installer_makes_has_a_route_that_takes_it():
+    """THE GATE THAT WOULD HAVE CAUGHT THE OPERATOR'S FAILED INSTALL (ruling
+    9010). mint_token's room attach POSTed to /tokens/{tid}, whose route takes
+    PATCH and DELETE -- impossible on any box, ever, and invisible to every
+    stub-broker gate because a stub accepts any method. Both sides of this
+    contract live in this repo, so it is asserted against the REAL route table.
+    """
+    routes = daemon_routes()
+    installer_calls = [                       # what cli.py actually sends
+        ("POST", "/login"),
+        ("GET", "/me"),
+        ("POST", "/tokens"),
+        ("POST", "/logout"),
+        ("GET", "/presence"),                 # verify()
+    ]
+    for method, path in installer_calls:
+        assert path in routes, f"the installer calls {path}; no such route"
+        assert method in routes[path], \
+            f"the installer {method}s {path}; that route takes {sorted(routes[path])}"
+    # And the second-step attach is GONE from the installer, not merely working:
+    # a mint that attaches later has a window where a token reaches nothing.
+    src = pathlib.Path(cli.__file__).read_text()
+    assert '/tokens/{tok' not in src and '"/tokens/" +' not in src, \
+        "the installer attaches rooms in a second call again"
+
+
+def test_the_mint_attaches_its_rooms_or_does_not_happen(tmp_path):
+    """One transaction, both directions: rooms ride the mint, and a room the
+    reach check refuses rolls the token back too -- no credential left to
+    hand-revoke."""
+    from reveille import store
+    path = str(tmp_path / "b.db")
+    conn = store.connect(path)
+    store.migrate(conn, path)
+    admin = store.setup_first_admin(conn, "op", "hunter2hunter2")
+    room = store.create_room(conn, admin["id"], "Reveille")
+
+    t = store.create_token(conn, admin["id"], "x", agent_name="dev",
+                           rooms=[room["id"]])
+    assert list(store.rooms_for_token(conn, t["id"])) == [room["id"]]
+
+    import pytest as _pytest
+    with _pytest.raises(store.BusError):
+        store.create_token(conn, admin["id"], "x", agent_name="dev2",
+                           rooms=["no-such-room"])
+    assert conn.execute("SELECT count(*) FROM tokens WHERE agent_id IN "
+                        "(SELECT id FROM agents WHERE name='dev2')").fetchone()[0] == 0, \
+        "a failed attach left the minted token behind"

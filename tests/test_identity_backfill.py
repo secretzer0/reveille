@@ -343,3 +343,18 @@ def test_the_write_path_attributes_to_the_live_identity(tmp_path):
     conn.execute("UPDATE agents SET retired_ns=9 WHERE id='new-id'")
     assert store.agent_id_for(conn, "reveille-devops") is None
     assert store.agent_id_for(conn, "tmelhiser") is None
+
+
+def test_two_owners_live_same_name_attributes_to_neither(tmp_path):
+    """Architect 9009: idx_agents_live is per-OWNER, so two accounts can each
+    run a live agent under one name -- two speakers, not a speaker and a ghost.
+    Picking one attributes a message across a tenancy boundary; None does not.
+    Red on the version whose comment cited the index as if it were global."""
+    conn, path = at_v17(tmp_path)
+    conn.execute("INSERT INTO users(id, name, pw_hash, role, created_ns) "
+                 "VALUES('u2','other','x','user',1)")
+    conn.execute("INSERT INTO agents(id, owner_id, name, created_ns) "
+                 "VALUES('a-mine','u1','devops',1)")
+    conn.execute("INSERT INTO agents(id, owner_id, name, created_ns) "
+                 "VALUES('a-theirs','u2','devops',2)")
+    assert store.agent_id_for(conn, "devops") is None

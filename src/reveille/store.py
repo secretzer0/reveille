@@ -1455,7 +1455,8 @@ def delete_session(conn, secret):
 
 # ---- tokens ------------------------------------------------------------------
 
-def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state"):
+def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
+                 rooms=None):
     """Mint a credential; a bound one names an agent and THE MINT IS THE
     PROVISIONING EVENT (DES-008 ruling 1). A native agent has no container and
     the launcher never sees it, so minting a bound token for a name inserts that
@@ -1468,6 +1469,15 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state"):
     owner's previous tokens for that identity in the same transaction: one
     identity, one live credential, and the superseded ids ride the return so a
     rotation is reported rather than silent.
+
+    ROOMS ATTACH AT MINT, in the same transaction, or the mint does not happen
+    (architect ruling 9010, from the operator's failed install): a mint that
+    attaches in a second call has a window where a token exists and reaches
+    nothing, and that window ate a real install -- the second call POSTed to a
+    route that takes PATCH, so it could never succeed on any box, and the last
+    step of the flow left a credential to hand-revoke. assign_room inside the
+    tx is the same reach check every route uses; a room that fails it rolls
+    back the token too.
     """
     agent_name = (agent_name or "").strip() or None
     tid, secret = uuid.uuid4().hex, secrets.token_urlsafe(32)
@@ -1491,8 +1501,11 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state"):
             "INSERT INTO tokens(id, secret_hash, owner_id, label, agent_id, mem_tier, "
             "created_ns) VALUES(?,?,?,?,?,?,?)",
             (tid, _sha(secret), owner_id, label, agent_id, mem_tier, now))
+        for rid in rooms or []:
+            assign_room(conn, tid, rid, owner_id)
     return {"id": tid, "secret": secret, "label": label, "agent_name": agent_name,
-            "agent_id": agent_id, "mem_tier": mem_tier, "superseded": superseded}
+            "agent_id": agent_id, "mem_tier": mem_tier, "superseded": superseded,
+            "rooms": list(rooms or [])}
 
 
 def resolve_token(conn, secret):
@@ -3071,8 +3084,19 @@ def agent_id_for(conn, name):
     rows = conn.execute(
         "SELECT id, retired_ns FROM agents WHERE name=?", (name,)).fetchall()
     live = [r for r in rows if r["retired_ns"] is None]
+    if len(live) == 1:
+        return live[0]["id"]
     if live:
-        return live[0]["id"]          # idx_agents_live: at most one
+        # idx_agents_live is UNIQUE(owner_id, name): at most one live row per
+        # name PER OWNER, so two accounts can each run a live agent under this
+        # name and there are two speakers to choose between. Picking one
+        # attributes a message across a tenancy boundary; None does not
+        # (architect ruling 9005/9009 -- the first version's comment here cited
+        # that index as if it were global, which is a claim the schema does not
+        # make). This resolver dies entirely when send() takes the identity
+        # from the caller's token, which is the enforcement slice's first
+        # commit and this guard must not survive it.
+        return None
     return rows[0]["id"] if len(rows) == 1 else None
 
 
