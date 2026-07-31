@@ -1652,3 +1652,46 @@ def test_the_container_has_a_utf8_locale_and_the_client_is_forced_to_it():
         assert "tmux -u attach-session" in ln, (
             "an attach path stopped forcing UTF-8 on its client -- the env is "
             "the root fix, this is the one that survives the env going missing")
+
+
+def test_login_status_reports_the_container_after_reaping_it(monkeypatch, tmp_path):
+    """A RECOVERY CONTROL MUST NOT BE GATED ON THE STATE IT RECOVERS FROM
+    (architect, msg 8867). The cancel button used to render only while the page
+    believed a login was PENDING, and the failure that stranded the operator was
+    the page believing wrong -- so the escape hatch was hidden in exactly the
+    state that needed it. Cancel now renders on container EXISTENCE, which means
+    /login/status has to report it, and report it AFTER its own reap: a flag read
+    before the removal describes a container this very call then deleted.
+    """
+    seen = []
+
+    def fake_docker(*args, check=True, capture=False):
+        seen.append(args)
+        # inspect = "does a container exist": true until this call reaps it,
+        # false afterwards. Everything else succeeds quietly.
+        if args[0] == "inspect":
+            gone = ("rm", "-f", "reveille-login-op") in [a[:3] for a in seen]
+            return types.SimpleNamespace(
+                returncode=1 if gone else 0, stdout="exited\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(rl, "_docker", fake_docker)
+    monkeypatch.setattr(rl, "_broker_me", lambda *a, **k: {"user": "op"})
+    monkeypatch.setattr(rl, "_db", lambda *a, **k: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(rl, "claude_login_state",
+                        lambda user, base=None: {"present": True,
+                                                 "logged_in_at_ns": 1, "needed": False})
+    monkeypatch.setattr(rl, "login_container_name", lambda user: "reveille-login-op")
+
+    app = rl.build_api("http://127.0.0.1:8765")
+    ep = next(r.endpoint for r in app.routes
+              if getattr(r, "path", None) == "/login/status")
+    req = types.SimpleNamespace(headers={}, query_params={}, path_params={},
+                                method="GET")
+    body = json.loads(asyncio.run(ep(req)).body)
+    assert "container" in body, \
+        "/login/status must say whether a container exists -- cancel renders on it"
+    assert ("rm", "-f", "reveille-login-op") in [a[:3] for a in seen], \
+        "the fixture did not exercise the reap, so the ordering is unproven"
+    assert body["container"] is False, \
+        "container was read BEFORE the reap -- it describes one this call deleted"
