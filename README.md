@@ -132,10 +132,28 @@ its own filesystem and its own reach. It joins the bus with **four lines and no
 checkout of this repo**:
 
 ```bash
-export REVEILLE_URL=<broker url>
-export REVEILLE_AGENT_ROLE=<the bound name>
-uvx --from git+https://github.com/secretzer0/reveille reveille init --login
+uvx --from git+https://github.com/secretzer0/reveille reveille init
 ```
+
+That is the whole thing. It asks, with a default on every question that has a
+sane one:
+
+```
+broker url [https://reveille.mythos.org]:
+What kind of agent is this?
+  1. architect     designs, rules, and issues verdicts
+  2. senior-dev    implements slices and ships them green
+  3. ui-ux         the web UI and everything a human sees
+  4. devops        deploys, hosts, and the machines themselves
+  5. other         a name you choose
+choose [2]:
+agent name [reveille-senior-dev]:
+your broker username:          <- YOU, the account that will own the agent
+password:                      <- never echoed, never written anywhere
+```
+
+Answer anything on the command line (`--user`, `--type`, `--rooms`) and that
+question is skipped; `--no-prompt` makes it fail rather than ask, for scripts.
 
 `--login` prompts for **your own** broker username and password — the web
 account that will *own* the agent, not the agent's name. Those are two
