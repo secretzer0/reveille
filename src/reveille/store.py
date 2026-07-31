@@ -874,30 +874,39 @@ def _upgrade_v16(conn, db_path):
 
 
 def _rescope_state_notes(conn):
-    """Move state notes from agent:<token_id> to agent:<agent_id>.
+    """Move state notes from agent:<token_id> to agent:<agent_id>. Returns
+    (moved, ambiguous) counts.
 
-    RESOLVED THROUGH THE AUTHOR, NOT THE TOKEN, and that is the whole repair.
-    The first version joined tokens, so a note could only move if the token that
-    minted it still existed -- and tokens are SUPERSEDED on every re-mint, which
-    is the normal lifecycle of a re-provisioned agent. Measured on the operator's
-    database: 47 of 50 state notes sat at a scope whose token was long gone,
-    including 37 belonging to the architect, and once the readers moved to the
-    identity those rows were reachable by nobody.
-
-    memories.author is the agent's NAME and it survives every token rotation, so
-    it is the durable link. Pre-migration history is one identity per name by
-    definition (DES-007 6.3), which is exactly what makes this resolution honest
-    rather than a guess. A note whose author has no agents row stays where it is:
-    there is nothing to resolve it to, and inventing one is what the backfill
-    refuses at migration time.
+    RESOLVED THROUGH THE AUTHOR, AND ONLY WHEN THE AUTHOR IS UNAMBIGUOUS --
+    exactly one agents row for that name. The first version resolved through the
+    minting token, which rotates on every re-mint: 47 of 50 live notes sat at
+    dead scopes. The second version resolved through the author with an ORDER BY
+    preferring the live identity -- which, the day a declined resurrect gives a
+    name two identities, moves the RETIRED agent's memory to the LIVE one.
+    One agent's history handed to another, silently, by a migration (architect,
+    msg 9000). A row that cannot be resolved without guessing is LEFT PUT and
+    COUNTED: it is the operator's to assign, which is 6.1's own rule one plane
+    over. No timestamp windows -- the identities on the only live database were
+    seeded after every historical row, so a time window would resolve nothing.
     """
-    return conn.execute("""
+    moved = conn.execute("""
         UPDATE memories SET scope = 'agent:' || (
-            SELECT a.id FROM agents a WHERE a.name = memories.author
-             ORDER BY a.retired_ns IS NULL DESC, a.created_ns LIMIT 1)
+            SELECT a.id FROM agents a WHERE a.name = memories.author)
          WHERE kind='state' AND scope LIKE 'agent:%'
            AND scope NOT IN (SELECT 'agent:' || id FROM agents)
-           AND EXISTS (SELECT 1 FROM agents a WHERE a.name = memories.author)""").rowcount
+           AND (SELECT count(*) FROM agents a
+                 WHERE a.name = memories.author) = 1""").rowcount
+    ambiguous = conn.execute("""
+        SELECT count(*) FROM memories
+         WHERE kind='state' AND scope LIKE 'agent:%'
+           AND scope NOT IN (SELECT 'agent:' || id FROM agents)
+           AND (SELECT count(*) FROM agents a
+                 WHERE a.name = memories.author) > 1""").fetchone()[0]
+    if ambiguous:
+        print(f"state rescope: left {ambiguous} note(s) whose author has more "
+              f"than one identity -- assign them explicitly rather than let a "
+              f"migration guess which agent's memory this is")
+    return moved, ambiguous
 
 
 def _upgrade_v17(conn, db_path):
@@ -939,23 +948,23 @@ def _upgrade_v17(conn, db_path):
             cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
-        # One identity per name, which is what pre-migration history IS: instances
-        # that were never distinguished cannot be split retroactively, and
-        # pretending otherwise would invent facts (DES-007 6.3). MIN(id) makes the
-        # choice deterministic rather than dependent on row order, for the case
-        # where a name somehow carries two rows already.
-        conn.execute("""
-            UPDATE messages SET sender_agent_id =
-              (SELECT MIN(a.id) FROM agents a WHERE a.name = messages.sender)""")
-        conn.execute("""
-            UPDATE memories SET author_agent_id =
-              (SELECT MIN(a.id) FROM agents a WHERE a.name = memories.author)""")
-        conn.execute("""
-            UPDATE reads SET agent_id =
-              (SELECT MIN(a.id) FROM agents a WHERE a.name = reads.agent)""")
-        conn.execute("""
-            UPDATE members SET agent_id =
-              (SELECT MIN(a.id) FROM agents a WHERE a.name = members.name)""")
+        # One identity per name is what pre-migration history IS (DES-007 6.3),
+        # and it is enforced here rather than assumed: a name that somehow
+        # carries two rows already is resolved for NEITHER of them. The first
+        # version said MIN(id) "makes the choice deterministic", which is true
+        # and is exactly the problem -- a deterministic guess is still a guess,
+        # and this one would hand a retired identity's history to whichever id
+        # sorted first (architect, msg 9000). Ambiguous rows keep NULL, which
+        # is "not yet attributed" and recoverable; a wrong id is a false record.
+        for table, col, namecol in (("messages", "sender_agent_id", "sender"),
+                                    ("memories", "author_agent_id", "author"),
+                                    ("reads", "agent_id", "agent"),
+                                    ("members", "agent_id", "name")):
+            conn.execute(f"""
+                UPDATE {table} SET {col} =
+                  (SELECT a.id FROM agents a WHERE a.name = {table}.{namecol})
+                 WHERE (SELECT count(*) FROM agents a
+                         WHERE a.name = {table}.{namecol}) = 1""")
         # STATE NOTES MOVE FROM THE TOKEN TO THE IDENTITY (DES-007 4.2), and this
         # is the migration's most user-visible payoff rather than a detail: a note
         # scoped agent:<token_id> is orphaned the moment an agent is recreated,
@@ -1024,12 +1033,24 @@ def _upgrade_v19(conn, db_path):
     """
     with tx(conn):
         _rescope_state_notes(conn)
+        # Same rule as the rescope: only an unambiguous name is resolved. A
+        # message whose sender has two identities stays NULL and is counted --
+        # NULL is "not yet attributed", which is recoverable; a wrong id is a
+        # false record, which is not.
         conn.execute("""
             UPDATE messages SET sender_agent_id = (
-                SELECT a.id FROM agents a WHERE a.name = messages.sender
-                 ORDER BY a.retired_ns IS NULL DESC, a.created_ns LIMIT 1)
+                SELECT a.id FROM agents a WHERE a.name = messages.sender)
              WHERE sender_agent_id IS NULL
-               AND EXISTS (SELECT 1 FROM agents a WHERE a.name = messages.sender)""")
+               AND (SELECT count(*) FROM agents a
+                     WHERE a.name = messages.sender) = 1""")
+        left = conn.execute("""
+            SELECT count(*) FROM messages
+             WHERE sender_agent_id IS NULL
+               AND (SELECT count(*) FROM agents a
+                     WHERE a.name = messages.sender) > 1""").fetchone()[0]
+        if left:
+            print(f"sender backfill: left {left} message(s) whose sender has "
+                  f"more than one identity -- unattributed, for the operator")
         conn.execute("PRAGMA user_version=20")
 
 
@@ -2891,16 +2912,22 @@ def _chain_info(conn, row):
 def agent_id_for(conn, name):
     """The identity behind a bus NAME, or None for a human or an unknown name.
 
-    Pre-migration history is one identity per name by definition (DES-007 6.3),
-    and going forward the live row is the one that matters -- so: prefer the live
-    instance, then the oldest, deterministically. None is a legitimate answer and
-    means "not an agent": a human's messages carry a name and no identity, and
-    inventing one for them is the failure the backfill refuses at migration time.
+    THIS IS THE WRITE-TIME RESOLVER AND ITS RULES ARE WRITE-TIME RULES. A
+    message being written NOW is being written by the live instance -- that is
+    what live means -- so a live row wins outright. With no live row and several
+    retired ones, the answer is None: an unattributed message is honest and an
+    attributed-to-the-wrong-agent one is not, and the migration-time version of
+    that same guess is exactly what handed one agent's history to another
+    (architect, msg 9000). None also means "not an agent": a human's messages
+    carry a name and no identity, and inventing one is the failure the backfill
+    refuses at migration time.
     """
-    row = conn.execute(
-        "SELECT id FROM agents WHERE name=? "
-        "ORDER BY retired_ns IS NULL DESC, created_ns LIMIT 1", (name,)).fetchone()
-    return row["id"] if row else None
+    rows = conn.execute(
+        "SELECT id, retired_ns FROM agents WHERE name=?", (name,)).fetchall()
+    live = [r for r in rows if r["retired_ns"] is None]
+    if live:
+        return live[0]["id"]          # idx_agents_live: at most one
+    return rows[0]["id"] if len(rows) == 1 else None
 
 
 def agent_scope(conn, token_id):

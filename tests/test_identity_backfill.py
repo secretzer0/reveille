@@ -261,7 +261,9 @@ def test_the_recount_and_the_refusal_cannot_disagree(tmp_path):
     """
     src = pathlib.Path(store.__file__).read_text()
     body = src[src.index("def _upgrade_v17("):src.index("def _upgrade_v18(")]
-    after = body[body.index("UPDATE members SET agent_id"):]
+    # anchored past the column backfills (now a loop, not four literals) to the
+    # recount at the function's tail
+    after = body[body.index("_rescope_state_notes(conn)"):]
     assert "unresolved_agent_names(conn)" in after, \
         "the recount must call the refusal, not re-spell it"
     assert "SELECT count(*) FROM messages WHERE sender_agent_id IS NULL" not in after, \
@@ -280,3 +282,56 @@ def test_a_human_sender_never_blocks_the_migration(tmp_path):
     assert store.migrate(conn, path) == store.SCHEMA_VERSION
     assert conn.execute("SELECT sender_agent_id FROM messages WHERE id=?",
                         (mid,)).fetchone()[0] is None
+
+
+def two_identities(conn, name="reveille-devops"):
+    """The shape a declined resurrect produces: one retired identity, one live,
+    same label. The fixture the prune gate already uses, rebuilt here because
+    with one identity per name this entire class of defect cannot be seen."""
+    conn.execute("INSERT INTO agents(id, owner_id, name, created_ns, retired_ns) "
+                 "VALUES('old-id','u1',?,1,2)", (name,))
+    conn.execute("INSERT INTO agents(id, owner_id, name, created_ns) "
+                 "VALUES('new-id','u1',?,3)", (name,))
+
+
+def test_an_ambiguous_author_is_left_put_and_counted(tmp_path, capsys):
+    """Architect finding, msg 9000: the tie-break preferred the LIVE identity,
+    so a retired agent's state notes moved to the live agent that later reused
+    its name -- one agent's memory handed to another, silently, by a migration.
+    Red on that ORDER BY, which happily moves both."""
+    conn, path = at_v17(tmp_path)
+    two_identities(conn)
+    conn.execute("INSERT INTO memories(uid, kind, scope, fact, author, status, "
+                 "created_ns) VALUES('m1','state','agent:dead-token',"
+                 "'the retired agent remembers','reveille-devops','live',1)")
+    back_to_17(conn)
+    assert store.migrate(conn, path) == store.SCHEMA_VERSION
+    assert conn.execute("SELECT scope FROM memories WHERE uid='m1'").fetchone()[0] \
+        == "agent:dead-token", "an ambiguous author's note moved -- that is the guess"
+    assert "more than one identity" in capsys.readouterr().out
+
+
+def test_an_ambiguous_sender_stays_null_and_is_counted(tmp_path, capsys):
+    """NULL is 'not yet attributed', which is recoverable. A wrong id is a false
+    record, which is not."""
+    conn, path = at_v17(tmp_path)
+    two_identities(conn)
+    mid = msg(conn, "reveille-devops")
+    back_to_17(conn)
+    assert store.migrate(conn, path) == store.SCHEMA_VERSION
+    assert conn.execute("SELECT sender_agent_id FROM messages WHERE id=?",
+                        (mid,)).fetchone()[0] is None
+    assert "more than one identity" in capsys.readouterr().out
+
+
+def test_the_write_path_attributes_to_the_live_identity(tmp_path):
+    """WRITE time is different from migration time, deliberately: a message
+    being written now is being written by the live instance -- that is what
+    live means. With no live row and several retired ones, None: unattributed
+    is honest, misattributed is not."""
+    conn, path = at_v17(tmp_path)
+    two_identities(conn)
+    assert store.agent_id_for(conn, "reveille-devops") == "new-id"
+    conn.execute("UPDATE agents SET retired_ns=9 WHERE id='new-id'")
+    assert store.agent_id_for(conn, "reveille-devops") is None
+    assert store.agent_id_for(conn, "tmelhiser") is None
