@@ -667,6 +667,7 @@ def test_fts_delete_sync_and_upgrade_backfill():
     # Re-run the v4->v5 step against a live table: drop the index, rewind the
     # version, migrate -- history must come back searchable.
     c.execute("DROP TABLE messages_fts")
+    store.claim_unresolved_names(c, admin["id"])   # what a real upgrade does first
     c.execute("PRAGMA user_version=4")
     assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "x.db")) == store.SCHEMA_VERSION
     assert len(store.search(c, keywords=["keepable"], rooms=[room["id"]])) == 1
@@ -712,6 +713,7 @@ def test_entity_filter_send_delete_and_backfill():
                      (a["id"],)).fetchone()[0] == 0
     # v5->v6 re-run against a live table: drop, rewind, migrate -> backfilled
     c.execute("DROP TABLE message_entities")
+    store.claim_unresolved_names(c, admin["id"])
     c.execute("PRAGMA user_version=5")
     assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "x.db")) == store.SCHEMA_VERSION
     assert len(store.search(c, entity="run_id", rooms=rid)) == 1
@@ -983,6 +985,7 @@ def test_fts_widen_migration_v9_to_v10():
     """)
     c.execute("INSERT INTO memories_fts(rowid, fact, entities) "
               "SELECT id, fact, entities FROM memories")
+    store.claim_unresolved_names(c, admin["id"])
     c.execute("PRAGMA user_version=9")
     zero = store.recall(c, rooms={room["id"]: "R"}, token_id=tok["id"],
                         query="onlyinrootcause")
@@ -2080,6 +2083,7 @@ def test_v3_backfills_file_rooms_from_attachments():
     store.send(c, "alice", store.BROADCAST, "see attached", room=room["id"],
                attachments=[{"url": "/files/99-old.png", "name": "old.png", "bytes": 4}])
     c.execute("DELETE FROM files")                          # simulate a pre-v4 db
+    store.claim_unresolved_names(c, admin["id"])
     c.execute("PRAGMA user_version=3")
     assert store.file_room(c, "99-old.png") is None         # would 404
     # A REAL tmp path, never a placeholder: migration steps snapshot to
@@ -2375,7 +2379,7 @@ def test_migration_v16_to_v17_rebuilds_the_table_and_keeps_every_row(tmp_path):
     hits = c.execute(
         'SELECT rowid FROM memories_fts WHERE memories_fts MATCH \'"wake-127"\'').fetchall()
     assert len(hits) == 2, f"the rebuilt index finds {len(hits)} of 2 rows"
-    assert c.execute("PRAGMA user_version").fetchone()[0] == 17
+    assert c.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
 
 
 def test_migration_v16_to_v17_is_rerunnable_within_one_second(tmp_path):
@@ -2428,7 +2432,7 @@ def test_every_arm_from_v9_reaches_the_rebuild(tmp_path):
     """The ladder is a hand-written arm per start version, so a step appended to
     some arms and not others is invisible until a database sits at the wrong one.
     Pin the property instead of the arms: from every version this fixture can
-    honestly represent, migrate() ends at 17 with the new column.
+    honestly represent, migrate() ends at the current version with the new column.
 
     WHAT THIS DOES NOT COVER, said rather than implied: start versions below 9.
     Their steps expect the OLD table shapes (v2 drops a column that no longer
@@ -2436,11 +2440,15 @@ def test_every_arm_from_v9_reaches_the_rebuild(tmp_path):
     it would fail on the fixture, not on the ladder. Those arms are covered by
     their own dedicated gates above, one shape each.
     """
+    # 17 is the REBUILD'S OWN TARGET (_upgrade_v16 takes 16 -> 17), not a stand-in
+    # for the current version: a chain starting AT 17 is already past the rebuild
+    # and must not be asked to have run it. Bumping SCHEMA_VERSION does not move
+    # this bound, which is why it stays a literal with a reason beside it.
     for start in range(9, 17):
         c, db = _v16_db_with_the_old_column(tmp_path / f"s{start}")
         c.execute(f"PRAGMA user_version={start}")
         assert store.migrate(c, db) == store.SCHEMA_VERSION
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 17, \
-            f"a chain starting at v{start} did not reach 17"
+        assert c.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION, \
+            f"a chain starting at v{start} did not reach the current version"
         assert "ON DELETE SET NULL" not in _mem_sql(c), \
             f"a chain starting at v{start} reached 17 without the rebuild"
