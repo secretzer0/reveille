@@ -933,10 +933,10 @@ function hhmm(ns){return new Date(ns/1e6).toLocaleTimeString([],{hour:'2-digit',
 function dayOf(ns){return new Date(ns/1e6).toDateString();}
 // ESCAPES FOR THE POSITION IT IS ACTUALLY USED IN. The textContent round-trip
 // escapes &, < and > and leaves BOTH quotes alone, which is correct for text
-// and wrong for the 23 places this page interpolates into an attribute value
-// (aria-label, title, data-*, value, href). There, one double quote in the
-// input closes the attribute early and everything after it is parsed as
-// markup. Today no name can carry a quote -- the launcher's ROLE_RE and the
+// and wrong for every place this page interpolates into an attribute value
+// (aria-label, title, data-*, value, placeholder, alt, href). There, one
+// double quote in the input closes the attribute early and everything after
+// it is parsed as markup. Today no name can carry a quote -- the launcher's ROLE_RE and the
 // broker's NAME_RE both forbid it -- but that is a constraint held two
 // services away from the line that depends on it, and the failure is silent
 // the day either one widens. Escaping here costs one pass and removes the
@@ -2887,8 +2887,21 @@ async function refreshLoginSection(){
   }else{
    const st=await lapi('/login/status');
    if(st.pending==='awaiting-code'&&st.url){
-    paint(el,'<b>1.</b> <a href="'+esc(st.url)+'" target="_blank" '+
-     'rel="noopener noreferrer">Click here and sign in</a> with the account '+
+    // SCHEME ALLOWLIST AT THE POINT OF INTERPOLATION. esc() makes a string
+    // safe to SIT in an attribute; it says nothing about what the browser
+    // will DO with it, and href acts on the scheme. This URL comes from the
+    // launcher relaying the login flow, so it is server-supplied today --
+    // which is a property of the current parse, not a guarantee, and the
+    // whole argument of this branch is that a constraint held elsewhere is
+    // not a check here. Anything that is not https renders as TEXT: the
+    // reader still sees the URL and can judge it, and nothing is one click
+    // from a javascript: or data: target (architect, msg 8813).
+    const https=/^https:\/\//i.test(st.url||'');
+    paint(el,'<b>1.</b> '+(https
+     ? '<a href="'+esc(st.url)+'" target="_blank" '+
+       'rel="noopener noreferrer">Click here and sign in</a>'
+     : '<span class="pAsk err">the login service returned a link this page '+
+       'will not open: '+esc(st.url)+'</span>')+' with the account '+
      'whose plan should pay. <b>2.</b> Paste the code it shows: '+
      '<input id="lgCode" size="24" autocomplete="off"> '+
      '<button id="lgSend"'+(st.relayed?' disabled':'')+'>submit</button> '+

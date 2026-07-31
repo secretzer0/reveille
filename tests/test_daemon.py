@@ -624,6 +624,27 @@ def test_esc_is_safe_where_it_is_actually_used():
         "quote escaping must follow the innerHTML round-trip, never precede it"
 
 
+def test_the_only_href_this_page_builds_checks_its_scheme():
+    """esc() makes a string safe to SIT in an attribute and says nothing about
+    what the browser DOES with it -- href acts on the scheme, so a javascript:
+    or data: URL is escaped, well-formed and still one click from executing.
+
+    The page builds exactly one href from a value it did not author: the login
+    URL the launcher relays. Server-supplied is a property of today's parse,
+    not a guarantee (architect, msg 8813)."""
+    sec = PAGE[PAGE.index("async function refreshLoginSection"):]
+    sec = sec[:sec.index("\nasync function ") + 1] if "\nasync function " in sec[1:] else sec
+    assert PAGE.count('href="\'+esc(') == 1, \
+        "a second built href needs its own scheme check -- this gate covers one"
+    assert "/^https:\\/\\//i.test(" in sec, \
+        "the login URL must be scheme-checked, not merely escaped"
+    # The refusal renders the URL as TEXT rather than dropping it: a reader who
+    # can see what came back can judge it, and a silent disappearance would
+    # look like the login flow simply failing.
+    assert "will not open: '+esc(st.url)" in sec, \
+        "a rejected URL must still be shown, as text"
+
+
 def test_a_humans_presence_is_their_open_tab():
     """Operator report 2026-07-30: a web user stayed 'active' in a room after
     switching rooms or signing out -- their live flag came from a member row
