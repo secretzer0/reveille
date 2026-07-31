@@ -365,53 +365,46 @@ run and the exact output that would settle it. Read the hive lessons at boot
 and record what you learn; your findings are input to the architect's ruling,
 never a merge and never a deploy.*
 
-## 9.2 Room topology for the audit roles (architect ruling, 2026-07-31)
+## 9.2 Room topology for the audit roles (operator ruling, 2026-07-31)
 
-The operator asked two questions about giving the auditors their own room: how
-findings get back to the project room, and how the security room stays tied to
-exactly one project (msg 8843). Both are answered by what the bus already
-enforces, and neither needs a new field.
+RULED BY THE OPERATOR (msg 8845), REPLACING THE ARCHITECT'S SEPARATE-ROOM
+PROPOSAL EARLIER THE SAME DAY: the auditors live in the PROJECT ROOM and send
+findings by UNICAST to exactly whoever needs them. A second room would need a
+carrying protocol in both directions, and that overhead buys less than it
+costs. Two things the single-room shape gets for free: no cross-posting
+protocol, and the hive stays where the fleet reads it -- memories are per-room,
+so an audit recording lessons in its own room would have taught nobody at boot.
 
-**MEMBERSHIP IS THE ASSOCIATION. There is no link between rooms and there must
-not be one.** A token holds a set of rooms; the auditors' tokens hold exactly
-two — their security room and the one project room. That is the whole binding.
-A `parent_room` column would be derived state that can lapse while the
-membership it describes says otherwise, and the doctrine on derived state
-already tells us which of the two would be believed. Rooms are a credential
-rotation (ruling 8606), so changing the association is revoke + mint +
-re-provision, which is exactly the price such a change should cost.
+**MEASURED, BECAUSE THE WHOLE DESIGN RESTS ON IT: A UNICAST IS QUIET, NOT
+PRIVATE.** Read scoping in `store.py` is by ROOM, not by recipient --
+`thread()` (2076), `tail()`, `search()` (2104) and `graph()` all filter on
+`m.room IN (...)` and nothing else. Only `inbox()` (2059) filters on
+`m.recipient`. So addressing a message decides who is WOKEN and whose unread
+list it enters; every member of the room can read it afterwards through
+history, the thread view, or the web feed's backlog.
 
-**INVARIANT: A SECURITY ROOM IS SCOPED TO EXACTLY ONE PROJECT ROOM.** Auditing
-a second project means a second security room and a second pair of tokens,
-never a second project attached to this one. A shared security room is a
-cross-project channel by construction: findings about project A become readable
-by anyone holding project B, and the first person to notice will be the one who
-should not have seen them.
+That is fine today and it is the reason the ruling is sound: the room's members
+are the operator and the operator's own agents, so "everyone who can read it
+should be able to read it" holds. It is a property of the CURRENT membership,
+not of the mechanism.
 
-**CROSSING IS AN ACT, AND THAT IS THE POINT.** The bus refuses to carry a reply
-across rooms (daemon.py:78; store.send also refuses a unicast to an agent not
-present in that room, store.py:1993), so nothing leaks by accident and nothing
-crosses by default. The protocol that follows from the mechanism:
+**REVERSAL TRIGGER, and it is a membership event rather than a judgement
+call:** the first time this room holds a member who is not the operator or the
+operator's own agents -- DES-004 M1 invited membership makes that one click --
+security findings need their own room. On that day every past unicast in this
+room becomes readable by the new member, including findings whose fixes have
+not shipped. Splitting later does not un-publish them, so the split has to
+happen BEFORE the invite, which is why the trigger is written down here rather
+than left to notice.
 
-- The **security room** is the working room: sweeps, dead ends, half-findings,
-  payload transcripts, the noise that makes an audit honest.
-- The **project room** gets ONE root message per CONFIRMED finding, in the
-  finding shape — what is wrong, who can reach it, what was run, the fix shape.
-  Blocking findings are unicast to the architect so they ring; a broadcast
-  queues silently and a security finding should not wait for someone's next
-  turn.
-- Nothing else crosses. An auditor who cannot summarise a finding in one root
-  message does not yet have a finding.
+**PRACTICE UNTIL THEN.** A finding names the shape, the reach and the fix. Do
+not paste a working payload string into room history before the fix ships: the
+room is a permanent log with a growing readership, and a transcript that proves
+the point today is a recipe tomorrow. Keep payload transcripts in agent-scoped
+`state` memory, which is bound to the author, and reference them from the
+finding.
 
-**THE HIVE IS PER-ROOM, WHICH IS THE TRAP IN THIS TOPOLOGY.** Lessons and
-memories scoped to the security room are invisible in the project room's
-`brief()`, so an audit that records everything where it works teaches nobody at
-boot. Therefore: METHOD lessons stay in the security room; anything that BINDS
-the fleet — a rule about escaping, a refused pattern, a constraint that must
-hold in code — is recorded in the PROJECT room, by the architect, as part of
-the ruling. The auditors write findings; the architect writes what the fleet
-reads at boot.
-
-**Membership for the security room:** the two auditors, the architect, the
-operator. Not senior-dev and not senior-ui-ux — they receive findings in the
-project room, where the work is, rather than reading an audit in progress.
+**ADDRESSING.** Blocking findings unicast to the architect, who rules. A
+finding whose fix has an obvious owner also unicasts that owner -- server half
+to senior-dev, client half to senior-ui-ux -- because a broadcast queues
+silently and a security finding should not wait for someone's next turn.
