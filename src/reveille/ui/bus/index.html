@@ -2978,12 +2978,29 @@ async function refreshLoginSection(){
  try{
   const p=await lapi('/profile');const L=p.claude_login||{};
   const cmd='<code>reveille-launch login '+esc(p.user)+'</code>';
+  // ASKED IN EVERY STATE, not only when the credential is absent. Two reasons,
+  // and the second is the ruling. /login/status is also the REAPER -- it removes
+  // a finished login container on observation -- so a page that stops asking the
+  // moment a login succeeds is a page that stops reaping exactly when there is
+  // something to reap. And the cancel button below renders on st.container, which
+  // there is no way to know without asking.
+  const st=await lapi('/login/status').catch(()=>({}));
+  // A RECOVERY CONTROL MUST NEVER BE GATED ON THE STATE IT RECOVERS FROM
+  // (architect, msg 8867). Cancel used to render only while the page believed a
+  // login was pending -- and the failure that stranded the operator WAS the page
+  // believing wrong, so the escape hatch was hidden in the one state that needed
+  // it. It now renders whenever a container exists, whatever anyone believes about
+  // pending, so a misreading in either direction costs one click instead of a
+  // support question. Every future improvement to the pending reading leaves that
+  // intact, which is the point of hanging it on the container instead.
+  const lgCancel=st.container
+   ?' <button id="lgCancel">cancel the login container</button>':'';
   if(L.present){
    paint(el,'logged in ('+esc(new Date(L.logged_in_at_ns/1e6)
     .toLocaleString())+'). <button id="lgStart">re-login (switch account)</button>'+
+    lgCancel+
     '<span class="pDim"> then restart your agents; or in a terminal: '+cmd+'</span>');
   }else{
-   const st=await lapi('/login/status');
    if(st.pending==='awaiting-code'&&st.url){
     // SCHEME ALLOWLIST AT THE POINT OF INTERPOLATION. esc() makes a string
     // safe to SIT in an attribute; it says nothing about what the browser
@@ -3002,16 +3019,15 @@ async function refreshLoginSection(){
        'will not open: '+esc(st.url)+'</span>')+' with the account '+
      'whose plan should pay. <b>2.</b> Paste the code it shows: '+
      '<input id="lgCode" size="24" autocomplete="off"> '+
-     '<button id="lgSend"'+(st.relayed?' disabled':'')+'>submit</button> '+
-     '<button id="lgCancel">cancel</button>'+
+     '<button id="lgSend"'+(st.relayed?' disabled':'')+'>submit</button>'+
+     lgCancel+
      (st.relayed?'<div class="pDim">code sent -- waiting for the login to '+
       'land; if nothing happens, cancel and start again</div>':''));
     loginPoll=setTimeout(refreshLoginSection,3000);
    }else if(st.pending){
     paint(el,(st.pending==='failed'
      ?'the login flow looks stuck or expired -- '
-     :'starting the login flow... ')+
-     '<button id="lgCancel">cancel</button>');
+     :'starting the login flow... ')+lgCancel);
     loginPoll=setTimeout(refreshLoginSection,2000);
    }else{
     paint(el,((L.needed_by||[]).length
@@ -3021,7 +3037,7 @@ async function refreshLoginSection(){
      ?'<b>No login on file.</b> Your credential mode is home-login: you will '+
       'need this before you can create an agent. '
      :'No login on file (needed only by home-login agents). ')+
-     '<button id="lgStart">log in via browser</button>'+
+     '<button id="lgStart">log in via browser</button>'+lgCancel+
      '<span class="pDim"> or in a terminal: '+cmd+'</span>');
    }
   }

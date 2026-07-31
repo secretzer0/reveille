@@ -800,3 +800,39 @@ console.log('ok');
     res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr or res.stdout
     assert "ok" in res.stdout
+
+
+def test_cancel_is_not_gated_on_the_state_it_recovers_from():
+    """Architect ruling 8867. The cancel button rendered only while the page
+    believed a login was pending; the failure was the page believing wrong; so
+    the escape hatch was hidden in the exact state that needed it.
+
+    Asserted over the STATEMENT, not the line, and by ENUMERATING every place the
+    control can be built rather than counting one spelling of it -- a second
+    branch reintroducing a pending-gated cancel in any other form is what this
+    has to catch.
+    """
+    sec = PAGE[PAGE.index("async function refreshLoginSection()"):
+               PAGE.index("function pruneAgent(")]
+    # 1. Exactly one place builds the control, and its condition is the CONTAINER.
+    builds = re.findall(r'id="lgCancel"', sec)
+    assert len(builds) == 1, \
+        f"the cancel control is built in {len(builds)} places -- one, or they drift"
+    stmt = sec[sec.index("const lgCancel="):]
+    stmt = stmt[:stmt.index(";")]
+    assert "st.container" in stmt, f"cancel is gated on something else: {stmt!r}"
+    for gated in ("st.pending", "L.present", "st.relayed"):
+        assert gated not in stmt, \
+            f"cancel renders on {gated} -- that is the state it recovers from"
+    # 2. Every branch that paints the section offers it. Four paints: logged in,
+    #    awaiting-code, pending/failed, no login. A branch that omits it is a
+    #    state where the container can exist and the way out cannot be reached.
+    paints = re.findall(r"paint\(el,", sec)
+    assert len(paints) == 4, f"{len(paints)} paints -- update this gate deliberately"
+    assert sec.count("lgCancel") >= 5, \
+        "some paint branch does not include the cancel control"
+    # 3. The status call that reads the container must not sit inside the
+    #    credential-absent branch, or the logged-in state cannot see it -- which
+    #    is also the state whose missing reap started this.
+    assert sec.index("const st=await lapi('/login/status')") < sec.index("if(L.present)"), \
+        "status is read inside a branch -- the logged-in state must read it too"

@@ -2410,6 +2410,13 @@ def build_api(auth_url):
             out["relayed"] = _docker(
                 "exec", login_container_name(p["user"]), "test", "-f",
                 "/tmp/.code-relayed", check=False, capture=True).returncode == 0
+        # Read AFTER the reap above, so it reports what is still there rather than
+        # what was there when the call began. This is what the cancel button renders
+        # on: a RECOVERY CONTROL MUST NOT BE GATED ON THE STATE IT RECOVERS FROM
+        # (architect, msg 8867). `pending` is a reading of a tmux session and can be
+        # wrong in either direction; a container either exists or it does not, and
+        # that is the thing cancel actually removes.
+        out["container"] = _login_container(p["user"])
         return JSONResponse(out)
 
     @guarded
