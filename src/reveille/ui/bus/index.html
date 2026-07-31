@@ -1710,8 +1710,14 @@ async function closeTab(gid){
 // The actions, on the tab, for the ACTIVE tab only (operator, msg 8751): an
 // inactive tab is a place to go, not a place to act, and a strip of six tabs
 // each carrying four buttons is a minefield over a one-pixel target.
-// Every one is a real <button> with its own aria-label -- Tab reaches them in
-// the order they read, and the icon is decorative to a screen reader.
+// Every one is a real <button> with its own aria-label, and the icon is
+// decorative to a screen reader.
+// THIS COMMENT USED TO CLAIM Tab reached them in the order they read, and that
+// was only ever true of the ACTIONS: the tab they sit on was a span with a
+// click handler, so the keyboard could destroy an agent from a tab it could
+// not select. The claim is true now because the tab is a button too (drawTabs,
+// aria-current) -- it was false when written, and it read as a checked fact,
+// which is how the gap survived review.
 function tabActions(t){
  if(t.gid!==agTabOn)return '';
  const a=agRows[t.agent]||{};
