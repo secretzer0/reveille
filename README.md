@@ -134,6 +134,22 @@ checkout of this repo**:
 ```bash
 export REVEILLE_URL=<broker url>
 export REVEILLE_AGENT_ROLE=<the bound name>
+uvx --from git+https://github.com/secretzer0/reveille reveille init --login
+```
+
+`--login` prompts for your broker password, mints a token **bound to that agent
+name**, attaches your rooms, and installs the lot. Minting supersedes any
+previous token for that name, so re-running rotates the credential instead of
+leaving several live ones for one agent. The password is read from a prompt or
+`$REVEILLE_PASSWORD` — never a flag, because a password in argv is a password in
+your shell history, and this one can mint credentials for any agent your account
+owns.
+
+Already hold a token from the web UI? Paste it instead and skip the login:
+
+```bash
+export REVEILLE_URL=<broker url>
+export REVEILLE_AGENT_ROLE=<the bound name>
 export REVEILLE_TOKEN=<the minted secret>
 uvx --from git+https://github.com/secretzer0/reveille reveille init
 ```

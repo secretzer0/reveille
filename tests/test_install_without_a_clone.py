@@ -9,6 +9,7 @@ manufactured rather than hoped for.
 import http.server
 import json
 import os
+import pathlib
 import subprocess
 import threading
 
@@ -231,3 +232,97 @@ def test_the_hook_ships_inside_the_package(tmp_path):
     from reveille import hook
     assert hook.hook_path().is_file(), hook.hook_path()
     assert subprocess.run(["bash", "-n", str(hook.hook_path())]).returncode == 0
+
+
+class Minting(http.server.BaseHTTPRequestHandler):
+    """A broker that logs in, mints and attaches -- the three calls --login makes."""
+    fail_attach = False
+    calls = []
+
+    def _json(self, code, body, cookie=None):
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        if cookie:
+            self.send_header("set-cookie", cookie)
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def do_POST(self):
+        n = int(self.headers.get("content-length", 0))
+        body = json.loads(self.rfile.read(n) or "{}")
+        Minting.calls.append((self.path, body))
+        if self.path == "/login":
+            if body.get("password") != "hunter2":
+                return self._json(401, {"error": "bad credentials"})
+            return self._json(200, {"name": body["name"]}, cookie="sid=abc; Path=/")
+        if self.path == "/tokens":
+            return self._json(200, {"id": "t1", "secret": "minted-secret",
+                                    "agent_name": body.get("agent_name"),
+                                    "superseded": ["old"]})
+        if self.path.startswith("/tokens/"):
+            if Minting.fail_attach:
+                return self._json(403, {"error": "not your room"})
+            return self._json(200, {"rooms": ["r1"]})
+        return self._json(404, {})
+
+    def do_GET(self):
+        if self.path == "/me":
+            return self._json(200, {"rooms": [{"id": "r1", "name": "Reveille2.0"}]})
+        return self._json(200, {"agents": []})
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def minting():
+    Minting.calls = []
+    Minting.fail_attach = False
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Minting)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_port}"
+    srv.shutdown()
+
+
+def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    secret, rooms, note = cli.mint_token(minting, "tmelhiser", "hunter2", "dev-agent")
+    assert secret == "minted-secret"
+    assert rooms == ["Reveille2.0"]
+    assert "superseded" in note, "a rotation that supersedes must say so"
+    paths = [p for p, _ in Minting.calls]
+    assert paths == ["/login", "/tokens", "/tokens/t1"], paths
+    # BOUND, and least privilege by default: an unbound or write-tier token here
+    # would hand a fresh machine more than it needs.
+    assert Minting.calls[1][1]["agent_name"] == "dev-agent"
+    assert Minting.calls[1][1]["mem_tier"] == "state"
+
+
+def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsys):
+    claude, log = fake_claude(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("REVEILLE_PASSWORD", "wrong")
+    rc = cli.main(["init", minting, "dev-agent", "--login", "--user", "tmelhiser",
+                   "--claude", claude, "--home", str(home)])
+    assert rc == 1
+    assert not log.exists() and not cli.env_file(home).exists()
+    assert "login failed" in capsys.readouterr().err
+
+
+def test_a_token_that_cannot_reach_a_room_is_named_not_left_silent(minting, monkeypatch):
+    """Minted-but-unattached is the worst outcome: a credential that exists and
+    reaches nothing, which reads as a broken bus rather than a failed install.
+    It must say the token id so a human can revoke it."""
+    Minting.fail_attach = True
+    with pytest.raises(RuntimeError, match="t1"):
+        cli.mint_token(minting, "tmelhiser", "hunter2", "dev-agent")
+
+
+def test_the_password_never_comes_from_a_flag():
+    """A password in argv is a password in .bash_history, and this one mints
+    credentials for any agent the account owns."""
+    src = pathlib.Path(cli.__file__).read_text()
+    parser = src[src.index("def main("):]
+    assert "--password" not in parser, "a --password flag would put it in history"

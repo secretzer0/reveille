@@ -23,6 +23,7 @@ root-equivalent credential into .bash_history on every machine that runs it.
 """
 
 import argparse
+import getpass
 import json
 import os
 import pathlib
@@ -113,10 +114,123 @@ def write_credential(url, name, token, home=None):
     return path
 
 
+# ---- minting from a password (operator ask, 2026-07-31) ---------------------
+# The browser flow is: log in, mint a bound token, copy it, paste it into a
+# shell. This is the same three steps done by the shell that is already about to
+# hold the credential -- which removes the copy-paste and nothing else. It is
+# strictly MORE reach than pasting a token: run with a password, this command can
+# mint a credential for any agent name the account owns. That is what makes it
+# worth having and also why the web UI must still never run it: a browser button
+# that did this would be a host-shell grant with a password behind it.
+
+
+def _post(url, path, payload, cookie=None, timeout=15):
+    """POST json, return (status, body-dict, set-cookie). Stdlib only, like the
+    rest of this installer -- a JSON POST does not earn a dependency."""
+    req = urllib.request.Request(url.rstrip("/") + path,
+                                 data=json.dumps(payload).encode(),
+                                 headers={"content-type": "application/json"})
+    if cookie:
+        req.add_header("Cookie", cookie)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode()
+            return r.status, (json.loads(body) if body.strip() else {}), \
+                r.headers.get("set-cookie", "")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode() or "{}"), ""
+        except Exception:
+            return e.code, {}, ""
+
+
+def _get(url, path, cookie, timeout=15):
+    req = urllib.request.Request(url.rstrip("/") + path, headers={"Cookie": cookie})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode() or "{}")
+
+
+def mint_token(url, user, password, agent, rooms=None, tier="state"):
+    """Log in, mint a token BOUND to `agent`, attach rooms. Returns
+    (secret, rooms-attached, note) or raises RuntimeError with what to fix.
+
+    Binding supersedes the account's previous token for that name -- the broker's
+    existing one-identity-one-live-credential rule, not something this adds. So
+    re-running this rotates the credential rather than accumulating four live
+    ones for a single agent, which is a state the operator has found in their
+    own Tokens tab before.
+    """
+    code, body, cookie = _post(url, "/login", {"name": user, "password": password})
+    if code != 200 or not cookie:
+        raise RuntimeError(f"login failed ({code}): {body.get('error') or body}")
+    cookie = cookie.split(";", 1)[0]
+
+    me = _get(url, "/me", cookie)
+    have = {r["name"]: r["id"] for r in me.get("rooms", [])}
+    if not have:
+        raise RuntimeError(
+            f"{user} is in no rooms, so a token minted here would reach nothing. "
+            f"Create or join a room first.")
+    want = [r.strip() for r in (rooms or "").split(",") if r.strip()] or list(have)
+    unknown = [r for r in want if r not in have and r not in have.values()]
+    if unknown:
+        raise RuntimeError(f"no such room for {user}: {', '.join(unknown)}. "
+                           f"Available: {', '.join(have)}")
+
+    code, tok, _ = _post(url, "/tokens",
+                         {"agent_name": agent, "label": f"native {agent}",
+                          "mem_tier": tier}, cookie)
+    if code != 200 or not tok.get("secret"):
+        raise RuntimeError(f"mint failed ({code}): {tok.get('error') or tok}")
+
+    attached = []
+    for r in want:
+        rid = have.get(r, r)
+        code, out, _ = _post(url, f"/tokens/{tok['id']}", {"room": rid, "attach": True},
+                             cookie)
+        if code != 200:
+            raise RuntimeError(
+                f"minted the token but could not attach room {r} ({code}). The "
+                f"token exists and reaches nothing -- revoke it in the Tokens tab "
+                f"rather than leaving it: {tok['id']}")
+        attached.append(r)
+    note = ""
+    if tok.get("superseded"):
+        note = f" (superseded {len(tok['superseded'])} previous token(s) for {agent})"
+    return tok["secret"], attached, note
+
+
+def read_password(user, prompt=None):
+    """Environment, then a TTY prompt. Never a flag: a password in argv is a
+    password in .bash_history, and this one mints credentials."""
+    if os.environ.get("REVEILLE_PASSWORD"):
+        return os.environ["REVEILLE_PASSWORD"]
+    return getpass.getpass(prompt or f"password for {user}: ")
+
+
 def cmd_init(a):
     url = a.url or os.environ.get("REVEILLE_URL", "")
     name = a.name or os.environ.get("REVEILLE_AGENT_ROLE", "")
-    token = read_token(a.token)
+    minted = ""
+    if a.login:
+        # MINT FIRST, then fall into exactly the same path as a pasted token.
+        # One installer, not two: everything after this point cannot tell where
+        # the credential came from, so there is one flow to get right.
+        user = a.user or os.environ.get("REVEILLE_USER") or input("broker username: ")
+        if not url or not name:
+            print("reveille init --login: needs REVEILLE_URL and an agent name "
+                  "(REVEILLE_AGENT_ROLE or the second argument).", file=sys.stderr)
+            return 2
+        try:
+            token, attached, minted = mint_token(url, user, read_password(user),
+                                                 name, a.rooms, a.tier)
+        except RuntimeError as e:
+            print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
+                  file=sys.stderr)
+            return 1
+        minted = f"minted a token bound to {name}, rooms: {', '.join(attached)}{minted}"
+    else:
+        token = read_token(a.token)
     missing = [n for n, v in (("REVEILLE_URL", url), ("REVEILLE_AGENT_ROLE", name),
                               ("REVEILLE_TOKEN", token)) if not v]
     if missing:
@@ -146,6 +260,8 @@ def cmd_init(a):
         return 1
 
     steps = []
+    if minted:
+        steps.append(minted)
     have, found = already_registered(claude)
     if have:
         steps.append(f"mcp: already registered, left alone -- {found or 'reveille'}\n"
@@ -197,6 +313,16 @@ def main(argv=None):
                                  "(default: the current directory)")
     i.add_argument("--claude", help="path to the claude binary")
     i.add_argument("--home", help=argparse.SUPPRESS)   # tests
+    i.add_argument("--login", action="store_true",
+                   help="log in and mint the token instead of pasting one. Reads "
+                        "the password from $REVEILLE_PASSWORD or a prompt, never "
+                        "from a flag")
+    i.add_argument("--user", help="broker username for --login (or $REVEILLE_USER)")
+    i.add_argument("--rooms", help="comma-separated room names for --login "
+                                   "(default: every room your account is in)")
+    i.add_argument("--tier", default="state",
+                   help="memory tier for the minted token (default: state, which "
+                        "is least privilege -- everything else lands as a draft)")
     i.add_argument("--force", action="store_true",
                    help="install even if the broker did not answer")
     i.set_defaults(fn=cmd_init)
