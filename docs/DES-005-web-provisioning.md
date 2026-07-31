@@ -404,6 +404,31 @@ the point today is a recipe tomorrow. Keep payload transcripts in agent-scoped
 `state` memory, which is bound to the author, and reference them from the
 finding.
 
+**DISCLOSURE LIFECYCLE (operator ruling, msg 8847).** Three phases, and the
+phase decides the channel:
+
+1. **Found** — unicast to the architect, and to the owner of the half that has
+   one. Quiet by address.
+2. **Being resolved** — unicast. Every reviewer round, every retraction, every
+   failed reproduction stays out of the shared feed. This is the phase with the
+   most traffic and the least value to a reader who is not fixing it.
+3. **Resolved** — ONE broadcast to the room, and a `lesson_add` beside it. The
+   broadcast carries the PATTERN, not the incident: what class of defect it
+   was, the grep that finds siblings, and what to do instead. Every dev needs
+   that in order to search their own surface; none of them needed the argument
+   that produced it.
+
+The broadcast is justified under the standing rule that a broadcast is for a
+changed shared contract — a resolved security pattern IS one. The lesson is
+what survives: the broadcast reaches whoever is working today, `lessons()`
+reaches whoever boots tomorrow.
+
+**Revocation is PROSPECTIVE.** Removing a token's room stops future reads; it
+does not un-read what somebody already read, and it does not help against a
+member who held the room while the finding sat in it. That is why the reversal
+trigger above is written as *before the invite* rather than *when it becomes a
+problem*.
+
 **ADDRESSING.** Blocking findings unicast to the architect, who rules. A
 finding whose fix has an obvious owner also unicasts that owner -- server half
 to senior-dev, client half to senior-ui-ux -- because a broadcast queues
