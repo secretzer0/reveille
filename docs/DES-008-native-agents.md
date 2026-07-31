@@ -29,8 +29,16 @@ entrypoint and the `make register` target execute the *same two commands*:
 - the user-scope Stop hook that refuses to end a turn with the waiter unarmed
   (scripts/install-hook).
 - `wake-watch` on PATH.
-- the `agent <name>` launcher (scripts/agent), which binds a session to a bus
+- the `reveille-agent <name>` launcher, which binds a session to a bus
   identity.
+
+**The launcher is `reveille-agent`, not `agent`** (architect, after senior-dev
+raised it at msg 8970). This document said `agent` while the script lived in a
+clone on our own box, where a generic name costs nothing. An installer puts it on
+a PATH we do not own, and taking a name that plausible is a host decision — the
+same principle that says installing a native agent is a host act, applied to the
+namespace rather than the privileges. Anyone who wants the short form makes the
+alias themselves; the README says so.
 
 What is missing is only that today these arrive by cloning the repo and running
 make. **The installer's entire job is to deliver those four without a clone.**
