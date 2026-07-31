@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# COMMITS THAT EXIST ON A BRANCH AND NOWHERE ELSE.
+#
+# Twice in one evening a commit was pushed to a branch that had ALREADY been
+# merged, so it never had a merge to ride: e37aaf5 (the git-identity hoist) and
+# d9a5724 (the wake-socket hover the operator asked for). Both branches read as
+# landed, because their siblings had landed.
+#
+# Nothing catches that. `git branch --merged` says merged -- it asks about the
+# TIP, and the tip is an ancestor of main. No test fails, because a feature that
+# is merely ABSENT breaks nothing. The second one was found only because someone
+# ran git cherry by hand during a hygiene pass.
+#
+# So this asks git cherry, per branch, and prints what is unapplied.
+#
+# IT REPORTS, IT DOES NOT REFUSE. Most unapplied commits are a branch legitimately
+# in review, and a control that fires on every open branch is one nobody reads.
+# The signal is a branch you BELIEVE is finished still holding a '+' line.
+set -u
+
+# THE BASE IS WHAT IS PUBLISHED, NOT WHAT YOUR CLONE HOLDS.
+#
+# This defaulted to the local `main` ref. In a clone whose local main sat six
+# commits behind origin, it reported those six as orphans -- main's own newer
+# commits, presented as work in danger of being lost. Two people ran the same
+# command against refs with the same name and got different answers, and neither
+# was wrong.
+#
+# That direction of failure is the bad one: the false positives BURY the true
+# ones, which were in that same list. An audit whose noise depends on when you
+# last pulled is an audit people stop reading, and a control nobody reads is
+# worse than no control.
+#
+# So the default names origin explicitly, the base is printed with its sha so a
+# stale FETCH is visible rather than silent, and an unknown ref stops rather
+# than being quietly compared against nothing. Pass a base to override -- a repo
+# with no remote must say `branch-orphans main`, which is honest about what it
+# is comparing.
+base="${1:-origin/main}"
+if ! sha="$(git rev-parse --short --verify "$base" 2>/dev/null)"; then
+  echo "REFUSING: no such ref '$base'." >&2
+  echo "The default is origin/main because the question is always about what is" >&2
+  echo "PUBLISHED. In a repo with no remote, name the base: branch-orphans main" >&2
+  exit 2
+fi
+echo "orphans against $base ($sha, as of your last fetch)"
+found=0
+
+for ref in $(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes/origin \
+             | grep -v -x -e "$base" -e "origin/$base" -e "origin/HEAD"); do
+  # git cherry prints '+' for commits NOT in base, '-' for equivalents already there.
+  out="$(git cherry "$base" "$ref" 2>/dev/null | grep '^+' || true)"
+  [ -z "$out" ] && continue
+  found=1
+  echo "$ref"
+  while read -r _ sha; do
+    [ -z "$sha" ] && continue
+    echo "  $(git log --format='%h %s' -1 "$sha")"
+  done <<< "$out"
+done
+
+if [ "$found" -eq 0 ]; then
+  echo "no orphaned commits: every branch's patches are in $base"
+fi

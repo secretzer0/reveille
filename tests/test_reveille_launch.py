@@ -1442,3 +1442,111 @@ def test_the_preflight_does_not_call_your_own_grant_a_rival():
     assert "g.grantee!=='me'" in stmt, (
         "the pre-flight counts the page's own grantee as a holder -- the owner "
         "is refused against themselves on every attach after the first")
+
+
+def test_branch_orphans_finds_a_commit_that_had_no_merge_to_ride(tmp_path):
+    """A commit pushed to an ALREADY-MERGED branch never gets a merge to ride.
+
+    Twice in one evening: e37aaf5 and d9a5724. Both branches read as landed
+    because their siblings had landed, and nothing catches that -- `git branch
+    --merged` asks about the TIP, which is an ancestor of main, and no test fails
+    for a feature that is merely absent. The second was found only because
+    someone ran git cherry by hand.
+
+    Built as the real shape rather than mocked: a base, a branch merged into it,
+    then a commit added to that branch AFTERWARDS.
+    """
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a],
+                              capture_output=True, text=True, check=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    (repo / "f.txt").write_text("base\n")
+    git("add", "-A"); git("commit", "-qm", "base")
+
+    git("checkout", "-q", "-b", "feat/x")
+    (repo / "f.txt").write_text("base\nlanded\n")
+    git("add", "-A"); git("commit", "-qm", "the half that landed")
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-ff", "feat/x", "-m", "merge feat/x")
+
+    # THE DEFECT: another commit onto the branch that was already merged.
+    git("checkout", "-q", "feat/x")
+    (repo / "f.txt").write_text("base\nlanded\nstranded\n")
+    git("add", "-A"); git("commit", "-qm", "the half that did not")
+    git("checkout", "-q", "main")
+
+    script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "branch-orphans"
+    # Named explicitly: this repo has no remote, and the DEFAULT is origin/main.
+    res = subprocess.run(["bash", str(script), "main"], cwd=str(repo),
+                         capture_output=True, text=True)
+    assert "the half that did not" in res.stdout, (
+        "a commit pushed to an already-merged branch is invisible -- this is the "
+        "case --merged reports as merged, because the TIP is an ancestor")
+    assert "the half that landed" not in res.stdout, (
+        "commits already in main must not be reported, or the signal drowns")
+
+    # And it stays quiet once the stranded commit is on main.
+    git("cherry-pick", "feat/x")
+    clean = subprocess.run(["bash", str(script), "main"], cwd=str(repo),
+                           capture_output=True, text=True)
+    assert "no orphaned commits" in clean.stdout, (
+        "reporting a commit whose patch IS in main makes the audit unreadable")
+
+
+def test_branch_orphans_compares_against_what_is_published(tmp_path):
+    """A stale LOCAL main manufactures orphans -- ruling 8768, measured.
+
+    The base defaulted to the local `main` ref. In a clone whose local main sat
+    six commits behind origin, those six of main's OWN commits were reported as
+    work in danger of being lost. Two people ran the same command against refs
+    with the same name and got different answers, and neither was wrong.
+
+    That direction of failure is the bad one: the false positives BURY the true
+    ones, which were in the same list. An audit whose noise depends on when you
+    last pulled is an audit people stop reading -- and this tool's whole argument
+    was that a control nobody reads is worse than none.
+    """
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a],
+                              capture_output=True, text=True, check=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.invalid")
+    git("config", "user.name", "t")
+    (repo / "f.txt").write_text("base\n")
+    git("add", "-A"); git("commit", "-qm", "base")
+    (repo / "f.txt").write_text("base\npublished\n")
+    git("add", "-A"); git("commit", "-qm", "a commit already on origin")
+    published = git("rev-parse", "HEAD").stdout.strip()
+
+    # A branch that CARRIES that published commit. This is where the false
+    # positives came from: the branch is fine, but measured against a lagging
+    # local main its shared history reads as unapplied work.
+    git("branch", "feat/x", published)
+
+    # origin/main is AHEAD; the local main ref lags, exactly as a clone does
+    # between someone else's push and your next pull.
+    git("update-ref", "refs/remotes/origin/main", published)
+    git("reset", "-q", "--hard", "HEAD~1")
+
+    script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "branch-orphans"
+    res = subprocess.run(["bash", str(script)], cwd=str(repo),
+                         capture_output=True, text=True)
+    assert "a commit already on origin" not in res.stdout, (
+        "the default compared against the LOCAL main, so main's own newer "
+        "commits were reported as orphans -- and the real ones drown in them")
+    assert "origin/main" in res.stdout, "say which ref was compared, and its sha"
+
+    # An unknown base stops rather than quietly comparing against nothing.
+    bad = subprocess.run(["bash", str(script), "origin/does-not-exist"],
+                         cwd=str(repo), capture_output=True, text=True)
+    assert bad.returncode == 2 and "REFUSING" in bad.stderr
