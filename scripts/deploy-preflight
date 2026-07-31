@@ -31,3 +31,45 @@ if [ ! -f "$data/broker.db" ] && [ -n "$current" ] && [ "$current" != "$data" ];
 fi
 
 mkdir -p "$data"
+
+# THE IDENTITY BACKFILL REFUSES ON A NAME IT CANNOT ATTRIBUTE, and this is where
+# the operator must meet that refusal -- BEFORE anything stops.
+#
+# The refusal itself is right: history whose names have no `agents` row cannot be
+# attributed without inventing an owner, and inventing one is what DES-007 6.1
+# forbids. But it lives inside migrate(), which runs at broker STARTUP -- so
+# without this check the operator learns about it after `make up` has already
+# taken down what was serving. Correct refusal, outage timing (architect, 8946).
+#
+# Here it is the same information one step earlier, with nothing down to deliver
+# it. The seeder only INSERTS rows, so it runs against the live database with the
+# OLD broker still up, and the deploy then proceeds with no gap at any point.
+#
+# Same rows through the same code as the migration and the seeder: it calls
+# store.unresolved_agent_names, so the three cannot drift into a preflight that
+# passes a database the migration will refuse.
+if [ -f "$data/broker.db" ]; then
+  repo="$(cd "$(dirname "$0")/.." && pwd)"
+  if ! (cd "$repo" && uv run --quiet python - "$data/broker.db" <<'PY'
+import sys
+from reveille import store
+
+conn = store.connect(sys.argv[1])
+pending = store.unresolved_agent_names(conn)
+if pending:
+    print("REFUSING to deploy: this database has history the identity backfill "
+          "cannot attribute.", file=sys.stderr)
+    for e in pending:
+        print(f"  {e['name']}: {e['messages']} messages, {e['memories']} memories, "
+              f"{e['lessons']} lessons", file=sys.stderr)
+    print("The migration runs at broker startup and REFUSES on these, so deploying "
+          "now would stop what is serving and fail to bring it back.", file=sys.stderr)
+    print("Assign them once, deliberately, with the broker still up:", file=sys.stderr)
+    print(f"  uv run python scripts/seed_agent_identities.py {sys.argv[1]} "
+          f"--assign <user>", file=sys.stderr)
+    sys.exit(1)
+PY
+  ); then
+    exit 1
+  fi
+fi
