@@ -364,3 +364,54 @@ socket or a browser you lack, say so and hand it over with the exact command to
 run and the exact output that would settle it. Read the hive lessons at boot
 and record what you learn; your findings are input to the architect's ruling,
 never a merge and never a deploy.*
+
+## 9.2 Room topology for the audit roles (architect ruling, 2026-07-31)
+
+The operator asked two questions about giving the auditors their own room: how
+findings get back to the project room, and how the security room stays tied to
+exactly one project (msg 8843). Both are answered by what the bus already
+enforces, and neither needs a new field.
+
+**MEMBERSHIP IS THE ASSOCIATION. There is no link between rooms and there must
+not be one.** A token holds a set of rooms; the auditors' tokens hold exactly
+two — their security room and the one project room. That is the whole binding.
+A `parent_room` column would be derived state that can lapse while the
+membership it describes says otherwise, and the doctrine on derived state
+already tells us which of the two would be believed. Rooms are a credential
+rotation (ruling 8606), so changing the association is revoke + mint +
+re-provision, which is exactly the price such a change should cost.
+
+**INVARIANT: A SECURITY ROOM IS SCOPED TO EXACTLY ONE PROJECT ROOM.** Auditing
+a second project means a second security room and a second pair of tokens,
+never a second project attached to this one. A shared security room is a
+cross-project channel by construction: findings about project A become readable
+by anyone holding project B, and the first person to notice will be the one who
+should not have seen them.
+
+**CROSSING IS AN ACT, AND THAT IS THE POINT.** The bus refuses to carry a reply
+across rooms (daemon.py:78; store.send also refuses a unicast to an agent not
+present in that room, store.py:1993), so nothing leaks by accident and nothing
+crosses by default. The protocol that follows from the mechanism:
+
+- The **security room** is the working room: sweeps, dead ends, half-findings,
+  payload transcripts, the noise that makes an audit honest.
+- The **project room** gets ONE root message per CONFIRMED finding, in the
+  finding shape — what is wrong, who can reach it, what was run, the fix shape.
+  Blocking findings are unicast to the architect so they ring; a broadcast
+  queues silently and a security finding should not wait for someone's next
+  turn.
+- Nothing else crosses. An auditor who cannot summarise a finding in one root
+  message does not yet have a finding.
+
+**THE HIVE IS PER-ROOM, WHICH IS THE TRAP IN THIS TOPOLOGY.** Lessons and
+memories scoped to the security room are invisible in the project room's
+`brief()`, so an audit that records everything where it works teaches nobody at
+boot. Therefore: METHOD lessons stay in the security room; anything that BINDS
+the fleet — a rule about escaping, a refused pattern, a constraint that must
+hold in code — is recorded in the PROJECT room, by the architect, as part of
+the ruling. The auditors write findings; the architect writes what the fleet
+reads at boot.
+
+**Membership for the security room:** the two auditors, the architect, the
+operator. Not senior-dev and not senior-ui-ux — they receive findings in the
+project room, where the work is, rather than reading an audit in progress.
