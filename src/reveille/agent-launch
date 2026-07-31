@@ -17,8 +17,13 @@
 # native: the boot prompt tells the agent to arm `wake-watch <role>` as a background task;
 # its completion notification IS the ring -- no keystroke injection, nothing ever types into
 # a human's half-written prompt. The Stop hook that blocks ending a turn with the waiter
-# unarmed is user-scoped, installed by `make register` (scripts/install-hook). Not in tmux:
-# re-launches inside a tmux session first (persistence/attach/web terminal, not waking).
+# unarmed is user-scoped, installed by `make register` (scripts/install-hook).
+#
+# TMUX IS OPT-IN AND OFF BY DEFAULT (operator directive). Pass --tmux, or set
+# REVEILLE_TMUX=1, to get a persistent session. tmux exists in this project for the
+# CONTAINER, where ttyd attaches to it -- docker/entrypoint.sh starts its own session
+# ("agent") directly and never calls this script, so the native default costs the browser
+# plane nothing. Wake has not involved tmux since 0.1.3 removed the keystroke sidecar.
 set -euo pipefail
 
 # THE CREDENTIAL FILE IS SOURCED HERE, and this is the line that decides whether
@@ -50,6 +55,9 @@ URL="${REVEILLE_URL:-http://127.0.0.1:8765}"
 
 claude_args=()
 role_pos=0
+# Off unless asked for. --tmux/--no-tmux override the env either way, so a box that
+# exports REVEILLE_TMUX=1 can still decline for one launch.
+WANT_TMUX="${REVEILLE_TMUX:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --role)    ROLE="$2"; shift 2 ;;
@@ -58,6 +66,11 @@ while [ $# -gt 0 ]; do
         --token=*) TOKEN="${1#*=}"; shift ;;
         --url)     URL="$2"; shift 2 ;;
         --url=*)   URL="${1#*=}"; shift ;;
+        # These MUST be cases here rather than falling through to claude: the -*
+        # arm below forwards anything unrecognised, so `--no-tmux` used to land on
+        # claude and break the launch with an error naming the wrong program.
+        --tmux)    WANT_TMUX=1; shift ;;
+        --no-tmux) WANT_TMUX=""; shift ;;
         --)        shift; claude_args+=("$@"); break ;;
         -*)        claude_args+=("$1"); shift ;;
         *)         if [ "$role_pos" -eq 0 ]; then ROLE="$1"; role_pos=1; else claude_args+=("$1"); fi; shift ;;
@@ -73,9 +86,17 @@ export REVEILLE_AGENT_ROLE="$ROLE"
 export REVEILLE_TOKEN="$TOKEN"
 export REVEILLE_URL="$URL"
 
-# Not in tmux: re-launch inside a fresh tmux session (persistence / attach / web terminal).
+# OPTED IN, and not already inside one: re-launch in a tmux session (persistence/attach).
+# This used to fire on `command -v tmux` alone, so every box with tmux installed was
+# silently re-execed into a session it never asked for, with no way to decline. Asking for
+# tmux where it is not installed now SAYS SO rather than quietly launching without it --
+# a request that is silently ignored is the shape that makes people distrust the launcher.
 # Re-pass resolved config as flags so a pre-existing tmux server's stale env can't drop it.
-if [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+if [ -n "$WANT_TMUX" ] && ! command -v tmux >/dev/null 2>&1; then
+    echo "agent: --tmux/REVEILLE_TMUX asked for tmux and it is not installed -- "\
+"starting without it" >&2
+fi
+if [ -n "$WANT_TMUX" ] && [ -z "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
     reinvoke=(--role "$ROLE" --token "$TOKEN" --url "$URL" ${claude_args[@]+"${claude_args[@]}"})
     argq=""; for a in "${reinvoke[@]}"; do argq+=" $(printf '%q' "$a")"; done
     exec tmux new-session -A -s "rev-$ROLE" "exec $(printf '%q' "${BASH_SOURCE[0]}")$argq"

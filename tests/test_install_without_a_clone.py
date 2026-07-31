@@ -534,3 +534,123 @@ def test_the_hook_command_is_never_a_cache_path(monkeypatch, tmp_path):
     cmd = install.hook_command()
     assert "/.cache/" not in cmd, cmd
     assert cmd == "reveille-stop-hook"
+
+
+# -- the hook CONVERGES, it does not merely exist (msg 9067) ------------------
+# Everything above starts from a settings.json with no Stop hook in it. That is
+# the state a FRESH machine is in, and it is the only state these fixtures ever
+# manufactured -- so the suite could prove hook_command() computes a durable
+# path while main() went on reporting a broken one as correct. The gap is not
+# subtle once named: 0.2.77 fixed which path a fresh install WRITES, and could
+# not reach one machine that already had the bad value, because every such
+# machine takes the early return below. These start from WRONG.
+
+def _settings_naming(cfg, command):
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "settings.json").write_text(json.dumps(
+        {"hooks": {"Stop": [{"hooks": [{"type": "command",
+                                        "command": command}]}]}},
+        indent=2) + "\n")
+    return cfg / "settings.json"
+
+
+def _durable_copy(tmp_path):
+    local = tmp_path / ".local" / "bin"
+    local.mkdir(parents=True, exist_ok=True)
+    p = local / "reveille-stop-hook"
+    p.write_text("#!/bin/sh\n")
+    p.chmod(0o755)
+    return p
+
+
+def _hook_commands(settings):
+    return [h["command"]
+            for g in json.loads(settings.read_text())["hooks"]["Stop"]
+            for h in g["hooks"]]
+
+
+def _as_home(tmp_path, cfg, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.setattr(install.pathlib.Path, "home",
+                        classmethod(lambda c: tmp_path))
+
+
+def test_a_cache_path_hook_is_re_pointed_rather_than_reported(
+        tmp_path, monkeypatch, capsys):
+    """The operator's own machine (msg 9067): settings.json naming a uv
+    cache-archive copy, reported as "already installed" by every re-run, and
+    dead at the next `uv cache prune`. Re-running the installer is the obvious
+    remedy and it CONFIRMED the broken state -- which is what makes this worse
+    than never having installed."""
+    cfg = tmp_path / "home" / ".claude"
+    stale = str(tmp_path / ".cache" / "uv" / "archive-v0" / "89m3Avup" / "bin"
+                / "reveille-stop-hook")
+    settings = _settings_naming(cfg, stale)
+    good = _durable_copy(tmp_path)
+    _as_home(tmp_path, cfg, monkeypatch)
+
+    assert install.main() == 0
+    assert _hook_commands(settings) == [str(good)], (
+        "a cache-archive hook survived the installer -- 0.2.77's durable "
+        "spelling reaches only machines that never had the defect")
+    assert "re-pointed" in capsys.readouterr().out
+
+
+def test_a_hook_naming_a_clone_this_machine_lacks_is_re_pointed(
+        tmp_path, monkeypatch, capsys):
+    """The packaged-hook defect one layer on: install-hook used to write an
+    absolute path to scripts/agent-stop-hook, fine on a box with the repo and
+    useless on one without. Such a value still ENDS IN agent-stop-hook, so it
+    matched and was left alone forever."""
+    cfg = tmp_path / "home" / ".claude"
+    gone = str(tmp_path / "someones" / "checkout" / "scripts" / "agent-stop-hook")
+    settings = _settings_naming(cfg, gone)
+    good = _durable_copy(tmp_path)
+    _as_home(tmp_path, cfg, monkeypatch)
+
+    assert install.main() == 0
+    assert _hook_commands(settings) == [str(good)], (
+        f"hook still names {gone}, which is not on this machine")
+
+
+def test_a_durable_hook_is_still_left_byte_identical(tmp_path, monkeypatch,
+                                                     capsys):
+    """Converging must not mean churning: the second run of a CORRECT install
+    still changes nothing, which is what test_a_second_run_changes_nothing
+    asserts end to end. Idempotence is preserved -- it just now means
+    converging on correctness rather than detecting presence."""
+    cfg = tmp_path / "home" / ".claude"
+    good = _durable_copy(tmp_path)
+    settings = _settings_naming(cfg, str(good))
+    before = settings.read_text()
+    _as_home(tmp_path, cfg, monkeypatch)
+
+    assert install.main() == 0
+    assert settings.read_text() == before
+    assert "already installed" in capsys.readouterr().out
+
+
+def test_a_bare_name_hook_is_durable_and_left_alone(tmp_path, monkeypatch,
+                                                    capsys):
+    """The bare name is what hook_command() falls back to precisely because a
+    login shell resolves it at hook-run time. Rewriting it to an absolute path
+    would be churn, and treating it as broken would rewrite every container
+    install on every run."""
+    cfg = tmp_path / "home" / ".claude"
+    settings = _settings_naming(cfg, "reveille-stop-hook")
+    before = settings.read_text()
+    _as_home(tmp_path, cfg, monkeypatch)
+
+    assert install.main() == 0
+    assert settings.read_text() == before
+    assert "already installed" in capsys.readouterr().out
+
+
+def test_is_durable_names_the_three_broken_shapes(tmp_path):
+    """The predicate itself, so a future reader can see what "durable" claims
+    without reconstructing it from main()."""
+    assert not install.is_durable("/home/x/.cache/uv/archive-v0/z/bin/reveille-stop-hook")
+    assert not install.is_durable(str(tmp_path / "gone" / "agent-stop-hook"))
+    assert install.is_durable("reveille-stop-hook")
+    here = _durable_copy(tmp_path)
+    assert install.is_durable(str(here))
