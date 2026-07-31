@@ -105,9 +105,28 @@ services:
       TTS_TOKEN: ${REVEILLE_TTS_TOKEN:-}
     volumes:
       - ${TTS_VOICES_DIR:-./voices}:/voices:ro
+      # The model is about a gigabyte and from_pretrained downloads it into HOME.
+      # Without this, removing the container re-downloads it -- a ten-minute first
+      # start every time, which the operator would meet on their SECOND deploy
+      # rather than their first.
+      - tts-cache:/home/tts/.cache
+    # THE GPU, RESERVED EXPLICITLY. Without this the container has no /dev/nvidia*,
+    # torch.cuda.is_available() is False, and the service synthesizes on the CPU
+    # while looking perfectly healthy -- three GPUs idle and the only symptom is
+    # "it feels slow" (architect, msg 8941). The service also SAYS which device it
+    # took, because a reservation that silently fails to apply is the same defect
+    # one layer up. Behind the voices profile, so a host with no nvidia runtime is
+    # unaffected: that is what the profile buys.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request as u; assert u.urlopen('http://127.0.0.1:8770/health', timeout=3).read() == b'ok'"]
+             "import json,urllib.request as u; assert json.load(u.urlopen('http://127.0.0.1:8770/health', timeout=3))['status'] == 'ok'"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -130,3 +149,10 @@ services:
     depends_on:
       broker:
         condition: service_healthy
+
+volumes:
+  # DES-009. The model cache, and the only named volume in this stack: everything
+  # else here is either a bind mount the operator chose or state that must not
+  # survive. This one holds a downloaded artifact, so losing it costs ten minutes
+  # and nothing else -- which is exactly the thing a named volume is for.
+  tts-cache:

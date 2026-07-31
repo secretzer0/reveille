@@ -114,7 +114,7 @@ class _Server:
 def test_speak_returns_wav_and_health_is_plain(tmp_path):
     s = _Server(tmp_path)
     try:
-        assert s.call("GET", "/health")[2] == b"ok"
+        assert json.loads(s.call("GET", "/health")[2])["status"] == "ok"
         code, ctype, body = s.call("POST", "/speak", {"text": "hello", "voice": "architect"})
         assert code == 200 and ctype == "audio/wav" and body.startswith(b"RIFF")
         text, clip, knobs = s.calls[0]
@@ -208,3 +208,83 @@ def test_the_broker_reaches_the_synthesizer_by_name_on_the_shared_network():
         "the synthesizer must be opt-in, or a deploy without the model image stalls"
     broker = COMPOSE[COMPOSE.index("\n  broker:"):COMPOSE.index("\n  # DES-009 commit 1")]
     assert "REVEILLE_TTS_URL" in broker, "the broker is never told where the service is"
+
+
+# ---- the device, said out loud (msg 8941) ------------------------------------
+
+def _fake_torch(cuda):
+    import types
+    t = types.ModuleType("torch")
+    t.cuda = types.SimpleNamespace(is_available=lambda: cuda)
+    return t
+
+
+def test_the_service_says_which_device_it_took(monkeypatch, tmp_path):
+    """A container with no device reservation lands on the CPU and works: correct
+    service, green healthcheck, ten times the latency, three idle GPUs, and the
+    only symptom is "it feels slow". So the device is REPORTED. Driven with torch
+    stubbed both ways, because this machine has neither a GPU nor torch."""
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(True))
+    assert tts_service.pick_device() == "cuda"
+    monkeypatch.setitem(sys.modules, "torch", _fake_torch(False))
+    assert tts_service.pick_device() == "cpu"
+    # ...and the two answers must not render the same downstream, or reporting it
+    # buys nothing. /health is where the operator's question gets answered.
+    seen = []
+    for dev in ("cuda", "cpu"):
+        monkeypatch.setattr(tts_service, "DEVICE", dev)
+        s = _Server(tmp_path)
+        try:
+            tts_service.SYNTH = None          # nothing has been spoken yet
+            seen.append(json.loads(s.call("GET", "/health")[2]))
+        finally:
+            s.close()
+    assert [h["device"] for h in seen] == ["cuda", "cpu"], seen
+    # `loaded` separates "cpu because that is all there is" from "nothing has been
+    # synthesized yet" -- two states that would otherwise read identically to
+    # whoever is asking why the first utterance took a minute.
+    assert seen[0]["loaded"] is False
+
+
+def test_a_missing_torch_is_named_rather_than_guessed(monkeypatch):
+    """An image without torch is broken, and it must say so rather than reporting
+    a device it never checked."""
+    import builtins
+    real = builtins.__import__
+
+    def no_torch(name, *a, **k):
+        if name == "torch":
+            raise ImportError("no module named torch")
+        return real(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", no_torch)
+    assert "torch is not installed" in tts_service.pick_device()
+
+
+def test_an_oversized_body_is_refused_before_it_is_read(tmp_path):
+    """MAX_CHARS is a property of the PARSED text, so enforcing only that means
+    the whole declared body is already in memory -- and this server is
+    single-threaded, so that one request is the entire service."""
+    s = _Server(tmp_path)
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=5)
+        # Declare far more than the cap and send nothing: a server that reads
+        # first would block here until the timeout, not answer 413.
+        c.putrequest("POST", "/speak")
+        c.putheader("Content-Length", str(tts_service.MAX_BODY * 1000))
+        c.endheaders()
+        r = c.getresponse()
+        assert r.status == 413, f"read the body before refusing it: {r.status}"
+        assert "cap is" in json.loads(r.read())["error"]
+    finally:
+        s.close()
+
+
+def test_the_token_is_compared_in_constant_time():
+    """Off the compose network this token is the only boundary there is, so the
+    comparison must not leak its own prefix and length to whoever is timing it.
+    Asserted on the SOURCE because a timing property cannot be measured reliably
+    in a unit test -- and stating that is better than a flaky measurement."""
+    src = (REPO / "src" / "reveille" / "tts_service.py").read_text()
+    do_post = src[src.index("    def do_POST("):src.index("\ndef main(")]
+    assert "hmac.compare_digest" in do_post, "the token is compared with =="
+    assert "!= f\"Bearer" not in do_post

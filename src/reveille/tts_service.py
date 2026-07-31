@@ -20,6 +20,7 @@ costs gigabytes of torch and this module has to be importable by a test suite
 that has neither. Tests replace SYNTH; production calls _chatterbox().
 """
 import hashlib
+import hmac
 import http.server
 import json
 import os
@@ -31,11 +32,35 @@ import pathlib
 # a service that silently speaks half a request makes the caller's cap look like
 # it worked.
 MAX_CHARS = 800
+# ...and a cap on the BODY, applied before a byte of it is read. MAX_CHARS is a
+# property of the parsed text, so enforcing only that reads the whole request
+# first: a caller declaring a gigabyte gets a gigabyte pulled into memory, and
+# this server is single-threaded, so that request IS the service (msg 8941).
+# Room for the cap plus json overhead and a long clip path, and nothing more.
+MAX_BODY = 4096
 
 # The default knobs; a bank voice gets a deterministic offset from these (§5).
 DEFAULT_KNOBS = {"exaggeration": 0.5, "cfg_weight": 0.5}
 
 SYNTH = None            # set by _chatterbox() on first use, or by a test
+# WHICH DEVICE THIS PROCESS WILL SYNTHESIZE ON, decided once at startup and
+# reported by /health. A container with no GPU reservation has no /dev/nvidia*,
+# so torch falls back to the CPU and everything still WORKS -- correct-looking
+# service, green healthcheck, ten times the latency, and nothing anywhere able to
+# answer "is it using the GPU". A degradation that reports nothing is the class
+# this fleet has ruled on twice; this is the report (msg 8941).
+DEVICE = "unknown"
+
+
+def pick_device():
+    """cuda if this process can actually see one, else cpu. Separated from the
+    model load on purpose: it costs a torch import and no download, so startup
+    can answer the device question minutes before the first utterance exists."""
+    try:
+        import torch                                  # noqa: PLC0415
+    except ImportError:
+        return "unavailable: torch is not installed in this image"
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _digest(name):
@@ -94,8 +119,9 @@ def _chatterbox():
     file stays importable without torch -- which is what lets its logic be
     gated at unit cost on a machine that could never run the model."""
     from chatterbox.tts import ChatterboxTTS          # noqa: PLC0415
-    import torch                                      # noqa: PLC0415
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = DEVICE if DEVICE in ("cuda", "cpu") else pick_device()
+    print(f"tts: loading the model on {device} -- the first utterance pays for "
+          f"this, and a download on a fresh cache volume pays much more", flush=True)
     model = ChatterboxTTS.from_pretrained(device=device)
 
     def synth(text, clip, knobs):
@@ -129,7 +155,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] == "/health":
-            return self._send(200, b"ok", "text/plain")
+            # The DEVICE rides the health reply because "is it using the GPU" is
+            # the first question a slow synthesizer raises, and latency is not an
+            # answer to it. `loaded` separates "cpu because that is all there is"
+            # from "nothing has been synthesized yet".
+            return self._send(200, json.dumps(
+                {"status": "ok", "device": DEVICE, "loaded": SYNTH is not None}).encode())
         return self._fail(404, "no such path")
 
     def do_POST(self):
@@ -139,10 +170,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # network it is empty and the service publishes no port, so the network
         # is the boundary; off-network it is the only boundary there is, which is
         # why the broker refuses a remote URL without one (§3, senior-dev's half).
-        if self.token and self.headers.get("Authorization", "") != f"Bearer {self.token}":
+        # compare_digest, not ==: this service is designed to be movable off the
+        # compose network, and there the token stops being a formality and becomes
+        # the only boundary there is. A comparison that returns early leaks its own
+        # prefix and length to whoever is timing it.
+        if self.token and not hmac.compare_digest(
+                self.headers.get("Authorization", ""), f"Bearer {self.token}"):
             return self._fail(401, "bad or missing bearer token")
         try:
             n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._fail(400, "content-length is not a number")
+        # REFUSED BEFORE A BYTE IS READ. The MAX_CHARS check below is on parsed
+        # text, so reaching it means the whole declared body is already in memory.
+        if n > MAX_BODY:
+            return self._fail(413, f"body declares {n} bytes, cap is {MAX_BODY}")
+        try:
             req = json.loads(self.rfile.read(n) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return self._fail(400, "body is not json")
@@ -172,13 +215,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
+    global DEVICE
     port = int(os.environ.get("TTS_PORT", "8770"))
     Handler.voices_root = os.environ.get("TTS_VOICES", "/voices")
     Handler.token = os.environ.get("TTS_TOKEN", "")
+    # Decided and SAID at startup, before anything is synthesized. A container
+    # with no device reservation lands on the cpu and works, which is exactly why
+    # it has to announce itself: the operator has three GPUs and the only symptom
+    # of missing them would be "it feels slow".
+    DEVICE = pick_device()
+    if DEVICE != "cuda":
+        print(f"tts: NO GPU VISIBLE -- synthesizing on {DEVICE}. If that is not "
+              f"intended, the compose service needs a device reservation.", flush=True)
     # 127.0.0.1 would be unreachable from the broker's container; the isolation
     # is the absence of a published port in compose, not a loopback bind here.
     srv = http.server.HTTPServer(("0.0.0.0", port), Handler)   # noqa: S104
-    print(f"tts: serving on :{port}, voices at {Handler.voices_root}, "
+    print(f"tts: serving on :{port} on {DEVICE}, voices at {Handler.voices_root}, "
           f"token {'required' if Handler.token else 'not set'}", flush=True)
     srv.serve_forever()
 
