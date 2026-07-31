@@ -3062,12 +3062,32 @@ async def prune_agent_http(request):
     """DELETE /agents/<name>?room=<rid> -- erase an agent's trace from a room. Survivors
     that replied to it are reparented to their thread root, never cascade-deleted."""
     p = _user_principal(request)
-    name = request.path_params["name"]
+    ref = request.path_params["name"]
     rid = request.query_params.get("room") or ""
     if rid not in p.rooms:
         raise store.AccessError(f"no access to room {rid}")
-    snap = store.snapshot(_conn, _snap_path(f"prune-{name}"))
-    out = store.prune_agent(_conn, name, rid)
+    # The path segment is an agents.id, or a name that resolves to exactly ONE
+    # identity -- the wire stays name-friendly for the UI while the store only
+    # ever prunes an id (ruling 8865: resolve the name from the id, never the
+    # other way). Two identities under a name refuse with both listed, because
+    # "erase mallory" cannot say WHICH mallory and guessing is how one agent's
+    # history becomes another's collateral.
+    if _conn.execute("SELECT 1 FROM agents WHERE id=?", (ref,)).fetchone():
+        aid = ref
+    else:
+        rows = _conn.execute("SELECT id, created_ns, retired_ns FROM agents "
+                             "WHERE name=?", (ref,)).fetchall()
+        if len(rows) != 1:
+            detail = (f"{len(rows)} identities answer to {ref!r}: "
+                      + ", ".join(r["id"] for r in rows) if rows
+                      else f"no identity answers to {ref!r}")
+            return JSONResponse({"error": "ambiguous_or_unknown",
+                                 "detail": detail + " -- prune by id"},
+                                status_code=409 if rows else 404)
+        aid = rows[0]["id"]
+    snap = store.snapshot(_conn, _snap_path(f"prune-{ref}"))
+    out = store.prune_agent(_conn, aid, rid)
+    name = out["name"]
     # The store owns rows and returns the stored names it orphaned; the bytes are
     # ours because _files_dir is ours. missing_ok: a blob already gone is the state
     # we want, not an error to fail a completed prune on.

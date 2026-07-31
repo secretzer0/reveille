@@ -2057,13 +2057,22 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
     if cur and cur["left_ns"] is None and cur["tag"] != tag \
             and _is_live(cur["seen_ns"], now):
         raise BusError(f"name {name!r} is held by a live agent (tag {cur['tag']}). pick another.")
+    # THE WRITER STAMPS THE IDENTITY -- from the token, its honest source. The
+    # v17 backfill filled members.agent_id and join() went on inserting NULL,
+    # which is the writer-never-moved defect for the third time tonight; here it
+    # made prune unable to tell whose seat a membership is, so pruning a retired
+    # identity took the live successor's seat with it.
+    aid_row = conn.execute("SELECT agent_id FROM tokens WHERE id=?",
+                           (token_id,)).fetchone() if token_id else None
+    aid = aid_row["agent_id"] if aid_row else None
     conn.execute(
-        "INSERT INTO members(room_id, name, tag, url, token_id, joined_ns, seen_ns) "
-        "VALUES(?,?,?,?,?,?,?) "
+        "INSERT INTO members(room_id, name, tag, url, token_id, agent_id, "
+        "joined_ns, seen_ns) VALUES(?,?,?,?,?,?,?,?) "
         "ON CONFLICT(room_id, name) DO UPDATE SET tag=excluded.tag, url=excluded.url, "
-        "token_id=excluded.token_id, seen_ns=excluded.seen_ns" +
+        "token_id=excluded.token_id, agent_id=COALESCE(excluded.agent_id, agent_id), "
+        "seen_ns=excluded.seen_ns" +
         (", left_ns=NULL" if clear_leave else ""),
-        (room_id, name, tag, url, token_id, now, now))
+        (room_id, name, tag, url, token_id, aid, now, now))
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
     cutoff = now if fresh else now - CATCHUP_NS
@@ -2842,8 +2851,17 @@ def agent_hive_footprint(conn, name, room_id):
             "counts": {"authored": len(authored), "citing": len(citing)}}
 
 
-def prune_agent(conn, name, room_id):
-    """Erase an agent from a room: its membership and every message to or from it.
+def prune_agent(conn, agent_id, room_id):
+    """Erase one IDENTITY from a room -- not a label (DES-007 4.1, ruling 8865).
+
+    Takes an agents.id and resolves the name FROM it, never the other way: the
+    day a label carries two histories, prune-by-name takes the wrong one with it,
+    and that is the operator's own purge control turning destructive under the
+    very feature that motivated the identity work. Sent messages are scoped by
+    sender_agent_id. Direct mail he RECEIVED is name-keyed (recipient has no
+    identity column), so it is deleted only when the name is UNAMBIGUOUS -- one
+    identity ever -- and otherwise left and counted, the same
+    unambiguous-or-leave rule every resolver in this codebase now follows.
 
     Survivors that replied to a deleted message are REPARENTED to their thread root
     rather than cascade-deleted, so other agents' work is not collateral. Both the
@@ -2853,17 +2871,35 @@ def prune_agent(conn, name, room_id):
     the survivor becomes a new root and its descendants' thread_id is re-stamped
     (thread_id is copied at insert, never derived, so it does not follow on its own).
     """
-    valid_name(name)
+    row = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+    if row is None:
+        raise BusError(f"no such identity: {agent_id} -- prune takes an agents.id; "
+                       f"a bare name cannot say WHICH history it means")
+    name = row["name"]
+    sole = conn.execute("SELECT count(*) FROM agents WHERE name=?",
+                        (name,)).fetchone()[0] == 1
     # The receipt is measured BEFORE the delete: `citing` is found through his
     # message ids, so afterwards there is nothing left to find it by.
     hive = agent_hive_footprint(conn, name, room_id)
     with tx(conn):
-        # recipient=name matches literally, never '*' (NAME_RE forbids it), so
-        # broadcasts he RECEIVED survive -- deleting those would erase everyone's mail.
-        # Broadcasts he SENT go, via sender=name: those are his trace.
-        doomed = [r["id"] for r in conn.execute(
-            "SELECT id FROM messages WHERE room=? AND (sender=? OR recipient=?)",
-            (room_id, name, name))]
+        # SENT: his trace, scoped by identity -- broadcasts included, because
+        # sender_agent_id says WHICH instance spoke. RECEIVED direct mail is
+        # name-keyed (recipient carries no id) and '*' never matches
+        # (NAME_RE forbids it), so broadcasts he received survive; with two
+        # identities under the name, received mail cannot be split and is LEFT,
+        # counted in the return rather than guessed at.
+        if sole:
+            doomed = [r["id"] for r in conn.execute(
+                "SELECT id FROM messages WHERE room=? AND "
+                "(sender_agent_id=? OR recipient=?)", (room_id, agent_id, name))]
+            left_received = 0
+        else:
+            doomed = [r["id"] for r in conn.execute(
+                "SELECT id FROM messages WHERE room=? AND sender_agent_id=?",
+                (room_id, agent_id))]
+            left_received = conn.execute(
+                "SELECT count(*) FROM messages WHERE room=? AND recipient=?",
+                (room_id, name)).fetchone()[0]
         dset, new_roots = set(doomed), []
         if doomed:
             # Survivors whose PRIMARY parent dies. Repair BEFORE the delete.
@@ -2890,8 +2926,12 @@ def prune_agent(conn, name, room_id):
         # belonging to a different repair and stamp it with the wrong thread_id.
         for r in new_roots:
             _rethread(conn, r)
-        conn.execute("DELETE FROM reads WHERE agent=?", (name,))
-        conn.execute("DELETE FROM members WHERE room_id=? AND name=?", (room_id, name))
+        conn.execute("DELETE FROM reads WHERE agent_id=?", (agent_id,))
+        # The membership dies only if it is THIS identity's: a live successor
+        # under the same label keeps its seat.
+        conn.execute("DELETE FROM members WHERE room_id=? AND name=? "
+                     "AND (agent_id=? OR agent_id IS NULL)",
+                     (room_id, name, agent_id))
         orphans = _orphaned_uploads(conn, name, room_id)
         if orphans:
             conn.execute(f"DELETE FROM files WHERE stored IN ({_ph(orphans)})", orphans)
@@ -2900,7 +2940,8 @@ def prune_agent(conn, name, room_id):
     # is what makes the two halves testable apart and impossible to drift: the route
     # deletes exactly what the store said it orphaned.
     return {"messages": len(doomed), "reparented": len(new_roots),
-            "files": orphans, "hive": hive}
+            "files": orphans, "hive": hive, "name": name,
+            "left_received": left_received}
 
 
 def _orphaned_uploads(conn, name, room_id):
