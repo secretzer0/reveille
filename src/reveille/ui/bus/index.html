@@ -155,7 +155,15 @@
  #agTabs .tab.err{color:var(--bad,#e06c6c)}
  /* Every action is a real <button> with its own label, never a clickable span:
     the icon carries the meaning for the eye, the aria-label carries it for a
-    screen reader, and Tab reaches all of them in the order they are read. */
+    screen reader, and Tab reaches all of them in the order they are read.
+    THE TAB ITSELF IS ALSO A BUTTON, and was not until now: it was a span with
+    a click handler, so a keyboard could reach stop, edit, destroy and close on
+    a tab it could not select. The destructive controls were reachable and the
+    harmless one was not. .tlab is styled to read as the tab's own text rather
+    than as an action, because it IS the tab. */
+ #agTabs .tab .tlab{display:flex;align-items:center;gap:.4rem;padding:0;
+   opacity:1;color:inherit;border-radius:0}
+ #agTabs .tab .tlab:hover{background:none}
  #agTabs .tab .acts{display:flex;align-items:center;gap:.05rem;margin-left:.15rem}
  #agTabs .tab button{background:none;border:0;color:inherit;font:inherit;
    line-height:1;cursor:pointer;padding:.1rem .25rem;border-radius:5px;opacity:.65}
@@ -731,7 +739,17 @@
   live on the tab above.</div>
 </div>
 </div>
-<div id="toasts"></div>
+<!-- THE ONE LIVE REGION ON THE PAGE. Every transient answer the system gives
+     lands here -- a refused driver grant, an unreachable launcher, a copied
+     token -- and a toast that only paints is an answer a screen reader never
+     receives, then removes itself after five seconds with nothing left to go
+     back to. polite, not assertive: none of it is worth cutting off a sentence.
+     NOT DONE HERE, deliberately: the message feed. Its rows are appended one at
+     a time while live, which a log region would announce correctly, but a room
+     switch backfills a whole page of history through that same append path --
+     so the honest fix announces only what arrives AFTER the backfill settles,
+     and that is a slice, not an attribute. -->
+<div id="toasts" role="status" aria-live="polite"></div>
 <!-- Per-agent modals (edit, destroy, create). role=dialog + aria-modal so a
      screen reader treats the page behind it as inert; Esc closes it, and focus
      returns to the control that opened it -- the tab icon you were on. -->
@@ -1465,7 +1483,12 @@ function wireAsk(onGo,reRender){
 let curTab='rooms';
 function panel(tab,html){
  curTab=tab;
- for(const b of document.querySelectorAll('.tab')){
+ // SCOPED TO THE PANEL'S OWN STRIP. This read document-wide for ".tab", which
+ // also matches the terminal tabs in #agTabs -- so opening Settings stripped
+ // the "on" class off whichever terminal tab was active, and it came back only
+ // when something else happened to repaint the strip. Two widgets may share a
+ // class name; a selector that does not say WHICH one is the defect.
+ for(const b of $('panTabs').querySelectorAll('.tab')){
   b.classList.toggle('on',b.dataset.tab===tab);
   // /users is admin-only server-side; showing the tab to a plain user would just
   // hand them a 403. Don't offer what cannot work.
@@ -1481,7 +1504,7 @@ $('pan').onclick=e=>{if(e.target.id==='pan')closePanel();};
 $('panOut').onclick=async()=>{await fetch('/logout',{method:'POST'});location.reload();};
 const TABS={rooms:()=>openRooms(),memory:()=>openMemories(),tokens:()=>openTokens(),
  users:()=>openUsers(),account:()=>openAccount()};
-for(const b of document.querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.tab]();
+for(const b of $('panTabs').querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.tab]();
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();});
 async function api(path,opts){
  const r=await fetch(path,Object.assign({headers:{'content-type':'application/json'}},opts||{}));
@@ -1729,13 +1752,21 @@ function stateSentence(name){
 }
 function drawTabs(){
  const strip=$('agTabs'),frames=$('agFrames');
+ // Selecting a tab REPLACES the strip, which destroys the element the keyboard
+ // was standing on -- focus would fall to the body and the next Tab would start
+ // again from the top of the page. So: only when focus was already inside the
+ // strip, put it back on the tab that is now current. A mouse click restores
+ // nothing, because it never had focus to lose.
+ const refocus=strip.contains(document.activeElement);
  strip.hidden=frames.hidden=!agTabs.length;
  $('agEmpty').hidden=!!agTabs.length;
  strip.innerHTML=agTabs.map(t=>
-  '<span class="tab'+(t.gid===agTabOn?' on':'')+(t.err?' err':'')+
-   '" data-tab="'+esc(t.gid)+'">'+
-   '<span class="swatch" style="background:'+color(t.agent)+'"></span>'+
-   esc(t.agent)+tabActions(t)+
+  '<span class="tab'+(t.gid===agTabOn?' on':'')+(t.err?' err':'')+'">'+
+   '<button type="button" class="tlab" data-tab="'+esc(t.gid)+'"'+
+   (t.gid===agTabOn?' aria-current="true"':'')+
+   ' aria-label="terminal for '+esc(t.agent)+'">'+
+   '<span class="swatch" aria-hidden="true" style="background:'+color(t.agent)+'"></span>'+
+   esc(t.agent)+'</button>'+tabActions(t)+
    '<button type="button" class="x" data-tabx="'+esc(t.gid)+
    '" title="close this tab" aria-label="close the tab for '+esc(t.agent)+
    '"><span aria-hidden="true">&times;</span></button></span>'
@@ -1760,8 +1791,11 @@ function drawTabs(){
   if(el.className==='frState')el.innerHTML=stateSentence(t.agent);
   el.hidden=(t.gid!==agTabOn);
  }
- for(const el of strip.querySelectorAll('[data-tab]'))el.onclick=ev=>{
-  if(ev.target.closest('[data-tabx],[data-agact]'))return;
+ // The label button IS the tab, and the actions are now its SIBLINGS rather
+ // than its children -- so the old "ignore clicks that landed on an action"
+ // guard has nothing left to catch and is gone. A button inside a button is
+ // invalid markup, which is why the actions could never have moved inside it.
+ for(const el of strip.querySelectorAll('[data-tab]'))el.onclick=()=>{
   agTabOn=el.dataset.tab;drawTabs();drawNote();drawRoster();
  };
  for(const el of strip.querySelectorAll('[data-tabx]'))el.onclick=ev=>{
@@ -1775,6 +1809,10 @@ function drawTabs(){
   else if(k==='recreate')openCreate(n);
   else agLifecycle(n,k);
  };
+ if(refocus){
+  const cur=strip.querySelector('[data-tab="'+CSS.escape(agTabOn||'')+'"]');
+  if(cur)cur.focus();
+ }
  drawNote();
 }
 // THE BOOT REPORT'S PROBLEMS, SAID OUT LOUD, beside the terminal they explain.
@@ -1885,10 +1923,14 @@ function drawRoster(){
  const row=a=>{
   const s=stateOf(a);
   const word=a.status==='absent'?'broken':gone(a)?s:behind(a)?'behind':'';
+  // SELECTION IS SPOKEN, not only drawn. The left bar and the tint say "you
+  // are here" to the eye; aria-current says the same thing to everything else.
+  // One fact, two channels -- the rule the state dot already follows.
   return '<button type="button" class="agent'+
    (agActive()===a.agent?' sel':'')+
    (a.status==='running'?' run':'')+(gone(a)?' gone':'')+
-   (a.status==='absent'?' bad':'')+'" data-rost="'+esc(a.agent)+'" '+
+   (a.status==='absent'?' bad':'')+'"'+
+   (agActive()===a.agent?' aria-current="true"':'')+' data-rost="'+esc(a.agent)+'" '+
    'aria-label="'+esc(a.agent+' -- '+s+(word&&word!==s?', '+word:''))+
    '" title="'+esc(a.agent+' -- '+s)+'">'+
    '<span class="swatch" style="background:'+color(a.agent)+'"></span>'+
