@@ -1961,10 +1961,18 @@ async def info(ctx: Context = None) -> str:
     """Reveille status banner: tool version, your bus name, and whether your wake waiter
     is attached right now. Call it on boot to confirm the bus works end to end."""
     p = _me(ctx.request_context.request)
-    attached = bool(_waiters.get((p.token_id, p.name)))
+    # COMPUTED BY THE RING PATH'S OWN RULE (ruling 9050): _notify rings every
+    # token that HOLDS THE ROOM, so "attached" here must mean "a ring for one of
+    # my rooms would reach me" -- not "my own token has a waiter". The old
+    # reading said ATTACHED for a waiter no ring could select, which is the
+    # green check devops sat deaf behind.
+    attached = any(_waiters.get((r["token_id"], p.name))
+                   for rid in p.rooms
+                   for r in _conn.execute(
+                       "SELECT token_id FROM token_rooms WHERE room_id=?", (rid,)))
     rooms = ", ".join(p.rooms.values()) or "none"
     return (f"Reveille v{__version__} -- you are '{p.name}' -- rooms: {rooms} -- "
-            f"wake waiter: {'ATTACHED (real-time wake)' if attached else 'NOT ARMED (no real-time wake -- arm wake --once)'}")
+            f"wake waiter: {'ATTACHED (real-time wake)' if attached else 'NOT ARMED (no real-time wake -- arm wake-watch <role>)'}")
 
 
 def _parent_room(reply_to):
@@ -2275,6 +2283,23 @@ async def wake_ws(ws: WebSocket):
         log.warning("%s wake rejected: name_mismatch (bound to %s)", name, tok["agent_name"])
         return
     rooms = store.rooms_for_token(_conn, tok["id"])
+    # A WAITER THAT CANNOT BE RUNG IS NOT ACCEPTED AS ONE THAT CAN (ruling 9052,
+    # from devops's measurement 9049). _notify rings only tokens present in
+    # token_rooms, so a valid token holding ZERO rooms registers a waiter that is
+    # unreachable BY CONSTRUCTION -- while the host sees HTTP 101, a stable
+    # socket, a held flock and an empty log. That is precisely how the first
+    # native agent sat deaf for an hour with four green checks. Same
+    # distinguishable-reject family as bad_token; wake.py treats an error frame
+    # as fatal and exits rather than hot-looping, which is what makes refusing
+    # safe.
+    if not rooms:
+        await ws.send_json({"error": "no_rooms",
+                            "detail": "this token holds no rooms, so no ring "
+                                      "could ever reach this waiter -- attach a "
+                                      "room to the token, then re-arm"})
+        await ws.close(code=4404)
+        log.warning("%s wake rejected: no_rooms (unringable by construction)", name)
+        return
     key = (tok["id"], name)
     _seen(name, rooms, tok["id"])
     log.info("%s wake connected (%s room(s))", name, len(rooms))

@@ -24,7 +24,26 @@ import sys
 # something that exists rather than something we hope exists. Falls back to the
 # bare name for the case where the hook is installed before the PATH entry is
 # visible to this process -- a login shell will find it.
-HOOK = shutil.which("reveille-stop-hook") or "reveille-stop-hook"
+def hook_command():
+    """The DURABLE spelling of the hook command, never a cache path.
+
+    which() found uv's cache-archive copy first -- uvx ran from it, so it led
+    PATH -- and that path was written into settings.json: a hook that works
+    until the next `uv cache prune`, then takes daemon supervision and watcher
+    arming with it, silently (ruling 9052). Preference order: the ~/.local/bin
+    entry uv tool install creates; any PATH hit that is not under a cache; the
+    bare name, resolved at hook-run time by a login shell.
+    """
+    local = pathlib.Path.home() / ".local" / "bin" / "reveille-stop-hook"
+    if local.is_file():
+        return str(local)
+    w = shutil.which("reveille-stop-hook")
+    if w and "/.cache/" not in w:
+        return w
+    return "reveille-stop-hook"
+
+
+HOOK = "reveille-stop-hook"
 def settings_path():
     """~/.claude/settings.json, or CLAUDE_CONFIG_DIR when it is set. Read at CALL
     time rather than import time so a test HOME is honoured -- a module-level
@@ -35,7 +54,7 @@ def settings_path():
 
 def main():
     SETTINGS = settings_path()
-    hook = shutil.which("reveille-stop-hook") or HOOK
+    hook = hook_command()
     settings = json.loads(SETTINGS.read_text()) if SETTINGS.exists() else {}
     stops = settings.setdefault("hooks", {}).setdefault("Stop", [])
     for group in stops:

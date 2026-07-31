@@ -169,3 +169,32 @@ def test_enqueue_is_a_no_op_while_voices_are_off(monkeypatch):
     before = daemon._tts_q.qsize()
     daemon._tts_enqueue(1, "r1", "s", "b")
     assert daemon._tts_q.qsize() == before
+
+
+def test_an_unringable_wake_attachment_is_refused(monkeypatch):
+    """Ruling 9052, from the first native agent's hour of silent deafness:
+    _notify rings only tokens in token_rooms, so a valid token holding zero
+    rooms registers a waiter that is unreachable BY CONSTRUCTION -- while every
+    host-side check reads green. Asserted over the source the way the ?room=
+    gate is, because wake_ws needs a live socket to drive: the refusal must sit
+    between the binding check and waiter registration, in the same
+    distinguishable-error family wake.py treats as fatal."""
+    src = pathlib.Path(daemon.__file__).read_text()
+    fn = src[src.index("async def wake_ws("):src.index("async def health(")]
+    reject = fn.index('"error": "no_rooms"')
+    assert reject != -1
+    assert fn.index("rooms = store.rooms_for_token") < reject < fn.index("_waiters.setdefault"), \
+        "the no_rooms refusal must run before any waiter is registered"
+    assert "4404" in fn, "a distinguishable close code, same family as bad_token"
+
+
+def test_info_answers_by_the_ring_paths_own_rule():
+    """Ruling 9050: info() said ATTACHED for a waiter no ring could ever select,
+    because it checked the CALLER's token while _notify rings every token
+    holding the room. One rule, both places -- the waiter line is computed from
+    token_rooms, exactly as _notify selects."""
+    src = pathlib.Path(daemon.__file__).read_text()
+    fn = src[src.index("async def info("):src.index("def _parent_room(")]
+    assert "token_rooms" in fn, "info must select waiters the way _notify does"
+    assert 'bool(_waiters.get((p.token_id, p.name)))' not in fn, \
+        "the caller's-own-token reading is back -- that is the green check devops sat deaf behind"

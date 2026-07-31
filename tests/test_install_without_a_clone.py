@@ -507,3 +507,30 @@ def test_the_boot_prompt_arms_the_living_ritual_not_the_retired_one():
     code_lines = [ln for ln in src.splitlines()
                   if "--once" in ln and not ln.lstrip().startswith("#")]
     assert code_lines == [], code_lines
+
+
+def test_the_hook_command_is_never_a_cache_path(monkeypatch, tmp_path):
+    """Ruling 9052: which() found uv's cache-archive copy first (uvx ran from
+    it) and that path went into settings.json -- a hook that dies at the next
+    `uv cache prune`, taking the whole reachability plane with it. Manufactured
+    in the shape that produced it: a cache copy AHEAD of the durable one."""
+    cache = tmp_path / ".cache" / "uv" / "archive-v0" / "xyz" / "bin"
+    cache.mkdir(parents=True)
+    (cache / "reveille-stop-hook").write_text("#!/bin/sh\n")
+    (cache / "reveille-stop-hook").chmod(0o755)
+    local = tmp_path / ".local" / "bin"
+    local.mkdir(parents=True)
+    (local / "reveille-stop-hook").write_text("#!/bin/sh\n")
+    (local / "reveille-stop-hook").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{cache}:{local}")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(install.pathlib.Path, "home", classmethod(lambda c: tmp_path))
+    cmd = install.hook_command()
+    assert "/.cache/" not in cmd, cmd
+    assert cmd == str(local / "reveille-stop-hook")
+    # durable copy absent, cache copy on PATH: bare name beats the cache path,
+    # because a login shell resolves it and a pruned cache does not
+    (local / "reveille-stop-hook").unlink()
+    cmd = install.hook_command()
+    assert "/.cache/" not in cmd, cmd
+    assert cmd == "reveille-stop-hook"
