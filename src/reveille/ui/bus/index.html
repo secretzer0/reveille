@@ -1532,6 +1532,13 @@ $('voice').onclick=toggleVoice;
 // Both events mean "this utterance is over": ended for a file that played, error for
 // one that is not there. A missing file is a silent message, so the queue moves on
 // rather than surfacing anything (DES-009 section 7).
+//
+// THESE TWO AND NO OTHERS. Do not add abort or emptied here, however much they read
+// like the same family: the HTML media load algorithm fires abort (step 6) and
+// emptied (step 7.1) on every REASSIGNMENT of src, which is what vPump does on each
+// advance. Listening would make one utterance's start end the previous one, so the
+// queue would drain in a burst and only the last file would be heard -- and it would
+// look like the synthesizer skipping, not like this line.
 $('vPlayer').addEventListener('ended',vDone);
 $('vPlayer').addEventListener('error',vDone);
 $('hGo').onclick=e=>{e.preventDefault();
