@@ -193,6 +193,25 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.68 THE INSTALLER SAYS WHOSE USERNAME IT IS ASKING FOR, AND THE MIGRATION
+STOPPED ASKING ONE QUESTION TWICE. `reveille init --login` prompted "broker
+username" -- and two identities are in play, only one of which has a password:
+REVEILLE_AGENT_ROLE is the AGENT being created, --user is the HUMAN who will own
+it. Answering it wrong creates an agent named after the person, which then posts
+in the room under their own name. The prompt now names the agent and says the
+next line is you. It also closes the session it opened: a login minted for three
+calls should not outlive them, or the installer leaves a live session behind on
+every machine it ever ran on. And the README says to unset $REVEILLE_PASSWORD
+before starting the agent, because an exported password is visible to every
+child of that shell. Separately, the root cause behind the 0.2.63 boot failure:
+the identity backfill asked "which names cannot be attributed" twice, once
+through the shared function and once in fresh SQL, and the two spellings
+disagreed about humans -- so a database the preflight had just blessed made the
+broker restart-loop. The second spelling is gone rather than corrected, and the
+gate pins the PROPERTY (the recount calls the refusal) rather than the human
+case, because pinning the instance would let the next exclusion diverge the same
+way.
+
 0.2.67 THE STATE NOTES CAME BACK, AND THE LAUNCHER STOPPED SQUATTING A GENERIC
 NAME. 0.2.62 rescoped every state memory from agent:<token_id> to
 agent:<agent_id> -- the right destination, since a note scoped to a TOKEN is
