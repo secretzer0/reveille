@@ -2289,3 +2289,158 @@ def test_agents_seen_remembers_what_an_erased_agent_left():
     store.join(c, "ui-dev", "T", room["id"], tok["id"])
     back = {a["name"]: a for a in store.agents_seen(c, [room["id"]])}
     assert back["ui-dev"]["present"] is True
+
+
+def _v16_db_with_the_old_column(tmp_path):  # noqa: D401
+    """A v16 database carrying the PRE-v17 memories table: source_msg_id as a live
+    reference with ON DELETE SET NULL. Built by migrating to current and then putting
+    the old definition back, because that is what every deployed database looks like
+    and the fresh path lays the NEW column directly -- a gate that only ever sees a
+    fresh db would pass identically if _upgrade_v16 did not exist (architect, 8876).
+    """
+    os.makedirs(str(tmp_path), exist_ok=True)
+    db = str(tmp_path / "v16.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("DROP TABLE IF EXISTS memories_fts")
+    c.execute("ALTER TABLE memories RENAME TO memories_new")
+    c.execute("""
+        CREATE TABLE memories (
+            id            INTEGER PRIMARY KEY,
+            uid           TEXT NOT NULL UNIQUE,
+            kind          TEXT NOT NULL,
+            scope         TEXT NOT NULL,
+            fact          TEXT NOT NULL,
+            entities      TEXT NOT NULL DEFAULT '',
+            source_msg_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+            supersedes_id INTEGER REFERENCES memories(id),
+            slug          TEXT,
+            symptom       TEXT, root_cause TEXT, rule TEXT, detection TEXT,
+            author        TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'live',
+            occurred_ns   INTEGER,
+            created_ns    INTEGER NOT NULL,
+            expires_ns    INTEGER
+        )""")
+    c.execute("DROP TABLE memories_new")
+    c.execute("""CREATE VIRTUAL TABLE memories_fts USING fts5(
+        fact, entities, symptom, root_cause, rule, detection,
+        content='memories', content_rowid='id',
+        tokenize="unicode61 tokenchars '-_'")""")
+    c.execute("PRAGMA foreign_keys=ON")
+    c.execute("PRAGMA user_version=16")
+    return c, db
+
+
+def _mem_sql(c):
+    return c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()[0]
+
+
+def test_migration_v16_to_v17_rebuilds_the_table_and_keeps_every_row(tmp_path):
+    c, db = _v16_db_with_the_old_column(tmp_path)
+    assert "ON DELETE SET NULL" in _mem_sql(c), "the fixture is not the old shape"
+    # Two rows and a supersession between them, plus a searchable term, because a
+    # rebuild can lose any of the three quietly. Seeded with foreign keys OFF: the
+    # citation points at a message this scratch db never had, which is the state the
+    # rebuild has to carry -- a dangling id IS the "source was deleted" reading.
+    c.execute("PRAGMA foreign_keys=OFF")
+    for uid, fact, sup in (("m-one", "the older claim about wake-127", None),
+                           ("m-two", "the newer claim about wake-127", 1)):
+        c.execute(
+            "INSERT INTO memories(uid, kind, scope, fact, entities, source_msg_id, "
+            "supersedes_id, author, status, created_ns) "
+            "VALUES(?,'decision','r1',?,'wake-127',4242,?,'architect','live',1)",
+            (uid, fact, sup))
+    c.execute("INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
+              "rule, detection) SELECT id, fact, entities, symptom, root_cause, rule, "
+              "detection FROM memories")
+    c.execute("PRAGMA foreign_keys=ON")
+    before = [tuple(r) for r in c.execute(
+        "SELECT id, uid, fact, source_msg_id, supersedes_id FROM memories ORDER BY id")]
+
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
+
+    assert "ON DELETE SET NULL" not in _mem_sql(c), \
+        "the rebuilt table still nulls citations on delete"
+    assert [tuple(r) for r in c.execute(
+        "SELECT id, uid, fact, source_msg_id, supersedes_id FROM memories ORDER BY id"
+    )] == before, "rows, ids, citations or supersession links changed in the rebuild"
+    # An external-content FTS index that survives the rebuild EMPTY is a silent
+    # search outage: every row is still there and nothing can find it.
+    # The term is quoted: the tokenizer keeps wake-127 as ONE token (that is the
+    # point of tokenchars '-_'), but the QUERY parser reads a bare dash as a
+    # column filter, so an unquoted probe fails on syntax rather than on coverage.
+    hits = c.execute(
+        'SELECT rowid FROM memories_fts WHERE memories_fts MATCH \'"wake-127"\'').fetchall()
+    assert len(hits) == 2, f"the rebuilt index finds {len(hits)} of 2 rows"
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 17
+
+
+def test_migration_v16_to_v17_is_rerunnable_within_one_second(tmp_path):
+    """The nanosecond snapshot name, proven rather than argued: snapshot() refuses an
+    existing path, so a second-resolution filename makes a rebuild un-re-runnable
+    inside one second -- which is exactly when a partial chain gets re-run."""
+    c, db = _v16_db_with_the_old_column(tmp_path)
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
+    c.execute("PRAGMA user_version=16")
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
+    assert "ON DELETE SET NULL" not in _mem_sql(c)
+
+
+def test_a_chain_interrupted_before_v17_does_not_claim_to_have_run_it(tmp_path):
+    """BLOCKING 1 of msg 8876, and the architect ran it before I did.
+
+    Every _upgrade_vN used to stamp SCHEMA_VERSION, so _upgrade_v14 -- three steps
+    before this one -- stamped the version THIS step has to earn. A power cut between
+    them left a database saying 17 with the old column still on it, and migrate()
+    early-returns on that number, so the next healthy boot never looks again and the
+    laundering is permanent on that database.
+
+    The fixture is the interrupt: run the chain from 14 with the step AFTER v14 raising.
+    """
+    c, db = _v16_db_with_the_old_column(tmp_path)
+    c.execute("PRAGMA user_version=14")
+    boom = store._upgrade_v15
+
+    def die(conn, path):
+        raise RuntimeError("power cut")
+
+    store._upgrade_v15 = die
+    try:
+        try:
+            store.migrate(c, db)
+            assert False, "the fixture did not interrupt anything"
+        except RuntimeError:
+            pass
+        crashed = c.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        store._upgrade_v15 = boom
+    assert crashed < 17, (
+        f"a step before v17 stamped {crashed} -- a crashed chain claims to have run "
+        f"the rebuild, and migrate() will early-return on the next boot")
+    assert store.migrate(c, db) == store.SCHEMA_VERSION      # the next boot repairs it
+    assert "ON DELETE SET NULL" not in _mem_sql(c)
+
+
+def test_every_arm_from_v9_reaches_the_rebuild(tmp_path):
+    """The ladder is a hand-written arm per start version, so a step appended to
+    some arms and not others is invisible until a database sits at the wrong one.
+    Pin the property instead of the arms: from every version this fixture can
+    honestly represent, migrate() ends at 17 with the new column.
+
+    WHAT THIS DOES NOT COVER, said rather than implied: start versions below 9.
+    Their steps expect the OLD table shapes (v2 drops a column that no longer
+    exists), so stamping a current database back to 3 does not represent one --
+    it would fail on the fixture, not on the ladder. Those arms are covered by
+    their own dedicated gates above, one shape each.
+    """
+    for start in range(9, 17):
+        c, db = _v16_db_with_the_old_column(tmp_path / f"s{start}")
+        c.execute(f"PRAGMA user_version={start}")
+        assert store.migrate(c, db) == store.SCHEMA_VERSION
+        assert c.execute("PRAGMA user_version").fetchone()[0] == 17, \
+            f"a chain starting at v{start} did not reach 17"
+        assert "ON DELETE SET NULL" not in _mem_sql(c), \
+            f"a chain starting at v{start} reached 17 without the rebuild"

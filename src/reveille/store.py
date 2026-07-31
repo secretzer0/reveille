@@ -572,9 +572,23 @@ def migrate(conn, db_path):
         _upgrade_v16(conn, db_path)
     elif v == 16:
         _upgrade_v16(conn, db_path)
-    # Chains from <=v8 need no v9+ steps: _upgrade_v8 lays _MEMORIES_SCHEMA,
-    # which already carries the current index shape, status set, and audit
-    # tables, and backfills through _memory_insert.
+    # Chains that start below the memory plane run its steps too. This used to be a
+    # comment saying they need not -- _upgrade_v8 lays _MEMORIES_SCHEMA at the current
+    # shape, so the later steps had nothing to do -- and that was true of every step
+    # that existed when it was written, all of them ADDITIVE. It stopped being true at
+    # the first non-additive one (v17 rebuilds the table to drop an FK action), and the
+    # only thing that had been keeping those chains correct was that nothing yet
+    # required work they skipped. Running the steps costs a rebuild on a database old
+    # enough to be at v8; being wrong costs a database that says 17 and is not.
+    if 2 <= v <= 8:
+        _upgrade_v9(conn, db_path)
+        _upgrade_v10(conn, db_path)
+        _upgrade_v11(conn, db_path)
+        _upgrade_v12(conn, db_path)
+        _upgrade_v13(conn, db_path)
+        _upgrade_v14(conn, db_path)
+        _upgrade_v15(conn, db_path)
+        _upgrade_v16(conn, db_path)
     return SCHEMA_VERSION
 
 
@@ -589,7 +603,7 @@ def _upgrade_v2(conn, db_path):
                      "(SELECT id FROM tokens WHERE revoked_ns IS NOT NULL)")
         conn.execute("DELETE FROM tokens WHERE revoked_ns IS NOT NULL")  # already dead
         conn.execute("ALTER TABLE tokens DROP COLUMN revoked_ns")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=3")
 
 
 def _upgrade_v3(conn, db_path):
@@ -605,7 +619,7 @@ def _upgrade_v3(conn, db_path):
             "SELECT replace(a.url, rtrim(a.url, replace(a.url, '/', '')), ''), "
             "       m.room, m.sender, m.ts_ns "
             "  FROM attachments a JOIN messages m ON m.id = a.message_id").rowcount
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=4")
     return n
 
 
@@ -627,7 +641,7 @@ def _upgrade_v4(conn, db_path):
         conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('delete-all')")
         n = conn.execute("INSERT INTO messages_fts(rowid, subject, body) "
                          "SELECT id, subject, body FROM messages").rowcount
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=5")
     return n
 
 
@@ -653,7 +667,7 @@ def _upgrade_v5(conn, db_path):
                      extract_entities(f"{r['subject']} {r['body']}")]
         conn.executemany(
             "INSERT OR IGNORE INTO message_entities(entity, message_id) VALUES(?,?)", rows)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=6")
     return len(rows)
 
 
@@ -662,8 +676,11 @@ def _upgrade_v6(conn, db_path):
     word-dash-number, found live: entity=des-001 was empty with the naming thread
     right there), and an extraction change without a re-extract would leave history
     indexed under the OLD rules -- two vocabularies pretending to be one index.
-    Same body as v5: the backfill is already a delete-and-rebuild."""
-    return _upgrade_v5(conn, db_path)
+    Same body as v5: the backfill is already a delete-and-rebuild -- but the STAMP
+    is this step's own, because v5's says 6 and finishing here means 7. A step that
+    borrows another's body must not borrow its version (msg 8876)."""
+    _upgrade_v5(conn, db_path)
+    conn.execute("PRAGMA user_version=7")
 
 
 def _upgrade_v7(conn, db_path):
@@ -678,7 +695,7 @@ def _upgrade_v7(conn, db_path):
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(tokens)")}
         if "agent_name" not in cols:
             conn.execute("ALTER TABLE tokens ADD COLUMN agent_name TEXT")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=8")
 
 
 def _upgrade_v8(conn, db_path):
@@ -704,7 +721,7 @@ def _upgrade_v8(conn, db_path):
                     slug=r["slug"], symptom=r["symptom"], root_cause=r["root_cause"],
                     rule=r["rule"], detection=r["detection"], created_ns=r["created_ns"])
             conn.execute("DROP TABLE lessons")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=9")
 
 
 def _upgrade_v9(conn, db_path):
@@ -730,7 +747,7 @@ def _upgrade_v9(conn, db_path):
             "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
             "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
             "rule, detection FROM memories")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=10")
 
 
 def _upgrade_v10(conn, db_path):
@@ -763,7 +780,7 @@ def _upgrade_v10(conn, db_path):
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
             raise BusError(f"v11 migration left {len(bad)} FK violations")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=11")
 
 
 def _upgrade_v11(conn, db_path):
@@ -773,7 +790,7 @@ def _upgrade_v11(conn, db_path):
     missing."""
     with tx(conn):
         _exec_script(conn, _MEMORIES_SCHEMA)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=12")
 
 
 def _upgrade_v12(conn, db_path):
@@ -793,7 +810,7 @@ def _upgrade_v12(conn, db_path):
             "    AND n.scope=m.scope AND n.slug=m.slug AND "
             "    (n.created_ns>m.created_ns OR "
             "     (n.created_ns=m.created_ns AND n.id>m.id))))")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=13")
 
 
 def _upgrade_v13(conn, db_path):
@@ -816,7 +833,7 @@ def _upgrade_v14(conn, db_path):
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(members)")}
         if "left_ns" not in cols:
             conn.execute("ALTER TABLE members ADD COLUMN left_ns INTEGER")
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=15")
 
 
 def _upgrade_v15(conn, db_path):
@@ -840,7 +857,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_live
     ON agents(owner_id, name) WHERE retired_ns IS NULL;
 CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
 """)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        conn.execute("PRAGMA user_version=16")
 
 
 def _upgrade_v16(conn, db_path):
