@@ -946,22 +946,23 @@ def _upgrade_v17(conn, db_path):
                AND EXISTS (SELECT 1 FROM agents a
                              JOIN tokens t ON t.agent_name = a.name
                             WHERE 'agent:' || t.id = memories.scope)""")
-        left = conn.execute(
-            "SELECT count(*) FROM messages WHERE sender_agent_id IS NULL "
-            "AND sender <> ? "
-            "AND sender NOT IN (SELECT name FROM users)",
-            (BROADCAST,)).fetchone()[0]
-        if left:
-            # Belt AND braces here deliberately, unlike the dual-name checks this
-            # repo deletes on sight: the refusal above reads the same tables this
-            # UPDATE does, so if the two ever disagree the disagreement is the
-            # bug, and finding it inside the transaction is free. Humans are
-            # excluded exactly as the refusal excludes them: a person is not an
-            # agent identity, so a human-sent message keeps a NULL id forever.
+        # THE RECOUNT CALLS THE REFUSAL, it does not re-spell it. The first
+        # version asked the same question in fresh SQL and got a different
+        # answer: the refusal excludes humans (a person is not an agent
+        # identity) and the recount did not, so on the operator's database the
+        # preflight passed, this counted 74 of their own messages as
+        # unattributed, and the broker restart-looped on a database its own
+        # preflight had just blessed. The comment sitting here claimed the two
+        # read the same tables "so if they ever disagree the disagreement is the
+        # bug" -- and it was, because a comment asserting agreement is not
+        # agreement. One definition, called twice.
+        still = unresolved_agent_names(conn)
+        if still:
             raise BusError(
-                f"identity backfill left {left} messages with no sender_agent_id "
-                f"after resolving every name it was given -- refusing to stamp "
-                f"this database as migrated")
+                f"identity backfill left {len(still)} name(s) unresolved AFTER "
+                f"resolving every name it was given: "
+                f"{', '.join(e['name'] for e in still)} -- refusing to stamp this "
+                f"database as migrated")
         conn.execute("PRAGMA user_version=18")
 
 
