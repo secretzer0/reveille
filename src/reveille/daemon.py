@@ -193,6 +193,18 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.78 no_rooms IS THE ONE RECOVERABLE REFUSAL. 0.2.77's zero-room refusal was
+right and its handling was one arm too fatal: waked exits on any error frame,
+so a container agent that left its LAST room -- a reversible state -- would
+have died permanently, respawned only if its entrypoint ever ran again. The
+native silent-deafness traded for a container loud-then-silent one. bad_token
+and name_mismatch cannot fix themselves and stay fatal; a token with no rooms
+can have one a second later, so waked now treats no_rooms as disconnect-class
+and reconnects on the fixed interval it already uses for a broker restart. The
+frame carries retry:true so the wire itself names the recoverable family.
+Found by the first native agent before the regression reached any container --
+which is the both-environments rule earning its keep on day one.
+
 0.2.77 EVERY GREEN CHECK THE DEAF AGENT SAT BEHIND IS NOW A REFUSAL OR THE
 TRUTH. The broker accepted a wake attachment from a valid token holding zero
 rooms -- a waiter _notify can never select, since rings go only to tokens in
