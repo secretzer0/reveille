@@ -193,6 +193,16 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.76 THE NATIVE BOOT PROMPT ARMS THE LIVING RITUAL. reveille-agent's boot
+banner told the first native agent to arm `wake --once` -- the pre-DES-003
+form, retired when the waiter split landed -- which grabs the wake socket
+itself and fights the supervised reveille-waked for it: stolen slot, or
+superseded into silent deafness, the one failure the fleet cannot see from
+inside. The prompt now arms `wake-watch <role>`, which watches the spool the
+daemon writes and is harmless in duplicate, and boot gains lessons() and
+brief() -- the knowledge floor the old prompt skipped. A gate reads the
+packaged script and refuses the retired form anywhere outside a comment.
+
 0.2.75 THE CREDENTIAL LIVES IN ENV, NOT IN CLAUDE CONFIG. The installer baked
 the literal token into the MCP registration, and "already registered, left
 alone" then kept it through a rotation -- the re-run superseded the token the
