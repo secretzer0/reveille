@@ -215,6 +215,13 @@ when it prints rows and 2 when it cannot read the file, because an unreadable
 database must not read as clean. The GLOB it replaces is kept in the test as the
 thing being refuted: it reports CLEAN on /files/a/../../etc/passwd while
 flagging every obvious payload, which is what made it look like it worked.
+WHAT THIS VERSION DID NOT VERIFY, stated here because a reader of a CHANGES
+entry has no other way to learn it: the LAUNCHER half of the login fix -- the
+pending reading against a real container, and a real re-login after a real
+success -- was never executed. No session in this fleet holds a docker socket.
+The container half is gated by running its actual boot script under a stub tmux
+and was seen red on the previous script; the endpoint half is argued and
+reviewed, not measured, until a human logs in on a deployed launcher.
 
 0.2.57 THE OTHER END OF THE ATTACHMENT DEFECT, AND THE HALF THAT STOPS THE BAD
 ROW EXISTING. send() inserted an attachment url verbatim from any caller;
