@@ -299,6 +299,13 @@
  #histBtn{background:none;border:1px solid var(--line);color:var(--dim);border-radius:7px;
   padding:.34rem .9rem;cursor:pointer;font:inherit;font-size:.82rem}
  #histBtn.on,#histBtn:hover{color:var(--gold);border-color:var(--gold)}
+ #voice{background:none;border:1px solid var(--line);color:var(--dim);border-radius:7px;
+  padding:.34rem .9rem;cursor:pointer;font:inherit;font-size:.82rem}
+ #voice:hover{color:var(--gold);border-color:var(--gold)}
+ /* ON is a colour AND a word ("voice on"), never colour alone -- the state has to
+    survive a colourblind reader and a screen reader, which is what aria-pressed is
+    for on the same element. */
+ #voice.armed{color:var(--gold);border-color:var(--gold)}
  #histBar{display:none;gap:.8rem;padding:.55rem 1.1rem .7rem;
   border-bottom:1px solid var(--line);background:var(--rail);flex-wrap:wrap;
   align-items:flex-end}
@@ -667,6 +674,13 @@
  <div id="top">
   <input id="filter" placeholder="Filter messages&hellip;">
   <span id="filterState" title="clear agent filter"></span>
+  <!-- DES-009 commit 3. The toggle IS the browser's autoplay gesture, which is why
+       voices cannot start themselves on load and why this is a button rather than a
+       stored preference: a page that restored "on" would have no gesture and would
+       queue into silence. aria-pressed carries the state to a screen reader, since
+       the label alone changes colour and not meaning. -->
+  <button type="button" id="voice" aria-pressed="false"
+   title="speak new messages aloud, in the order they arrive">voice off</button>
   <button id="histBtn" title="search the entire bus log">history</button>
  </div>
  <div id="histBar">
@@ -691,6 +705,9 @@
   <div id="histInfo"><span id="histLabel"></span><span><b id="backLive">back to live</b></span></div>
   <div id="empty">no traffic yet</div></div></div>
  <button id="jump">&darr; latest</button>
+ <!-- One player, reused. Not autoplay: nothing is ever assigned a src until the
+      toggle has been pressed, so a page load issues no audio request at all. -->
+ <audio id="vPlayer" preload="none"></audio>
  <div id="composerWrap">
   <form id="composer">
    <div class="ctop">
@@ -1131,6 +1148,85 @@ function add(m){
  if(follow)$('feed').scrollTop=$('feed').scrollHeight;
 }
 
+// ---- DES-009 commit 3: the play queue ---------------------------------------
+// Everyone in a room hears the same voices in the same ORDER. The order is the
+// message id, which the log already provides -- that is the whole reason there is
+// no audio stream to synchronise (DES-009 section 2).
+let voiceOn=false;         // default OFF, and deliberately not persisted: see the button
+const vQ=[];               // pending [{id,from}], drained in id order
+let vBusy=false;           // one utterance at a time -- overlapping voices are noise
+const V_MAX=8;             // queue depth past which we skip to the newest
+// WANTED, as a pure decision so a gate can drive it: off means NOTHING is queued and
+// therefore nothing is fetched (a toggle that still fetches is a toggle that lies),
+// and nobody hears themselves -- suppressed HERE because the browser is the only
+// place that knows who is watching (DES-009 section 5). The server still holds the
+// file; everyone else in the room needs it.
+function vWant(m,me,on){
+ return !!(on&&m&&m.id&&m.from&&m.from!==me);
+}
+// NEXT, also pure. Sorted at take time rather than at insert, because arrival order
+// is not id order and the requirement is about what PLAYS. A gap is not waited for:
+// a message may legitimately have no audio, and waiting on an id that never comes is
+// a stall, which section 2 forbids outright. Past V_MAX we skip to the newest and
+// report how many went -- falling behind is allowed, falling behind silently is not.
+function vTake(q,max){
+ if(!q.length)return null;
+ q.sort((a,b)=>a.id-b.id);
+ if(q.length>max){const last=q[q.length-1],dropped=q.length-1;q.length=0;
+  return {id:last.id,dropped:dropped};}
+ return {id:q.shift().id,dropped:0};
+}
+let vCtx=null;
+// The audible half of "visibly behind". The toast is the readable half; a tone alone
+// would be a sound nobody can interpret, and a toast alone is invisible to whoever is
+// listening rather than looking -- which is the entire audience of this feature.
+function vMark(n){
+ try{vCtx=vCtx||new (window.AudioContext||window.webkitAudioContext)();
+  const o=vCtx.createOscillator(),g=vCtx.createGain();
+  o.frequency.value=660;g.gain.value=0.05;o.connect(g);g.connect(vCtx.destination);
+  o.start();o.stop(vCtx.currentTime+0.12);}catch(e){}
+ toast(n+' message'+(n>1?'s':'')+' skipped -- audio was falling behind');
+}
+function vPump(){
+ if(vBusy||!voiceOn)return;
+ const t=vTake(vQ,V_MAX);
+ if(!t)return;
+ if(t.dropped)vMark(t.dropped);
+ vBusy=true;
+ const a=$('vPlayer');
+ a.src='/audio/'+encodeURIComponent(t.id)+'.wav'+qs();
+ // ADVANCED BY EVENTS, NEVER BY A TIMER. A backgrounded tab has its timers throttled
+ // to once a minute or worse, so a timer-driven queue stops draining the moment
+ // somebody switches tabs -- and audio is exactly the feature people background.
+ // ended and error both mean "this one is done"; a missing file is a silent message,
+ // never an error surface and never a stall (DES-009 section 7).
+ a.play().catch(e=>{
+  // Autoplay refusal is the failure mode worth naming: without this the queue drains
+  // into silence and looks like a broken synthesizer. The toggle was the gesture; if
+  // the browser still refused, say so and turn it back off rather than pretending.
+  vBusy=false;
+  if(e&&e.name==='NotAllowedError'){voiceOn=false;paintVoice();
+   toast('your browser blocked audio -- click voice again to allow it');}
+ });
+}
+function vDone(){vBusy=false;vPump();}
+function vPush(m){
+ if(!vWant(m,myName,voiceOn))return;
+ vQ.push({id:m.id,from:m.from});
+ vPump();
+}
+function paintVoice(){
+ const b=$('voice');
+ b.className=voiceOn?'armed':'';
+ b.setAttribute('aria-pressed',voiceOn?'true':'false');
+ b.textContent=voiceOn?'voice on':'voice off';
+}
+function toggleVoice(){
+ voiceOn=!voiceOn;
+ if(!voiceOn){const a=$('vPlayer');a.pause();a.removeAttribute('src');vQ.length=0;vBusy=false;}
+ paintVoice();
+}
+
 function clearFeed(){
  for(const el of [...$('inner').children])
   if(el.id!=='histInfo')el.remove();
@@ -1397,7 +1493,10 @@ function connect(){
   case 'presence':
    if(m.room===room)renderPresence(m.agents);
    return;
-  case 'message':return add(m);
+  // Speak LIVE arrivals only, which is why this hangs off the socket rather than off
+  // add(): add() also renders the backlog, and a late joiner must not be blasted with
+  // a queue of history nobody is waiting to hear (DES-009 section 2).
+  case 'message':vPush(m);return add(m);
   default:return;       // an event this build does not know is not an error --
   }                     // the broker may be newer, and the poll still covers us
  };
@@ -1429,6 +1528,19 @@ $('histBtn').onclick=()=>{
  if(mode==='history'){toLive();return;}
  $('histBar').classList.toggle('on');
 };
+$('voice').onclick=toggleVoice;
+// Both events mean "this utterance is over": ended for a file that played, error for
+// one that is not there. A missing file is a silent message, so the queue moves on
+// rather than surfacing anything (DES-009 section 7).
+//
+// THESE TWO AND NO OTHERS. Do not add abort or emptied here, however much they read
+// like the same family: the HTML media load algorithm fires abort (step 6) and
+// emptied (step 7.1) on every REASSIGNMENT of src, which is what vPump does on each
+// advance. Listening would make one utterance's start end the previous one, so the
+// queue would drain in a burst and only the last file would be heard -- and it would
+// look like the synthesizer skipping, not like this line.
+$('vPlayer').addEventListener('ended',vDone);
+$('vPlayer').addEventListener('error',vDone);
 $('hGo').onclick=e=>{e.preventDefault();
  const p={limit:500};
  if($('hKw').value.trim())p.keywords=$('hKw').value.trim();

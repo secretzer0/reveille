@@ -875,3 +875,95 @@ def test_the_rail_selection_is_repainted_wherever_the_active_tab_moves():
     for s in sites:
         assert "drawTabs()" in PAGE[s:s + 400], \
             f"an agTabOn assignment never reaches drawTabs: {PAGE[s:s + 80]!r}"
+
+
+# ---- DES-009 commit 3: the play queue ----------------------------------------
+
+def _voice_fns():
+    """vWant and vTake, extracted from the served page. Executed rather than
+    re-implemented: a copy in the test drifts from the page, which is the whole
+    reason the behind-predicate gate reads the page too."""
+    out = []
+    for name in ("function vWant(", "function vTake("):
+        start = PAGE.index(name)
+        out.append(PAGE[start:start + PAGE[start:].index("\n}\n") + 2])
+    return "\n".join(out)
+
+
+def test_the_voice_queue_plays_in_id_order_and_skips_when_it_falls_behind():
+    """The product requirement is that everyone hears the same voices in the same
+    ORDER, so the ordering is the thing to gate, given arrival that is not ordered.
+    """
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not on PATH -- served-JS gates need it")
+    prog = _voice_fns() + """
+const eq=(got,want,what)=>{const g=JSON.stringify(got),w=JSON.stringify(want);
+  if(g!==w)throw new Error(what+': '+g+' != '+w);};
+
+// ORDER. Arrival 7,5,9,6 must play 5,6,7,9 -- id order, not arrival order.
+let q=[{id:7},{id:5},{id:9},{id:6}], played=[];
+for(let i=0;i<4;i++){const t=vTake(q,8);played.push(t.id);
+  if(t.dropped)throw new Error('dropped with a queue of 4');}
+eq(played,[5,6,7,9],'play order');
+eq(vTake(q,8),null,'an empty queue yields nothing');
+
+// A GAP IS NOT WAITED FOR. 5 then 9 with no 6,7,8 plays both rather than stalling:
+// a message may have no audio at all, and waiting on an id that never comes is the
+// stall DES-009 section 2 forbids.
+q=[{id:9},{id:5}];
+eq([vTake(q,8).id, vTake(q,8).id],[5,9],'a gap must not stall the queue');
+
+// FALLING BEHIND IS VISIBLE. Past the bound, skip to the NEWEST and report how many
+// went -- not the oldest, and never silently.
+q=[];for(let i=1;i<=12;i++)q.push({id:i});
+const t=vTake(q,8);
+eq([t.id,t.dropped],[12,11],'skip to newest, count what was dropped');
+eq(q.length,0,'the skipped queue is cleared, not left to replay');
+
+// OFF ISSUES NOTHING, and nobody hears themselves. vWant is the only gate before a
+// fetch, so both properties are one function.
+const m={id:1,from:'architect'};
+eq(vWant(m,'me',false),false,'off must queue nothing');
+eq(vWant({id:1,from:'me'},'me',true),false,'a listener must not hear themselves');
+eq(vWant(m,'me',true),true,'someone else, voices on');
+eq(vWant({id:1},'me',true),false,'a message with no sender is not speakable');
+console.log('ok');
+"""
+    res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert "ok" in res.stdout
+
+
+def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
+    # 1. Default off, in the markup AND in the state, or a page load speaks.
+    assert 'id="voice" aria-pressed="false"' in PAGE, \
+        "the toggle must ship pressed=false -- it is also the autoplay gesture"
+    assert "let voiceOn=false;" in PAGE, "voiceOn must default to off"
+    assert "localStorage" not in PAGE[PAGE.index("let voiceOn=false;"):
+                                      PAGE.index("function clearFeed()")], \
+        "a restored 'on' has no user gesture behind it and would queue into silence"
+    # 2. The player is never given a src at load: preload none, no src attribute.
+    assert '<audio id="vPlayer" preload="none"></audio>' in PAGE
+    # 3. The queue advances on media EVENTS. A timer-driven queue stops draining in a
+    #    backgrounded tab, which is exactly where audio gets left running.
+    for ev in ("'ended',vDone", "'error',vDone"):
+        assert ev in PAGE, f"the queue does not advance on {ev}"
+    pump = PAGE[PAGE.index("function vPump()"):PAGE.index("function vDone()")]
+    assert "setTimeout" not in pump and "setInterval" not in pump, \
+        "vPump advances on a timer -- a backgrounded tab throttles it to a stop"
+    # 4. Autoplay refusal is NAMED. Without this the queue drains into silence and
+    #    reads as a broken synthesizer.
+    assert "NotAllowedError" in pump, "an autoplay refusal must be visible, not silent"
+    # 5. Live arrivals only: the speak call hangs off the socket's message case, not
+    #    off add(), which also renders backlog.
+    case = PAGE[PAGE.index("case 'message':"):]
+    case = case[:case.index("\n")]
+    assert "vPush(m)" in case, "voices must be fed by the live socket case"
+    body = PAGE[PAGE.index("function add(m){"):]
+    body = body[:body.index("\n}\n")]
+    assert "vPush" not in body, \
+        "add() renders the backlog too -- a late joiner would be blasted with history"
