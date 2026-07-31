@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -194,6 +194,7 @@ CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
 CREATE TABLE IF NOT EXISTS members (
     room_id   TEXT NOT NULL REFERENCES rooms(id),
     name      TEXT NOT NULL,
+    agent_id  TEXT,
     tag       TEXT,
     url       TEXT,
     token_id  TEXT REFERENCES tokens(id),
@@ -242,11 +243,23 @@ CREATE TABLE IF NOT EXISTS messages (
     subject   TEXT NOT NULL DEFAULT '',
     body      TEXT NOT NULL,
     room      TEXT NOT NULL REFERENCES rooms(id),
+    -- WHICH INSTANCE sent it (DES-007 2.3). The NAME stays and stays load-bearing:
+    -- agents address each other by name, `to=` is a name on the wire, and humans
+    -- read names. The id is what segments instances of one label over time, which
+    -- is the whole reason purge-by-name is unsafe the day a name has two
+    -- histories. Neither column replaces the other.
+    sender_agent_id TEXT,
     ts_ns     INTEGER NOT NULL
 );
+-- agent is the NAME (routing reads it); agent_id is the IDENTITY (DES-007 4.3).
+-- Both, not one: a resurrected identity under a reused name would otherwise
+-- inherit the previous instance's read state, and a DECLINED resurrect would mint
+-- an agent that appears to have already read mail it has never seen -- inbox()
+-- would skip it silently, which is the worst shape a bug in a mailbox can take.
 CREATE TABLE IF NOT EXISTS reads (
     message_id INTEGER NOT NULL REFERENCES messages(id),
     agent      TEXT NOT NULL,
+    agent_id   TEXT,
     read_ns    INTEGER NOT NULL,
     PRIMARY KEY (message_id, agent)
 );
@@ -326,6 +339,10 @@ CREATE TABLE IF NOT EXISTS memories (
     -- status: NULL = never cited; id with no row = the source was DELETED; id with
     -- a row = trace() works.
     source_msg_id INTEGER,
+    -- WHICH INSTANCE wrote it. author stays a name because history reads the way
+    -- the world read at the time (the S6b precedent); author_agent_id is what
+    -- segments two identities that shared one label.
+    author_agent_id TEXT,
     supersedes_id INTEGER REFERENCES memories(id),
     slug          TEXT,
     symptom       TEXT, root_cause TEXT, rule TEXT, detection TEXT,
@@ -856,6 +873,94 @@ def _upgrade_v16(conn, db_path):
         conn.execute("PRAGMA user_version=17")
 
 
+def _upgrade_v17(conn, db_path):
+    """v17 -> v18: history carries the IDENTITY, not only the label (DES-007 6).
+
+    THE FIRST MIGRATION IN THIS CODEBASE THAT REFUSES. Every column here is
+    filled by resolving a historical NAME against the agents table, and a name
+    with no row cannot be resolved. The two ways to get past that are both
+    forbidden: inventing an owner, and leaving the id permanently NULL -- the
+    second is the two-shapes-in-one-column problem the no-legacy rule exists to
+    stop, and DES-007 6.2 says nullable only for the window between the column
+    landing and the backfill completing, which here is one transaction. So an
+    unresolved name raises, the migration rolls back, and the operator is handed
+    the list and the one-shot that seeds it (scripts/seed_agent_identities.py).
+
+    It refuses BEFORE it writes anything, so a database that cannot be migrated
+    is left exactly as it was rather than half-converted.
+
+    THE NAME STAYS EVERYWHERE. sender, author, reads.agent and members.name are
+    what routing, `to=` and every human reader use; the id is what segments two
+    instances of one label. A design that dropped the name would break every
+    `to=` on the wire (DES-007 2.3).
+    """
+    pending = unresolved_agent_names(conn)
+    if pending:
+        listed = "\n  ".join(
+            f"{e['name']}: {e['messages']} messages, {e['memories']} memories, "
+            f"{e['lessons']} lessons" for e in pending)
+        raise BusError(
+            f"identity backfill REFUSES: {len(pending)} agent name(s) in this "
+            f"database have no row in `agents`, so their history cannot be "
+            f"attributed to an identity without inventing one.\n  {listed}\n"
+            f"Nothing was changed. Assign them once, deliberately:\n"
+            f"  uv run python scripts/seed_agent_identities.py <db> --assign <user>")
+    snapshot(conn, f"{db_path}.pre-v18-{time.time_ns()}.bak")
+    with tx(conn):
+        for table, col in (("messages", "sender_agent_id"), ("memories", "author_agent_id"),
+                           ("reads", "agent_id"), ("members", "agent_id")):
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+        # One identity per name, which is what pre-migration history IS: instances
+        # that were never distinguished cannot be split retroactively, and
+        # pretending otherwise would invent facts (DES-007 6.3). MIN(id) makes the
+        # choice deterministic rather than dependent on row order, for the case
+        # where a name somehow carries two rows already.
+        conn.execute("""
+            UPDATE messages SET sender_agent_id =
+              (SELECT MIN(a.id) FROM agents a WHERE a.name = messages.sender)""")
+        conn.execute("""
+            UPDATE memories SET author_agent_id =
+              (SELECT MIN(a.id) FROM agents a WHERE a.name = memories.author)""")
+        conn.execute("""
+            UPDATE reads SET agent_id =
+              (SELECT MIN(a.id) FROM agents a WHERE a.name = reads.agent)""")
+        conn.execute("""
+            UPDATE members SET agent_id =
+              (SELECT MIN(a.id) FROM agents a WHERE a.name = members.name)""")
+        # STATE NOTES MOVE FROM THE TOKEN TO THE IDENTITY (DES-007 4.2), and this
+        # is the migration's most user-visible payoff rather than a detail: a note
+        # scoped agent:<token_id> is orphaned the moment an agent is recreated,
+        # because recreating mints a new token, so "recreate resumes its old
+        # state" has been a claim rather than a promise. Rewritten through the
+        # token's bound name; a note whose token is gone keeps its old scope,
+        # because there is nothing left to resolve it through and guessing would
+        # attach one agent's memory to another.
+        conn.execute("""
+            UPDATE memories SET scope = 'agent:' || (
+                SELECT MIN(a.id) FROM agents a
+                  JOIN tokens t ON t.agent_name = a.name
+                 WHERE 'agent:' || t.id = memories.scope)
+             WHERE scope LIKE 'agent:%'
+               AND EXISTS (SELECT 1 FROM agents a
+                             JOIN tokens t ON t.agent_name = a.name
+                            WHERE 'agent:' || t.id = memories.scope)""")
+        left = conn.execute(
+            "SELECT count(*) FROM messages WHERE sender_agent_id IS NULL "
+            "AND sender <> ?", (BROADCAST,)).fetchone()[0]
+        if left:
+            # Belt AND braces here deliberately, unlike the dual-name checks this
+            # repo deletes on sight: the refusal above reads the same tables this
+            # UPDATE does, so if the two ever disagree the disagreement is the
+            # bug, and finding it inside the transaction is free.
+            raise BusError(
+                f"identity backfill left {left} messages with no sender_agent_id "
+                f"after resolving every name it was given -- refusing to stamp "
+                f"this database as migrated")
+        conn.execute("PRAGMA user_version=18")
+
+
 def _upgrade_v0(conn, db_path):
     """v0 (room = the shared secret, stored as a string on every row) -> v2 (rooms are
     uuid rows owned by a user). Ownerless rooms are claimed by the first admin at
@@ -936,7 +1041,7 @@ def _upgrade_v0(conn, db_path):
 # nothing able to say so. v1 has no entry (it never shipped) and v6 is reachable
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
-             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)}
+             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -1955,6 +2060,32 @@ def unresolved_agent_names(conn):
     claimed = {r["name"] for r in conn.execute("SELECT name FROM agents")}
     return [a for a in agents_seen(conn, rooms, exclude=people)
             if a["name"] not in claimed]
+
+
+def claim_unresolved_names(conn, owner_id, now=None):
+    """Mint one RETIRED identity per unresolved historical name, owned by
+    owner_id. Returns the names claimed.
+
+    The caller NAMES the owner -- there is no default and there must never be
+    one. A default answers for names nobody looked at, on a database nobody
+    checked, and that is precisely how an invented owner gets in silently
+    (operator, 2026-07-31: every historical agent here is theirs, assigned by
+    hand, and the assignment must not live in code). This function is the
+    mechanics of an act someone else decides to perform.
+
+    RETIRED, not live: these rows are history. A live row would claim
+    idx_agents_live for (owner, name), so re-minting or resurrecting that name
+    later would collide with a ghost that nothing is running.
+    """
+    now = now or time.time_ns()
+    claimed = []
+    for e in unresolved_agent_names(conn):
+        conn.execute(
+            "INSERT INTO agents(id, owner_id, name, created_ns, retired_ns) "
+            "VALUES(?,?,?,?,?)",
+            (str(uuid.uuid4()), owner_id, e["name"], e["last_ns"] or now, now))
+        claimed.append(e["name"])
+    return claimed
 
 
 def presence(conn, rooms):

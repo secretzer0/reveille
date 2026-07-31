@@ -27,8 +27,6 @@ pretending otherwise would invent facts.
 
 import argparse
 import sys
-import time
-import uuid
 
 from reveille import store
 
@@ -74,17 +72,13 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
-    now = time.time_ns()
     with store.tx(conn):
-        for e in pending:
-            # retired_ns SET: these identities are history, not live instances.
-            # A live row would claim the partial unique index, so resurrecting or
-            # re-minting the name later would collide with a ghost -- and none of
-            # these agents is running under this row, which is what live means.
-            conn.execute(
-                "INSERT INTO agents(id, owner_id, name, created_ns, retired_ns) "
-                "VALUES(?,?,?,?,?)",
-                (str(uuid.uuid4()), owner_id, e["name"], e["last_ns"] or now, now))
+        # The minting lives in store.claim_unresolved_names, so the migration's
+        # refusal and the act that clears it read the same rows through the same
+        # code. Two implementations of "which names are unresolved" would drift,
+        # and the drift would show up as a migration that refuses a database
+        # somebody had just seeded.
+        store.claim_unresolved_names(conn, owner_id)
     print(f"\nminted {len(pending)} identity rows owned by {a.assign}, all retired "
           f"(history, not live instances). Re-running is a no-op.")
     return 0
