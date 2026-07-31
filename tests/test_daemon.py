@@ -967,3 +967,84 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     body = body[:body.index("\n}\n")]
     assert "vPush" not in body, \
         "add() renders the backlog too -- a late joiner would be blasted with history"
+
+
+# ---- DES-008 item D: the install block shows and never runs -------------------
+
+def _install_fns():
+    """installCmds and installBlock, extracted from the served page and executed:
+    a copy in the test would drift from the panel, and the panel is what a human
+    pastes into a root shell."""
+    out = []
+    for name in ("const INIT_CMD", "function installCmds(", "function installBlock("):
+        start = PAGE.index(name)
+        end = PAGE[start:].index("\n}\n") + 2 if name.startswith("function") \
+            else PAGE[start:].index("\n")
+        out.append(PAGE[start:start + end])
+    return "\n".join(out)
+
+
+def test_the_install_block_shows_the_command_and_offers_no_way_to_run_it():
+    """DES-008 section 4, the invariant written never to soften. A native agent's
+    reach is the machine, and that is a grant a shell makes rather than a browser.
+    So the panel must carry no affordance that sends this anywhere.
+    """
+    start = PAGE.index("// ---- DES-008 item D")
+    block = PAGE[start:PAGE.index("async function openTokens()")]
+    # 1. Nothing in this region talks to any server. A "run it for me" button is
+    #    exactly what this must catch, and it would arrive as one of these.
+    for call in ("api(", "lapi(", "fetch(", "XMLHttpRequest", "sendBeacon"):
+        assert call not in block, f"the install panel calls {call} -- it must only DISPLAY"
+    # 2. The token never rides a url, an href or an anchor: those land in history,
+    #    in a referer and in somebody's access log.
+    for sink in ("href", "location.href", "window.open", "src="):
+        assert sink not in block, f"the install panel builds a {sink} -- the token would ride it"
+    # 3. Exactly ONE place builds the command, so a second copy cannot drift.
+    assert PAGE.count("function installCmds(") == 1
+    assert len(re.findall(r"(?<!function )installCmds\(", PAGE)) == 2, \
+        "installCmds has more or fewer call sites than the block and the copy button"
+
+
+def test_the_install_command_carries_the_secret_once_and_says_it_is_shown_once():
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not on PATH -- served-JS gates need it")
+    prog = """
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',
+  '"':'&quot;',"'":'&#39;'}[c]));
+const location={origin:'http://bus.local:8765'};
+""" + _install_fns() + """
+const mint={agent_name:'roc-api-dev', secret:'sec-ABC123', id:'t1'};
+const out = installBlock(mint);
+const count = (h, n) => h.split(n).length - 1;
+if (count(out, 'sec-ABC123') !== 1)
+  throw new Error('the secret appears ' + count(out,'sec-ABC123') + ' times, want 1');
+for (const need of ['shown once', 'does not run them',
+                    'export REVEILLE_AGENT_ROLE=roc-api-dev',
+                    'http://bus.local:8765', 'reveille init'])
+  if (!out.includes(need)) throw new Error('install block omits: ' + need);
+// An UNBOUND token installs nothing: there is no agent identity to install, and
+// showing an install command for one would teach a shape that cannot work.
+if (installBlock({secret:'x'}) !== '')
+  throw new Error('an unbound token was offered an install command');
+// The name is agent-authored text landing in the operator's privileged session,
+// so it is escaped like every other such string on this page.
+const nasty = installBlock({agent_name:'<img src=x onerror=alert(1)>', secret:'s'});
+if (nasty.includes('<img src=x')) throw new Error('the agent name was interpolated raw');
+if (!nasty.includes('&lt;img src=x')) throw new Error('the agent name was not escaped');
+console.log('ok');
+"""
+    res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert "ok" in res.stdout
+
+
+def test_the_init_invocation_is_pinned_because_it_is_a_contract():
+    """The command shape belongs to senior-dev's `reveille init` (DES-008 items
+    A-C). It is pinned HERE so a drift fails on this branch rather than on the
+    machine where somebody is pasting it into a root shell."""
+    assert "const INIT_CMD = 'uvx --from reveille reveille init';" in PAGE, \
+        "the init invocation moved -- confirm the new shape with senior-dev, then pin it"
