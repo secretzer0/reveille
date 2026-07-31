@@ -2769,15 +2769,17 @@ function installBlock(t){
   'in the third line -- it is shown once, here, and nowhere else, so copy it '+
   'before you leave this screen.</div>'+
   '<pre class="tokOut" id="installCmd">'+esc(installCmds(t, location.origin))+'</pre>'+
-  // TWO FAILURES THAT LOOK IDENTICAL FROM A TERMINAL, named here because the
-  // reader is holding the only screen that could tell them apart: uvx cannot
-  // find the source, and git cannot read the private repo, both surface as a
-  // fetch failure. Named before it happens rather than diagnosed after.
-  '<div class="pDim">The machine you paste this on needs git access to the '+
-  'repository -- it is private, so uvx fetches it over git rather than from an '+
-  'index. If that line fails, check git before uvx: "cannot find reveille" and '+
-  '"cannot read that repo" print the same way. The agent runs in whatever '+
-  'directory you are in, so cd there first.</div>';
+  // THE REPO WENT PUBLIC (operator, msg 9006), so the sentence about git
+  // credentials retires with the condition that made it true. What stays is the
+  // fact a reader still needs: the source is a GIT url and not an index, so the
+  // machine needs git and a network path to github -- which is a different
+  // failure from a package that cannot be found, and it is still the one they
+  // will hit first. The credential half is gone rather than reworded, because a
+  // sentence that was load-bearing yesterday is dead weight today and every line
+  // here competes with the command it sits under.
+  '<div class="pDim">That last line fetches from git rather than from a package '+
+  'index, so the machine needs git and a route to github. The agent runs in '+
+  'whatever directory you are in, so cd there first.</div>';
 }
 function wireInstallCopy(t){
  const b=$('copyInstall');
