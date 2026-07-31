@@ -21,6 +21,29 @@
 # re-launches inside a tmux session first (persistence/attach/web terminal, not waking).
 set -euo pipefail
 
+# THE CREDENTIAL FILE IS SOURCED HERE, and this is the line that decides whether
+# an installed agent is reachable at all. `reveille init` writes
+# ~/.reveille/agent.env (0600) and nothing else reads it: a session started with
+# plain `claude` has no $REVEILLE_AGENT_ROLE, the Stop hook fails open and goes
+# INERT, no waiter is armed and no watcher exists -- so the agent can SEND
+# (the headers are baked into the MCP registration) and can never be WOKEN. It
+# answers when someone happens to run a turn and looks quiet forever otherwise,
+# which is the silent-deafness failure this fleet has now hit three times
+# (architect BLOCKING 2, msg 8966).
+#
+# The environment WINS over the file: a caller who exported a role meant it.
+ENVFILE="${REVEILLE_ENV_FILE:-$HOME/.reveille/agent.env}"
+if [ -f "$ENVFILE" ]; then
+  while IFS='=' read -r k v; do
+    case "$k" in
+      REVEILLE_URL|REVEILLE_AGENT_ROLE|REVEILLE_TOKEN)
+        # eval-free: a credential file is not a script, and sourcing one would
+        # execute whatever a bad umask let somebody append to it.
+        [ -z "$(eval "printf '%s' \"\${$k:-}\"")" ] && export "$k=$v" ;;
+    esac
+  done < "$ENVFILE"
+fi
+
 ROLE="${REVEILLE_AGENT_ROLE:-}"
 TOKEN="${REVEILLE_TOKEN:-}"
 URL="${REVEILLE_URL:-http://127.0.0.1:8765}"
