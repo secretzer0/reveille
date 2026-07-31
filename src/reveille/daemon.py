@@ -190,6 +190,34 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.60 THE MIGRATION CHAIN CAN NO LONGER SAY IT IS DONE WHEN IT IS NOT. Every
+upgrade step used to stamp user_version = SCHEMA_VERSION rather than its own
+target, and migrate() branched on the version it FOUND and ran a hand-listed
+sequence of steps per arm. Together those meant an arm that was short by a step
+still ended with the database claiming to be current. Three arms WERE short: a
+database at 9 through 13 ran up to _upgrade_v14 and never created the agents
+table, a database at 3 ended at 9, and the upper arms never ran the v17 rebuild.
+What hid all three for four versions is that one step replays the whole schema,
+and a full replay heals ADDITIVE drift -- so the tables appeared by another
+route and every assertion any test could make came out green. The first
+non-additive step turns that luck into data loss. There are no arms now: a step
+table plus a loop over the version the database is AT, each step advancing to
+ITS OWN target in its own transaction, so a failed chain leaves the version
+where it completed and the next start resumes there. A step that does not
+advance is refused rather than looped. The table is gated too -- a
+SCHEMA_VERSION bump that forgets its entry fails a test instead of stamping
+silently past a real migration, which would have been the same defect wearing
+the new mechanism.
+
+Also here, for DES-007: scripts/seed_agent_identities.py and the refusal list
+behind it. The identity backfill maps a historical name to an identity by
+looking it up in the agents table, and the two ways to paper over a name that is
+not there are both forbidden -- inventing an owner, or leaving the id
+permanently NULL. So the backfill will REFUSE and print what it cannot resolve,
+and a human assigns those rows once, deliberately, with a script nothing imports
+and no migration calls. Historical rows mint RETIRED: they are history, and a
+live row would claim the one-live-name index against a name nothing is running.
+
 0.2.59 A CITATION NOW OUTLIVES THE MESSAGE IT CITES, AND THE ESCAPE HATCH IS NOT
 GATED ON THE STATE IT ESCAPES. Four accepted branches.
 
