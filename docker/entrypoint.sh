@@ -360,7 +360,39 @@ mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
 # ponytail: while-loop supervisor -- ttyd is a sidecar, its death must not take
 # the agent down (4.5); replace with a real supervisor if restart churn appears.
 ( while :; do
-    ttyd -W -a -p "${REVEILLE_TTYD_PORT:-7681}" attach-gate attach >/dev/null 2>&1
+    # CLIENT OPTIONS, NAMED. Every one of these was a default nobody chose.
+    #
+    # MEASURED, not assumed -- the reported diagnosis was wrong on both halves.
+    # ttyd 1.7.7's bundled client does NOT default to the DOM renderer and does
+    # NOT default to a bare generic monospace. Read out of the served bundle:
+    #   rendererType: "webgl"
+    #   fontFamily:   "Consolas,Liberation Mono,Menlo,Courier,monospace"
+    #
+    # So webgl is what is drawing today, and webgl is the renderer that produces
+    # atlas and glyph artifacts on a blocklisted driver or a lost GPU context --
+    # which is the symptom. canvas is named explicitly because "the default" has
+    # now been wrong twice in one file.
+    #
+    # The font is resolved in the BROWSER, not here: this is a CSS stack against
+    # the fonts on the viewer's machine, and no package installed in this image
+    # can change what renders. Each entry is a system monospace that carries
+    # box-drawing on its own platform, so a missing face falls to another real
+    # one instead of to Courier, whose box-drawing is what comes apart.
+    #
+    # NOT CHANGED, deliberately: tmux's `window-size largest`. With two clients
+    # attached a narrow tab sees the wider client's wrapping, which also reads
+    # as corruption -- but that behaviour is documented as intentional one file
+    # over, and reversing an intentional choice on a hunch is how a fix becomes
+    # a regression. If artifacts survive this with only the browser attached,
+    # that line is the next suspect.
+    ttyd -W -a -p "${REVEILLE_TTYD_PORT:-7681}" \
+      -t 'fontFamily=ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace' \
+      -t fontSize=13 \
+      -t rendererType=canvas \
+      -t 'theme={"background":"#0b0d10","foreground":"#c8d0d8","cursor":"#e2a63d","selectionBackground":"#2a3340"}' \
+      -t scrollback=10000 \
+      -t disableLeaveAlert=true \
+      attach-gate attach >/dev/null 2>&1
     sleep 1
   done ) &
 

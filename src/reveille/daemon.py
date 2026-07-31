@@ -190,6 +190,34 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.52 AN EMPTY ANSWER IS NOT AN ANSWER, AND THE RAIL DRAWS ITS OWN EDGES. The
+roster groups agents by room, reading GET /tokens first and falling back to
+/agents-seen per room. A bound token with NO rooms answered with an empty list
+and the code RECORDED it -- which grouped the agent nowhere AND marked the name
+already-answered, so the fallback never fired. On the owner's own session that
+put one agent under a room and twenty-two under "no room". Empty answer and no
+answer are the same fact. Named by the architect as A WORKING SIBLING IS NOT
+COVERAGE: where two paths serve one purpose, exercising either produces a
+working system, so the untaken path inherits the taken one's credibility -- and
+here the tester's IDENTITY chose the path, since an account owning no tokens can
+only ever run the fallback. Visually the rail now draws containment (rule under
+each heading, spine down the open group, hover edge) and selection is a filled
+left bar plus tint rather than a 1px outline, because a shape survives being
+small, dim, or read by someone who cannot pick gold out of grey.
+
+Agent image 0.2.12: the browser terminal NAMES its client options. Measured, not
+assumed -- ttyd 1.7.7's bundled client defaults to rendererType "webgl" and to
+"Consolas,Liberation Mono,Menlo,Courier,monospace", so the reported diagnosis
+(DOM renderer, generic font) was wrong on both halves. webgl is what was drawing
+and webgl is the renderer that produces atlas and glyph artifacts on a
+blocklisted driver or a lost GPU context, which is the symptom; canvas is named
+explicitly. The font stack is resolved in the BROWSER -- no package in the image
+can change what renders -- so every entry is a system monospace carrying
+box-drawing on its own platform, and a missing face falls to another real one
+instead of to Courier. tmux's `window-size largest` is deliberately unchanged:
+it is documented as intentional, and it is the next suspect if artifacts survive
+with only the browser attached.
+
 0.2.51 THE TWO READINGS, SAID IN ONE SENTENCE. The activity icon reported what
 the bus SAW from an agent; whether anything is LISTENING was a separate dot, and
 it is reachability -- not activity -- that promises the next message lands. The

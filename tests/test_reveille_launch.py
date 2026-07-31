@@ -1550,3 +1550,56 @@ def test_branch_orphans_compares_against_what_is_published(tmp_path):
     bad = subprocess.run(["bash", str(script), "origin/does-not-exist"],
                          cwd=str(repo), capture_output=True, text=True)
     assert bad.returncode == 2 and "REFUSING" in bad.stderr
+
+
+def test_ttyd_names_its_client_options_rather_than_taking_defaults():
+    """The browser terminal's rendering, chosen rather than inherited.
+
+    The operator reported tmux artifacts and broken box-drawing. The offered
+    diagnosis was that ttyd runs with no client options, so xterm.js takes the
+    DOM renderer and a generic monospace. Both halves were wrong, and the
+    correction is why this test pins the VALUE and not merely the flag: read out
+    of ttyd 1.7.7's own served bundle, the defaults are rendererType "webgl" and
+    fontFamily "Consolas,Liberation Mono,Menlo,Courier,monospace".
+
+    So webgl was already drawing, and webgl is the renderer that produces atlas
+    and glyph artifacts on a blocklisted driver or a lost GPU context. canvas is
+    named because "the default" has now been wrong twice in this file.
+
+    Unknown -t keys are passed to the frontend and silently ignored, so a
+    misspelled option fails exactly like a missing one -- which is the same
+    silent-substitution shape as the font, one layer up. That is what makes an
+    assertion on the literal text worth having.
+    """
+    ep = (pathlib.Path(rl.__file__).parent.parent / "docker" / "entrypoint.sh").read_text()
+    start = ep.find("ttyd -W -a")
+    assert start != -1, "the ttyd supervisor is gone or renamed"
+    cmd = ep[start:ep.index("attach-gate attach", start)]
+    assert "rendererType=canvas" in cmd, (
+        "the renderer is unnamed again -- ttyd's default is webgl, which is the "
+        "one that dies on a lost GPU context and draws artifacts on the way")
+    assert "-t fontSize=13" in cmd
+    for face in ('"DejaVu Sans Mono"', '"Liberation Mono"', '"Noto Sans Mono"', "ui-monospace"):
+        assert face in cmd, (
+            f"{face} left the stack -- a missing face must fall to another real "
+            f"monospace, never to Courier, whose box-drawing is what comes apart")
+    assert "scrollback=10000" in cmd
+
+
+def test_the_agent_image_tag_moves_when_the_entrypoint_does():
+    """Tag-per-image-change (ruling 8433), asserted rather than remembered.
+
+    entrypoint.sh is baked at build time, so a change to it with the tag left
+    alone makes two different images answer to one name -- and the launcher.db
+    records that name as the account of what an agent is running. The ttyd
+    options are the current instance: edit them, keep 0.2.11, and every existing
+    container claims to be an image it is not.
+    """
+    root = pathlib.Path(rl.__file__).parent.parent
+    mk = [ln for ln in (root / "Makefile").read_text().splitlines()
+          if ln.startswith("AGENT_IMAGE ?=")]
+    assert len(mk) == 1
+    tag = mk[0].split("?=")[1].strip()
+    assert tag == rl.DEFAULT_IMAGE
+    assert tag == "reveille-agent:0.2.12", (
+        "the entrypoint changed and the tag did not -- two images, one name")
