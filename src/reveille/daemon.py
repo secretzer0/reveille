@@ -193,6 +193,36 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.62 HISTORY CARRIES THE IDENTITY, AND THE ROOM CAN SPEAK. Two slices.
+
+DES-007: every message, memory, read receipt and membership now records WHICH
+INSTANCE, not only which label. The name stays everywhere it was -- routing,
+`to=` and every human reader use it -- and the id is what segments two agents
+that shared one name over time, which is what makes purge, resurrect and read
+receipts safe the day a label carries two histories. State notes move from the
+token to the identity: a note scoped to a token was orphaned the moment an agent
+was recreated, so "recreate resumes its old state" has been a claim rather than
+a promise. THIS MIGRATION REFUSES. History whose names have no agents row cannot
+be attributed without inventing an owner, and both ways past that are forbidden
+-- an invented owner, or a permanently-nullable id. So it stops, names every
+unresolved name with its counts, and prints the one-shot that clears it. The
+refusal fires in deploy-preflight BEFORE anything is taken down, because the
+same refusal at broker startup would be correct and would also be an outage; the
+seeder only inserts, so it runs against the live database with the old broker
+still serving.
+
+DES-009: the broker speaks for the room. A worker thread synthesizes each
+message in id order and serves it at /audio/<msg-id>.wav, authorized by ITS
+MESSAGE'S ROOM -- the ?room= the client sends is ignored, because a
+client-supplied room in an authorization decision is a hole. The browser never
+meets the synthesizer. A synthesizer off this host must be https and must carry
+a token or the voice worker does not start and says why: a plaintext
+synthesizer on someone else's LAN is a bus transcript in flight. A missing
+audio file is a SILENT message by design, so a service that is down costs
+silence rather than errors. The audio dies with its message at the single delete
+choke point, never per caller. Nothing has been heard yet -- no synthesizer
+exists in this fleet, and the first utterance is the operator's.
+
 0.2.61 THE ROOM CAN SPEAK, CLIENT SIDE. DES-009 commit 3: the bus page can play
 each message as audio, in message-id order, one at a time. The ordering is the
 feature rather than a detail -- utterances arrive as they are synthesized, which
