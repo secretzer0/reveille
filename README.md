@@ -70,14 +70,23 @@ merge. Updating one and not the other is the failure this sequence exists to
 stop — it kept a login-home crash running for six reviews after it was fixed.
 
 ```bash
-cd <your checkout> && git pull            # what you are deploying
+cd <your checkout> && git pull    # what you are deploying
+make up                           # BOTH halves: broker image + launcher
+```
 
+`make up` deploys the broker, then runs `scripts/deploy-launcher`, which pins
+`~/.reveille/launcher-src` to origin/main, restarts the launcher by its exact
+pid, and **verifies it came back on the new commit** — starting it itself if
+nothing did. The pin check still runs last, now as the assertion that all of
+that worked rather than as a message telling you to go and do it.
+
+By hand, if you want the steps rather than the command:
+
+```bash
 uv run python scripts/reveille_launch.py pin   # fast-forward the pinned clone
-pgrep -af "reveille_launch.py api"             # the EXACT pid, never pkill blind
+pgrep -af "reveille_launch.py serve"           # the EXACT pid, never pkill blind
 kill <that pid>                                # the Stop hook respawns it
 curl -s localhost:8766/health                  # must report the commit you pulled
-
-make up                                        # broker image + compose + checks
 ```
 
 **What brings it back:** `scripts/agent-stop-hook` — the same Stop hook that
