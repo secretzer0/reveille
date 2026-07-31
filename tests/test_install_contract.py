@@ -60,3 +60,28 @@ def test_every_console_script_the_boot_doctrine_prescribes_exists():
         assert cmd in daemon.USAGE, f"usage() stopped prescribing {cmd}"
         assert cmd in SCRIPTS, (
             f"usage() prescribes {cmd!r} and the package does not ship it")
+
+
+def test_the_panel_only_tells_people_to_run_commands_the_package_ships():
+    """The panel's half of the same contract, and it lives HERE rather than with
+    the launcher assertions because INIT_CMD lives here -- each assertion where
+    its subject is, so neither branch has to land before the other.
+
+    The first word after `uvx --from <source>` is the console script uvx is asked
+    to run. If the manifest stops shipping that name, the operator gets
+    "executable not found" from a command this page printed.
+    """
+    page = daemon._ui_read("index.html")
+    m = re.search(r"const INIT_CMD = 'uvx --from (\S+) (\S+) (\S+)';", page)
+    assert m, "INIT_CMD is gone or reshaped -- the panel's contract moved"
+    source, script, subcommand = m.groups()
+    assert script in SCRIPTS, (
+        f"the panel tells people to run {script!r}, which [project.scripts] does "
+        f"not ship: {sorted(SCRIPTS)}")
+    assert subcommand == "init", f"the panel invokes {script} {subcommand}, not init"
+    # The source is a git url while the package is unpublished. Pinned as a pair
+    # with the script name so a move to a published name has to change both
+    # deliberately rather than one of them by tidying.
+    assert source.startswith("git+https://"), (
+        f"the panel fetches from {source!r} -- there is no published package yet, "
+        f"so anything but a git url cannot resolve on the operator's machine")
