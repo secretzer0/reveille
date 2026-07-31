@@ -23,6 +23,7 @@ root-equivalent credential into .bash_history on every machine that runs it.
 """
 
 import argparse
+import contextlib
 import getpass
 import json
 import os
@@ -194,6 +195,14 @@ def mint_token(url, user, password, agent, rooms=None, tier="state"):
                 f"token exists and reaches nothing -- revoke it in the Tokens tab "
                 f"rather than leaving it: {tok['id']}")
         attached.append(r)
+    # CLOSE THE SESSION. It was minted for three calls and there is no reason for
+    # it to outlive them; leaving it valid means the installer left a live
+    # session behind on every machine it ever ran on (architect, msg 8987).
+    # Best effort: the mint succeeded and a logout that fails must not fail the
+    # install, since the credential the caller needs is already in hand.
+    with contextlib.suppress(Exception):
+        _post(url, "/logout", {}, cookie)
+
     note = ""
     if tok.get("superseded"):
         note = f" (superseded {len(tok['superseded'])} previous token(s) for {agent})"
@@ -216,7 +225,18 @@ def cmd_init(a):
         # MINT FIRST, then fall into exactly the same path as a pasted token.
         # One installer, not two: everything after this point cannot tell where
         # the credential came from, so there is one flow to get right.
-        user = a.user or os.environ.get("REVEILLE_USER") or input("broker username: ")
+        # WHOSE USERNAME: the operator read "broker username" and reasonably asked
+        # whether it meant the agent they were creating. Two identities are in
+        # play and only one has a password -- the prompt now says which, because
+        # a person answering it is holding the only screen that could tell them
+        # apart, and getting it wrong creates an agent named after them that
+        # posts in the room under their own name.
+        user = a.user or os.environ.get("REVEILLE_USER")
+        if not user:
+            print(f"Creating the agent '{name}'.")
+            print("Now log in as YOURSELF -- the web account that will OWN it. "
+                  "This is not the agent's name.")
+            user = input("your broker username: ")
         if not url or not name:
             print("reveille init --login: needs REVEILLE_URL and an agent name "
                   "(REVEILLE_AGENT_ROLE or the second argument).", file=sys.stderr)
