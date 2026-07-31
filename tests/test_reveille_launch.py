@@ -1602,7 +1602,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.13", (
+    assert tag == "reveille-agent:0.2.14", (
         "the entrypoint changed and the tag did not -- two images, one name")
 
 
@@ -1619,3 +1619,36 @@ def test_the_wheel_scrolls_the_view_not_the_prompt_history():
     assert "set -g mouse on" in conf, (
         "the wheel is sending arrow keys again -- scrolling up will edit the "
         "prompt instead of moving the view")
+
+
+def test_the_container_has_a_utf8_locale_and_the_client_is_forced_to_it():
+    """An em dash rendered as "_" for three fixes because nothing here was UTF-8.
+
+    LANG, LC_ALL and LC_CTYPE were all empty, so the tmux CLIENT fell back to
+    ASCII and substituted an underscore for every character it could not
+    represent. What made it survive three attempts is that the damage is
+    INVISIBLE FROM INSIDE: `tmux capture-pane` prints the cells it stores, which
+    held correct UTF-8 the whole time. Every check run in the container agreed
+    the text was fine while the browser showed U+2014 and U+2192 as underscores,
+    so the renderer and the font stack took the blame twice each.
+
+    Both halves are pinned because they fail independently: the image env is the
+    root, and `tmux -u` is what holds if that env is ever stripped between ttyd
+    and the client.
+    """
+    root = pathlib.Path(rl.__file__).parent.parent
+    dockerfile = (root / "docker" / "Dockerfile").read_text()
+    assert "ENV LANG=C.UTF-8 LC_ALL=C.UTF-8" in dockerfile, (
+        "the container has no UTF-8 locale -- tmux will spell every multibyte "
+        "character as an underscore, and nothing inside the container will say so")
+
+    gate = (root / "docker" / "attach-gate").read_text()
+    # CODE lines only: this file explains itself at length, and two of the
+    # matches are comments quoting the very command being replaced.
+    execs = [ln for ln in gate.splitlines()
+             if "exec tmux" in ln and not ln.lstrip().startswith("#")]
+    assert len(execs) == 2, "expected exactly the viewer and driver attach paths"
+    for ln in execs:
+        assert "tmux -u attach-session" in ln, (
+            "an attach path stopped forcing UTF-8 on its client -- the env is "
+            "the root fix, this is the one that survives the env going missing")

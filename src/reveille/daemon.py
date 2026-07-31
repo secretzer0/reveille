@@ -190,6 +190,22 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.54 THE TERMINAL HAD NO UTF-8 LOCALE, WHICH IS WHY EVERY OTHER FIX FAILED.
+Agent image 0.2.14. LANG, LC_ALL and LC_CTYPE were all EMPTY in the container,
+so the tmux CLIENT fell back to ASCII and substituted an underscore for every
+character it could not represent. The broken glyphs were captured off the live
+pane and turned out to be U+2014 and U+2192 -- an em dash and a right arrow,
+ordinary in every monospace, which is why no font stack and no renderer could
+have fixed them. Three attempts went to the renderer and the font first because
+the damage IS INVISIBLE FROM INSIDE THE CONTAINER: `tmux capture-pane` prints
+the cells it stores, and those held correct UTF-8 the whole time, so every check
+run in the container agreed the text was fine while the browser showed
+underscores. Fixed at both ends, because they fail independently: ENV
+LANG/LC_ALL=C.UTF-8 in the image is the root, and `tmux -u` on both the viewer
+and driver attach paths is what holds if that env is ever stripped between ttyd
+and the client. C.UTF-8 needs no locales package and carries no language policy
+into someone else's agent.
+
 0.2.53 THE RENDERER WAS THE WRONG LEVER, AND THE WHEEL WAS EDITING THE PROMPT.
 Agent image 0.2.13. canvas did not fix the broken glyphs, so the characters were
 captured off the live pane instead of theorised about: em dash (U+2014) and
