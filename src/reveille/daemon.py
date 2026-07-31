@@ -193,6 +193,21 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.72 A MINT ATTACHES ITS ROOMS OR DOES NOT HAPPEN. The operator's first real
+--login install died on its last step: the room attach POSTed to a route that
+takes PATCH, a call that could never succeed anywhere -- and every stub-broker
+gate was blind to it, because a stub accepts any method. Rooms now ride
+POST /tokens and attach inside the mint's own transaction, through the same
+reach check every route uses; a refused room rolls back the token, so the
+minted-token-that-reaches-nothing state is unrepresentable and its error
+message is deleted with it. The installer makes one call. A route-contract
+gate now asserts every call the installer makes against the daemon's REAL
+route table, since both sides live in this repo and a stub cannot referee
+them. Also: a name carried LIVE by two different owners resolves to neither
+at write time -- the live-name index is per-owner, so two accounts can each
+run a `devops`, and picking one would attribute a message across a tenancy
+boundary.
+
 0.2.71 A TOKEN BINDS TO AN IDENTITY, NOT A SPELLING, AND AN ACCOUNT IS NEVER
 HARD-DELETED. The last cutover of the identity work: tokens store agent_id and
 the agent_name column is GONE -- the name still travels the wire (X-Agent, to=,
