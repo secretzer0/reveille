@@ -1925,6 +1925,29 @@ def agents_seen(conn, rooms, exclude=()):
     return sorted(seen.values(), key=lambda e: e["name"])
 
 
+def unresolved_agent_names(conn):
+    """Every agent name the HISTORY carries that no agents row claims, with what
+    each holds. This is the backfill's refusal list (DES-007 6.1).
+
+    The backfill maps a name to an identity by looking the name up in `agents`.
+    A name with no row cannot be mapped, and the two ways to paper over that are
+    both forbidden: inventing an owner, or leaving the id permanently NULL --
+    which is the two-shapes-in-one-column problem the no-legacy rule exists to
+    stop. So the backfill REFUSES and prints this list instead, and a human
+    assigns the missing rows once, deliberately (operator, 2026-07-31: every
+    historical agent on this host is theirs, assigned by hand, never in code).
+
+    Humans are excluded by NAME rather than by tag: a web user is a person, and
+    a person is not a recoverable agent identity. Reads every room, because an
+    identity is global to the broker while agents_seen answers per room.
+    """
+    rooms = [r["id"] for r in conn.execute("SELECT id FROM rooms")]
+    people = {r["name"] for r in conn.execute("SELECT name FROM users")}
+    claimed = {r["name"] for r in conn.execute("SELECT name FROM agents")}
+    return [a for a in agents_seen(conn, rooms, exclude=people)
+            if a["name"] not in claimed]
+
+
 def presence(conn, rooms):
     """Everyone across the caller's rooms. Each entry carries its room: names are
     per-room now, so a flat list would be ambiguous."""
