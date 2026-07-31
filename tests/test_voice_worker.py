@@ -129,6 +129,23 @@ def test_the_worker_writes_the_file_and_announces_it(monkeypatch, tmp_path):
     assert pushed == [("r1", {"event": "audio", "id": 7})]
 
 
+def test_the_cold_load_wait_says_where_to_look(monkeypatch, tmp_path, caplog):
+    """A first utterance can block for minutes on the lazy model load, and
+    silence that long is indistinguishable from a hang. /health reports device
+    and loaded; nothing pointed at it until this line (architect, 8946)."""
+    monkeypatch.setattr(daemon, "_files_dir", tmp_path)
+    monkeypatch.setattr(daemon, "_tts_speak", lambda *a, **k: b"RIFF")
+    monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
+    daemon._tts_q.put((1, "r1", "a"))
+    daemon._tts_q.put((2, "r1", "b"))
+    daemon._tts_q.put(None)
+    with caplog.at_level("INFO"):
+        daemon._tts_worker("http://tts:8100/", "", 1)
+    said = [r.getMessage() for r in caplog.records if "health" in r.getMessage()]
+    assert len(said) == 1, f"the cold-load hint fired {len(said)}x -- once, or it is noise"
+    assert "http://tts:8100/health" in said[0]
+
+
 def test_a_service_that_is_down_leaves_a_silent_message(monkeypatch, tmp_path):
     """Gate named in section 8. A synthesizer that cannot answer must not stall
     the worker, must not write a file, and must not announce anything -- the

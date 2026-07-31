@@ -1240,11 +1240,23 @@ def _tts_worker(url, token, timeout):
     single-threaded server. One long wait, one attempt, and a message that
     arrives silent if it fails.
     """
+    first = True
     while True:
         item = _tts_q.get()
         if item is None:
             return
         mid, room, text = item
+        if first:
+            # TEN MINUTES OF SILENCE IS INDISTINGUISHABLE FROM A HANG unless
+            # something points at the thing that tells them apart. The service's
+            # /health reports {"status","device","loaded"}, so whoever is
+            # watching a first utterance take minutes can ask whether the model
+            # is still loading and on what device -- a container with no GPU
+            # reservation synthesizes on the CPU while looking perfectly healthy
+            # (architect 8946, senior-ui-ux 8944).
+            log.info("tts: the first utterance may block on the model load -- "
+                     "%s/health reports device and loaded", url.rstrip("/"))
+            first = False
         wav = _tts_speak(url, token, text, timeout)
         if not wav:
             continue                      # silent message: the feed already carried it
