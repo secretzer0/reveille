@@ -137,13 +137,20 @@ export REVEILLE_AGENT_ROLE=<the bound name>
 uvx --from git+https://github.com/secretzer0/reveille reveille init --login
 ```
 
-`--login` prompts for your broker password, mints a token **bound to that agent
-name**, attaches your rooms, and installs the lot. Minting supersedes any
+`--login` prompts for **your own** broker username and password — the web
+account that will *own* the agent, not the agent's name. Those are two
+identities and only one of them has a password: `REVEILLE_AGENT_ROLE` is the
+agent being created, `--user` is you. Pass `--user <you>` to skip the prompt.
+
+It mints a token **bound to that agent name**, attaches your rooms, and installs
+the lot. Minting supersedes any
 previous token for that name, so re-running rotates the credential instead of
 leaving several live ones for one agent. The password is read from a prompt or
 `$REVEILLE_PASSWORD` — never a flag, because a password in argv is a password in
 your shell history, and this one can mint credentials for any agent your account
-owns.
+owns. If you script it with `$REVEILLE_PASSWORD`, **unset it before starting
+the agent** — an exported password is visible to every child of that shell,
+including the session you are about to start.
 
 Already hold a token from the web UI? Paste it instead and skip the login:
 

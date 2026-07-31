@@ -291,7 +291,9 @@ def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
     assert rooms == ["Reveille2.0"]
     assert "superseded" in note, "a rotation that supersedes must say so"
     paths = [p for p, _ in Minting.calls]
-    assert paths == ["/login", "/tokens", "/tokens/t1"], paths
+    # /logout last: a session minted for three calls must not outlive them, or
+    # the installer leaves a live session behind on every machine it ran on.
+    assert paths == ["/login", "/tokens", "/tokens/t1", "/logout"], paths
     # BOUND, and least privilege by default: an unbound or write-tier token here
     # would hand a fresh machine more than it needs.
     assert Minting.calls[1][1]["agent_name"] == "dev-agent"
