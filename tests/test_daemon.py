@@ -978,8 +978,13 @@ def _install_fns():
     out = []
     for name in ("const INIT_CMD", "function installCmds(", "function installBlock("):
         start = PAGE.index(name)
+        # INIT_CMD spans two LINES since the uvx form retired (ruling 9078), so it
+        # is read to its terminating semicolon rather than to the first newline --
+        # a line-granular read here silently truncated the constant and took the
+        # next function with it, which surfaced as "installCmds is not defined"
+        # rather than as anything about the constant.
         end = PAGE[start:].index("\n}\n") + 2 if name.startswith("function") \
-            else PAGE[start:].index("\n")
+            else PAGE[start:].index(";\n") + 1
         out.append(PAGE[start:start + end])
     return "\n".join(out)
 
@@ -1080,15 +1085,24 @@ def test_the_init_invocation_is_pinned_because_it_is_a_contract():
     """The command shape belongs to senior-dev's `reveille init` (DES-008 items
     A-C). It is pinned HERE so a drift fails on this branch rather than on the
     machine where somebody is pasting it into a root shell."""
-    assert ("const INIT_CMD = 'uvx --from git+https://github.com/secretzer0/reveille "
-            "reveille init';") in PAGE, \
+    # Pinned as the exact two-line statement, backslash-n and all: the shape is
+    # the contract, not just the words in it.
+    assert ("const INIT_CMD = 'uv tool install --force --from "
+            "git+https://github.com/secretzer0/reveille reveille\\n' +") in PAGE and \
+        "'reveille init';" in PAGE, \
         "the init invocation moved -- confirm the new shape with senior-dev, then pin it"
     # The package-name form is what senior-dev corrected at 8956 and it FAILS on a
-    # real machine: there is no `reveille` on PyPI and the repo is private, so the
-    # git url is the only fetchable source. Pinned as an absence too, because the
-    # short form is what anyone tidying this line would reach for.
-    assert "--from reveille reveille init" not in PAGE, \
-        "the package-name form is back -- it cannot resolve while the repo is private"
+    # real machine: there is no `reveille` on any index, so the git url is the only
+    # fetchable source. Pinned as an absence too, because the short form is what
+    # anyone tidying this line would reach for.
+    assert "--from reveille reveille" not in PAGE, \
+        "the package-name form is back -- it cannot resolve, there is no published package"
+    # AND uvx MUST NOT COME BACK (ruling 9078). It runs the package ephemerally from
+    # a bin dir under ~/.cache/uv that wins PATH for that process, which is how a
+    # Stop hook came to point into a cache. Absence, because the one-line form is
+    # shorter and will look like an improvement to whoever meets it next.
+    assert "uvx" not in PAGE, \
+        "uvx is back in the panel -- it runs ephemerally and taught a cache-path hook"
     # All three values ride the ENVIRONMENT. A documented form that puts a
     # root-equivalent credential in argv puts it in .bash_history on every machine
     # that runs it.

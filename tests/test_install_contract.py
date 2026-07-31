@@ -72,16 +72,25 @@ def test_the_panel_only_tells_people_to_run_commands_the_package_ships():
     "executable not found" from a command this page printed.
     """
     page = daemon._ui_read("index.html")
-    m = re.search(r"const INIT_CMD = 'uvx --from (\S+) (\S+) (\S+)';", page)
+    # The two-line form (ruling 9078): install the tool durably, then configure the
+    # machine with a name that is now on PATH. The old one-line form ran the package
+    # from a throwaway environment whose bin dir won PATH, which is how a Stop hook
+    # came to point inside a cache.
+    m = re.search(r"const INIT_CMD = 'uv tool install --force --from "
+                  r"(\S+) ([A-Za-z0-9_-]+)", page)
     assert m, "INIT_CMD is gone or reshaped -- the panel's contract moved"
-    source, script, subcommand = m.groups()
+    source, pkg = m.groups()
+    assert source.startswith("git+https://"), (
+        f"the panel fetches from {source!r} -- there is no published package yet, "
+        f"so anything but a git url cannot resolve on the operator's machine")
+    # The SECOND line names a console script the package ships, invoked by name
+    # rather than by url -- which is also what a human types on a re-run.
+    m2 = re.search(r"'(\S+) (\S+)';", page[page.index("const INIT_CMD"):])
+    assert m2, "the second line of INIT_CMD is gone"
+    script, subcommand = m2.groups()
     assert script in SCRIPTS, (
         f"the panel tells people to run {script!r}, which [project.scripts] does "
         f"not ship: {sorted(SCRIPTS)}")
     assert subcommand == "init", f"the panel invokes {script} {subcommand}, not init"
-    # The source is a git url while the package is unpublished. Pinned as a pair
-    # with the script name so a move to a published name has to change both
-    # deliberately rather than one of them by tidying.
-    assert source.startswith("git+https://"), (
-        f"the panel fetches from {source!r} -- there is no published package yet, "
-        f"so anything but a git url cannot resolve on the operator's machine")
+    assert pkg in SCRIPTS or pkg == script, \
+        f"the installed package {pkg!r} does not correspond to any shipped script"
