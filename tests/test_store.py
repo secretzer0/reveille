@@ -1048,7 +1048,7 @@ def test_ratify_and_reject_write_audit_rows_that_survive_prune():
         [("reject", "bob"), ("ratify", "bob")]
     assert rows[0]["reason"] == "dup of one" and rows[1]["reason"] is None
     assert rows[0]["memory_uid"] == d2["id"]
-    store.prune_agent(c, "alice", room["id"])   # the drafter is erased...
+    _prune_by_name(c, admin["id"], "alice", room["id"])   # the drafter is erased...
     assert len(store.memory_audit_rows(c)) == 2  # ...the decision record is not
 
 
@@ -1372,6 +1372,19 @@ def test_retract_only_while_unseen():
 
 # ---- prune / purge / retention -----------------------------------------------
 
+def _prune_by_name(c, owner_id, name, room_id):
+    """Prune takes an agents.id now (DES-007 4.1). These tests predate
+    identities and speak raw names, so: ensure the name has its one identity,
+    then prune that -- the same resolution the HTTP route performs."""
+    row = c.execute("SELECT id FROM agents WHERE name=?", (name,)).fetchone()
+    aid = row["id"] if row else store.mint_agent(c, owner_id, name)["id"]
+    # the raw-SQL history these fixtures build never stamped sender_agent_id;
+    # attribute it the way the backfill would, so the prune can see it
+    c.execute("UPDATE messages SET sender_agent_id=? WHERE sender=? "
+              "AND sender_agent_id IS NULL", (aid, name))
+    return store.prune_agent(c, aid, room_id)
+
+
 def test_prune_agent_reparents_survivors_to_thread_root():
     c, admin, room, tok = fixture()
     for n in ("alice", "bob", "mallory"):
@@ -1380,7 +1393,7 @@ def test_prune_agent_reparents_survivors_to_thread_root():
     mid = store.send(c, "mallory", store.BROADCAST, "middle", reply_to=root["id"],
                      room=room["id"])
     leaf = store.send(c, "bob", store.BROADCAST, "leaf", reply_to=mid["id"], room=room["id"])
-    out = store.prune_agent(c, "mallory", room["id"])
+    out = _prune_by_name(c, admin["id"], "mallory", room["id"])
     assert out["messages"] == 1
     r = c.execute("SELECT parent_id, thread_id FROM messages WHERE id=?", (leaf["id"],)).fetchone()
     assert r["parent_id"] == root["id"]          # reparented, not orphaned
@@ -1402,7 +1415,7 @@ def test_prune_agent_when_the_root_itself_dies():
                      room=room["id"])
     grand = store.send(c, "bob", store.BROADCAST, "grandkid", reply_to=kid["id"],
                        room=room["id"])
-    store.prune_agent(c, "mallory", room["id"])
+    _prune_by_name(c, admin["id"], "mallory", room["id"])
     r = c.execute("SELECT parent_id, thread_id FROM messages WHERE id=?", (kid["id"],)).fetchone()
     assert r["parent_id"] is None and r["thread_id"] == kid["id"]   # became a root
     g = c.execute("SELECT thread_id FROM messages WHERE id=?", (grand["id"],)).fetchone()
@@ -1424,7 +1437,7 @@ def test_rethread_walks_parent_id_not_links():
     merge = store.send(c, "bob", store.BROADCAST, "merge",
                        reply_to=[kid["id"], other["id"]], room=room["id"])
     before = c.execute("SELECT thread_id FROM messages WHERE id=?", (other["id"],)).fetchone()[0]
-    store.prune_agent(c, "mallory", room["id"])
+    _prune_by_name(c, admin["id"], "mallory", room["id"])
     after = c.execute("SELECT thread_id FROM messages WHERE id=?", (other["id"],)).fetchone()[0]
     assert before == after == other["id"]        # untouched: reached only by a link edge
     assert c.execute("SELECT thread_id FROM messages WHERE id=?",
@@ -1436,7 +1449,7 @@ def test_prune_agent_keeps_broadcasts_he_only_received():
     for n in ("alice", "mallory"):
         store.join(c, n, f"T{n}", room["id"], tok["id"])
     m = store.send(c, "alice", store.BROADCAST, "all hands", room=room["id"])
-    store.prune_agent(c, "mallory", room["id"])
+    _prune_by_name(c, admin["id"], "mallory", room["id"])
     assert [x["id"] for x in store.tail(c, rooms=[room["id"]])] == [m["id"]]
 
 
@@ -1501,7 +1514,7 @@ def _src_of(c, uid):
 def test_prune_leaves_the_citation_pointing_at_the_deleted_message():
     c, admin, room, tok = fixture()
     uid, mid = _cited_fact(c, admin, room, tok)
-    store.prune_agent(c, "mallory", room["id"])
+    _prune_by_name(c, admin["id"], "mallory", room["id"])
     assert _src_of(c, uid) == mid, "prune nulled the citation instead of keeping it"
 
 
@@ -1525,7 +1538,7 @@ def test_a_deleted_source_renders_as_deleted_not_as_absent():
     the defect."""
     c, admin, room, tok = fixture()
     uid, mid = _cited_fact(c, admin, room, tok)
-    store.prune_agent(c, "mallory", room["id"])
+    _prune_by_name(c, admin["id"], "mallory", room["id"])
     item = store.memory_detail(c, uid)
     assert item["source_message"]["deleted"] is True
     assert item["source_message"]["id"] == mid
@@ -1553,7 +1566,7 @@ def test_the_footprint_names_what_he_wrote_AND_what_cites_him():
     assert [x["slug"] for x in f["authored"]] == ["his-rule"]
     assert f["counts"] == {"authored": 1, "citing": 1}
     # The receipt says the same thing after the fact, measured before the delete.
-    out = store.prune_agent(c, "mallory", room["id"])
+    out = _prune_by_name(c, admin["id"], "mallory", room["id"])
     assert out["hive"]["counts"] == {"authored": 1, "citing": 1}
     assert store.lessons(c, rooms=[room["id"]])[0]["slug"] == "his-rule"   # KEPT, not retracted
 
@@ -1569,7 +1582,7 @@ def test_prune_removes_his_orphaned_upload_and_keeps_a_reattached_one():
                attachments=[{"url": "/files/1-his.png", "name": "his.png", "bytes": 1}])
     store.send(c, "alice", store.BROADCAST, "hers, reusing his upload", room=room["id"],
                attachments=[{"url": "/files/2-shared.png", "name": "s.png", "bytes": 1}])
-    out = store.prune_agent(c, "mallory", room["id"])
+    out = _prune_by_name(c, admin["id"], "mallory", room["id"])
     assert out["files"] == ["1-his.png"]                  # named, so the route can unlink it
     left = {r["stored"] for r in c.execute("SELECT stored FROM files")}
     assert left == {"2-shared.png"}, "a survivor's attachment lost its file"
@@ -2458,3 +2471,74 @@ def test_every_arm_from_v9_reaches_the_rebuild(tmp_path):
             f"a chain starting at v{start} did not reach the current version"
         assert "ON DELETE SET NULL" not in _mem_sql(c), \
             f"a chain starting at v{start} reached 17 without the rebuild"
+
+
+def _two_identities_one_label(c, admin, room, tok, name="mallory"):
+    """One LABEL, two identities -- the shape a decline produces (DES-007 5.1).
+    The only fixture in which prune-by-name is observably wrong, which is why it
+    did not exist before: with one identity per name the two keys agree."""
+    first = store.mint_agent(c, admin["id"], name)
+    store.join(c, name, f"T{name}", room["id"], tok["id"])
+    gone = []
+    for _ in range(2):
+        m = store.send(c, name, store.BROADCAST, "first instance", room=room["id"])
+        c.execute("UPDATE messages SET sender_agent_id=? WHERE id=?",
+                  (first["id"], m["id"]))     # raw fixture: stamp what send-by-name cannot
+        gone.append(m["id"])
+    store.retire_agent(c, first["id"])
+    second = store.mint_agent(c, admin["id"], name)
+    # the successor takes the seat: re-join stamps the membership with the live
+    # identity (a NULL-id seat is the pre-identity shape prune treats as the
+    # pruned one's)
+    c.execute("UPDATE members SET agent_id=? WHERE room_id=? AND name=?",
+              (second["id"], room["id"], name))
+    kept = []
+    for _ in range(2):
+        m = store.send(c, name, store.BROADCAST, "second instance", room=room["id"])
+        c.execute("UPDATE messages SET sender_agent_id=? WHERE id=?",
+                  (second["id"], m["id"]))
+        kept.append(m["id"])
+    assert first["id"] != second["id"]
+    return first, second, gone, kept
+
+
+def test_prune_agent_erases_one_identity_not_the_label():
+    """DES-007 4.1, the parked red gate from 91e1645, landed with its fix: purge
+    used to delete by NAME, so the day a label carried two histories it took the
+    wrong one with it -- the operator's own purge control, silently destructive
+    under the very feature that motivated the identity work. Red on the
+    name-keyed version with the SURVIVOR count at 0."""
+    c, admin, room, tok = fixture()
+    first, second, gone, kept = _two_identities_one_label(c, admin, room, tok)
+    out = store.prune_agent(c, first["id"], room["id"])
+    live = {x["id"] for x in store.tail(c, rooms=[room["id"]])}
+    assert set(kept) <= live, "the surviving identity's messages must not be collateral"
+    assert not (live & set(gone)), "the pruned identity's messages must be gone"
+    assert out["messages"] == len(gone)
+    # the survivor keeps its seat: the label is still joined
+    assert c.execute("SELECT count(*) FROM members WHERE room_id=? AND name='mallory'",
+                     (room["id"],)).fetchone()[0] == 1
+
+
+def test_prune_by_bare_name_refuses():
+    """A name cannot say WHICH history it means. The store takes an id only; the
+    route resolves an unambiguous name to one, and refuses two."""
+    c, admin, room, tok = fixture()
+    try:
+        store.prune_agent(c, "mallory", room["id"])
+        raise AssertionError("a bare name pruned something")
+    except store.BusError as e:
+        assert "agents.id" in str(e)
+
+
+def test_prune_with_two_identities_leaves_received_mail_and_counts_it():
+    """Received direct mail is name-keyed -- recipient carries no identity -- so
+    with two identities under the name it cannot be split. Unambiguous-or-leave,
+    the same rule as every resolver: left put, counted in the return."""
+    c, admin, room, tok = fixture()
+    first, second, gone, kept = _two_identities_one_label(c, admin, room, tok)
+    store.join(c, "sender2", "TS", room["id"], tok["id"])
+    dm = store.send(c, "sender2", "mallory", "direct", room=room["id"])["id"]
+    out = store.prune_agent(c, first["id"], room["id"])
+    assert out["left_received"] == 1
+    assert c.execute("SELECT count(*) FROM messages WHERE id=?", (dm,)).fetchone()[0] == 1
