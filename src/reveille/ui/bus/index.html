@@ -2743,7 +2743,12 @@ async function openRooms(){
 // CONTRACT between their entry point and this panel, so it lives in one constant
 // with a gate on it -- a drift fails on my branch rather than on the machine
 // where somebody is pasting it.
-const INIT_CMD = 'uvx --from reveille reveille init';
+// THE GIT URL, NOT A PACKAGE NAME (senior-dev, msg 8956). There is no `reveille`
+// on PyPI and the repo is private, so the git URL is the only fetchable source --
+// `--from reveille` would fail on the operator's machine rather than on either of
+// our branches, which is the whole reason this constant is pinned by a gate.
+// When the repo flips public this URL stays valid and nothing here changes.
+const INIT_CMD = 'uvx --from git+https://github.com/secretzer0/reveille reveille init';
 function installCmds(t, base){
  // The ONLY place this command is built. One site, so the gate can enumerate it
  // and so a second copy cannot drift out of agreement with the first.
@@ -2763,7 +2768,16 @@ function installBlock(t){
   'machine, and that is a grant a shell makes, not a browser. The token above is '+
   'in the third line -- it is shown once, here, and nowhere else, so copy it '+
   'before you leave this screen.</div>'+
-  '<pre class="tokOut" id="installCmd">'+esc(installCmds(t, location.origin))+'</pre>';
+  '<pre class="tokOut" id="installCmd">'+esc(installCmds(t, location.origin))+'</pre>'+
+  // TWO FAILURES THAT LOOK IDENTICAL FROM A TERMINAL, named here because the
+  // reader is holding the only screen that could tell them apart: uvx cannot
+  // find the source, and git cannot read the private repo, both surface as a
+  // fetch failure. Named before it happens rather than diagnosed after.
+  '<div class="pDim">The machine you paste this on needs git access to the '+
+  'repository -- it is private, so uvx fetches it over git rather than from an '+
+  'index. If that line fails, check git before uvx: "cannot find reveille" and '+
+  '"cannot read that repo" print the same way. The agent runs in whatever '+
+  'directory you are in, so cd there first.</div>';
 }
 function wireInstallCopy(t){
  const b=$('copyInstall');
