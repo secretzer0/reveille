@@ -193,6 +193,17 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.75 THE CREDENTIAL LIVES IN ENV, NOT IN CLAUDE CONFIG. The installer baked
+the literal token into the MCP registration, and "already registered, left
+alone" then kept it through a rotation -- the re-run superseded the token the
+untouched registration still carried, so the agent booted and 401ed on every
+call while looking fully installed. Headers now reference ${REVEILLE_TOKEN} and
+${REVEILLE_AGENT_ROLE}, the form join-here and the container entrypoint always
+used, so the credential lives in exactly one place: ~/.reveille/agent.env,
+which reveille-agent exports into the session. Rotation is a one-file rewrite.
+Registration is remove-then-add every run, so older literal-token installs
+converge on their next init.
+
 0.2.74 THE INSTALLER OUTLIVES ITS OWN RUN, ROOMS ARE A CHOICE WITH OWNERS
 SHOWN, AND THE MINT PANEL IS IN. The operator's first successful install ended
 in `reveille-agent: command not found`: a uvx run is ephemeral, its console
