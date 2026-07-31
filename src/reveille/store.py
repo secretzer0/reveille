@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -965,6 +965,33 @@ def _upgrade_v17(conn, db_path):
         conn.execute("PRAGMA user_version=18")
 
 
+
+def _upgrade_v18(conn, db_path):
+    """v18 -> v19: rescope the state notes written into the GAP.
+
+    v17->v18 moved state notes to agent:<agent_id> while memory_add still wrote
+    agent:<token_id>. So between that deploy and this fix, every state note a
+    live agent wrote landed at the OLD scope -- and the moment the readers move
+    to the identity (this same commit), those notes become invisible in their
+    turn. Fixing the readers without this step fixes the incident by recreating
+    it one hour younger, which is the half that is easy to miss.
+
+    Same UPDATE as v17's, deliberately: one statement, run twice, rather than a
+    second spelling of the same move.
+    """
+    with tx(conn):
+        conn.execute("""
+            UPDATE memories SET scope = 'agent:' || (
+                SELECT MIN(a.id) FROM agents a
+                  JOIN tokens t ON t.agent_name = a.name
+                 WHERE 'agent:' || t.id = memories.scope)
+             WHERE scope LIKE 'agent:%'
+               AND EXISTS (SELECT 1 FROM agents a
+                             JOIN tokens t ON t.agent_name = a.name
+                            WHERE 'agent:' || t.id = memories.scope)""")
+        conn.execute("PRAGMA user_version=19")
+
+
 def _upgrade_v0(conn, db_path):
     """v0 (room = the shared secret, stored as a string on every row) -> v2 (rooms are
     uuid rows owned by a user). Ownerless rooms are claimed by the first admin at
@@ -1045,7 +1072,7 @@ def _upgrade_v0(conn, db_path):
 # nothing able to say so. v1 has no entry (it never shipped) and v6 is reachable
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
-             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)}
+             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2730,7 +2757,7 @@ def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
             raise AccessError(
                 "state memories need a BOUND token: under a shared token every agent "
                 "shares one state bucket, and a wrong brief is worse than none")
-        scope = f"agent:{token_id}"
+        scope = agent_scope(conn, token_id)
         status = "live"                       # own state is always yours to write
         expires_ns = time.time_ns() + STATE_TTL_NS
     else:
@@ -2812,6 +2839,32 @@ def _chain_info(conn, row):
     return depth, fork
 
 
+def agent_scope(conn, token_id):
+    """The scope a state note lives at, for this token: agent:<agent_id> when the
+    token is bound to a name with an identity, agent:<token_id> otherwise.
+
+    ONE FUNCTION BECAUSE THE ALTERNATIVE ALREADY COST US THE DATA. The v17->v18
+    backfill moved every state note to agent:<agent_id> (DES-007 4.2 -- a note
+    scoped to a TOKEN is orphaned the moment an agent is recreated, since
+    recreating mints a new token). The writer and both readers still computed
+    agent:<token_id>, so the rows sat on disk at a scope nothing asked for: the
+    operator's own agents could not see their state, new writes landed at the old
+    scope, and supersede reported "cannot find the row" because that was literally
+    true. A data move without its readers is a dual-name check with the two names
+    in different files.
+
+    The fallback is not legacy tolerance, it is the honest answer for an UNBOUND
+    token, which has no identity to key on -- and state writes already refuse an
+    unbound token, so the fallback is reached only by readers, where it returns
+    the empty bucket such a caller has always had.
+    """
+    row = conn.execute(
+        "SELECT a.id FROM tokens t JOIN agents a ON a.name = t.agent_name "
+        "WHERE t.id = ? ORDER BY a.retired_ns IS NULL DESC, a.created_ns LIMIT 1",
+        (token_id,)).fetchone()
+    return f"agent:{row['id']}" if row else f"agent:{token_id}"
+
+
 def recall(conn, *, rooms, token_id, caller="", tier="state", is_admin=False,
            owned_rooms=(), query="", kind="", scope="", entity="", author="",
            since_ns=None, until_ns=None, status="live", limit=10, explain=False):
@@ -2820,7 +2873,7 @@ def recall(conn, *, rooms, token_id, caller="", tier="state", is_admin=False,
     other agents' state is never returned, at any status. Drafts are visible to
     their author, to ratify-eligible owners (owned_rooms), and to admins."""
     where = ["(m.scope='global' OR m.scope IN (%s) OR m.scope=?)" % _ph(list(rooms))]
-    args = list(rooms) + [f"agent:{token_id}"]
+    args = list(rooms) + [agent_scope(conn, token_id)]
     where.append("(m.expires_ns IS NULL OR m.expires_ns > ?)")
     args.append(time.time_ns())
     if status in ("draft", "rejected") and not is_admin:
@@ -3193,7 +3246,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
     srows = conn.execute(
         "SELECT * FROM memories WHERE kind='state' AND status='live' AND scope=? "
         "AND (expires_ns IS NULL OR expires_ns > ?) ORDER BY created_ns DESC",
-        (f"agent:{token_id}", time.time_ns())).fetchall()
+        (agent_scope(conn, token_id), time.time_ns())).fetchall()
     if srows:
         section("state", srows, lambda r, _: f"- {r['fact']}", 0.15)
     # 6. presence digest
