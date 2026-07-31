@@ -720,3 +720,83 @@ def test_a_humans_presence_is_their_open_tab():
     finally:
         daemon._feed.clear()
         daemon._feed.update(saved)
+
+
+# ---- the erase control: reachable, and honest about what it keeps ------------
+# pruneAgent() shipped as a fully-written confirm dialog that NOTHING called --
+# store function, HTTP route, typed-name confirm, all present, no control. An
+# unreachable capability is indistinguishable from one that was never built,
+# which is how the operator came to ask for a feature the code already had.
+
+def test_the_erase_control_is_reachable_from_the_page():
+    # 1. A real button, so the keyboard reaches it: Tab into the Rooms panel,
+    #    Enter on "members" to expand the room, Tab to the agent's "erase".
+    assert 'data-prune="' in PAGE, "no control carries data-prune"
+    assert re.search(r'<button class="danger" data-prune="', PAGE), \
+        "the erase control must be a real button -- a clickable span is mouse-only"
+    # 2. Something must WIRE it. The defect was a definition with no caller, so
+    #    count call sites rather than asserting the function exists: a definition
+    #    is what the broken version also had.
+    calls = len(re.findall(r"(?<!function )pruneAgent\(", PAGE))   # definition excluded
+    assert calls >= 1, \
+        f"pruneAgent is called {calls}x -- a definition with no caller is the defect"
+    # Over the STATEMENT, never the line: this source wraps, and a line-granular
+    # read passes on broken code simply by not seeing the half that matters.
+    stmt = PAGE[PAGE.index("[data-prune]"):]
+    stmt = stmt[:stmt.index(";") + 1]
+    assert "pruneAgent(" in stmt, f"the [data-prune] handler does not call it: {stmt!r}"
+    # 3. The dialog cannot open without the footprint: a confirm that silently
+    #    drops the cost when the read fails is the dialog this replaced.
+    start = PAGE.index("async function pruneAgent(")
+    fn = PAGE[start:start + PAGE[start:].index("\n}\n")]
+    assert fn.index("return;") < fn.index("confirming={kind:'prune'"), \
+        "pruneAgent must bail before opening the dialog when the footprint read fails"
+
+
+def test_the_erase_dialog_states_the_hive_it_will_keep():
+    """Extracted from the served page and RUN, not re-implemented: a copy drifts,
+    and this is the method the behind-predicate gate already uses.
+
+    The property: a dialog that lists only what it deletes implies the rest went
+    too, and the rest -- the agent's own lessons, and other agents' facts
+    distilled from its messages -- is the half that keeps being served at boot.
+    """
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not on PATH -- served-JS gates need it")
+    lines = PAGE.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("function pruneAsk("))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i] == "}")
+    src = "\n".join(lines[start:end + 1])
+    prog = """
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',
+  '"':'&quot;',"'":'&#39;'}[c]));
+function askRow(title,msg,body){return title+'\\n'+msg+'\\n'+body;}
+""" + src + """
+const out = pruneAsk({id:'devops', foot:{counts:{authored:2,citing:1},
+  authored:[{kind:'lesson',slug:'his-rule',fact:'obey this'},
+            {kind:'decision',slug:null,fact:'<img src=x onerror=alert(1)>'}],
+  citing:[{kind:'decision',slug:null,fact:'the fact he taught'}]}}, 'Reveille');
+const need = ['KEPT: 2 memories it wrote', 'KEPT: 1 facts distilled',
+              'his-rule', 'obey this', 'the fact he taught',
+              'Type the agent name to confirm'];
+for (const s of need) if (!out.includes(s)) throw new Error('dialog omits: ' + s);
+// A hostile fact is agent-authored text landing in the operator's privileged
+// session: escaped at render, exactly like every other memory string.
+if (out.includes('<img src=x')) throw new Error('fact interpolated raw into the dialog');
+if (!out.includes('&lt;img src=x')) throw new Error('fact not escaped');
+// The empty case must still say the two headings, or a zero footprint reads as
+// "nothing was kept" only because the section vanished.
+const none = pruneAsk({id:'nobody', foot:{counts:{authored:0,citing:0},
+  authored:[], citing:[]}}, 'Reveille');
+for (const s of ['KEPT: 0 memories it wrote', 'nothing it authored is live here',
+                 'no live fact cites its messages'])
+  if (!none.includes(s)) throw new Error('empty footprint omits: ' + s);
+console.log('ok');
+"""
+    res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert "ok" in res.stdout

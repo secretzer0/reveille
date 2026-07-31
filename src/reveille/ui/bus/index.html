@@ -470,6 +470,12 @@
  .quote{border-left:2px solid var(--line);margin:.15rem 0 .5rem;padding:.25rem .6rem;
   color:var(--dim);font-size:.8rem;white-space:pre-wrap;word-break:break-word}
  .memMeta{font-size:.72rem;color:var(--faint)}
+ .memMeta.err{color:#e8555a}
+ /* The kept-hive list inside the erase confirm. Bounded height on purpose: an agent
+    with forty lessons must not push the confirm button off the panel. */
+ .pList{margin:.1rem 0 .5rem 1.1rem;padding:0;font-size:.72rem;color:var(--dim);
+  max-height:9rem;overflow-y:auto}
+ .pList li{margin:.15rem 0}
  .qcount{background:var(--gold);color:#000;border-radius:.6rem;padding:0 .45rem;
   font-size:.68rem;font-weight:700;margin-left:.4rem}
  #panX{margin-left:auto;background:none;border:none;color:var(--faint);cursor:pointer;
@@ -2500,6 +2506,26 @@ async function openRooms(){
     mine.push('<div class="pRow"><input id="invName" placeholder="username (exact)" '+
      'autocomplete="off"><button data-inv="'+r.id+'">invite</button></div>');
    }catch(e){toast(e.message);}
+   // AGENTS, under the room that owns them, because erasing one is a room act and
+   // the rail is a filter. The rail rows select; a destructive control there would
+   // sit one keystroke from a selection people make constantly.
+   try{const pr=await api('/presence'+qsFor(r.id));
+    mine.push('<div class="pSec">AGENTS IN THIS ROOM</div>');
+    mine.push('<div class="pDim">Erase deletes an agent and every message to or from '+
+     'it HERE. Replies from others are reparented, never deleted. What it wrote to the '+
+     'hive is KEPT -- the dialog lists it, and retracting a fact is a separate act.</div>');
+    mine.push((pr.agents||[]).map(a=>{
+     if(confirming&&confirming.kind==='prune'&&confirming.id===a.name&&
+        confirming.room===r.id)return pruneAsk(confirming,r.name);
+     return '<div class="pRow"><b>'+esc(a.name)+'</b>'+
+      '<span class="pDim">'+(a.connected?'connected':a.live?'live':'stale')+'</span>'+
+      '<button class="danger" data-prune="'+esc(a.name)+'" data-proom="'+r.id+
+      '">erase</button></div>';}).join('')||
+     '<div class="pDim">no agents have joined this room</div>');
+    // Presence lists JOINED members, so a name that sent messages and then left is
+    // not offered here. That is a listing gap, not a scope one -- the endpoint prunes
+    // any name; only this control is narrower than it.
+   }catch(e){toast(e.message);}
   }
  }
  const mineHtml=mine.join('')||'<div class="pDim">no rooms yet</div>';
@@ -2558,6 +2584,20 @@ async function openRooms(){
  for(const b of document.querySelectorAll('[data-pub]'))b.onclick=async()=>{
   try{await api('/rooms/'+b.dataset.pub,{method:'PATCH',
    body:JSON.stringify({public:b.dataset.to==='1'})});openRooms();}catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-prune]'))b.onclick=()=>
+  pruneAgent(b.dataset.prune,b.dataset.proom);
+ if(confirming&&confirming.kind==='prune')wireAsk(async()=>{
+  if($('cfIn').value!==confirming.id){toast('name does not match');return;}
+  const nm=confirming.id,rid=confirming.room;confirming=null;
+  try{const o=await api('/agents/'+encodeURIComponent(nm)+qsFor(rid),{method:'DELETE'});
+   // The receipt says what was KEPT as well as what went, because the thing this
+   // dialog most has to not imply is that the hive went with the messages.
+   const kept=o.hive.counts.authored+o.hive.counts.citing;
+   toast('erased '+o.messages+' messages, reparented '+o.reparented+', removed '+
+    o.files.length+' file(s) — '+kept+' hive row(s) KEPT (snapshot saved)');
+   if(rid===room){clearFeed();lastId=0;loadBacklog(true);}
+   loadPresence();}catch(e){toast(e.message);}
+  openRooms();},openRooms);
  // Typed-name confirm: purge is irreversible and the snapshot is the only undo.
  for(const b of document.querySelectorAll('[data-purge]'))b.onclick=()=>{
   confirming={kind:'purge',id:b.dataset.purge,name:b.dataset.name};openRooms();};
@@ -3008,20 +3048,38 @@ async function refreshLoginSection(){
  }
 }
 
-function pruneAgent(name){
- // Typed-name confirm, in-panel: erasing an agent is irreversible bar the snapshot.
- confirming={kind:'prune',id:name,name:name};
- panel('rooms',askRow('Erase '+esc(name)+'?',
-  'Deletes the agent and every message to or from it in this room. Replies from others '+
-  'are reparented to their thread root, not deleted. A snapshot is saved first. Type the '+
-  'agent name to confirm.','<input id="cfIn" placeholder="'+esc(name)+'" autocomplete="off">'));
- wireAsk(async()=>{
-  if($('cfIn').value!==name){toast('name does not match');return;}
-  confirming=null;closePanel();
-  try{const o=await api('/agents/'+encodeURIComponent(name)+qs(),{method:'DELETE'});
-   toast('pruned '+o.messages+' messages, reparented '+o.reparented+' (snapshot saved)');
-   clearFeed();lastId=0;loadBacklog(true);loadPresence();}catch(e){toast(e.message);}},
-  ()=>{confirming=null;closePanel();});
+// The cost, stated BEFORE it is paid. A dialog that says only what it deletes
+// implies the rest went too, and the rest is the half that keeps being obeyed:
+// a lesson this agent wrote is read by every agent in the room at every boot.
+// Retraction is a separate, per-fact act -- this names the facts so it can be made.
+function pruneAsk(c,roomName){
+ const f=c.foot||{counts:{authored:0,citing:0}};
+ const list=(rows,none)=>(rows&&rows.length)
+  ? '<ul class="pList">'+rows.map(r=>'<li>'+esc(r.kind)+
+     (r.slug?' <b>'+esc(r.slug)+'</b>':'')+' &mdash; '+esc((r.fact||'').slice(0,120))+
+     '</li>').join('')+'</ul>'
+  : '<div class="pDim">'+none+'</div>';
+ return askRow('Erase '+esc(c.id)+' from '+esc(roomName)+'?',
+  'Deletes every message to or from it in this room, and the files it uploaded that '+
+  'nothing else references. Replies from others are reparented to their thread root, '+
+  'not deleted. A snapshot is saved first, and that is the only undo.'+
+  '<div class="pSec">KEPT: '+f.counts.authored+' memories it wrote</div>'+
+  list(f.authored,'nothing it authored is live here')+
+  '<div class="pSec">KEPT: '+f.counts.citing+' facts distilled from its messages</div>'+
+  list(f.citing,'no live fact cites its messages')+
+  '<div class="pDim">These stay live and keep being served at boot. Retract them by '+
+  'name in the Memory tab if any of it is wrong.</div>'+
+  '<div class="pAsk">Type the agent name to confirm.</div>',
+  '<input id="cfIn" placeholder="'+esc(c.id)+'" autocomplete="off">');
+}
+async function pruneAgent(name,rid){
+ // Read the footprint FIRST and refuse to open the dialog without it: a confirm that
+ // silently drops the cost when the read fails is the dialog we were trying not to build.
+ let foot;
+ try{foot=await api('/agents/'+encodeURIComponent(name)+'/footprint'+qsFor(rid));}
+ catch(e){toast('cannot read what this would leave behind: '+e.message);return;}
+ confirming={kind:'prune',id:name,room:rid,foot:foot};
+ openRooms();
 }
 
 fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+v;});
