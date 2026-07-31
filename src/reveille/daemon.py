@@ -190,6 +190,18 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.51 THE TWO READINGS, SAID IN ONE SENTENCE. The activity icon reported what
+the bus SAW from an agent; whether anything is LISTENING was a separate dot, and
+it is reachability -- not activity -- that promises the next message lands. The
+waiting and unsure hovers now carry both, so nobody has to combine two symbols
+in their head to learn which kind of quiet they are looking at: rung with mail
+unread AND the wake socket attached means mail will reach it; rung with the
+socket gone means mail is queueing. The same two facts the deafness verdict
+already separates as no-waiter versus not-draining, said where someone is
+actually looking. Nothing new is computed. Recovered from a commit that was
+pushed and never merged while its two siblings landed, so the branch read as
+shipped -- found by branch hygiene, not by anyone missing the feature.
+
 0.2.50 THE RAIL SAYS WHAT EXISTS, THE TAB SAYS WHAT YOU ACT ON. Two of the
 manage-agents defects were CSS beating markup, the class no diff review
 catches: #fmode set display, so [hidden] -- the lowest-specificity rule there
