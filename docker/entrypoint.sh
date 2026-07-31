@@ -362,16 +362,21 @@ mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
 ( while :; do
     # CLIENT OPTIONS, NAMED. Every one of these was a default nobody chose.
     #
-    # MEASURED, not assumed -- the reported diagnosis was wrong on both halves.
-    # ttyd 1.7.7's bundled client does NOT default to the DOM renderer and does
-    # NOT default to a bare generic monospace. Read out of the served bundle:
-    #   rendererType: "webgl"
-    #   fontFamily:   "Consolas,Liberation Mono,Menlo,Courier,monospace"
+    # MEASURED TWICE, and the second measurement overturned the first fix.
+    # ttyd 1.7.7's bundled client defaults to rendererType "webgl" and to
+    # "Consolas,Liberation Mono,Menlo,Courier,monospace" -- so neither the DOM
+    # renderer nor a bare generic font was ever in play.
     #
-    # So webgl is what is drawing today, and webgl is the renderer that produces
-    # atlas and glyph artifacts on a blocklisted driver or a lost GPU context --
-    # which is the symptom. canvas is named explicitly because "the default" has
-    # now been wrong twice in one file.
+    # canvas did not fix it. The characters coming out as underscores were
+    # captured from the live pane and are ORDINARY: em dash (U+2014) and right
+    # arrow (U+2192). Not box-drawing, not exotic. Every plausible system
+    # monospace has them, so the font stack was never the lever it was sold as.
+    #
+    # WHAT IS: canvas and webgl both rasterise from a glyph atlas measured in
+    # the PRIMARY font, and their fallback for a glyph that font lacks is poor.
+    # The DOM renderer emits real text nodes, so the BROWSER does per-glyph
+    # fallback the way it does everywhere else on the page. Slower, and correct.
+    # A terminal that renders fast and wrong is not a faster terminal.
     #
     # The font is resolved in the BROWSER, not here: this is a CSS stack against
     # the fonts on the viewer's machine, and no package installed in this image
@@ -388,7 +393,7 @@ mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
     ttyd -W -a -p "${REVEILLE_TTYD_PORT:-7681}" \
       -t 'fontFamily=ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace' \
       -t fontSize=13 \
-      -t rendererType=canvas \
+      -t rendererType=dom \
       -t 'theme={"background":"#0b0d10","foreground":"#c8d0d8","cursor":"#e2a63d","selectionBackground":"#2a3340"}' \
       -t scrollback=10000 \
       -t disableLeaveAlert=true \

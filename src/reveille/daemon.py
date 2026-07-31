@@ -190,6 +190,21 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.53 THE RENDERER WAS THE WRONG LEVER, AND THE WHEEL WAS EDITING THE PROMPT.
+Agent image 0.2.13. canvas did not fix the broken glyphs, so the characters were
+captured off the live pane instead of theorised about: em dash (U+2014) and
+right arrow (U+2192), ordinary in every plausible monospace, which retires the
+font-substitution story entirely. canvas and webgl both rasterise from a glyph
+atlas measured in the PRIMARY font and fall back badly for anything it lacks;
+the DOM renderer emits real text nodes, so the browser does per-glyph fallback
+as it does everywhere else. Slower and correct -- a terminal that renders fast
+and wrong is not a faster terminal. Second, tmux gains `mouse on`: with it off
+xterm.js translates the wheel into ARROW KEYS for a full-screen app, and
+arrow-up in the agent's TUI walks prompt history, so scrolling up did not move
+the view, it rewrote what was typed. Costs accepted and written down: mouse
+selection now enters tmux copy-mode rather than the browser's own (shift-drag
+escapes), and a click moves the cursor where panes support it.
+
 0.2.52 AN EMPTY ANSWER IS NOT AN ANSWER, AND THE RAIL DRAWS ITS OWN EDGES. The
 roster groups agents by room, reading GET /tokens first and falling back to
 /agents-seen per room. A bound token with NO rooms answered with an empty list
