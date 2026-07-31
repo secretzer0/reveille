@@ -518,7 +518,7 @@ def test_the_manage_rail_hides_and_reads_what_it_claims():
     #    credentials block down there is something competing for the space the
     #    operator asked to give back to tmux -- and the credentials are the
     #    USER's, so they live in the Account tab now.
-    well = PAGE[PAGE.index('<div id="agentsWell">'):PAGE.index('<div id="toasts">')]
+    well = PAGE[PAGE.index('<div id="agentsWell">'):PAGE.index('<div id="toasts"')]
     for gone in ('id="agList"', 'class="addAgent"', 'id="agCredClaude"'):
         assert gone not in well, f"{gone} must not be in the agents well"
     assert '<div class="pSec">CREDENTIALS</div>' in \
@@ -527,6 +527,71 @@ def test_the_manage_rail_hides_and_reads_what_it_claims():
     # 5. The claude token field is dead: the browser login replaced it, and a
     #    second way to set the same credential is a second thing to keep true.
     assert "claude token (setup-token or API key)" not in PAGE
+
+
+def test_the_keyboard_can_reach_the_terminal_tabs():
+    """U8 follow-up: the tab strip was operable by mouse only.
+
+    Each tab was a <span> carrying data-tab and a click handler, while the
+    controls INSIDE it -- stop, edit, destroy, close -- were real buttons. So
+    a keyboard user could destroy an agent's container from its tab and could
+    not select that tab, which is the reachability ordered backwards. The
+    comment above tabActions() claimed Tab reached them in reading order; that
+    was true of the actions and false of the tab.
+
+    Every assertion below is a PROPERTY of the served bytes, because the
+    rendered DOM is not something a gate can reach (ui_copy contract, 8706).
+    """
+    strip = PAGE[PAGE.index("function drawTabs()"):PAGE.index("function drawNote()")]
+    # 1. The thing that selects a tab is a real button. A span with a click
+    #    handler renders identically in a screenshot and is unreachable.
+    assert '<button type="button" class="tlab" data-tab="' in strip, \
+        "the tab label must be a button -- a clickable span is mouse-only"
+    #    ...and the old shape must be gone, not merely joined: a span still
+    #    carrying data-tab would take the click first and nothing would look
+    #    wrong.
+    assert '<span class="tab\'+(t.gid===agTabOn?\' on\':\'\')+(t.err?\' err\':\'\')+\n   \'" data-tab="\'' \
+        not in strip, "the tab container must not also carry data-tab"
+    # 2. Which tab is current is SPOKEN, not only tinted. Same for the roster
+    #    row: the left bar and the tint are the eye's channel.
+    assert 'aria-current="true"' in strip, \
+        "the open tab must say it is current, not only look it"
+    roster = PAGE[PAGE.index("function drawRoster()"):]
+    assert 'aria-current="true"' in roster[:roster.index("const groups=new Map()")], \
+        "the selected roster row must say it is selected"
+    # 3. Selecting a tab replaces the strip, which destroys the focused
+    #    element. Without the restore, Enter on a tab drops focus to the body
+    #    and the next Tab starts from the top of the page.
+    assert "strip.contains(document.activeElement)" in strip and "cur.focus()" in strip, \
+        "re-rendering the strip must put focus back on the current tab"
+    # 4. A button inside a button is invalid markup and would be reparented by
+    #    the parser, so the actions must stay siblings of the label.
+    assert strip.index("class=\"tlab\"") < strip.index("+tabActions(t)+"), \
+        "actions must follow the label button, never nest inside it"
+
+
+def test_two_tab_strips_do_not_share_one_selector():
+    """Opening Settings un-highlighted the active terminal tab.
+
+    panel() toggled the "on" class across a document-wide ".tab" query, and
+    #agTabs uses the same class name -- so every terminal tab lost its
+    highlight the moment any Settings tab was opened, and got it back only
+    when something else happened to repaint the strip. The class name is not
+    the defect; a selector that does not name its widget is.
+    """
+    assert "document.querySelectorAll('.tab')" not in PAGE, \
+        "a '.tab' query must name its strip -- two widgets use that class"
+    assert PAGE.count("$('panTabs').querySelectorAll('.tab')") == 2, \
+        "both the paint and the binding must be scoped to the panel's strip"
+
+
+def test_transient_answers_reach_a_screen_reader():
+    """A toast is the page's whole answer channel for a refused driver grant,
+    an unreachable launcher, a copied token -- and it removes itself after
+    five seconds. Painted without a live region, it is an answer a screen
+    reader is never given and cannot go back for."""
+    assert '<div id="toasts" role="status" aria-live="polite">' in PAGE, \
+        "the toast host is the page's live region; without it toasts are silent"
 
 
 def test_a_humans_presence_is_their_open_tab():

@@ -190,6 +190,39 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.55 THE KEYBOARD COULD DESTROY AN AGENT BUT NOT SELECT ITS TAB. Each terminal
+tab was a SPAN carrying a click handler, while stop, edit, destroy and close
+inside it were real buttons -- so every destructive action on a tab was
+keyboard-reachable and the harmless act of selecting one was not. Reachability
+inverted, in shipped code, under a comment claiming Tab reached the tabs in
+reading order: true of the actions, false of the tab they sit on, which is how a
+sentence that reads as a checked fact describes only the half that worked. The
+label is now a real button and the actions are its SIBLINGS, because a button
+inside a button is invalid and the parser silently reparents it; selecting a tab
+replaces the strip and destroys the focused element, so focus is restored to the
+now-current tab, and only when it was in the strip to begin with -- a mouse click
+has no focus to lose and must not have one forced on it. Two more from the same
+read. Opening Settings UN-HIGHLIGHTED the active terminal tab: panel() toggled
+the `on` class over a DOCUMENT-WIDE query for .tab, a class the terminal tabs
+also use, and the highlight returned only when something else happened to
+repaint the strip -- both the paint and the click binding are now scoped to
+panTabs, the same shared-name-unscoped-selector family as the two CSS-beating-
+markup defects from U9. And TOASTS WERE SILENT TO A SCREEN READER: they are the
+page's whole answer channel for a refused driver grant or an unreachable
+launcher, and they delete themselves after five seconds, so an unannounced toast
+is an answer that is never given and cannot be gone back for. The toast host is
+now the page's one polite live region, and roster selection carries aria-current
+rather than being visible but unspoken. DELIBERATELY NOT DONE, with the reason in
+the file: the message feed is not a live region, because its append path also
+carries the room-switch backfill and a log region there would read a page of
+history aloud on every room change -- announcing only what arrives after the
+backfill settles is a slice, not an attribute. VERIFIED IN THE SERVED BYTES AND
+NOT IN A BROWSER: three gates assert the structure and accessible names against
+the file the server actually serves, each proven red against the previous
+markup, but focus ORDER as a browser computes it, whether the focus restore
+lands, what assistive tech announces, and whether the live region fires are all
+unwalked -- no session in this fleet currently has a browser.
+
 0.2.54 THE TERMINAL HAD NO UTF-8 LOCALE, WHICH IS WHY EVERY OTHER FIX FAILED.
 Agent image 0.2.14. LANG, LC_ALL and LC_CTYPE were all EMPTY in the container,
 so the tmux CLIENT fell back to ASCII and substituted an underscore for every
