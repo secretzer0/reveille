@@ -190,6 +190,32 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.58 A SUCCESSFUL LOGIN WAS THE ONE CASE WITH NOTHING LEFT TO CLEAN IT UP, AND
+THE SCAN 0.2.57 ASKED FOR. The browser login left its container running after it
+worked, and the user could not log in again. `claude /login` returns to its own
+prompt when the login lands, so the container waited on a tmux session that
+outlives the flow; the only thing that ever removed it was the Account tab
+polling /login/status, and that page polls only while the credential is ABSENT.
+Success flipped the page to the other branch and the observation stopped at
+exactly the moment the cleanup became due. The container now ends itself when
+.credentials.json appears -- it is the first thing to know it succeeded and must
+not need a witness in order to stop -- and "a login is pending" now means a LIVE
+tmux session rather than an existing container, so residue (finished, stopped or
+wedged) can no longer refuse the next login. That refusal was unescapable in
+practice: the cancel button that would have cleared it renders only while the UI
+believes a login is pending, which by then it did not. The trade is stated
+rather than buried: deciding pending by a docker exec means an exec that fails
+for an unrelated reason reads as no-login-pending and removes an in-flight
+login, which costs a retry; the reading it replaces stranded the user
+permanently. Also here, and it is the answer to what 0.2.57 left open:
+scripts/scan_attachment_urls.py reports every attachments row that
+store.valid_file_url refuses -- the shipping constraint imported, not restated,
+opened read-only so it cannot write the live database it is pointed at, exit 1
+when it prints rows and 2 when it cannot read the file, because an unreadable
+database must not read as clean. The GLOB it replaces is kept in the test as the
+thing being refuted: it reports CLEAN on /files/a/../../etc/passwd while
+flagging every obvious payload, which is what made it look like it worked.
+
 0.2.57 THE OTHER END OF THE ATTACHMENT DEFECT, AND THE HALF THAT STOPS THE BAD
 ROW EXISTING. send() inserted an attachment url verbatim from any caller;
 0.2.56 closed what a reader's browser did with such a url, and this closes
