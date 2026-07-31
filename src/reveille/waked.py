@@ -81,6 +81,18 @@ async def _session(uri, agent, state):
                     continue
                 if not isinstance(obj, dict):
                     continue
+                if obj.get("error") == "no_rooms":
+                    # RECOVERABLE, unlike every other refusal: a token with no
+                    # rooms can have one a second later -- a restored room after
+                    # DIRECTIVE:LEAVE, a provisioning race. Exiting here turns a
+                    # reversible state into permanent deafness for a container
+                    # whose entrypoint never runs again (devops, msg 9060; the
+                    # operator's both-environments condition, 9054). Same class
+                    # as a broker restart: log, reconnect on the fixed interval.
+                    print(f"reveille-waked: token holds no rooms -- unringable "
+                          f"until one attaches; retrying ({obj.get('detail', '')})",
+                          file=sys.stderr)
+                    return None
                 if obj.get("error"):
                     print(f"reveille-waked rejected: {obj['error']} "
                           f"({obj.get('detail', '')})", file=sys.stderr)

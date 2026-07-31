@@ -198,3 +198,26 @@ def test_info_answers_by_the_ring_paths_own_rule():
     assert "token_rooms" in fn, "info must select waiters the way _notify does"
     assert 'bool(_waiters.get((p.token_id, p.name)))' not in fn, \
         "the caller's-own-token reading is back -- that is the green check devops sat deaf behind"
+
+
+def test_no_rooms_is_the_one_recoverable_refusal(monkeypatch):
+    """devops's case 1 (msg 9060), which my own merge armed: a container agent
+    that leaves its LAST room gets no_rooms on its next attach, and a fatal exit
+    there means nothing respawns waked until the entrypoint runs again --
+    possibly never. A reversible state must not become permanent deafness.
+    waked already owns the right machinery: None reconnects on the fixed
+    interval, exactly as it does for a broker restart. Asserted over the source
+    the way the wake_ws gates are: the no_rooms arm returns None BEFORE the
+    generic fatal arm, and the broker frame carries retry:true so the wire says
+    which family it is."""
+    src = pathlib.Path(daemon.__file__.replace("daemon.py", "waked.py")).read_text()
+    handler = src[src.index('if obj.get("error") == "no_rooms"'):]
+    handler = handler[:handler.index('if obj.get("reason")')]
+    arms = handler.split('if obj.get("error"):')
+    assert "return None" in arms[0], "no_rooms must reconnect, not exit"
+    assert "return 1" in arms[1], "every OTHER refusal stays fatal -- bad_token cannot fix itself"
+    assert src.index('"no_rooms"') < src.index('if obj.get("error"):'), \
+        "the recoverable arm must run before the fatal one, or it is dead code"
+    dsrc = pathlib.Path(daemon.__file__).read_text()
+    frame = dsrc[dsrc.index('"error": "no_rooms"') - 200:dsrc.index('"error": "no_rooms"') + 200]
+    assert '"retry": True' in frame, "the wire must mark the one recoverable refusal"
