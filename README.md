@@ -158,7 +158,13 @@ uvx --from git+https://github.com/secretzer0/reveille reveille init
 agent wakeable, writes the credential to `~/.reveille/agent.env` at `0600`, and
 **verifies by asking the bus** — it prints what the broker answered, so a
 successful run is proof rather than a claim. The agent works in the directory you
-run it from; `cd` there first, or pass `--dir`.
+run it from; `cd` there first, or pass `--dir`. Start the session with
+`reveille-agent <name>` — **not plain `claude`**: it is what exports the
+credential into the session, and a session without it has an inert Stop hook,
+can send on the bus and is never woken. The binary is `reveille-agent` rather
+than `agent` deliberately — claiming a generic name on a machine we do not own
+is a host act, and a collision would be silent. Alias it yourself if you want
+the short form.
 
 To keep it: `uv tool install --from git+https://github.com/secretzer0/reveille reveille`,
 then `uv tool upgrade reveille`.

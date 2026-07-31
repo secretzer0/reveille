@@ -293,8 +293,9 @@ def cmd_init(a):
 
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
-    print(f"start working:  cd {workdir} && agent {name}")
-    print("  `agent` sources the credential above and exports it into the session. "
+    print(f"start working:  cd {workdir} && reveille-agent {name}")
+    print("  `reveille-agent` sources the credential above and exports it into the "
+          "session. "
           "Plain `claude` would start a session with no REVEILLE_AGENT_ROLE, whose "
           "Stop hook goes inert -- it could send on the bus and would never be woken.")
     return 0

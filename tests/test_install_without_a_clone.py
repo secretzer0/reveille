@@ -98,7 +98,7 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
 
     # 5. it points at the launcher, not at bare `claude`: a session with no
     # REVEILLE_AGENT_ROLE has an inert Stop hook and is never woken.
-    assert "&& agent dev-agent" in out
+    assert "&& reveille-agent dev-agent" in out
     assert "never be woken" in out
 
 

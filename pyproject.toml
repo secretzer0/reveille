@@ -1,6 +1,6 @@
 [project]
 name = "reveille"
-version = "0.2.66"
+version = "0.2.67"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -18,7 +18,7 @@ wake-watch = "reveille.watch:main"
 reveille-stop-hook = "reveille.hook:main"
 reveille-install-hook = "reveille.install:main"
 reveille = "reveille.cli:main"
-agent = "reveille.launch:main"
+reveille-agent = "reveille.launch:main"
 
 [dependency-groups]
 dev = [

@@ -193,6 +193,27 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.67 THE STATE NOTES CAME BACK, AND THE LAUNCHER STOPPED SQUATTING A GENERIC
+NAME. 0.2.62 rescoped every state memory from agent:<token_id> to
+agent:<agent_id> -- the right destination, since a note scoped to a TOKEN is
+orphaned the moment an agent is recreated -- while memory_add, recall and brief
+all still computed the token scope. Nothing was deleted: the rows sat on disk at
+a scope nothing asked for, so agents could not see their own state, new writes
+landed at the old scope, and supersede answered "cannot find the row" because
+that was true. state was the only kind affected because it is the only kind
+scoped to a token, which is why lessons written in the same minutes survived.
+Both halves land together: store.agent_scope() is now the single place that
+answers where a token's state lives, and a migration re-runs the rescope for
+every note written into the gap -- fixing only the readers would have recreated
+the incident an hour younger. THE RULE THIS BROKE IS THE HOUSE RULE: no legacy,
+clean cutovers in one commit. The scope of a state note is a contract between a
+writer, a reader and a migration, and the migration shipped alone; a data move
+without its readers is a dual-name check with the two names in different files.
+Also: the session launcher is `reveille-agent`, not `agent`. Claiming a generic
+binary name on a machine we do not own is a host act, and the collision would be
+silent and would read as our tool being broken. Alias it if you want the short
+form.
+
 0.2.66 ONE COMMAND AND ONE PASSWORD INSTALLS AN AGENT. `reveille init --login`
 logs in, mints a token BOUND to the agent name, attaches that account's rooms,
 and then follows exactly the same path as a pasted token -- one installer with
