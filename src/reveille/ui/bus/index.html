@@ -931,7 +931,20 @@ function initials(n){const p=n.split(/[-_.]/).filter(Boolean);
  return ((p[0]?.[0]||'')+(p[1]?.[0]||p[0]?.[1]||'')).toUpperCase();}
 function hhmm(ns){return new Date(ns/1e6).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
 function dayOf(ns){return new Date(ns/1e6).toDateString();}
-function esc(s){const d=document.createElement('span');d.textContent=s;return d.innerHTML;}
+// ESCAPES FOR THE POSITION IT IS ACTUALLY USED IN. The textContent round-trip
+// escapes &, < and > and leaves BOTH quotes alone, which is correct for text
+// and wrong for the 23 places this page interpolates into an attribute value
+// (aria-label, title, data-*, value, href). There, one double quote in the
+// input closes the attribute early and everything after it is parsed as
+// markup. Today no name can carry a quote -- the launcher's ROLE_RE and the
+// broker's NAME_RE both forbid it -- but that is a constraint held two
+// services away from the line that depends on it, and the failure is silent
+// the day either one widens. Escaping here costs one pass and removes the
+// question, rather than answering it once for the callers that exist now.
+// Text position is unharmed: &quot; and &#39; render as the characters
+// themselves when the browser parses this back as HTML.
+function esc(s){const d=document.createElement('span');d.textContent=s;
+ return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
 function matches(m){
  if(!m)return true;
