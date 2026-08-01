@@ -193,6 +193,17 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.85 THE RAIL SAYS WHAT IT MEASURED, NOT A DIRECTION IT CANNOT KNOW.
+senior-ui-ux's accepted badge fix: the Agents rail marked a container
+"behind" whenever its image differed from the launcher's default -- an
+inequality wearing an ordering's label, so a container AHEAD of a stale
+launcher read as behind, which is exactly what the operator's screen showed
+(containers on 0.2.15 judged by a launcher defaulting 0.2.14). The word is
+now "differs", the two tags ride the tooltip and the accessible name, and
+the rail names the RECORDED image -- whether the container drifted under
+that record is a question the rail cannot answer and no longer implies it
+has. The predicate is renamed with the claim; its pin moved with it.
+
 0.2.84 A PERMANENT no_rooms STOPS PRETENDING TO BE TRANSIENT. 0.2.78 made
 no_rooms the one recoverable refusal and reported it to waked's reconnect
 loop as a clean session, which reset the backoff ladder: a permanently
