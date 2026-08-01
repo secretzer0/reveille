@@ -193,6 +193,19 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.86 THE SMOKE SPEAKS THE CLI IT DRIVES. launch_smoke -- the DES-002 T2
+end-to-end gate -- still called the pre-tenancy CLI (new role repo) and has
+been UNRUNNABLE since the user positional landed: running it needs a docker
+socket no session had, and a gate that cannot start is indistinguishable
+from one that passes. Found by devops's first socketed run (9136). The
+smoke now drives new/destroy with user+agent under USER=smoke, its argv
+lives in functions a unit test parses against the launcher's real
+build_parser() on any box, the cleanup name is pinned to container_name(),
+and the old two-positional shape is kept as a refused negative. Folded from
+the same run: REVEILLE_LAUNCH_DATA isolated beside the db, and scratch-dir
+plus broker.db modes the server container's own uid can open. Runnable is
+not proven: the socketed end-to-end run is devops's validation.
+
 0.2.85 THE RAIL SAYS WHAT IT MEASURED, NOT A DIRECTION IT CANNOT KNOW.
 senior-ui-ux's accepted badge fix: the Agents rail marked a container
 "behind" whenever its image differed from the launcher's default -- an
