@@ -193,6 +193,22 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.81 THE CONTAINERS CATCH UP TO THE REACHABILITY WORK. Agent image 0.2.15
+(devops, accepted at 9094): reveille-agent:0.2.14 was built before 0.2.53, so
+every container in the fleet ran a waked, a wake-watch and a Stop hook from 27
+versions back -- missing the retired wake --once boot prompt (0.2.76), the
+zero-room attachment refusal and honest waiter line (0.2.77), and no_rooms as
+the one recoverable refusal (0.2.78): exactly the work that made deafness
+diagnosable, absent where the silent failure would land. AGENT_IMAGE and
+DEFAULT_IMAGE move together, pinned equal by the unit test. The 0.2.15 tag is
+built on the broker host and carries reveille 0.2.80.
+
+A RUNNING CONTAINER DOES NOT FOLLOW THIS BUMP: existing agents keep 0.2.14
+until re-provisioned, and the launcher serving provisions must itself be on a
+head that names 0.2.15 -- at this writing the live launcher is pinned 18
+versions back and its redeploy is blocked on a cross-user kill only the
+operator can perform.
+
 0.2.80 THE INSTALLER CONVERGES ON CORRECTNESS, AND NATIVE TMUX IS OPT-IN. The
 first native agent's first shipped branch, and the finding is the night's gate
 lesson wearing installer clothes: install.py matched an existing Stop hook on
