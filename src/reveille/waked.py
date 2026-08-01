@@ -39,6 +39,20 @@ from reveille import __version__, spool
 
 HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))
 
+# _session's distinguishable return for the one recoverable refusal. A string,
+# not an int: every int return is an exit code, and no_rooms must never be one
+# directly -- the LOOP decides when recoverable stops being credible.
+NO_ROOMS = "no_rooms"
+NO_ROOMS_WINDOW_S = 1800
+
+
+def no_rooms_exit_due(first_s, now_s, window_s):
+    """The whole bound decision, pure. ELAPSED TIME since the FIRST refusal,
+    never a count of refusals (ruling 9119): a count and the backoff ladder
+    are the same knob turned twice, so landing the ladder would silently
+    stretch a counted bound into hours the next time someone tunes it."""
+    return first_s is not None and now_s - first_s >= window_s
+
 
 def nudge_due(last_write_ns, now_ns, interval_s):
     """The whole idle decision, pure: an interval of 0 never nudges."""
@@ -84,15 +98,19 @@ async def _session(uri, agent, state):
                 if obj.get("error") == "no_rooms":
                     # RECOVERABLE, unlike every other refusal: a token with no
                     # rooms can have one a second later -- a restored room after
-                    # DIRECTIVE:LEAVE, a provisioning race. Exiting here turns a
+                    # DIRECTIVE:LEAVE, a provisioning race. Exiting HERE turns a
                     # reversible state into permanent deafness for a container
                     # whose entrypoint never runs again (devops, msg 9060; the
-                    # operator's both-environments condition, 9054). Same class
-                    # as a broker restart: log, reconnect on the fixed interval.
+                    # operator's both-environments condition, 9054). But the
+                    # return is DISTINGUISHABLE, not None: a refusal is not a
+                    # clean session, and reporting it as one is what reset the
+                    # backoff ladder and made the loop unbounded -- measured at
+                    # exactly 1.00s flat, forever (devops, msg 9104). The loop
+                    # owns the ladder and the 30-minute bound (ruling 9119).
                     print(f"reveille-waked: token holds no rooms -- unringable "
                           f"until one attaches; retrying ({obj.get('detail', '')})",
                           file=sys.stderr)
-                    return None
+                    return NO_ROOMS
                 if obj.get("error"):
                     print(f"reveille-waked rejected: {obj['error']} "
                           f"({obj.get('detail', '')})", file=sys.stderr)
@@ -112,20 +130,42 @@ async def _session(uri, agent, state):
     return None
 
 
-async def _run(url, agent, idle_nudge_s):
+async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S):
     sep = "&" if "?" in url else "?"
     token = os.environ.get("REVEILLE_TOKEN", "")
     uri = f"{url}{sep}name={agent}" + (f"&token={token}" if token else "")
     state = {"last": time.time_ns()}   # daemon start counts as activity
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
     delay = 1
+    first_no_rooms = None   # monotonic stamp of the FIRST refusal of a streak
     try:
         while True:
             try:
                 code = await _session(uri, agent, state)
-                delay = 1
-                if code is not None:
-                    return code
+                if code == NO_ROOMS:
+                    # Falls through to the same sleep as a connect error, so
+                    # the existing ladder applies; only a session that ATTACHED
+                    # resets it. The bound is elapsed time from the stamp,
+                    # never a count -- see no_rooms_exit_due.
+                    now = time.monotonic()
+                    if first_no_rooms is None:
+                        first_no_rooms = now
+                    if no_rooms_exit_due(first_no_rooms, now, no_rooms_window_s):
+                        print(
+                            f"reveille-waked: token held no rooms for "
+                            f"{int(now - first_no_rooms)}s -- this credential "
+                            f"routes nowhere; exiting so the lock frees. The "
+                            f"Stop hook installs a fresh daemon at the next "
+                            f"TURN BOUNDARY, so a parked agent stays parked "
+                            f"until one: this exit is not self-healing, it "
+                            f"stops an unringable daemon from holding the "
+                            f"slot forever.", file=sys.stderr)
+                        return 3
+                else:
+                    first_no_rooms = None
+                    delay = 1
+                    if code is not None:
+                        return code
             except (OSError, websockets.WebSocketException) as e:
                 print(f"reveille-waked: {e} -- retrying in {delay}s",
                       file=sys.stderr)
@@ -143,6 +183,15 @@ def main():
                     help="write one synthetic reason=idle-nudge ring after this "
                          "many seconds without any ring (default 1800; 0 "
                          "disables). Fixed interval by ruling -- no backoff.")
+    ap.add_argument("--no-rooms-window", type=int, default=NO_ROOMS_WINDOW_S,
+                    metavar="SECONDS",
+                    help="exit (code 3) after this many seconds of consecutive "
+                         "no_rooms refusals with no successful attach between "
+                         "them (default 1800). Elapsed time, never a count of "
+                         "retries, so the backoff ladder cannot stretch the "
+                         "bound (ruling 9119). The freed lock lets the Stop "
+                         "hook respawn from fresh session env at the next "
+                         "turn boundary.")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args()
     lock = open(spool.lock_path(a.name), "w")
@@ -156,7 +205,8 @@ def main():
         return 0
     # The flock rides the open fd for the daemon's whole life; releasing is
     # process exit, which is exactly when the slot should free.
-    return asyncio.run(_run(a.url, a.name, a.idle_nudge))
+    return asyncio.run(_run(a.url, a.name, a.idle_nudge,
+                            no_rooms_window_s=a.no_rooms_window))
 
 
 if __name__ == "__main__":
