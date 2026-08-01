@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sqlite3
@@ -986,9 +987,9 @@ def test_agent_rooms_now_returns_room_ids_for_that_agent_only():
     assert calls == [("GET", "/presence")], calls
 
 
-# ---- reconfig 3: behind the current image -------------------------------
+# ---- reconfig 3: differs from the current image --------------------------
 
-def test_behind_predicate_runs_the_bytes_that_ship():
+def test_differs_predicate_runs_the_bytes_that_ship():
     """Reconfig 3's judgement lives in the served page, so test THAT, not a
     copy of it: extract the predicate from the shipped file and execute it.
 
@@ -998,10 +999,14 @@ def test_behind_predicate_runs_the_bytes_that_ship():
     the line is renamed or moved, which is correct for a gate: a predicate a
     gate can no longer find is a predicate it is no longer checking.
 
-    The rule under test: BEHIND is a comparison, never a version parse. Any
-    difference from what the launcher would provision today is worth showing,
-    and inventing an ordering over image tags would be a second thing to keep
-    true. An agent with no recorded image is not behind -- it is not running.
+    The rule under test is unchanged and is why the predicate is named for a
+    DIFFERENCE now: it is a comparison, never a version parse. Any difference
+    from what the launcher would provision today is worth showing, and
+    inventing an ordering over image tags would be a second thing to keep
+    true. What moved is the CLAIM: the rail used to print "behind" off this
+    comparison, which reads as a direction the comparison cannot establish --
+    the NEWER case below has always been true here and rendered as behind. An
+    agent with no recorded image differs from nothing -- it is not running.
     """
     node = shutil.which("node")
     if node is None:
@@ -1009,8 +1014,8 @@ def test_behind_predicate_runs_the_bytes_that_ship():
     page = pathlib.Path(
         rl.__file__).parent.parent / "src/reveille/ui/bus/index.html"
     line = next((ln.strip() for ln in page.read_text().splitlines()
-                 if ln.strip().startswith("const behind=")), None)
-    assert line, "the behind predicate is gone or renamed in ui/bus/index.html"
+                 if ln.strip().startswith("const differs=")), None)
+    assert line, "the differs predicate is gone or renamed in ui/bus/index.html"
     prog = line + """
 const cases = [
   // [agent image, default image, expected]
@@ -1022,14 +1027,91 @@ const cases = [
 ];
 for (const [image, def, want] of cases) {
   agDefaultImage = def;
-  const got = behind({image});
+  const got = differs({image});
   if (got !== want)
-    throw new Error(`behind(${image}||'empty') vs ${def||'empty'}: ${got} != ${want}`);
+    throw new Error(`differs(${image}||'empty') vs ${def||'empty'}: ${got} != ${want}`);
 }
 console.log("ok");
 """
     res = subprocess.run([node, "-e", "let agDefaultImage='';" + prog],
                          capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert "ok" in res.stdout
+
+
+def _served_statement(lines, prefix, optional=False):
+    """The whole statement beginning with prefix, read to its terminating
+    semicolon -- never the first LINE of it.
+
+    A line-granular read passes on broken code by not seeing the half that
+    matters, and it truncates silently the day the statement wraps: tonight's
+    extractor ate the definition below a two-line constant and failed with a
+    name the change never touched. Read to the delimiter instead.
+    """
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.strip().startswith(prefix)), None)
+    if start is None and optional:
+        return ""
+    assert start is not None, f"{prefix} is gone or renamed in ui/bus/index.html"
+    end = next(i for i in range(start, len(lines))
+               if lines[i].rstrip().endswith(";"))
+    return "\n".join(ln.strip() for ln in lines[start:end + 1])
+
+
+def test_the_rail_claims_no_direction_and_names_both_tags():
+    """The comparison was right and the WORD was wrong: an agent recorded at a
+    newer tag than the launcher's default rendered as "behind", identical to
+    one left back on an old one, and the operator who hit it could only tell
+    the two apart by opening the edit dialog (msg 9103).
+
+    So this gate asserts the claim rather than the predicate: the rail's word
+    for a difference must not name a direction, and both tags must reach the
+    reader -- a bare "differs" sends them to the same dialog. Executed from the
+    served bytes, like the predicate gate beside it, because a re-implementation
+    here would be a mirror of the page rather than a check on it.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not on PATH -- served-JS gates need it")
+    lines = (pathlib.Path(rl.__file__).parent.parent
+             / "src/reveille/ui/bus/index.html").read_text().splitlines()
+    # The predicate is taken by its SHAPE, not by its name, so this gate reads
+    # the page from before the rename too -- otherwise it goes red on the old
+    # head for "the predicate is missing", which is a fixture failure wearing
+    # the finding's clothes and says nothing about the claim under test.
+    pred = next((ln.strip() for ln in lines
+                 if re.match(r"const \w+=a=>!!\(a\.image", ln.strip())), None)
+    assert pred, "the image comparison is gone from ui/bus/index.html"
+    # imgs is what this change ADDS, so its absence must not stop the run
+    # before the direction assertion -- that assertion is the one predicted to
+    # fire on the unfixed head, and an earlier extraction error would hide it.
+    imgs = _served_statement(lines, "const imgs=", optional=True) or "const imgs='';"
+    prog = "let agDefaultImage='';\n" + pred + """
+function render(a, s){
+  const gone=()=>false;
+""" + _served_statement(lines, "const word=") + "\n" + imgs + """
+  return {word, imgs};
+}
+agDefaultImage = "reveille-agent:0.2.15";
+const older = render({status:"running", image:"reveille-agent:0.2.14"}, "running");
+const newer = render({status:"running", image:"reveille-agent:0.2.16"}, "running");
+const same  = render({status:"running", image:"reveille-agent:0.2.15"}, "running");
+if (/behind|ahead|old|new/.test(older.word))
+  throw new Error(`the rail claims a direction it cannot establish: ${older.word}`);
+if (older.word !== newer.word)
+  throw new Error(`older and newer render differently (${older.word} vs ` +
+                  `${newer.word}) -- the comparison cannot tell them apart`);
+if (!older.word)
+  throw new Error("a difference from the launcher default says nothing at all");
+if (same.word || same.imgs)
+  throw new Error(`an agent at the current default is not a difference: ` +
+                  `${same.word}|${same.imgs}`);
+for (const tag of ["reveille-agent:0.2.14", "reveille-agent:0.2.15"])
+  if (!older.imgs.includes(tag))
+    throw new Error(`${tag} never reaches the reader: ${older.imgs}`);
+console.log("ok");
+"""
+    res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
     assert res.returncode == 0, res.stderr or res.stdout
     assert "ok" in res.stdout
 
