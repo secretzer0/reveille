@@ -27,7 +27,30 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 LAUNCHER = str(REPO / "scripts" / "reveille_launch.py")
 NET = "reveille-smoke"
 BROKER = "reveille-smoke-broker"
+USER = "smoke"
 ROLES = ["smoke-agent-1", "smoke-agent-2"]
+
+
+# The launcher argv this smoke drives, as functions, so a unit test can parse
+# them against the REAL build_parser() on any box. This file rotted silently
+# once already: it kept calling `new role repo` after tenancy made it
+# `new user agent repo`, and nothing said so because running the smoke needs a
+# docker socket and no session had one -- a gate that cannot run is
+# indistinguishable from a gate that passes (devops, msg 9136). The argv shape
+# is the half that rots; it is now pinned where pytest can reach it.
+def new_argv(role, broker_url, health_url):
+    return ["new", USER, role, "/nonexistent", "--broker", broker_url,
+            "--health-url", health_url, "--network", NET,
+            "--boot-cmd", "agent-probe", "--timeout", "150"]
+
+
+def replace_refused_argv(role, broker_url):
+    return ["new", USER, role, "/nonexistent", "--broker", broker_url,
+            "--network", NET]
+
+
+def destroy_argv(role):
+    return ["destroy", USER, role, "--purge"]
 
 
 def server_image():
@@ -72,8 +95,15 @@ def seed(db):
     return secrets
 
 
-def launch(launch_db, *args, **kw):
-    env = dict(os.environ, REVEILLE_LAUNCH_DB=launch_db)
+def launch(tmp, *args, **kw):
+    # EVERY launcher default is overridden, not just the db: an unset var does
+    # not mean "no value", it means "the production value" -- this smoke once
+    # left REVEILLE_LAUNCH_BROKER unset and dirtied the live broker's networks
+    # (lesson smoke-inherits-production-defaults). DATA matters here for the
+    # same reason: without it, agent data roots land under ~/.reveille/data.
+    env = dict(os.environ,
+               REVEILLE_LAUNCH_DB=os.path.join(tmp, "launcher.db"),
+               REVEILLE_LAUNCH_DATA=os.path.join(tmp, "agent-data"))
     return subprocess.run([sys.executable, LAUNCHER, *args], env=env,
                           text=True, cwd=REPO, **kw)
 
@@ -89,14 +119,22 @@ def main():
     data = os.path.join(tmp, "data")
     os.makedirs(data)
     db = os.path.join(data, "broker.db")
-    launch_db = os.path.join(tmp, "launcher.db")
     secrets = seed(db)
+    # The broker container runs as ITS OWN uid, not this script's: mkdtemp is
+    # 0700 and sqlite creates 0644, so without these the server dies with
+    # "unable to open database file" and every write answers "readonly
+    # database" -- both read like broker bugs and are file modes, invisible
+    # from a uid-1000 session (devops, msg 9136; the one-host-gate class).
+    os.chmod(tmp, 0o755)
+    os.chmod(data, 0o777)
+    os.chmod(db, 0o666)
 
-    # Idempotent start: a crashed prior run can leave containers/volumes behind, and
-    # the new refuse-unless-replace guard would then reject provisioning. Clear ours.
+    # Idempotent start: a crashed prior run can leave containers behind, and
+    # the refuse-unless-replace guard would then reject provisioning. Clear
+    # ours -- by the tenancy name, rev-<user>-<agent>. (The old rev-<role>
+    # and named-volume cleanup lines died with the bind-mount cutover.)
     for role in ROLES:
-        docker("rm", "-f", f"rev-{role}", check=False)
-        docker("volume", "rm", f"rev-{role}-claude", check=False)
+        docker("rm", "-f", f"rev-{USER}-{role}", check=False)
     docker("network", "create", NET, check=False)
     docker("rm", "-f", BROKER, check=False)
     docker("run", "-d", "--name", BROKER, "--network", NET, "-p", f"{port}:8765",
@@ -107,24 +145,22 @@ def main():
         wait_health(port)
 
         for role in ROLES:
-            r = launch(launch_db, "new", role, "/nonexistent", "--broker", broker_url,
-                       "--health-url", health_url, "--network", NET,
-                       "--boot-cmd", "agent-probe", "--timeout", "150",
+            r = launch(tmp, *new_argv(role, broker_url, health_url),
                        input=secrets[role] + "\n")
             assert r.returncode == 0, f"{role} reported unhealthy (exit {r.returncode})"
 
         # Both agents are now running on one shared network -- the 7681 collision that
         # host-networking would cause (msg 8402) shows up here or nowhere.
-        assert all(secrets[role].encode() not in pathlib.Path(launch_db).read_bytes()
+        launch_db = pathlib.Path(tmp) / "launcher.db"
+        assert all(secrets[role].encode() not in launch_db.read_bytes()
                    for role in ROLES), "TOKEN LEAKED into launcher.db"
-        ls = launch(launch_db, "ls", capture_output=True)
+        ls = launch(tmp, "ls", capture_output=True)
         assert all(role in ls.stdout for role in ROLES), f"ls: {ls.stdout!r}"
         assert ls.stdout.count("running") == len(ROLES), f"not all running: {ls.stdout!r}"
 
         # Re-provision without --replace is refused (the unprompted-destroy guard).
-        refused = launch(launch_db, "new", ROLES[0], "/nonexistent", "--broker",
-                         broker_url, "--network", NET, input="x\n",
-                         capture_output=True)
+        refused = launch(tmp, *replace_refused_argv(ROLES[0], broker_url),
+                         input="x\n", capture_output=True)
         assert refused.returncode != 0 and "already exists" in refused.stderr, \
             f"re-provision should refuse without --replace: {refused.stderr!r}"
 
@@ -132,7 +168,7 @@ def main():
               "no port collision, launcher.db token-free, re-provision guarded")
     finally:
         for role in ROLES:
-            launch(launch_db, "destroy", role, "--purge", capture_output=True)
+            launch(tmp, *destroy_argv(role), capture_output=True)
         docker("rm", "-f", BROKER, check=False)
         docker("network", "rm", NET, check=False)
 
