@@ -364,7 +364,10 @@ def test_profile_file_is_0600_and_holds_the_only_copy(tmp_path):
     p = pathlib.Path(rl.profile_path("acme", base=str(tmp_path)))
     import stat as stat_mod
     assert stat_mod.S_IMODE(p.stat().st_mode) == 0o600
-    assert (p.parent.stat().st_mode & 0o777) == 0o700   # user root closed
+    # 0711, not 0700, since the plane split (operator ruling 9149): the user
+    # root is launcher-owned and traverse-only -- agents and login containers
+    # pass THROUGH to their own dirs below, nothing but the launcher lists it.
+    assert (p.parent.stat().st_mode & 0o777) == 0o711
     assert rl.load_profile("acme", base=str(tmp_path))["github_token"] \
         == "ghp_ONLY_HERE"
     # the profile is a SIBLING of agent data roots: no data_root path ever

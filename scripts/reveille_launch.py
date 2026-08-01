@@ -617,11 +617,12 @@ def load_profile(user, base=None):
 
 
 def save_profile(user, prof, base=None):
-    """0600 at open (never chmod-after), user root 0700 first -- the same
-    discipline as join-here's env fragment."""
+    """0600 at open (never chmod-after). The parent goes through
+    ensure_user_root -- the launcher-plane writer -- never a direct
+    makedirs+chmod: chmod on a parent another account created is the exact
+    call that broke the credential save (msg 9149)."""
     path = profile_path(user, base)
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    os.chmod(os.path.dirname(path), 0o700)
+    ensure_user_root(user, base=base)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(prof, f)
@@ -918,8 +919,7 @@ def ensure_login_home(user, image):
     coincidence that hid it the first two times. provision_agent already does
     this for the agent home; the login home needs it for the same reason."""
     root = user_auth_root(user)
-    os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
-    os.chmod(os.path.dirname(root), 0o700)
+    ensure_user_root(user, image=image)   # launcher-plane parent, ruled split
     os.makedirs(root, mode=0o700, exist_ok=True)
     _own_agent_dirs(root, image, subdirs=())   # the login home IS ~/.claude
     return os.path.isfile(os.path.join(root, ".credentials.json"))
@@ -978,6 +978,58 @@ PROFILE_NOTES = (
     "(reveille-launch login <user> <agent>, once, agent stopped). That mode "
     "is NOT zero-touch: a freshly provisioned agent sits at a login prompt "
     "until you log it in.")
+
+
+def user_root_repair_argv(path, st_uid, my_uid, my_gid, image):
+    """The repair container's argv for a data/<user> dir owned by ANOTHER
+    account, pure so the uid-critical shape is unit-testable anywhere (the
+    own_dirs_argv discipline: our smoke hosts are uid 1000, where a uid
+    coincidence cannot be seen). None when the dir is already the caller's --
+    a bare chmod suffices then and needs no container.
+
+    --user 0:0 is load-bearing exactly as in own_dirs_argv. The chown is
+    NON-RECURSIVE by contract: everything BELOW data/<user> is
+    container-plane and must stay the image's uid -- a -R here would steal
+    every agent home on the box in one repair."""
+    if st_uid == my_uid:
+        return None
+    return ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "sh",
+            "-v", f"{path}:/own", image, "-c",
+            f"chown {my_uid}:{my_gid} /own && chmod 711 /own"]
+
+
+def ensure_user_root(user, base=None, image=DEFAULT_IMAGE):
+    """data/<user>/ is the LAUNCHER-PLANE directory, and this is its ONE
+    writer: profile.json lives in it, the launcher enumerates it, and the
+    container-plane dirs below (agent homes, claude-auth) belong to the image
+    uid via _own_agent_dirs. Operator ruling (msg 9149): the two planes split
+    explicitly -- this dir is owned by the LAUNCHER'S OWN UID at mode 0711,
+    traverse-only, because nothing but the launcher ever lists it.
+
+    Why not makedirs+chmod, which all three former writers did: chmod
+    requires OWNERSHIP, not write permission, and the third uid-1000
+    coincidence went live the night the launcher changed accounts -- the
+    unconditional chmod(0o700) 500'd the browser login and the credential
+    save on a directory the PREVIOUS launcher account had created. This
+    CONVERGES instead of asserting: created fresh, the dir is ours and gets
+    0711; existing and ours, it is re-moded; existing and someone else's, it
+    is re-owned through a root helper container -- the same authority (the
+    docker socket, never host file ownership) that _own_agent_dirs rides."""
+    d = os.path.join(base or DEFAULT_DATA, user)
+    try:
+        os.mkdir(d, 0o711)
+        os.chmod(d, 0o711)   # mkdir's mode is umask-clipped; ours now, so fix it
+        return d
+    except FileExistsError:
+        pass
+    st = os.stat(d)
+    argv = user_root_repair_argv(d, st.st_uid, os.getuid(), os.getgid(), image)
+    if argv is not None:
+        subprocess.run(argv, check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    elif (st.st_mode & 0o777) != 0o711:
+        os.chmod(d, 0o711)
+    return d
 
 
 def own_dirs_argv(root, image, subdirs=("claude", "repos")):
@@ -1119,12 +1171,11 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         extra_env.append("ANTHROPIC_MODEL")
         env["ANTHROPIC_MODEL"] = model
 
-    # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
-    # host user browses it; the agent dirs under it belong to the AGENT.
+    # The agent's home, nothing else's (sec 4). The USER root is launcher-plane
+    # (0711, launcher-owned, ensure_user_root); the agent dirs under it belong
+    # to the AGENT via _own_agent_dirs -- the ruled split, msg 9149.
     root = data_root(user, agent)
-    user_root = os.path.dirname(root)
-    os.makedirs(user_root, mode=0o700, exist_ok=True)
-    os.chmod(user_root, 0o700)
+    ensure_user_root(user, image=image)
     for sub in ("claude", "repos"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
     _own_agent_dirs(root, image)
