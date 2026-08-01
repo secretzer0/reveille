@@ -1981,13 +1981,40 @@ def agent_identities(conn, owner_id, name):
         (owner_id, name))]
 
 
+def _revoke_identity_tokens(conn, agent_id):
+    """Every token bound to this identity dies when its liveness does; returns
+    the revoked ids. The statements are revoke_token's, inlined rather than
+    called: revoke_token re-derives authority from an owner_id parameter, and
+    here authority was already decided by whoever authorized the retire or
+    release -- the identity-level act covers its own credentials. Callers hold
+    the transaction."""
+    ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM tokens WHERE agent_id=?", (agent_id,)).fetchall()]
+    for tid in ids:
+        conn.execute("UPDATE members SET token_id=NULL WHERE token_id=?", (tid,))
+        conn.execute("DELETE FROM token_rooms WHERE token_id=?", (tid,))
+        conn.execute("DELETE FROM tokens WHERE id=?", (tid,))
+    return ids
+
+
 def retire_agent(conn, agent_id, now=None):
     """Mark an identity not-live. Destroy sets this; the row is NEVER deleted,
-    because the row IS the record that outlives the container."""
+    because the row IS the record that outlives the container.
+
+    Retiring revokes the identity's own tokens in the same transaction: an
+    identity that is not live must not hold a live credential answering to its
+    name. Mint-time supersede is identity-scoped by ruling (DES-007 2.4), so a
+    credential stranded on a PREVIOUS identity of a name is structurally out of
+    its reach, and the destroy route's broker-side revoke is best-effort -- the
+    operator found the gap as duplicate live bound tokens after a
+    retire-and-recreate (msg 9100). Returns the revoked ids so the act reports
+    the rotation instead of hiding it."""
     now = now or time.time_ns()
     with tx(conn):
+        revoked = _revoke_identity_tokens(conn, agent_id)
         conn.execute("UPDATE agents SET retired_ns=? WHERE id=? AND retired_ns IS NULL",
                      (now, agent_id))
+    return revoked
 
 
 def resurrect_agent(conn, agent_id, now=None):
@@ -2017,9 +2044,14 @@ def resurrect_agent(conn, agent_id, now=None):
 def release_agent_name(conn, agent_id, by, now=None):
     """Free a label so another account may claim it. Do not ship the lock without
     the key: a name held forever by a deleted account is a leak. Audited by the
-    caller -- an ownership transfer nobody can point at afterwards is not one."""
+    caller -- an ownership transfer nobody can point at afterwards is not one.
+
+    Release makes the identity not-live, so it revokes the identity's tokens the
+    same way retire does: a freed label whose old owner still holds a live
+    credential answering to it is the lock shipped with a copied key."""
     now = now or time.time_ns()
     with tx(conn):
+        _revoke_identity_tokens(conn, agent_id)
         conn.execute(
             "UPDATE agents SET released_ns=?, released_by=?, "
             "retired_ns=COALESCE(retired_ns, ?) WHERE id=? AND released_ns IS NULL",

@@ -323,6 +323,61 @@ def test_the_index_refuses_a_second_live_row_even_by_raw_insert():
     assert live["id"] != "deadbeef"
 
 
+def test_a_retired_identity_keeps_no_live_credential():
+    """The operator's duplicate-tokens screenshot (msg 9100), as a gate.
+
+    Mint-time supersede is identity-scoped by ruling (DES-007 2.4), so a token
+    stranded on a PREVIOUS identity of a name is structurally out of its reach,
+    and the destroy route's broker-side revoke is best-effort. Retire itself
+    must therefore revoke the identity's own tokens, or a retire-and-recreate
+    leaves two live credentials answering to one name -- which it did."""
+    c, admin, room, tok = fixture()
+    old = store.create_token(c, admin["id"], "v1", agent_name="scout",
+                             rooms=[room["id"]])
+    # the fixture fired: the bound credential really exists before the retire
+    assert store.resolve_token(c, old["secret"])["agent_name"] == "scout"
+    identity = old["agent_id"]
+
+    revoked = store.retire_agent(c, identity)
+    assert store.resolve_token(c, old["secret"]) is None, (
+        "a retired identity still holds a live credential answering to its name")
+    assert revoked and old["id"] in revoked, "retire did not report the rotation"
+
+    # the recreate half of the operator's flow: same name, fresh identity
+    new = store.create_token(c, admin["id"], "v2", agent_name="scout",
+                             rooms=[room["id"]])
+    assert new["agent_id"] != identity
+    live = c.execute(
+        "SELECT t.id FROM tokens t JOIN agents a ON a.id=t.agent_id "
+        "WHERE a.name='scout'").fetchall()
+    assert [r["id"] for r in live] == [new["id"]], (
+        "duplicate live bound tokens for one name -- the 9100 defect")
+
+
+def test_retire_revokes_without_orphaning_a_joined_member():
+    """revoke_token's own FK discipline, kept through the retire path: a member
+    row still pointing at the dying token must be orphaned, not violated."""
+    c, admin, room, tok = fixture()
+    b = store.create_token(c, admin["id"], "b", agent_name="scout",
+                           rooms=[room["id"]])
+    store.join(c, "scout", "boot", room["id"], token_id=b["id"])
+    assert c.execute("SELECT 1 FROM members WHERE token_id=?",
+                     (b["id"],)).fetchone(), "fixture never joined"
+    store.retire_agent(c, b["agent_id"])
+    assert c.execute("SELECT 1 FROM members WHERE token_id=?",
+                     (b["id"],)).fetchone() is None
+
+
+def test_release_revokes_the_identitys_tokens():
+    """A freed label whose old owner still holds a live credential answering to
+    it is the lock shipped with a copied key."""
+    c, admin, room, tok = fixture()
+    b = store.create_token(c, admin["id"], "b", agent_name="scout",
+                           rooms=[room["id"]])
+    store.release_agent_name(c, b["agent_id"], "admin")
+    assert store.resolve_token(c, b["secret"]) is None
+
+
 def test_a_released_label_is_claimable_and_release_retires():
     """Do not ship the lock without the key: a name held forever by a deleted
     account is a leak. Release also retires, so the label is genuinely free
