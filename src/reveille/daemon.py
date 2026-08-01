@@ -193,6 +193,22 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.84 A PERMANENT no_rooms STOPS PRETENDING TO BE TRANSIENT. 0.2.78 made
+no_rooms the one recoverable refusal and reported it to waked's reconnect
+loop as a clean session, which reset the backoff ladder: a permanently
+unringable daemon opened a socket every 1.00s, flat, forever -- measured
+live -- while its flock kept the Stop hook from installing one that could
+hear. Ruled (9119) and built as one change: _session returns a
+distinguishable NO_ROOMS, so the existing 1s-to-15s ladder applies to
+refusals, and the loop exits (code 3) after 30 minutes ELAPSED from the
+first refusal of a streak -- monotonic stamp, cleared only by a session
+that attached, time never a count, so tuning the ladder cannot stretch the
+bound. --no-rooms-window SECONDS overrides the default 1800; the default
+is the contract. THE HONEST HALF: the exit is not self-healing. It frees
+the lock so the Stop hook respawns waked from fresh session env at the
+next TURN BOUNDARY; a parked agent stays parked until one. What it ends is
+a dead credential holding the wake slot forever.
+
 0.2.83 A NOT-LIVE IDENTITY HOLDS NO LIVE CREDENTIAL. Ruled doctrine (9122):
 retiring or releasing an agent identity now revokes that identity's own
 tokens in the same transaction and reports the ids. Mint-time supersede is
