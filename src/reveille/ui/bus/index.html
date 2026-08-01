@@ -2098,13 +2098,20 @@ function roomName(id){
 function drawRoster(){
  const box=$('roster');
  const agents=agAll;
- const behind=a=>!!(a.image&&agDefaultImage&&a.image!==agDefaultImage);
+ // IT MEASURES A DIFFERENCE, SO IT SAYS DIFFERENCE. This shipped calling the
+ // state "behind", which claims a direction the comparison never establishes:
+ // an agent recorded at a NEWER tag than the launcher's default renders
+ // identically to one left back on an old one. The operator hit exactly that
+ // and had to open the edit dialog to learn which way round they were looking.
+ // The predicate stays a comparison and never a version parse -- an ordering
+ // over image tags is a second thing to keep true -- so only the claim moved.
+ const differs=a=>!!(a.image&&agDefaultImage&&a.image!==agDefaultImage);
  const stateOf=a=>a.state||(a.status==='running'?'running':'stopped');
  const gone=a=>{const s=stateOf(a);return s==='retired'||s==='erased';};
  // ACTIONABLE FLOATS: what wants a decision sorts to the top of its group,
  // recovery cases sink. Alphabetical inside each band, so the order is still
  // predictable enough to build muscle memory on.
- const band=a=>a.status==='absent'?0:behind(a)?1:a.status==='running'?2:
+ const band=a=>a.status==='absent'?0:differs(a)?1:a.status==='running'?2:
    gone(a)?4:3;
  const q=rostQ.trim().toLowerCase();
  const hit=a=>!q||a.agent.toLowerCase().indexOf(q)>=0;
@@ -2117,7 +2124,16 @@ function drawRoster(){
  // is fill AND ring.
  const row=a=>{
   const s=stateOf(a);
-  const word=a.status==='absent'?'broken':gone(a)?s:behind(a)?'behind':'';
+  const word=a.status==='absent'?'broken':gone(a)?s:differs(a)?'differs':'';
+  // A DIFFERENCE IS ONLY ACTIONABLE ONCE YOU CAN SEE FROM WHAT. One word on a
+  // twenty-character rail cannot carry two image tags, so they ride the
+  // tooltip and the accessible name -- the same two channels the state dot
+  // already uses -- rather than sending the reader to a dialog to find out.
+  // The recorded tag is what the launcher wrote at provision; the container
+  // may have been changed under it, which is a different question the rail
+  // cannot answer and must not pretend to.
+  const imgs=differs(a)?' -- recorded image '+a.image+
+    ', launcher default '+agDefaultImage:'';
   // SELECTION IS SPOKEN, not only drawn. The left bar and the tint say "you
   // are here" to the eye; aria-current says the same thing to everything else.
   // One fact, two channels -- the rule the state dot already follows.
@@ -2126,8 +2142,8 @@ function drawRoster(){
    (a.status==='running'?' run':'')+(gone(a)?' gone':'')+
    (a.status==='absent'?' bad':'')+'"'+
    (agActive()===a.agent?' aria-current="true"':'')+' data-rost="'+esc(a.agent)+'" '+
-   'aria-label="'+esc(a.agent+' -- '+s+(word&&word!==s?', '+word:''))+
-   '" title="'+esc(a.agent+' -- '+s)+'">'+
+   'aria-label="'+esc(a.agent+' -- '+s+(word&&word!==s?', '+word:'')+imgs)+
+   '" title="'+esc(a.agent+' -- '+s+imgs)+'">'+
    '<span class="swatch" style="background:'+color(a.agent)+'"></span>'+
    '<span class="nm">'+esc(a.agent)+'</span>'+
    '<span class="st'+(a.status==='absent'?' err':'')+'">'+esc(word)+'</span>'+
