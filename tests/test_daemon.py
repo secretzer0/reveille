@@ -73,6 +73,40 @@ def test_changes_newest_entry_is_this_version():
         f"{__version__!r} -- bump both or neither")
 
 
+def test_uv_lock_records_the_version_pyproject_declares():
+    """A version bump re-locks in the same commit or the lock lies.
+
+    Happened twice: pyproject went to 0.2.78 with uv.lock still saying 0.2.77
+    (re-locked after the fact in 11287c2), then again at 0.2.80 with the lock
+    still at 0.2.78. Half a cutover: the bump commit claims a release while
+    the committed lock still records the previous one, so any consumer of the
+    lock (a frozen sync, a fresh clone's resolution record) is told the old
+    version shipped.
+
+    Reads BOTH halves from HEAD via git show, not from the files: measured
+    on this tree, the doctrinal `uv run pytest` re-locks the working copy to
+    match pyproject before pytest ever reads it, so a file read is green in
+    exactly the broken state -- only the commit carries the defect. And a
+    working-tree read of pyproject would go red mid-workflow, between
+    editing the version and committing the pair. (Reading the installed
+    __version__ would be wrong the same way the file read is: it measures
+    the venv's sync state, not the commit.)"""
+    import subprocess
+    import tomllib
+    repo = os.path.join(os.path.dirname(__file__), "..")
+
+    def at_head(path):
+        return subprocess.run(["git", "-C", repo, "show", f"HEAD:{path}"],
+                              capture_output=True, text=True, check=True).stdout
+
+    declared = tomllib.loads(at_head("pyproject.toml"))["project"]["version"]
+    lock = tomllib.loads(at_head("uv.lock"))
+    locked = next(p["version"] for p in lock["package"] if p["name"] == "reveille")
+    assert locked == declared, (
+        f"uv.lock records reveille {locked!r} but pyproject.toml declares "
+        f"{declared!r} -- run uv lock and commit the lock with the bump")
+
+
 def test_usage_names_the_hive_in_standing_doctrine():
     """Boot-doctrine gap (msg 8407): brief/recall/memory_add must appear in the STANDING
     USAGE text, not only in CHANGES -- a capability that lives only in the changelog is
