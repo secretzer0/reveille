@@ -193,6 +193,21 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.83 A NOT-LIVE IDENTITY HOLDS NO LIVE CREDENTIAL. Ruled doctrine (9122):
+retiring or releasing an agent identity now revokes that identity's own
+tokens in the same transaction and reports the ids. Mint-time supersede is
+identity-scoped by ruling (DES-007 2.4) and structurally cannot reach a
+credential stranded on a PREVIOUS identity of a name; the destroy route's
+broker-side revoke is best-effort. This closes the gap store-side, on every
+path that makes an identity not-live, BEFORE the DES-007 resurrect and
+enforcement slices ship the callers that would have opened it -- nothing in
+production writes agents.retired_ns today.
+
+WHAT THIS DOES NOT EXPLAIN, so nobody stops looking: the operator's live
+duplicate bound tokens (msg 9100). The retire-then-remint sequence gated
+here cannot have run on that box; the live cause is undetermined until the
+discriminating query (9119) answers against the live db.
+
 0.2.82 THE LOCK CANNOT LIE AND THE STOP HOOK CANNOT ROT. Two accepted slices.
 The version gate: three times a bump left uv.lock recording the previous
 release, so test_daemon now pins the reveille entry in uv.lock to the version
