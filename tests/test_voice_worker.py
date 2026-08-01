@@ -205,16 +205,22 @@ def test_no_rooms_is_the_one_recoverable_refusal(monkeypatch):
     that leaves its LAST room gets no_rooms on its next attach, and a fatal exit
     there means nothing respawns waked until the entrypoint runs again --
     possibly never. A reversible state must not become permanent deafness.
-    waked already owns the right machinery: None reconnects on the fixed
-    interval, exactly as it does for a broker restart. Asserted over the source
-    the way the wake_ws gates are: the no_rooms arm returns None BEFORE the
-    generic fatal arm, and the broker frame carries retry:true so the wire says
-    which family it is."""
+    Since ruling 9119 the arm returns the NO_ROOMS sentinel rather than None:
+    still reconnect-class -- the property this gate pins is that _session does
+    NOT turn the refusal into an exit code -- but distinguishable, so the loop
+    can apply the backoff ladder and the 30-minute bound instead of resetting
+    them (the 1.00s-flat unbounded loop devops measured at 9104). Asserted
+    over the source the way the wake_ws gates are: the no_rooms arm returns
+    the sentinel BEFORE the generic fatal arm, and the broker frame carries
+    retry:true so the wire says which family it is."""
     src = pathlib.Path(daemon.__file__.replace("daemon.py", "waked.py")).read_text()
     handler = src[src.index('if obj.get("error") == "no_rooms"'):]
     handler = handler[:handler.index('if obj.get("reason")')]
     arms = handler.split('if obj.get("error"):')
-    assert "return None" in arms[0], "no_rooms must reconnect, not exit"
+    assert "return NO_ROOMS" in arms[0], (
+        "no_rooms must return the reconnect-class sentinel -- neither an exit "
+        "code (permanent deafness, msg 9060) nor None (reads as a clean "
+        "session and resets the ladder, msg 9104)")
     assert "return 1" in arms[1], "every OTHER refusal stays fatal -- bad_token cannot fix itself"
     assert src.index('"no_rooms"') < src.index('if obj.get("error"):'), \
         "the recoverable arm must run before the fatal one, or it is dead code"
