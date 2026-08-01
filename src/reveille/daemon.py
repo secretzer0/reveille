@@ -193,6 +193,28 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.80 THE INSTALLER CONVERGES ON CORRECTNESS, AND NATIVE TMUX IS OPT-IN. The
+first native agent's first shipped branch, and the finding is the night's gate
+lesson wearing installer clothes: install.py matched an existing Stop hook on
+its NAME and returned -- so a wrong-but-present value was permanent, re-running
+init CONFIRMED a broken machine instead of repairing it, and 0.2.77's
+durable-path fix could not reach a single machine that already had the cache
+path, because every such machine took the early return. Three separate rescue
+prescriptions ("re-run init") were impossible the whole time, and a test on
+main enshrined the wrong side while its own comment praised remove-then-add
+for the MCP half. is_durable() now asks the question that was never asked --
+would this command still run after a cache prune and a repo move -- and a
+failing answer re-points the entry while a correct one stays byte-identical:
+idempotence preserved, now meaning convergence rather than detection. And
+tmux on native is opt-in (--tmux / REVEILLE_TMUX=1), per the operator: it
+exists for the container, where ttyd attaches to it; a host with tmux
+installed is no longer silently re-execed into a session it never asked for,
+and --no-tmux no longer falls through onto claude.
+
+Verified native by its author on the real defect state; container path
+untouched by inspection (entrypoint starts its own session and never calls
+agent-launch) -- container run still owed under the two-shape doctrine.
+
 0.2.79 THE PANEL MINTS WITH ROOMS AND TEACHES THE SHAPE THAT PERSISTS, AND THE
 SYNTHESIZER EXISTS. senior-ui-ux's accepted stack: the install panel picks
 rooms BEFORE the mint (the same one-transaction rule the wizard follows), the
