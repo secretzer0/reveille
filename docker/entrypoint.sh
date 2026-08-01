@@ -250,9 +250,18 @@ import json, os, pathlib
 home = pathlib.Path.home()
 
 
-def patch(path, updates):
+def patch(path, updates, converge=None):
     """setdefault-merge one JSON file, atomically. Only ABSENT keys are written:
-    an agent that changed a setting keeps its choice across restarts."""
+    an agent that changed a setting keeps its choice across restarts.
+
+    converge: keys written UNCONDITIONALLY, replacing whatever is present.
+    Reserved for values that are a reachability contract, where present-but-
+    wrong is fatal and silent -- a persisted settings.json carrying a stale
+    Stop hook otherwise keeps it across every re-provision, and re-provisioning
+    is the one remedy anyone reaches for. Same rule install.py's hook half
+    already enforces: converge on correctness, never on presence. Dicts
+    recurse (sibling keys survive); anything else is assigned, and a wrong-
+    TYPE intermediate is replaced rather than crashed on."""
     try:
         d = json.loads(path.read_text())
     except (OSError, ValueError):
@@ -264,6 +273,16 @@ def patch(path, updates):
             else:
                 dst.setdefault(k, v)
     merge(d, updates)
+    def assign(dst, src):
+        for k, v in src.items():
+            if isinstance(v, dict):
+                if not isinstance(dst.get(k), dict):
+                    dst[k] = {}
+                assign(dst[k], v)
+            else:
+                dst[k] = v
+    if converge:
+        assign(d, converge)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(d, indent=2))
@@ -301,11 +320,17 @@ patch(home / ".claude.json", {
 # deaf for 21 HOURS with 44 rings in its spool, on a bus that was healthy again
 # after the first few minutes (msg 8573). The hook needs no bus to run and is
 # most needed when there is none.
+#
+# The Stop hook CONVERGES while everything else setdefaults, and the asymmetry
+# is the design (ruling 9094): permissions and the bypass acknowledgement are
+# the agent's to change, so present wins; the Stop hook decides whether this
+# agent can be WOKEN, so present-but-wrong must lose. hooks.Stop is replaced
+# whole -- other hooks the agent added ride along untouched.
 patch(home / ".claude" / "settings.json",
       {"permissions": {"defaultMode": "bypassPermissions"},
-       "skipDangerousModePermissionPrompt": True,
-       "hooks": {"Stop": [{"hooks": [{"type": "command",
-                                      "command": "/usr/local/bin/agent-stop-hook"}]}]}})
+       "skipDangerousModePermissionPrompt": True},
+      converge={"hooks": {"Stop": [{"hooks": [{"type": "command",
+                                    "command": "/usr/local/bin/agent-stop-hook"}]}]}})
 PY
 
 # home-login mode (launcher mounts the user's login home read-only at
