@@ -193,6 +193,24 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.82 THE LOCK CANNOT LIE AND THE STOP HOOK CANNOT ROT. Two accepted slices.
+The version gate: three times a bump left uv.lock recording the previous
+release, so test_daemon now pins the reveille entry in uv.lock to the version
+pyproject declares -- BOTH read from HEAD via git show, because uv run
+re-locks the working copy to match pyproject before pytest reads a byte, so a
+file-reading assertion is green in exactly the broken state, healed by the
+command that runs it. Ruled general (9101): a gate must read the artifact
+from the commit whenever its own runner can repair the working copy. And the
+entrypoint's patch() gains converge= -- hooks.Stop is written unconditionally
+while every other key stays setdefault, closing the sibling-writer half of
+0.2.80's installer fix: a persisted settings.json carrying a wrong-but-
+present Stop hook survived every re-provision, and the Stop hook is the one
+key where present-but-wrong is deafness, not preference. Sibling hooks keys
+survive; the writer set for hooks.Stop is closed at two and both converge.
+
+Agent image moves to reveille-agent:0.2.16 (entrypoint is baked). NOT BUILT
+at this writing -- the build follows on the broker host, after this commit.
+
 0.2.81 THE CONTAINERS CATCH UP TO THE REACHABILITY WORK. Agent image 0.2.15
 (devops, accepted at 9094): reveille-agent:0.2.14 was built before 0.2.53, so
 every container in the fleet ran a waked, a wake-watch and a Stop hook from 27
