@@ -193,6 +193,26 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.87 THE LAUNCHER'S UID AND THE CONTAINER'S UID ARE DIFFERENT QUESTIONS, and
+they were one only by accident. The image bakes ARG UID=1000 and the operator
+is uid 1000, so `os.chmod` on data/<user> had never once been asked to fail.
+Move the launcher to any other account -- which is what a real deployment is,
+and what this box became tonight -- and ensure_login_home dies with EPERM on
+that path, taking the browser login and the credential save with it. chmod
+needs OWNERSHIP, not write permission, so no mode could have fixed it. The
+launcher now TAKES ownership of data/<user> through the privilege it actually
+has: not CAP_CHOWN, but the docker socket, via the same root-container chown
+_own_agent_dirs already used for the agent homes -- non-recursive, so those
+homes keep the image's uid. THREE writers created that directory with the same
+makedirs+chmod pair (save_profile, ensure_login_home, provision_agent) and all
+three move together; fixing one would have made the login work and the next
+provision fail identically. The mode stays 0700: 0711 was drafted and the
+suite refused it, because profile.json holds the user's github and claude
+tokens and nothing needs to traverse a directory the launcher owns. The gate
+asserts the ARGV and the CALL rather than a real chown, so it is true on a
+uid-1000 box too -- a fixture that only fails where the uids differ would have
+passed on the two earlier sightings of this same defect.
+
 0.2.86 THE SMOKE SPEAKS THE CLI IT DRIVES. launch_smoke -- the DES-002 T2
 end-to-end gate -- still called the pre-tenancy CLI (new role repo) and has
 been UNRUNNABLE since the user positional landed: running it needs a docker

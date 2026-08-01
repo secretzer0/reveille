@@ -620,8 +620,7 @@ def save_profile(user, prof, base=None):
     """0600 at open (never chmod-after), user root 0700 first -- the same
     discipline as join-here's env fragment."""
     path = profile_path(user, base)
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    os.chmod(os.path.dirname(path), 0o700)
+    ensure_launcher_dir(os.path.dirname(path))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(prof, f)
@@ -918,8 +917,7 @@ def ensure_login_home(user, image):
     coincidence that hid it the first two times. provision_agent already does
     this for the agent home; the login home needs it for the same reason."""
     root = user_auth_root(user)
-    os.makedirs(os.path.dirname(root), mode=0o700, exist_ok=True)
-    os.chmod(os.path.dirname(root), 0o700)
+    ensure_launcher_dir(os.path.dirname(root), image)
     os.makedirs(root, mode=0o700, exist_ok=True)
     _own_agent_dirs(root, image, subdirs=())   # the login home IS ~/.claude
     return os.path.isfile(os.path.join(root, ".credentials.json"))
@@ -997,6 +995,64 @@ def own_dirs_argv(root, image, subdirs=("claude", "repos")):
     return ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "chown",
             "-v", f"{root}:/own", image,
             "-R", f"{AGENT_UID}:{AGENT_GID}", *targets]
+
+
+def own_path_argv(path, image, uid, gid, recursive=False):
+    """The chown container's argv for ONE path, pure for the same reason
+    own_dirs_argv is: the uid-critical shape has to be assertable on a box
+    where the accident cannot hide.
+
+    NOT -R by default, and that default is the whole point. The per-user dir
+    has the AGENT dirs beneath it, and those belong to the image's uid -- a
+    recursive chown here would take them and undo _own_agent_dirs on every
+    call. One directory, not a tree."""
+    return ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "chown",
+            "-v", f"{path}:/own", image,
+            *(["-R"] if recursive else []), f"{uid}:{gid}", "/own"]
+
+
+# data/<user>/ stays CLOSED at 0700, and the fix is about OWNERSHIP alone.
+#
+# I proposed 0711 and the suite refused it: test_profile_file_is_0600_and_holds
+# _the_only_copy pins this mode because profile.json lives here and carries the
+# user's github and claude tokens. 0600 protects the file; 0700 stops another
+# host user traversing to the agent homes beneath it, which hold the credential
+# copied in at boot. Once the launcher OWNS this directory nothing else needs to
+# traverse it -- dockerd sets up every bind mount as root -- so the loosening
+# bought nothing and widened exposure on exactly the multi-user box this whole
+# change exists to support. The pin was right and it fired the moment I moved
+# the contract, which is what pins are for.
+USER_DIR_MODE = 0o700
+
+
+def ensure_launcher_dir(path, image=None):
+    """THIS directory belongs to the LAUNCHER. Everything BELOW it belongs to
+    the IMAGE. Splitting those two was the operator's ruling on 2026-08-01.
+
+    They were one uid until tonight, and only by accident: the image bakes
+    ARG UID=1000 and the operator happens to be uid 1000, so `os.chmod` on a
+    dir the launcher did not own had never once been asked to fail. Move the
+    launcher to any other account -- which is what a real deployment is -- and
+    ensure_login_home dies with EPERM on this exact path, taking the browser
+    login and the credential save with it. chmod needs OWNERSHIP, not write
+    permission, which is why a mode fix alone could never have worked.
+
+    So the launcher TAKES ownership rather than assuming it, through the same
+    privilege it uses everywhere else: not CAP_CHOWN, which it may not have,
+    but the docker socket, which it has by definition. Non-recursive, so the
+    agent homes underneath keep the image's uid.
+
+    Idempotent by CONVERGENCE: an already-correct dir is chowned by nobody and
+    re-chmodded to the same mode, and a wrong-owner dir is repaired rather than
+    reported as present. The other shape is what made `reveille init` confirm a
+    broken machine (msg 9067)."""
+    os.makedirs(path, mode=USER_DIR_MODE, exist_ok=True)
+    if os.stat(path).st_uid != os.getuid():
+        subprocess.run(own_path_argv(path, image or DEFAULT_IMAGE,
+                                     os.getuid(), os.getgid()),
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.chmod(path, USER_DIR_MODE)
+    return path
 
 
 def _own_agent_dirs(root, image, subdirs=("claude", "repos")):
@@ -1119,12 +1175,13 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         extra_env.append("ANTHROPIC_MODEL")
         env["ANTHROPIC_MODEL"] = model
 
-    # The agent's home, nothing else's (sec 4). The USER root is 0700 so no other
-    # host user browses it; the agent dirs under it belong to the AGENT.
+    # The agent's home, nothing else's (sec 4). The USER root belongs to the
+    # LAUNCHER and is traverse-only for everyone else; the agent dirs under it
+    # belong to the AGENT. Two uids, split deliberately -- see
+    # ensure_launcher_dir for why they were one by accident until 2026-08-01.
     root = data_root(user, agent)
     user_root = os.path.dirname(root)
-    os.makedirs(user_root, mode=0o700, exist_ok=True)
-    os.chmod(user_root, 0o700)
+    ensure_launcher_dir(user_root, image)
     for sub in ("claude", "repos"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
     _own_agent_dirs(root, image)
