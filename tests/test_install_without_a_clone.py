@@ -502,6 +502,36 @@ def test_an_ephemeral_run_persists_itself_before_the_hook(monkeypatch, tmp_path)
     assert not calls
 
 
+def test_the_installer_grants_the_permission_its_registration_needs(
+        tmp_path, monkeypatch):
+    """The operator's Mac, first boot after a clean install: join() was
+    refused by permission policy. Everything the installer wrote was present
+    -- registration, hook, credential -- and the first real bus call still
+    needed an approval nobody was there to give. The installer must grant
+    what it registers: the explicit permissions.allow rule for the reveille
+    server, the way a user pre-approves a tool in settings.json. Converged
+    like the hook (a machine installed before this fix gains the rule on
+    re-run), and idempotent after that."""
+    cfg = tmp_path / ".claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    monkeypatch.setattr(install.shutil, "which", lambda n: None)
+    assert install.main() == 0
+    s = json.loads((cfg / "settings.json").read_text())
+    assert install.MCP_ALLOW in s["permissions"]["allow"]
+    # a pre-fix machine: durable hook already present, no permission rule --
+    # the re-run CONVERGES rather than reporting already-installed and leaving
+    (cfg / "settings.json").write_text(json.dumps(
+        {"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": "reveille-stop-hook"}]}]}}))
+    assert install.main() == 0
+    s = json.loads((cfg / "settings.json").read_text())
+    assert install.MCP_ALLOW in s["permissions"]["allow"]
+    # and once correct, a re-run is byte-identical
+    before = (cfg / "settings.json").read_text()
+    assert install.main() == 0
+    assert (cfg / "settings.json").read_text() == before
+
+
 def test_the_boot_prompt_arms_the_living_ritual_not_the_retired_one():
     """The first native agent's boot banner told it to run `wake --once` -- the
     RETIRED pre-DES-003 arm, which grabs the wake socket itself and fights the
@@ -556,10 +586,14 @@ def test_the_hook_command_is_never_a_cache_path(monkeypatch, tmp_path):
 # machine takes the early return below. These start from WRONG.
 
 def _settings_naming(cfg, command):
+    # A correct install carries the permission rule too (the installer grants
+    # what it registers); a machine from before that fix is modelled explicitly
+    # in test_the_installer_grants_the_permission_its_registration_needs.
     cfg.mkdir(parents=True, exist_ok=True)
     (cfg / "settings.json").write_text(json.dumps(
         {"hooks": {"Stop": [{"hooks": [{"type": "command",
-                                        "command": command}]}]}},
+                                        "command": command}]}]},
+         "permissions": {"allow": [install.MCP_ALLOW]}},
         indent=2) + "\n")
     return cfg / "settings.json"
 
