@@ -78,11 +78,33 @@ def settings_path():
                         or (pathlib.Path.home() / ".claude")) / "settings.json"
 
 
+MCP_ALLOW = "mcp__reveille"
+
+
+def ensure_allow(settings):
+    """The installer must GRANT what it REGISTERS. On the operator's Mac the
+    first join() after a clean install was refused by permission policy: the
+    machine had the MCP registration, the hook, the credential -- it LOOKED
+    configured -- and the first real bus call still needed an approval nobody
+    was there to give. The explicit allow rule is how a user pre-approves a
+    tool in settings.json; its scope is the one server this installer itself
+    registers, no wider. Returns a step line, or None when the rule is already
+    present."""
+    allow = settings.setdefault("permissions", {}).setdefault("allow", [])
+    if MCP_ALLOW in allow:
+        return None
+    allow.append(MCP_ALLOW)
+    return f"permissions: {MCP_ALLOW} allowed (the bus tools work on first use)"
+
+
 def main():
     SETTINGS = settings_path()
     hook = hook_command()
     settings = json.loads(SETTINGS.read_text()) if SETTINGS.exists() else {}
+    perm_line = ensure_allow(settings)
+    wrote = perm_line is not None
     stops = settings.setdefault("hooks", {}).setdefault("Stop", [])
+    hook_line = None
     for group in stops:
         for h in group.get("hooks", []):
             cmd = h.get("command", "")
@@ -104,18 +126,25 @@ def main():
             # -- idempotence is preserved, it just now means converging
             # rather than detecting.
             if is_durable(cmd):
-                print(f"stop hook already installed: {cmd}")
-                return 0
-            h["command"] = hook
-            SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-            SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
-            print(f"stop hook re-pointed (the old one would not survive a "
-                  f"`uv cache prune` or a moved clone): {cmd} -> {hook}")
-            return 0
-    stops.append({"hooks": [{"type": "command", "command": hook}]})
-    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
-    print(f"stop hook installed -> {SETTINGS} ({hook})")
+                hook_line = f"stop hook already installed: {cmd}"
+            else:
+                h["command"] = hook
+                wrote = True
+                hook_line = (f"stop hook re-pointed (the old one would not survive "
+                             f"a `uv cache prune` or a moved clone): {cmd} -> {hook}")
+            break
+        if hook_line:
+            break
+    if hook_line is None:
+        stops.append({"hooks": [{"type": "command", "command": hook}]})
+        wrote = True
+        hook_line = f"stop hook installed -> {SETTINGS} ({hook})"
+    if wrote:
+        SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+    if perm_line:
+        print(perm_line)
+    print(hook_line)
     return 0
 
 
