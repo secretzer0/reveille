@@ -193,6 +193,16 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.89 THE INSTALLER GRANTS WHAT IT REGISTERS. First boot on the operator's
+Mac: join() was refused by permission policy. Registration, hook, credential
+all present -- the machine LOOKED configured -- and the first real bus call
+still needed an approval nobody was there to give. reveille-install-hook now
+converges permissions.allow with "mcp__reveille" (the one server it
+registers, no wider) alongside the Stop hook, in the same single write: the
+settings.json pre-approval a user would otherwise add by hand. A machine
+installed before this fix gains the rule on any re-run of `reveille init`;
+a correct file stays byte-identical.
+
 0.2.88 PRESENT IS NOT DURABLE. `reveille init`'s ensure_on_path() checked
 bare which() -- but uvx puts its ephemeral bin FIRST on the child PATH, so
 from inside init the agent binary is always "present" and the uv tool
