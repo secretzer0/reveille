@@ -263,10 +263,16 @@ def ensure_on_path():
     garbage-collected, so nothing this run installed survives it -- the closing
     `reveille-agent <name>` was command-not-found on the operator's first real
     run, and worse, the Stop hook had captured the CACHE path, which dies at the
-    next uv cache prune. If reveille-agent is not on PATH, make the install
-    persistent with the uv that is necessarily running us. Returns a step line,
-    or None when already persistent."""
-    if shutil.which("reveille-agent"):
+    next uv cache prune. And a bare which() cannot see the problem from inside
+    the problem: uvx puts its ephemeral bin FIRST on PATH, so during `uvx ...
+    reveille init` the agent binary is always "present" and the presence check
+    skipped the persist on every machine -- the operator's Mac hit the exact
+    command-not-found this function exists to prevent. Presence is not
+    durability (install.py learned this at msg 9067); ask whether the copy
+    would survive a cache prune. Returns a step line, or None when already
+    persistent."""
+    w = shutil.which("reveille-agent")
+    if w and install.is_durable(w):
         return None
     uv = shutil.which("uv") or "uv"
     r = subprocess.run([uv, "tool", "install", "--force", "--from", GIT_SOURCE,
@@ -276,9 +282,13 @@ def ensure_on_path():
     # this process's PATH may predate ~/.local/bin; the hook installer resolves
     # commands with which(), so it must see the durable copies
     local_bin = os.path.expanduser("~/.local/bin")
+    step = f"persisted: uv tool install reveille -> {local_bin} (uvx runs are ephemeral)"
     if local_bin not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
-    return f"persisted: uv tool install reveille -> {local_bin} (uvx runs are ephemeral)"
+        # uv prints its own PATH warning, but capture_output above swallows it
+        step += (" -- ~/.local/bin is not on your shell PATH: run "
+                 "`uv tool update-shell` once, then open a new shell")
+    return step
 
 
 def read_password(user, prompt=None):

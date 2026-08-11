@@ -469,12 +469,17 @@ def test_the_room_picker_shows_owners_and_defaults_to_yours():
 def test_an_ephemeral_run_persists_itself_before_the_hook(monkeypatch, tmp_path):
     """The operator's run ended in `reveille-agent: command not found`: a uvx
     run is ephemeral, so its console scripts live in a GC-able cache and the
-    Stop hook had captured that cache path. If reveille-agent is not on PATH,
-    init persists the install with the uv that is necessarily running it --
-    BEFORE the hook writes a command path into settings.json."""
+    Stop hook had captured that cache path. The first fix checked bare
+    presence -- but uvx puts its ephemeral bin FIRST on PATH, so from inside
+    `uvx ... reveille init` which() ALWAYS answers with the cache copy, the
+    persist was skipped on every machine, and the operator's Mac hit
+    command-not-found again. A cache hit must count as absent; only a copy
+    that survives `uv cache prune` counts as installed."""
     calls = []
-    monkeypatch.setattr(cli.shutil, "which",
-                        lambda n: "/usr/bin/uv" if n == "uv" else None)
+    hits = {"uv": "/usr/bin/uv",
+            "reveille-agent": "/home/x/.cache/uv/archive-v0/AbC123/bin/reveille-agent"}
+    monkeypatch.setattr(cli.shutil, "which", hits.get)
+    monkeypatch.setenv("PATH", "/usr/bin")
 
     class R:
         returncode = 0
@@ -485,8 +490,13 @@ def test_an_ephemeral_run_persists_itself_before_the_hook(monkeypatch, tmp_path)
     assert calls and calls[0][:3] == ["/usr/bin/uv", "tool", "install"]
     assert cli.GIT_SOURCE in calls[0]
     assert "ephemeral" in step
-    # and a persistent install is left alone
-    monkeypatch.setattr(cli.shutil, "which", lambda n: "/home/x/.local/bin/" + n)
+    # capture_output swallowed uv's own PATH warning: the step line carries it
+    assert "uv tool update-shell" in step
+    # and a persistent install -- a real file outside any cache -- is left alone
+    durable = tmp_path / ".local" / "bin" / "reveille-agent"
+    durable.parent.mkdir(parents=True)
+    durable.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(cli.shutil, "which", lambda n: str(durable))
     calls.clear()
     assert cli.ensure_on_path() is None
     assert not calls
