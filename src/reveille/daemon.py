@@ -193,6 +193,18 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.88 PRESENT IS NOT DURABLE. `reveille init`'s ensure_on_path() checked
+bare which() -- but uvx puts its ephemeral bin FIRST on the child PATH, so
+from inside init the agent binary is always "present" and the uv tool
+install persist never ran on any machine; the operator's Mac, the first
+real off-host install, ended in `reveille-agent: command not found`, the
+exact failure the function exists to prevent. The unit test mocked which()
+to None -- the mock encoded the wrong world. Now asks install.is_durable
+(would the copy survive `uv cache prune`) instead of presence, and the
+step line names `uv tool update-shell` when ~/.local/bin is off the shell
+PATH, since capture_output was swallowing uv's own warning. Init-path
+only; no broker behavior change.
+
 0.2.87 THE LAUNCHER'S UID AND THE CONTAINER'S UID ARE DIFFERENT QUESTIONS, and
 they were one only by accident. The image bakes ARG UID=1000 and the operator
 is uid 1000, so `os.chmod` on data/<user> had never once been asked to fail.
