@@ -132,18 +132,28 @@ SERVER_NETWORK ?= reveille
 AGENTS_PATH ?= /agents
 PROXY_IMAGE ?= caddy:2-alpine
 PROXY_PORT  ?= 80
+# Full Caddy site address for the proxy. The default keeps the historical shape
+# (plain HTTP on PROXY_PORT); setting a hostname (PROXY_SITE=reveille.mythos.org)
+# turns on Caddy's automatic HTTPS -- LE issuance and renewal via TLS-ALPN-01.
+PROXY_SITE  ?= :$(PROXY_PORT)
 BROKER_NAME ?= reveille-server
 PROXY_NAME  ?= reveille-proxy
 TTS_NAME    ?= reveille-tts
 # COMPOSE_EXTRA: overlay files layered by variant targets (up-dev). Empty for
 # the real deploy, so `make up` composes exactly one file.
 COMPOSE_EXTRA =
+# The compose PROJECT owns the containers: two invocations sharing a project
+# ADOPT each other's containers, so a scratch run with scratch names RECREATES
+# the live broker onto scratch config and its teardown stops the live stack
+# (measured 2026-08-13: compose_gate took the live bus down for ~15 minutes).
+# Scratch invocations MUST override this; the default is the live project.
+COMPOSE_PROJECT ?= reveille
 COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
   REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
-  PROXY_IMAGE=$(PROXY_IMAGE) PROXY_PORT=$(PROXY_PORT) \
+  PROXY_IMAGE=$(PROXY_IMAGE) PROXY_SITE=$(PROXY_SITE) \
   BROKER_NAME=$(BROKER_NAME) PROXY_NAME=$(PROXY_NAME) \
   TTS_IMAGE=$(TTS_IMAGE) TTS_NAME=$(TTS_NAME) \
-  docker compose -f docker/compose.yml $(COMPOSE_EXTRA)
+  docker compose -p $(COMPOSE_PROJECT) -f docker/compose.yml $(COMPOSE_EXTRA)
 
 # REFUSES TO REBUILD AN EXISTING TAG. The version string is the image tag; building
 # changed content under a tag that exists makes two images answer to one name and
@@ -204,7 +214,7 @@ up:
 	@# The check stays, now as the assertion that the fix above worked rather
 	@# than as the thing that tells someone to go and do it.
 	@bash scripts/launcher-pin-check || exit 1
-	@echo "reveille up: proxy :$(PROXY_PORT) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
+	@echo "reveille up: proxy $(PROXY_SITE) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
 
 # `make up` with the working tree's UI mounted LIVE (docker/compose.dev.yml):
 # edit src/reveille/ui/bus/index.html, refresh, done -- no rebuild. Same

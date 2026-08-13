@@ -10,9 +10,13 @@
 #
 # Both upstreams are 127.0.0.1: the launcher binds loopback only and this runs
 # with --network host, so the proxy is the only way in.
-# Port and upstreams come from the environment with production defaults, so the
-# SAME file the deployment runs is the one the gate exercises on scratch ports.
-:{$PROXY_PORT:80} {
+# Site address and upstreams come from the environment with production defaults,
+# so the SAME file the deployment runs is the one the gate exercises on scratch
+# ports. PROXY_SITE is a full Caddy site address: ":80" (default) serves plain
+# HTTP on a port; a hostname ("reveille.mythos.org") turns on automatic HTTPS --
+# Caddy issues and renews the Let's Encrypt cert itself via TLS-ALPN-01, which
+# needs only 443 routed here by SNI, no port 80 and no DNS API.
+{$PROXY_SITE::80} {
 	handle_path /agents* {
 		reverse_proxy {$LAUNCHER_UPSTREAM:127.0.0.1:8766}
 	}

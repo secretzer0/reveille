@@ -96,7 +96,7 @@ def main():
         # is the file under test, which is the only way this gate means anything.
         subprocess.run(
             ["docker", "run", "-d", "--rm", "--name", cname, "--network", "host",
-             "-e", f"PROXY_PORT={pport}",
+             "-e", f"PROXY_SITE=:{pport}",
              "-e", f"BROKER_UPSTREAM=127.0.0.1:{bport}",
              "-e", f"LAUNCHER_UPSTREAM=127.0.0.1:{lport}",
              "-v", f"{REPO / 'docker' / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
