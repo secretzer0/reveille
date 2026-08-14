@@ -193,6 +193,18 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.90 THE DIRECTORY IS THE AGENT, AND THE FRONT DOOR HAS A PUBLIC NAME.
+Two merges. (1) reveille init now writes the credential into the agent
+directory's .claude/settings.local.json env block -- Claude Code injects it
+at session start, so plain `claude` run there IS that agent, and one machine
+holds as many agents as it has initialized directories. ~/.reveille/agent.env
+and the reveille-agent wrapper are RETIRED; re-run `reveille init` in each
+agent directory to migrate. (2) The proxy takes PROXY_SITE (a full Caddy site
+address; a hostname turns on automatic HTTPS via TLS-ALPN-01) with certs
+persisted in the caddy-data volume, and every scratch compose invocation must
+override COMPOSE_PROJECT -- container names never isolated anything, the
+project is the ownership boundary.
+
 0.2.89 THE INSTALLER GRANTS WHAT IT REGISTERS. First boot on the operator's
 Mac: join() was refused by permission policy. Registration, hook, credential
 all present -- the machine LOOKED configured -- and the first real bus call
