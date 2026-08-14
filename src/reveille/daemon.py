@@ -193,6 +193,13 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.92 THE INSTALLER SEEDS THE MODES. reveille init seeds
+CAVEMAN_DEFAULT_MODE=ultra and PONYTAIL_DEFAULT_MODE=full into the agent
+directory's env block -- an agent talks terse and builds lazy from its first
+session, without hand-editing. Seeded via setdefault, never converged: a
+hand-tuned level survives every re-run. Inert where those plugins are not
+installed. Init-path only; no broker behavior change, no deploy owed.
+
 0.2.91 THE HEADERS COME FROM THE DIRECTORY. The 0.2.90 per-directory flow had
 a seam the acceptance run caught: Claude Code expands MCP ${VAR} headers from
 the process env at connect time, BEFORE project settings env is injected, so
