@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "reveille": {
+      "type": "http",
+      "url": "https://reveille.mythos.org/mcp",
+      "headersHelper": "reveille-headers"
+    }
+  }
+}
