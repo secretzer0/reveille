@@ -103,7 +103,9 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     local = work / ".claude" / "settings.local.json"
     env = json.loads(local.read_text())["env"]
     assert env == {"REVEILLE_URL": broker, "REVEILLE_AGENT_ROLE": "dev-agent",
-                   "REVEILLE_TOKEN": "sekrit"}
+                   "REVEILLE_TOKEN": "sekrit",
+                   "CAVEMAN_DEFAULT_MODE": "ultra",
+                   "PONYTAIL_DEFAULT_MODE": "full"}
     assert oct(local.stat().st_mode)[-3:] == "600"
 
     # 4. it PROVED it worked, and against a route that RESOLVES THE TOKEN.

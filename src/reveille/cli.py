@@ -140,6 +140,15 @@ def write_credential(url, name, token, workdir):
     env["REVEILLE_URL"] = url
     env["REVEILLE_AGENT_ROLE"] = name
     env["REVEILLE_TOKEN"] = token
+    # SEEDED, NOT CONVERGED, and the split is deliberate: a credential has one
+    # correct value so wrong ones are rewritten above, but these are the
+    # operator's communication-mode preferences (operator directive,
+    # 2026-08-13) -- an agent talks caveman-ultra for token economy and builds
+    # ponytail-full for restraint, IF those plugins are installed; the vars are
+    # inert otherwise. A value the user tuned by hand IS the correct value, so
+    # setdefault never overrides an existing choice, only fills an absence.
+    env.setdefault("CAVEMAN_DEFAULT_MODE", "ultra")
+    env.setdefault("PONYTAIL_DEFAULT_MODE", "full")
     # The directory's .mcp.json (write_mcp_json) is what carries the identity
     # into MCP, and a project-scope server needs the session's approval;
     # granting it here is the same single-write pre-approval the installer
