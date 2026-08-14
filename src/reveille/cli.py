@@ -38,10 +38,6 @@ import urllib.request
 from . import install
 
 
-def env_file(home=None):
-    return pathlib.Path(home or pathlib.Path.home()) / ".reveille" / "agent.env"
-
-
 def read_token(args_token, stdin=None):
     """Environment, then stdin, then the flag nobody should use. Returns the token
     or None. The order is the security order, not a convenience order."""
@@ -62,10 +58,11 @@ def mcp_argv(url, name, token, claude="claude"):
     rotation: re-running init SUPERSEDES the old token, "already registered
     (left alone)" kept the stale baked header, and every MCP call 401ed on a
     machine that looked fully installed. With ${VAR} expansion the credential
-    lives in exactly ONE place -- ~/.reveille/agent.env, which reveille-agent
-    exports into the session -- so a rotation is a one-file rewrite and the
-    registration never goes stale. name and token stay in the signature because
-    callers still validate them; the config carries neither.
+    lives in exactly ONE place per agent -- the env block of the agent
+    directory's .claude/settings.local.json, which Claude Code injects at
+    session start -- so a rotation is a one-file rewrite and the registration
+    never goes stale. name and token stay in the signature because callers
+    still validate them; the config carries neither.
     """
     return [claude, "mcp", "add", "--transport", "http", "--scope", "user",
             "reveille", url.rstrip("/") + "/mcp",
@@ -112,15 +109,42 @@ def verify(url, name, token, timeout=10):
         return False, f"{e} -- the broker did not answer"
 
 
-def write_credential(url, name, token, home=None):
-    """0600, and the directory too. This file is the credential; a mode that lets
-    another account on this machine read it makes the whole boundary decorative."""
-    path = env_file(home)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def write_credential(url, name, token, workdir):
+    """THE DIRECTORY IS THE AGENT (operator ruling, 2026-08-13). The credential
+    goes in <workdir>/.claude/settings.local.json's env block, which Claude Code
+    injects at session start -- so plain `claude` run in that directory IS the
+    agent: MCP headers, the Stop hook and the waked it spawns all inherit the
+    identity from the session env. One machine holds as many agents as it has
+    directories; ~/.reveille/agent.env and the reveille-agent wrapper are gone.
+
+    CONVERGES rather than detects presence (the installer's own idempotence
+    ruling): existing REVEILLE_* values are rewritten to correct, every other
+    key in the file is preserved. A file that cannot be parsed is refused, not
+    clobbered -- it holds settings this installer does not own. 0600, atomic
+    replace: this file is the credential; a mode that lets another account read
+    it makes the whole boundary decorative."""
+    d = pathlib.Path(workdir) / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "settings.local.json"
+    cfg = {}
+    if path.exists():
+        try:
+            cfg = json.loads(path.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise RuntimeError(
+                f"{path} exists and is not valid JSON ({e}). It holds settings "
+                f"this installer does not own, so it is refused rather than "
+                f"clobbered -- fix or remove it, then re-run.")
+    env = cfg.setdefault("env", {})
+    env["REVEILLE_URL"] = url
+    env["REVEILLE_AGENT_ROLE"] = name
+    env["REVEILLE_TOKEN"] = token
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(f"REVEILLE_URL={url}\nREVEILLE_AGENT_ROLE={name}\n"
-                f"REVEILLE_TOKEN={token}\n")
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
     os.chmod(path, 0o600)          # explicit, in case the file already existed
     return path
 
@@ -269,9 +293,10 @@ def ensure_on_path():
     skipped the persist on every machine -- the operator's Mac hit the exact
     command-not-found this function exists to prevent. Presence is not
     durability (install.py learned this at msg 9067); ask whether the copy
-    would survive a cache prune. Returns a step line, or None when already
-    persistent."""
-    w = shutil.which("reveille-agent")
+    would survive a cache prune. The probe binary is reveille-waked -- the
+    console script whose durability decides whether an agent can be woken at
+    all. Returns a step line, or None when already persistent."""
+    w = shutil.which("reveille-waked")
     if w and install.is_durable(w):
         return None
     uv = shutil.which("uv") or "uv"
@@ -502,9 +527,14 @@ def cmd_init(a):
         return 1
     steps.append("hook: installed")
 
-    path = write_credential(url, name, token, a.home)
-    steps.append(f"credential: {path} (0600)")
-    steps.append(f"workdir: {workdir}")
+    try:
+        path = write_credential(url, name, token, workdir)
+    except RuntimeError as e:
+        print(f"reveille init: REFUSING at the credential step -- {e}\n"
+              f"The MCP registration and Stop hook above stand; re-run once the "
+              f"file is fixed and init converges the rest.", file=sys.stderr)
+        return 1
+    steps.append(f"credential: {path} (0600) -- this directory IS the agent")
     if agent_type:
         seeded = starter_claude_md(workdir, name, agent_type)
         steps.append(f"role: {agent_type}" + (f", CLAUDE.md written to {seeded}"
@@ -513,11 +543,12 @@ def cmd_init(a):
 
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
-    print(f"start working:  cd {workdir} && reveille-agent {name}")
-    print("  `reveille-agent` sources the credential above and exports it into the "
-          "session. "
-          "Plain `claude` would start a session with no REVEILLE_AGENT_ROLE, whose "
-          "Stop hook goes inert -- it could send on the bus and would never be woken.")
+    print(f"start working:  cd {workdir} && claude")
+    print("  The credential lives in that directory's .claude/settings.local.json, "
+          "so any session started THERE carries this identity -- and a session "
+          "started elsewhere carries none: its Stop hook stays inert and nothing "
+          "wakes it. One directory, one agent; run init in another directory to "
+          "make another agent.")
     return 0
 
 
@@ -530,10 +561,11 @@ def main(argv=None):
     i.add_argument("token", nargs="?",
                    help="'-' to read the token from stdin. Prefer $REVEILLE_TOKEN: "
                         "a token in argv lands in your shell history")
-    i.add_argument("--dir", help="working directory the agent starts in "
-                                 "(default: the current directory)")
+    i.add_argument("--dir", help="the agent's directory -- the credential lands in "
+                                 "its .claude/settings.local.json and sessions "
+                                 "started there carry the identity (default: the "
+                                 "current directory)")
     i.add_argument("--claude", help="path to the claude binary")
-    i.add_argument("--home", help=argparse.SUPPRESS)   # tests
     i.add_argument("--login", action="store_true",
                    help="log in and mint the token instead of pasting one. Reads "
                         "the password from $REVEILLE_PASSWORD or a prompt, never "

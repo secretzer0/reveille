@@ -31,24 +31,26 @@ CLI = (REPO / "src" / "reveille" / "cli.py").read_text()
 DES008 = (REPO / "docs" / "DES-008-native-agents.md").read_text()
 
 
-def test_the_launcher_the_docs_name_is_the_launcher_the_package_ships():
-    """The rename that prompted this gate. DES-008 names the launcher in prose and
-    `reveille init` prints it as the last thing a human types; the manifest decides
-    whether it exists. A rename that lands in one place and not the others is
-    invisible until somebody's shell says command not found.
+def test_the_command_the_docs_prescribe_is_the_command_that_exists():
+    """The rename that prompted this gate, one cutover later. DES-008 used to
+    name a launcher and the manifest decided whether it existed; since THE
+    DIRECTORY IS THE AGENT (operator, 2026-08-13) no launcher ships at all --
+    the doc prescribes plain `claude` in an initialized directory and init
+    prints the same thing. What is gated: the doc names the living mechanism,
+    the CLI's closing line agrees, and the retired wrapper is neither shipped
+    nor prescribed anywhere a human would type it.
     """
-    m = re.search(r"the `([a-z][\w-]*) <name>` launcher", DES008)
-    assert m, "DES-008 no longer names the launcher in the form this gate reads"
-    launcher = m.group(1)
-    assert launcher in SCRIPTS, (
-        f"DES-008 tells a human to run {launcher!r}; [project.scripts] ships "
-        f"{sorted(SCRIPTS)} -- one side of the rename landed and the other did not")
-    # ...and the CLI's own closing line must name the SAME one, because that is the
-    # line the operator actually reads at the end of a successful install.
-    printed = re.search(r'print\(f"start working:  cd \{workdir\} && (\S+) \{name\}"\)', CLI)
+    assert "THE DIRECTORY IS THE AGENT" in DES008, (
+        "DES-008 no longer names the per-directory mechanism this gate reads")
+    assert "settings.local.json" in DES008
+    # the CLI's closing line is the one the operator actually reads at the end
+    # of a successful install: plain `claude`, no wrapper.
+    printed = re.search(r'print\(f"start working:  cd \{workdir\} && (\S+)"\)', CLI)
     assert printed, "reveille init no longer prints a start-working line in this form"
-    assert printed.group(1) == launcher, (
-        f"init prints {printed.group(1)!r} and the docs say {launcher!r}")
+    assert printed.group(1) == "claude", (
+        f"init prints {printed.group(1)!r}; the living mechanism is plain `claude`")
+    assert "reveille-agent" not in SCRIPTS, (
+        "the retired wrapper is shipping again -- half a cutover")
 
 
 def test_every_console_script_the_boot_doctrine_prescribes_exists():

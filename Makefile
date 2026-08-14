@@ -8,7 +8,7 @@ PID  := $(REPO)/reveille.pid
 # launcher.db image records ambiguous.
 AGENT_IMAGE ?= reveille-agent:0.2.16
 
-.PHONY: help sync build test smoke daemon start stop restart status logs register unregister install-agent lint clean agent-image agent-container agent-spike server-image tts-image up down branch-orphans
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister lint clean agent-image agent-container agent-spike server-image tts-image up down branch-orphans
 
 help:
 	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
@@ -22,7 +22,6 @@ help:
 	@echo "make status         is the background broker running?"
 	@echo "make logs           tail -f reveille.log"
 	@echo "make register [URL=] register reveille once (user scope); identity = per-session \$$REVEILLE_AGENT_ROLE"
-	@echo "make install-agent  install the 'reveille-agent <name>' launcher into $(PREFIX)"
 	@echo "make unregister      remove the reveille MCP registration"
 	@echo "make lint           ruff check"
 	@echo "make agent-image    build the agent container image ($(AGENT_IMAGE))"
@@ -87,8 +86,9 @@ logs:
 
 # Register the daemon ONCE per machine (user scope). Identity is NOT baked in here --
 # the X-Agent header and the bearer token are ${VAR} templates that Claude Code expands
-# per session from that session's own env. So one registration serves every tmux pane;
-# each pane just exports its own $REVEILLE_AGENT_ROLE (see `reveille-agent` launcher / install-agent).
+# per session from that session's own env. THE DIRECTORY IS THE AGENT: `reveille init`
+# in a project directory writes the identity into its .claude/settings.local.json env
+# block, so plain `claude` there carries it -- one registration serves every agent dir.
 # URL is 127.0.0.1 on the daemon host, the LAN name elsewhere (override: URL=...).
 register:
 	-claude mcp remove reveille --scope user 2>/dev/null
@@ -96,14 +96,7 @@ register:
 	  --header 'Authorization: Bearer $${REVEILLE_TOKEN:-}' \
 	  --header 'X-Agent: $${REVEILLE_AGENT_ROLE:-unset-agent}'
 	uv run python -m reveille.install
-	@echo "registered. each session: export REVEILLE_AGENT_ROLE=<dev> (and REVEILLE_TOKEN) before 'claude',"
-	@echo "or use: reveille-agent <dev>   (see make install-agent)"
-
-# Install the 'agent <name>' launcher so a pane is one command: `agent roc-api-dev`.
-install-agent:
-	install -d "$(PREFIX)"
-	install -m 0755 src/reveille/agent-launch "$(PREFIX)/reveille-agent"
-	@echo "installed $(PREFIX)/agent  (ensure $(PREFIX) is on PATH)"
+	@echo "registered. per agent directory: run 'reveille init' there, then plain 'claude'."
 
 unregister:
 	claude mcp remove reveille --scope user || true
