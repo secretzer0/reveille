@@ -211,6 +211,20 @@ def user_auth_root(user, base=None):
     return os.path.join(base or DEFAULT_DATA, user, "claude-auth")
 
 
+def no_login_refusal(user):
+    """THE REFUSAL NAMES THE REACHABLE DOOR. This text renders verbatim in the
+    web UI's create-agent dialog, where the reader is one click from the
+    Account tab and zero clicks from a shell -- the first version prescribed
+    only the CLI, so the operator stood in front of the right control while
+    being sent to the wrong one. A function rather than an inline f-string so
+    the gate asserts over the SENTENCE THE USER READS, not over source bytes a
+    line wrap can split mid-phrase."""
+    return (f"claude_mode=home-login but {user} has no login on file. Log in "
+            f"once and every agent copies it at boot: open the Account tab "
+            f"(top of this page) and use its Claude login, or run "
+            f"`reveille-launch login {user}` on the launcher host")
+
+
 def docker_run_argv(user, agent, image, network, quotas,
                     boot_cmd=None, data_base=None, extra_env=(),
                     auth_mount=None):
@@ -1147,10 +1161,7 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         auth_mount = user_auth_root(user)
         if not os.path.isfile(os.path.join(auth_mount, ".credentials.json")) \
                 and not boot_cmd:
-            raise LaunchError(
-                f"claude_mode=home-login but {user} has no login on file: run "
-                f"`reveille-launch login {user}` first (one interactive "
-                f"`claude /login`; every agent copies it at boot)")
+            raise LaunchError(no_login_refusal(user))
     env = dict(
         os.environ,
         REVEILLE_AGENT_ROLE=agent,

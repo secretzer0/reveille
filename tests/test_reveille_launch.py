@@ -254,6 +254,19 @@ def test_login_need_fires_before_the_wall():
     assert n == {"needed": True, "needed_by": ["a", "b"]}
 
 
+def test_the_no_login_refusal_names_the_reachable_door():
+    """The refusal renders verbatim in the web create-agent dialog, where the
+    reader is one click from the Account tab -- the first version prescribed
+    only the CLI, sending the operator away from the control in front of them.
+    Both doors must stay named: the tab for the browser, the command for a
+    shell. Asserted over the RENDERED sentence -- a source-bytes assertion
+    died on its first run because the f-string wrapped mid-phrase."""
+    said = rl.no_login_refusal("tmelhiser")
+    assert "Account tab" in said, "the web reader's door went missing"
+    assert "reveille-launch login tmelhiser" in said, \
+        "the shell reader's door went missing"
+
+
 def test_claude_login_state_is_a_reading(tmp_path):
     # Absent -> present tracks the FILE, computed fresh each call -- never a
     # stored flag that can lapse. No values ever ride the reading.
