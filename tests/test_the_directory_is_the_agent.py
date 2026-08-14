@@ -75,3 +75,63 @@ def test_the_write_is_atomic_no_tmp_residue(tmp_path):
     cli.write_credential("http://b:8765", "dev-agent", "sekrit", tmp_path)
     names = os.listdir(tmp_path / ".claude")
     assert names == ["settings.local.json"], names
+
+
+# ---- the headers come from the directory ------------------------------------
+# ${VAR} headers expand from the process env at connect time, BEFORE project
+# settings env is injected -- the acceptance run measured the session's Bash
+# seeing the identity while the MCP headers expanded empty. So identity rides
+# a headersHelper reading the settings file, and these gates pin both halves.
+
+def test_the_helper_reads_the_env_block(tmp_path):
+    from reveille import headers
+    cli.write_credential("http://b:8765", "dev-agent", "sekrit", tmp_path)
+    assert headers.gather(tmp_path) == {"Authorization": "Bearer sekrit",
+                                        "X-Agent": "dev-agent"}
+
+
+def test_a_directory_that_is_not_an_agent_yields_no_headers(tmp_path):
+    """No file, malformed file, or HALF a credential all read as anonymous --
+    half an identity authenticates as nobody and muddies the refusal."""
+    from reveille import headers
+    assert headers.gather(tmp_path) == {}
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text("{not json")
+    assert headers.gather(tmp_path) == {}
+    (d / "settings.local.json").write_text(json.dumps(
+        {"env": {"REVEILLE_TOKEN": "sekrit"}}))     # token without a name
+    assert headers.gather(tmp_path) == {}
+
+
+def test_mcp_json_converges_and_preserves_other_servers(tmp_path):
+    (tmp_path / ".mcp.json").write_text(json.dumps({
+        "mcpServers": {"other": {"type": "stdio", "command": "kept"},
+                       "reveille": {"type": "http", "url": "http://old/mcp"}}}))
+    cli.write_mcp_json("http://b:8765", tmp_path)
+    cfg = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]
+    assert cfg["other"] == {"type": "stdio", "command": "kept"}
+    assert cfg["reveille"] == {"type": "http", "url": "http://b:8765/mcp",
+                               "headersHelper": "reveille-headers"}
+
+
+def test_mcp_json_that_cannot_be_parsed_is_refused_not_clobbered(tmp_path):
+    (tmp_path / ".mcp.json").write_text("{not json")
+    with pytest.raises(RuntimeError, match="not valid JSON"):
+        cli.write_mcp_json("http://b:8765", tmp_path)
+    assert (tmp_path / ".mcp.json").read_text() == "{not json"
+
+
+def test_the_helper_the_registration_names_is_shipped(tmp_path):
+    """A doc that prescribes a command must be true as written, and .mcp.json
+    is a doc the next session executes: the helper it names must be a console
+    script this package ships."""
+    import pathlib
+    import tomllib
+    path = cli.write_mcp_json("http://b:8765", tmp_path)
+    helper = json.loads(path.read_text())["mcpServers"]["reveille"]["headersHelper"]
+    scripts = tomllib.loads(
+        (pathlib.Path(cli.__file__).parents[2] / "pyproject.toml")
+        .read_text())["project"]["scripts"]
+    assert helper in scripts, (
+        f".mcp.json names {helper!r}; [project.scripts] ships {sorted(scripts)}")
