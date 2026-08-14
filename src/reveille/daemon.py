@@ -193,6 +193,13 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.94 THE AGENT OWNS ITS UPDATER, AND ONE REAL DOOR. Agent image 0.2.17:
+claude and playwright live in /opt/npm, chowned to the agent uid, so claude's
+auto-updater stops warning "npm global folder isn't writable" -- NODE_PATH
+follows. Running containers keep 0.2.16 until recreated; an image fix never
+reaches a running container. And the no-login refusal now names ONLY the
+Account tab: its reader is remote, so the CLI door was painted on a wall.
+
 0.2.93 THE REFUSAL NAMES THE REACHABLE DOOR. The home-login provision refusal
 renders in the web create-agent dialog one click from the Account tab, and it
 prescribed only the CLI. no_login_refusal() now names both doors -- the
