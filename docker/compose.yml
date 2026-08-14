@@ -141,18 +141,22 @@ services:
     # else. This is DES-006 U3's shape, unchanged.
     network_mode: host
     environment:
-      PROXY_PORT: ${PROXY_PORT:-80}
+      PROXY_SITE: ${PROXY_SITE:-:80}
       BROKER_UPSTREAM: 127.0.0.1:${REVEILLE_PORT:-8765}
       LAUNCHER_UPSTREAM: 127.0.0.1:${LAUNCHER_PORT:-8766}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account state. A hostname PROXY_SITE makes Caddy
+      # issue and renew Let's Encrypt certs; without this volume every container
+      # recreate discards them and re-issues -- straight into LE's rate limits.
+      - caddy-data:/data
     depends_on:
       broker:
         condition: service_healthy
 
 volumes:
-  # DES-009. The model cache, and the only named volume in this stack: everything
-  # else here is either a bind mount the operator chose or state that must not
-  # survive. This one holds a downloaded artifact, so losing it costs ten minutes
-  # and nothing else -- which is exactly the thing a named volume is for.
+  # DES-009. The model cache: a downloaded artifact, so losing it costs ten
+  # minutes and nothing else -- which is exactly the thing a named volume is for.
   tts-cache:
+  # ACME certificates and account keys (see the proxy's /data mount).
+  caddy-data:

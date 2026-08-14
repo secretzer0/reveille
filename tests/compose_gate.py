@@ -71,6 +71,10 @@ def main():
     mk = ["make", "-C", str(REPO),
           f"SERVER_IMAGE={tag}", f"SERVER_DATA={data}",
           f"SERVER_NETWORK={NET}", f"PROXY_PORT={pport}",
+          # A scratch COMPOSE PROJECT, or compose adopts the live stack's
+          # containers: it would recreate the live broker onto scratch config
+          # and the teardown below would stop the live bus (2026-08-13).
+          "COMPOSE_PROJECT=revgate",
           "BROKER_NAME=revgate-server", "PROXY_NAME=revgate-proxy"]
     env = {"REVEILLE_PORT": str(bport), "LAUNCHER_PORT": "1"}
 
