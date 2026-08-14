@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.16")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.17")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -212,17 +212,17 @@ def user_auth_root(user, base=None):
 
 
 def no_login_refusal(user):
-    """THE REFUSAL NAMES THE REACHABLE DOOR. This text renders verbatim in the
-    web UI's create-agent dialog, where the reader is one click from the
-    Account tab and zero clicks from a shell -- the first version prescribed
-    only the CLI, so the operator stood in front of the right control while
-    being sent to the wrong one. A function rather than an inline f-string so
-    the gate asserts over the SENTENCE THE USER READS, not over source bytes a
-    line wrap can split mid-phrase."""
+    """THE REFUSAL NAMES THE REACHABLE DOOR, AND ONLY THAT DOOR. This text
+    renders verbatim in the web UI's create-agent dialog, whose reader is a
+    REMOTE user: the Account tab is one click away and the launcher host is
+    unreachable by construction, so naming the CLI there is prescribing a door
+    that does not exist for the person reading (operator ruling, 2026-08-13 --
+    the first fix named both and the second half was noise). A function rather
+    than an inline f-string so the gate asserts over the SENTENCE THE USER
+    READS, not over source bytes a line wrap can split mid-phrase."""
     return (f"claude_mode=home-login but {user} has no login on file. Log in "
-            f"once and every agent copies it at boot: open the Account tab "
-            f"(top of this page) and use its Claude login, or run "
-            f"`reveille-launch login {user}` on the launcher host")
+            f"once -- open the Account tab at the top of this page and use "
+            f"its Claude login -- and every agent copies it at boot.")
 
 
 def docker_run_argv(user, agent, image, network, quotas,

@@ -56,6 +56,15 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_$
     && install -m 0755 /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh \
     && rm -rf /tmp/gh_*
 
+# THE AGENT OWNS WHAT ITS TOOLING AUTO-UPDATES. claude's updater runs as the
+# agent uid and rewrites its own npm global tree in place; installed as root
+# under /usr/lib it could only warn "npm global folder isn't writable" on
+# every /status (operator screenshot, 2026-08-13). A dedicated prefix, chowned
+# to the agent after the root-stage installs, gives the updater a tree it may
+# write without handing it /usr/bin.
+ENV NPM_CONFIG_PREFIX=/opt/npm
+ENV PATH=/opt/npm/bin:$PATH
+
 ARG CLAUDE_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} && npm cache clean --force
 
@@ -70,18 +79,20 @@ RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && npm cache clean --force \
     && rm -rf /var/lib/apt/lists/*
 
 # Globally-installed packages must be require()-able from anywhere. npm's global
-# root here is /usr/lib/node_modules, but node's default resolution for a bare
-# require() outside a project walks ~/.node_modules, ~/.node_libraries and
-# /usr/lib/node -- none of which is that. So `node -e "require('playwright')"`
-# threw MODULE_NOT_FOUND from every cwd until the caller happened to discover
-# the path themselves (reported by reveille-senior-ui-ux, msg 8523, after
-# hitting it mid-task). Installed-but-unreachable is the same defect class as a
-# capability with no reachable path.
-ENV NODE_PATH=/usr/lib/node_modules
+# root here is the dedicated prefix's node_modules, but node's default
+# resolution for a bare require() outside a project walks ~/.node_modules,
+# ~/.node_libraries and /usr/lib/node -- none of which is that. So
+# `node -e "require('playwright')"` threw MODULE_NOT_FOUND from every cwd
+# until the caller happened to discover the path themselves (reported by
+# reveille-senior-ui-ux, msg 8523, after hitting it mid-task).
+# Installed-but-unreachable is the same defect class as a capability with no
+# reachable path.
+ENV NODE_PATH=/opt/npm/lib/node_modules
 
 RUN groupadd -g ${GID} agent \
     && useradd -m -u ${UID} -g ${GID} -s /bin/bash agent \
-    && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent
+    && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent \
+    && chown -R ${UID}:${GID} /opt/npm
 
 USER agent
 WORKDIR /home/agent
