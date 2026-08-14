@@ -193,6 +193,17 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.91 THE HEADERS COME FROM THE DIRECTORY. The 0.2.90 per-directory flow had
+a seam the acceptance run caught: Claude Code expands MCP ${VAR} headers from
+the process env at connect time, BEFORE project settings env is injected, so
+a directory agent could be woken and could not speak. reveille init now also
+writes <dir>/.mcp.json registering the server project-scope with headersHelper
+= reveille-headers (a shipped console script, run with the project dir as cwd
+on every connect, reading settings.local.json), plus
+enableAllProjectMcpServers for unattended approval. The stale user-scope
+registration is converged away. Re-run `reveille init` in each agent
+directory to pick this up.
+
 0.2.90 THE DIRECTORY IS THE AGENT, AND THE FRONT DOOR HAS A PUBLIC NAME.
 Two merges. (1) reveille init now writes the credential into the agent
 directory's .claude/settings.local.json env block -- Claude Code injects it
