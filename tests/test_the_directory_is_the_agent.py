@@ -23,9 +23,25 @@ def test_a_fresh_directory_gets_the_env_block(tmp_path):
     cfg = json.loads(path.read_text())
     assert cfg["env"] == {"REVEILLE_URL": "http://b:8765",
                           "REVEILLE_AGENT_ROLE": "dev-agent",
-                          "REVEILLE_TOKEN": "sekrit"}
+                          "REVEILLE_TOKEN": "sekrit",
+                          "CAVEMAN_DEFAULT_MODE": "ultra",
+                          "PONYTAIL_DEFAULT_MODE": "full"}
     # this file IS the credential: another account reading it ends the boundary
     assert oct(path.stat().st_mode)[-3:] == "600"
+
+
+def test_modes_are_seeded_never_overridden(tmp_path):
+    """A credential has one correct value and converges; a mode is the user's
+    preference and only an ABSENCE is filled. A hand-tuned level surviving a
+    re-run is the difference between an installer and an editor."""
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text(json.dumps(
+        {"env": {"CAVEMAN_DEFAULT_MODE": "lite"}}))
+    cli.write_credential("http://b:8765", "dev-agent", "sekrit", tmp_path)
+    env = json.loads((d / "settings.local.json").read_text())["env"]
+    assert env["CAVEMAN_DEFAULT_MODE"] == "lite", "it overrode a tuned level"
+    assert env["PONYTAIL_DEFAULT_MODE"] == "full", "it did not fill the absence"
 
 
 def test_existing_settings_are_preserved_and_wrong_values_converge(tmp_path):
