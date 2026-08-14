@@ -18,7 +18,6 @@ wake-watch = "reveille.watch:main"
 reveille-stop-hook = "reveille.hook:main"
 reveille-install-hook = "reveille.install:main"
 reveille = "reveille.cli:main"
-reveille-agent = "reveille.launch:main"
 
 [dependency-groups]
 dev = [

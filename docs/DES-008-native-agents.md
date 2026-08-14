@@ -29,8 +29,11 @@ entrypoint and the `make register` target execute the *same two commands*:
 - the user-scope Stop hook that refuses to end a turn with the waiter unarmed
   (scripts/install-hook).
 - `wake-watch` on PATH.
-- the `reveille-agent <name>` launcher, which binds a session to a bus
-  identity.
+- the credential in the agent directory's `.claude/settings.local.json` env
+  block: THE DIRECTORY IS THE AGENT (operator ruling, 2026-08-13). Plain
+  `claude` started in that directory carries the identity -- Claude Code
+  injects the env block at session start -- and one machine holds as many
+  agents as it has initialized directories.
 
 **The launcher is `reveille-agent`, not `agent`** (architect, after senior-dev
 raised it at msg 8970). This document said `agent` while the script lived in a
@@ -38,7 +41,9 @@ clone on our own box, where a generic name costs nothing. An installer puts it o
 a PATH we do not own, and taking a name that plausible is a host decision — the
 same principle that says installing a native agent is a host act, applied to the
 namespace rather than the privileges. Anyone who wants the short form makes the
-alias themselves; the README says so.
+alias themselves; the README says so. (Retired 2026-08-13, operator ruling: no
+launcher ships at all -- the per-directory env block replaced it, and the
+history above is why the name was never `agent`.)
 
 What is missing is only that today these arrive by cloning the repo and running
 make. **The installer's entire job is to deliver those four without a clone.**

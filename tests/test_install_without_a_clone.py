@@ -60,16 +60,18 @@ exit {rc}
 def run(tmp_path, url, claude, **kw):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
     os.environ["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
-    argv = ["init", url, "dev-agent", "-", "--claude", claude, "--home", str(home)]
+    argv = ["init", url, "dev-agent", "-", "--claude", claude, "--dir", str(work)]
     for k, v in kw.items():
         argv += [f"--{k}", v] if v is not True else [f"--{k}"]
-    return argv, home
+    return argv, home, work
 
 
 def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, capsys):
     claude, log = fake_claude(tmp_path)
-    argv, home = run(tmp_path, broker, claude)
+    argv, home, work = run(tmp_path, broker, claude)
     monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
@@ -80,7 +82,7 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     assert f"{broker}/mcp" in said
     # HEADERS FROM ENV, never literals: a baked token goes stale at the first
     # rotation (supersede-on-remint) and the machine 401s while looking
-    # installed. The credential's one home is agent.env.
+    # installed. The credential's one home is the agent directory's env block.
     assert "Bearer ${REVEILLE_TOKEN" in said
     assert "X-Agent: ${REVEILLE_AGENT_ROLE" in said
     assert "sekrit" not in said, "the literal token leaked into claude config"
@@ -90,21 +92,25 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     cmds = [h["command"] for g in settings["hooks"]["Stop"] for h in g["hooks"]]
     assert any("stop-hook" in c for c in cmds), cmds
 
-    # 3. the credential file, and its mode
-    env = cli.env_file(home)
-    assert "REVEILLE_TOKEN=sekrit" in env.read_text()
-    assert oct(env.stat().st_mode)[-3:] == "600"
+    # 3. THE DIRECTORY IS THE AGENT: the credential lands in the workdir's
+    # .claude/settings.local.json env block, 0600, so a session started there
+    # carries the identity and a session started elsewhere carries none.
+    local = work / ".claude" / "settings.local.json"
+    env = json.loads(local.read_text())["env"]
+    assert env == {"REVEILLE_URL": broker, "REVEILLE_AGENT_ROLE": "dev-agent",
+                   "REVEILLE_TOKEN": "sekrit"}
+    assert oct(local.stat().st_mode)[-3:] == "600"
 
     # 4. it PROVED it worked, and against a route that RESOLVES THE TOKEN.
-    # /version discards its request and refuses nothing, so asking it proved the
+    # /version discards its request and refuses nobody, so asking it proved the
     # broker was reachable and nothing about the credential (architect, 8966).
     assert "bus answered:" in out
     assert Broker.seen == ["/presence"], Broker.seen
 
-    # 5. it points at the launcher, not at bare `claude`: a session with no
-    # REVEILLE_AGENT_ROLE has an inert Stop hook and is never woken.
-    assert "&& reveille-agent dev-agent" in out
-    assert "never be woken" in out
+    # 5. it points at plain `claude` IN THE AGENT DIRECTORY -- the wrapper is
+    # gone, the directory carries the identity.
+    assert f"cd {work} && claude" in out
+    assert "reveille-agent" not in out
 
 
 def test_the_token_never_has_to_ride_argv(tmp_path, broker, monkeypatch):
@@ -127,13 +133,16 @@ def test_the_token_never_has_to_ride_argv(tmp_path, broker, monkeypatch):
 
 def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
     claude, log = fake_claude(tmp_path, listed="reveille")
-    argv, home = run(tmp_path, broker, claude)
+    argv, home, work = run(tmp_path, broker, claude)
     monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
     assert cli.main(argv) == 0
     first = (home / ".claude" / "settings.json").read_text()
+    first_local = (work / ".claude" / "settings.local.json").read_text()
     assert cli.main(argv) == 0
     assert (home / ".claude" / "settings.json").read_text() == first, \
         "a second run rewrote the hook -- re-running must report, not change"
+    assert (work / ".claude" / "settings.local.json").read_text() == first_local, \
+        "a correct credential file must converge byte-identical"
     out = capsys.readouterr().out
     # registration is remove-then-add every run: "already registered, left
     # alone" is what kept a stale literal-token config through a rotation
@@ -148,12 +157,13 @@ def test_a_broker_that_refuses_the_token_installs_nothing(tmp_path, broker,
     checked FIRST and a refusal leaves the machine untouched."""
     Broker.code = 401
     claude, log = fake_claude(tmp_path)
-    argv, home = run(tmp_path, broker, claude)
+    argv, home, work = run(tmp_path, broker, claude)
     monkeypatch.setenv("REVEILLE_TOKEN", "wrong")
     assert cli.main(argv) == 1
     assert not log.exists(), "it registered an MCP server against a refused token"
     assert not (home / ".claude" / "settings.json").exists(), "it installed a hook"
-    assert not cli.env_file(home).exists(), "it wrote a credential"
+    assert not (work / ".claude" / "settings.local.json").exists(), \
+        "it wrote a credential"
     assert "REFUSING" in capsys.readouterr().err
 
 
@@ -162,11 +172,11 @@ def test_a_failing_mcp_add_stops_before_the_hook(tmp_path, broker, monkeypatch,
     """Step 1 failing must not leave a Stop hook pointing at a bus this machine is
     not registered with -- that state looks configured and is not."""
     claude, _ = fake_claude(tmp_path, rc=3)
-    argv, home = run(tmp_path, broker, claude)
+    argv, home, work = run(tmp_path, broker, claude)
     monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
     assert cli.main(argv) == 1
     assert not (home / ".claude" / "settings.json").exists()
-    assert not cli.env_file(home).exists()
+    assert not (work / ".claude" / "settings.local.json").exists()
     assert "step 1 of 3" in capsys.readouterr().err
 
 
@@ -182,34 +192,10 @@ def test_missing_configuration_names_what_is_missing(tmp_path, monkeypatch, caps
     # --no-prompt is the scripted path: a script would rather be told what is
     # missing than sit at a prompt nobody is watching. Without it, a terminal
     # gets the wizard, which is the point of the wizard.
-    assert cli.main(["init", "--no-prompt", "--home", str(tmp_path)]) == 2
+    assert cli.main(["init", "--no-prompt", "--dir", str(tmp_path)]) == 2
     err = capsys.readouterr().err
     for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
         assert var in err
-
-
-def test_the_launcher_ships_and_reads_the_credential_file(tmp_path):
-    """BLOCKING 2 of msg 8966: nothing sourced ~/.reveille/agent.env, so an
-    installed agent started with no REVEILLE_AGENT_ROLE -- inert Stop hook, no
-    waiter, able to send and never woken. Manufactured by running the launcher
-    with the sourcing step's input present and absent."""
-    from reveille import launch
-    assert launch.script_path().is_file(), launch.script_path()
-    env_file = tmp_path / "agent.env"
-    env_file.write_text("REVEILLE_URL=http://b:8765\n"
-                        "REVEILLE_AGENT_ROLE=dev-agent\nREVEILLE_TOKEN=sekrit\n")
-    probe = ("source_it() { :; }; "
-             f"REVEILLE_ENV_FILE={env_file} bash -c '"
-             f"set -a; . <(sed -n \"1,3p\" {env_file}); set +a; echo $REVEILLE_AGENT_ROLE'")
-    got = subprocess.run(["bash", "-c", probe], capture_output=True, text=True)
-    assert got.stdout.strip() == "dev-agent", got.stderr
-
-    # and the shape init TELLS you to use, with the sourcing step dropped: the
-    # variable is absent, which is precisely the deaf session.
-    bare = subprocess.run(["bash", "-c", "echo ${REVEILLE_AGENT_ROLE:-ABSENT}"],
-                          capture_output=True, text=True,
-                          env={"PATH": os.environ["PATH"]})
-    assert bare.stdout.strip() == "ABSENT"
 
 
 def test_the_hook_command_is_a_name_on_path_not_a_clone_path(tmp_path, monkeypatch):
@@ -304,12 +290,15 @@ def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsy
     claude, log = fake_claude(tmp_path)
     home = tmp_path / "home"
     home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
     monkeypatch.setenv("REVEILLE_PASSWORD", "wrong")
     rc = cli.main(["init", minting, "dev-agent", "--login", "--user", "tmelhiser",
-                   "--claude", claude, "--home", str(home)])
+                   "--claude", claude, "--dir", str(work)])
     assert rc == 1
-    assert not log.exists() and not cli.env_file(home).exists()
+    assert not log.exists()
+    assert not (work / ".claude" / "settings.local.json").exists()
     assert "login failed" in capsys.readouterr().err
 
 
@@ -477,7 +466,7 @@ def test_an_ephemeral_run_persists_itself_before_the_hook(monkeypatch, tmp_path)
     that survives `uv cache prune` counts as installed."""
     calls = []
     hits = {"uv": "/usr/bin/uv",
-            "reveille-agent": "/home/x/.cache/uv/archive-v0/AbC123/bin/reveille-agent"}
+            "reveille-waked": "/home/x/.cache/uv/archive-v0/AbC123/bin/reveille-waked"}
     monkeypatch.setattr(cli.shutil, "which", hits.get)
     monkeypatch.setenv("PATH", "/usr/bin")
 
@@ -493,7 +482,7 @@ def test_an_ephemeral_run_persists_itself_before_the_hook(monkeypatch, tmp_path)
     # capture_output swallowed uv's own PATH warning: the step line carries it
     assert "uv tool update-shell" in step
     # and a persistent install -- a real file outside any cache -- is left alone
-    durable = tmp_path / ".local" / "bin" / "reveille-agent"
+    durable = tmp_path / ".local" / "bin" / "reveille-waked"
     durable.parent.mkdir(parents=True)
     durable.write_text("#!/bin/sh\n")
     monkeypatch.setattr(cli.shutil, "which", lambda n: str(durable))
@@ -532,21 +521,19 @@ def test_the_installer_grants_the_permission_its_registration_needs(
     assert (cfg / "settings.json").read_text() == before
 
 
-def test_the_boot_prompt_arms_the_living_ritual_not_the_retired_one():
+def test_the_boot_doctrine_arms_the_living_ritual_not_the_retired_one(tmp_path):
     """The first native agent's boot banner told it to run `wake --once` -- the
     RETIRED pre-DES-003 arm, which grabs the wake socket itself and fights the
     supervised reveille-waked for it: stolen slot, or superseded into silent
-    deafness. The living ritual is wake-watch, which watches the spool the
-    daemon writes and is harmless in duplicate."""
-    from reveille import launch
-    src = launch.script_path().read_text()
-    boot = src[src.index('BOOT="'):src.index('# Liveness')]
-    assert "wake-watch $ROLE" in boot
-    assert "--once" not in boot, "the boot prompt prescribes the retired arm again"
-    # and the retired form survives nowhere outside comments in this script
-    code_lines = [ln for ln in src.splitlines()
-                  if "--once" in ln and not ln.lstrip().startswith("#")]
-    assert code_lines == [], code_lines
+    deafness. The living ritual is wake-watch, harmless in duplicate. The
+    wrapper that used to print the banner is gone; the doctrine's home is now
+    the CLAUDE.md init seeds into the agent directory, so that text is what is
+    gated -- a capability absent from the boot doctrine goes unused."""
+    path = cli.starter_claude_md(tmp_path, "dev-agent", "devops")
+    text = path.read_text()
+    assert "wake-watch $REVEILLE_AGENT_ROLE" in text
+    assert "--once" not in text, "the boot doctrine prescribes the retired arm"
+    assert "join()" in text and "lessons()" in text and "brief(" in text
 
 
 def test_the_hook_command_is_never_a_cache_path(monkeypatch, tmp_path):
