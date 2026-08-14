@@ -49,38 +49,39 @@ def read_token(args_token, stdin=None):
     return (args_token or "").strip() or None
 
 
-def mcp_argv(url, name, token, claude="claude"):
-    """The registration command, as argv -- HEADERS FROM ENV, never literals.
+def write_mcp_json(url, workdir):
+    """The registration lives in the DIRECTORY too, as <workdir>/.mcp.json.
 
-    This is the exact form join-here and the container entrypoint already use
-    (reveille_launch.py:2852), and the first version diverged from it by baking
-    the literal token into the claude config. That broke on the very first
-    rotation: re-running init SUPERSEDES the old token, "already registered
-    (left alone)" kept the stale baked header, and every MCP call 401ed on a
-    machine that looked fully installed. With ${VAR} expansion the credential
-    lives in exactly ONE place per agent -- the env block of the agent
-    directory's .claude/settings.local.json, which Claude Code injects at
-    session start -- so a rotation is a one-file rewrite and the registration
-    never goes stale. name and token stay in the signature because callers
-    still validate them; the config carries neither.
-    """
-    return [claude, "mcp", "add", "--transport", "http", "--scope", "user",
-            "reveille", url.rstrip("/") + "/mcp",
-            "--header", "Authorization: Bearer ${REVEILLE_TOKEN:-}",
-            "--header", "X-Agent: ${REVEILLE_AGENT_ROLE:-}"]
-
-
-def already_registered(claude="claude"):
-    """(is it there, what was found). Idempotence must not mean blindness: a
-    machine carrying a registration for a DIFFERENT broker, or one holding a
-    stale token, would otherwise be reported as "already registered" and left
-    wrong (architect, msg 8966). What was found is printed so a human can see
-    whether it is the one they meant."""
-    r = subprocess.run([claude, "mcp", "list"], capture_output=True, text=True)
-    if r.returncode != 0:
-        return False, ""
-    found = [ln.strip() for ln in r.stdout.splitlines() if "reveille" in ln]
-    return bool(found), "; ".join(found)
+    The first cutover registered user-scope with ${VAR} headers and put the
+    values in the directory's settings env block -- and the acceptance run
+    caught the seam: Claude Code expands MCP headers from the process
+    environment at connect time, BEFORE project settings env is injected, so
+    the session's Bash saw the identity while the MCP headers expanded empty.
+    Headers therefore ride a headersHelper -- reveille-headers, a console
+    script this package ships -- which Claude Code runs with the project
+    directory as cwd, fresh on every connect, reading the same
+    settings.local.json the credential lands in. One file holds the secret;
+    this one only names the mechanism, carries nothing sensitive, and is safe
+    to commit. Same converge discipline as the credential write: rewrite the
+    reveille entry to correct, preserve every other server, refuse a file
+    that cannot be parsed."""
+    path = pathlib.Path(workdir) / ".mcp.json"
+    cfg = {}
+    if path.exists():
+        try:
+            cfg = json.loads(path.read_text())
+        except (ValueError, UnicodeDecodeError) as e:
+            raise RuntimeError(
+                f"{path} exists and is not valid JSON ({e}). It may name MCP "
+                f"servers this installer does not own, so it is refused rather "
+                f"than clobbered -- fix or remove it, then re-run.")
+    cfg.setdefault("mcpServers", {})["reveille"] = {
+        "type": "http",
+        "url": url.rstrip("/") + "/mcp",
+        "headersHelper": "reveille-headers",
+    }
+    path.write_text(json.dumps(cfg, indent=2) + "\n")
+    return path
 
 
 def verify(url, name, token, timeout=10):
@@ -139,6 +140,12 @@ def write_credential(url, name, token, workdir):
     env["REVEILLE_URL"] = url
     env["REVEILLE_AGENT_ROLE"] = name
     env["REVEILLE_TOKEN"] = token
+    # The directory's .mcp.json (write_mcp_json) is what carries the identity
+    # into MCP, and a project-scope server needs the session's approval;
+    # granting it here is the same single-write pre-approval the installer
+    # already does for permissions.allow -- without it the first session gets
+    # a prompt nobody unattended can answer.
+    cfg["enableAllProjectMcpServers"] = True
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -500,23 +507,24 @@ def cmd_init(a):
         steps.append(persisted)
     if minted:
         steps.append(minted)
-    # REMOVE THEN ADD, the entrypoint's own idempotence: "already registered,
-    # left alone" kept a stale literal-token registration through a rotation
-    # and the machine 401ed while looking installed. Re-registering is cheap,
-    # carries no secret (headers are ${VAR} references), and converges every
-    # older install to the env form.
+    # THE REGISTRATION LIVES IN THE DIRECTORY. A stale user-scope registration
+    # is converged AWAY, never left: its ${VAR} headers expand from the process
+    # env at connect time, before project settings env exists, so it either
+    # authenticates as whatever the shell happened to export or as nobody --
+    # both wrong, and the second one silently. The remove is idempotent and
+    # cheap; the .mcp.json write below is the registration.
     subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
                    capture_output=True, text=True)
-    r = subprocess.run(mcp_argv(url, name, token, claude),
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"reveille init: `claude mcp add` failed at step 1 of 3, so "
-              f"nothing else was installed -- a Stop hook pointing at a bus "
-              f"this machine is not registered with looks configured and is "
-              f"not.\n{(r.stderr or r.stdout).strip()}", file=sys.stderr)
+    try:
+        mcp_path = write_mcp_json(url, workdir)
+    except RuntimeError as e:
+        print(f"reveille init: REFUSING at step 1 of 3 -- {e}\n"
+              f"Nothing else was installed: a Stop hook beside a directory "
+              f"whose MCP registration did not land looks configured and is "
+              f"not.", file=sys.stderr)
         return 1
-    steps.append("mcp: registered (headers reference $REVEILLE_TOKEN / "
-                 "$REVEILLE_AGENT_ROLE -- the credential lives only in agent.env)")
+    steps.append(f"mcp: {mcp_path} (project scope; headersHelper reads the "
+                 f"credential from settings.local.json at connect time)")
 
     hook_rc = install.main()
     if hook_rc != 0:

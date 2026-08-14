@@ -76,16 +76,21 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
 
-    # 1. the MCP registration, by its argv rather than by its effect
+    # 1. the MCP registration IS the directory's .mcp.json: a headersHelper
+    # that reads the credential at connect time, because ${VAR} headers expand
+    # from the process env BEFORE project settings env is injected -- the
+    # acceptance run measured Bash seeing the identity while the MCP headers
+    # expanded empty. The stale user-scope registration is converged away.
     said = log.read_text()
-    assert "mcp add --transport http --scope user reveille" in said
-    assert f"{broker}/mcp" in said
-    # HEADERS FROM ENV, never literals: a baked token goes stale at the first
-    # rotation (supersede-on-remint) and the machine 401s while looking
-    # installed. The credential's one home is the agent directory's env block.
-    assert "Bearer ${REVEILLE_TOKEN" in said
-    assert "X-Agent: ${REVEILLE_AGENT_ROLE" in said
-    assert "sekrit" not in said, "the literal token leaked into claude config"
+    assert "mcp remove --scope user reveille" in said
+    mcp = json.loads((work / ".mcp.json").read_text())["mcpServers"]["reveille"]
+    assert mcp == {"type": "http", "url": f"{broker}/mcp",
+                   "headersHelper": "reveille-headers"}
+    assert "sekrit" not in (work / ".mcp.json").read_text(), \
+        "the literal token leaked into a committable file"
+    # ...and the session must be able to APPROVE that project server unattended
+    assert json.loads((work / ".claude" / "settings.local.json").read_text())[
+        "enableAllProjectMcpServers"] is True
 
     # 2. the hook, landing in THIS home
     settings = json.loads((home / ".claude" / "settings.json").read_text())
@@ -138,15 +143,18 @@ def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
     assert cli.main(argv) == 0
     first = (home / ".claude" / "settings.json").read_text()
     first_local = (work / ".claude" / "settings.local.json").read_text()
+    first_mcp = (work / ".mcp.json").read_text()
     assert cli.main(argv) == 0
     assert (home / ".claude" / "settings.json").read_text() == first, \
         "a second run rewrote the hook -- re-running must report, not change"
     assert (work / ".claude" / "settings.local.json").read_text() == first_local, \
         "a correct credential file must converge byte-identical"
+    assert (work / ".mcp.json").read_text() == first_mcp, \
+        "a correct registration must converge byte-identical"
     out = capsys.readouterr().out
-    # registration is remove-then-add every run: "already registered, left
-    # alone" is what kept a stale literal-token config through a rotation
-    assert "mcp: registered" in out
+    # registration converges every run: "already registered, left alone" is
+    # what kept a stale literal-token config through a rotation
+    assert "mcp: " in out and ".mcp.json" in out
     assert "already installed" in out
 
 
@@ -161,20 +169,26 @@ def test_a_broker_that_refuses_the_token_installs_nothing(tmp_path, broker,
     monkeypatch.setenv("REVEILLE_TOKEN", "wrong")
     assert cli.main(argv) == 1
     assert not log.exists(), "it registered an MCP server against a refused token"
+    assert not (work / ".mcp.json").exists(), "it wrote a registration"
     assert not (home / ".claude" / "settings.json").exists(), "it installed a hook"
     assert not (work / ".claude" / "settings.local.json").exists(), \
         "it wrote a credential"
     assert "REFUSING" in capsys.readouterr().err
 
 
-def test_a_failing_mcp_add_stops_before_the_hook(tmp_path, broker, monkeypatch,
-                                                 capsys):
-    """Step 1 failing must not leave a Stop hook pointing at a bus this machine is
-    not registered with -- that state looks configured and is not."""
-    claude, _ = fake_claude(tmp_path, rc=3)
+def test_a_failing_registration_stops_before_the_hook(tmp_path, broker,
+                                                      monkeypatch, capsys):
+    """Step 1 failing must not leave a Stop hook beside a directory whose MCP
+    registration did not land -- that state looks configured and is not. The
+    failure that can actually happen now is an unparseable .mcp.json: it may
+    name servers the installer does not own, so it is refused, not clobbered."""
+    claude, _ = fake_claude(tmp_path)
     argv, home, work = run(tmp_path, broker, claude)
+    (work / ".mcp.json").write_text("{not json")
     monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
     assert cli.main(argv) == 1
+    assert (work / ".mcp.json").read_text() == "{not json", \
+        "a refusal must leave the file exactly as it found it"
     assert not (home / ".claude" / "settings.json").exists()
     assert not (work / ".claude" / "settings.local.json").exists()
     assert "step 1 of 3" in capsys.readouterr().err
