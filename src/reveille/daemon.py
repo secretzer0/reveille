@@ -193,6 +193,14 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.93 THE REFUSAL NAMES THE REACHABLE DOOR. The home-login provision refusal
+renders in the web create-agent dialog one click from the Account tab, and it
+prescribed only the CLI. no_login_refusal() now names both doors -- the
+Account tab for a browser reader, reveille-launch login for a shell -- and
+exists as a function so the gate asserts the sentence the user reads, not
+source bytes an f-string wrap can split. Launcher-path only; broker image
+unchanged.
+
 0.2.92 THE INSTALLER SEEDS THE MODES. reveille init seeds
 CAVEMAN_DEFAULT_MODE=ultra and PONYTAIL_DEFAULT_MODE=full into the agent
 directory's env block -- an agent talks terse and builds lazy from its first
