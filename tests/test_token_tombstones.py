@@ -35,8 +35,8 @@ def db():
 def minted_twice(c):
     """An owner, a bound mint, and the re-mint that supersedes it."""
     admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
-    old = store.create_token(c, admin["id"], "body-1", agent_name="wanderer")
-    new = store.create_token(c, admin["id"], "body-2", agent_name="wanderer")
+    old = store.create_token(c, admin["id"], "body-1", agent_name="wanderer", create=True)
+    new = store.create_token(c, admin["id"], "body-2", agent_name="wanderer", create=True)
     assert old["id"] in new["superseded"]
     return admin, old, new
 
@@ -79,7 +79,7 @@ def test_a_never_valid_secret_gets_no_signpost():
 def test_plain_revoke_leaves_no_tombstone():
     c = db()
     admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
-    tok = store.create_token(c, admin["id"], "solo", agent_name="loner")
+    tok = store.create_token(c, admin["id"], "solo", agent_name="loner", create=True)
     store.revoke_token(c, tok["id"], admin["id"])
     assert c.execute("SELECT count(*) FROM token_tombstones").fetchone()[0] == 0
 

@@ -3447,10 +3447,25 @@ async def tokens_http(request):
     # resolves (or provisions) the identity first, and the two must share one
     # transaction -- a crash between a separate supersede and the mint would
     # leave an agent with NO live credential.
+    # THE GUARD AGAINST SILENT FORKS (ruling 10896): a bound mint for a name
+    # with no live identity is a refusal unless creation was declared. The
+    # structured shape here is for CLIENTS (init --login's confirm prompt needs
+    # the list as data, not prose); store.create_token carries the same guard
+    # as the invariant, so a caller that skips this route still cannot fork.
+    agent_name = (d.get("agent_name") or "").strip()
+    if agent_name and not d.get("create"):
+        live = store.live_agent_names(_conn, p.user_id)
+        if agent_name not in live:
+            return JSONResponse(
+                {"error": "unknown_agent",
+                 "detail": f"no live agent of yours is named {agent_name!r}; a "
+                           f"bound mint attaches to an existing identity. Pass "
+                           f"create=true to deliberately create a new agent.",
+                 "live_agents": live}, status_code=400)
     t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip(),
                            agent_name=d.get("agent_name"),
                            mem_tier=(d.get("mem_tier") or "state"),
-                           rooms=d.get("rooms"))
+                           rooms=d.get("rooms"), create=bool(d.get("create")))
     superseded = t["superseded"]
     log.info("%s minted token %s%s%s", p.name, t["id"],
              f" bound to {t['agent_name']}" if t["agent_name"] else "",

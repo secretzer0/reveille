@@ -43,7 +43,7 @@ def main():
         u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
         a = store.create_room(conn, u["id"], "alpha")
         c_ = store.create_room(conn, u["id"], "bravo")
-        tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE)
+        tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE, create=True)
         for r in (a, c_):
             store.assign_room(conn, tok["id"], r["id"], u["id"])
         conn.close()

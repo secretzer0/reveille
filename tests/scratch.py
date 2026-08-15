@@ -53,8 +53,12 @@ def scratch_broker(env_extra=None, timeout=25):
     tmp = pathlib.Path(tempfile.mkdtemp())
     port = _free_port()
     db = str(tmp / "broker.db")
-    env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port),
-               REVEILLE_HOST="127.0.0.1", **(env_extra or {}))
+    # env_extra WINS, including over the scratch defaults -- the docstring has
+    # always claimed the overlay; dict()'s kwargs made REVEILLE_DB/PORT/HOST
+    # collisions a TypeError instead (found by the first gate that seeds a db).
+    env = {**os.environ, "REVEILLE_DB": db, "REVEILLE_PORT": str(port),
+           "REVEILLE_HOST": "127.0.0.1", **(env_extra or {})}
+    db = env["REVEILLE_DB"]
     env["PATH"] = str(REPO / ".venv" / "bin") + os.pathsep + env["PATH"]
     proc = subprocess.Popen(["reveille-daemon"], env=env,
                             stdout=subprocess.DEVNULL,

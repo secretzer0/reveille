@@ -272,7 +272,7 @@ def test_mem_ctx_never_inherits_owner_admin(tmp_path):
     store.migrate(c, db)
     admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
     tok = store.create_token(c, admin["id"], "fleet", agent_name="agent-x",
-                             mem_tier="ratify")
+                             mem_tier="ratify", create=True)
     prev = daemon._conn
     daemon._conn = c
     try:

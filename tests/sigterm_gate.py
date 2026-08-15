@@ -75,7 +75,7 @@ def main():
     store.migrate(conn, db)
     u = store.setup_first_admin(conn, USER, PASS)
     room = store.create_room(conn, u["id"], "gate")
-    tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE)
+    tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE, create=True)
     store.assign_room(conn, tok["id"], room["id"], u["id"])
     conn.close()
 

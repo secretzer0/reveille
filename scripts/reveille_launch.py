@@ -1892,8 +1892,13 @@ def mint_bound_token(auth_url, cookie_header, agent, rooms):
     -- the browser never holds the secret, the launcher holds it for this
     call's lifetime only, and the broker learns nothing new (same POST /tokens
     + PATCH room-attach the Tokens tab issues). Raises LaunchError."""
+    # create=True: the web create-agent dialog IS the human's deliberate
+    # creation act (ruling 10896 + operator 10905: naming is the human's).
+    # For a RE-provision the name resolves to its live identity and the flag
+    # is inert -- the mint attaches and supersedes, never forks.
     t = _broker_json(auth_url, cookie_header, "POST", "/tokens",
-                     {"label": agent, "agent_name": agent, "mem_tier": "state"})
+                     {"label": agent, "agent_name": agent, "mem_tier": "state",
+                      "create": True})
     if not isinstance(t, dict) or not t.get("secret"):
         raise LaunchError("broker refused the token mint")
     for rid in rooms:

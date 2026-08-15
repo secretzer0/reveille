@@ -201,7 +201,8 @@ def _get(url, path, cookie, timeout=15):
         return json.loads(r.read().decode() or "{}")
 
 
-def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None):
+def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
+               create=False, confirm_create=None):
     """Log in, mint a token BOUND to `agent`, attach rooms. Returns
     (secret, rooms-attached, note) or raises RuntimeError with what to fix.
 
@@ -241,8 +242,36 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None):
     # so the message is gone rather than improved.
     code, tok, _ = _post(url, "/tokens",
                          {"agent_name": agent, "label": f"native {agent}",
-                          "mem_tier": tier,
+                          "mem_tier": tier, "create": create,
                           "rooms": want_ids}, cookie)
+    if code == 400 and tok.get("error") == "unknown_agent":
+        # THE GUARD AGAINST SILENT FORKS (ruling 10896): the broker refuses to
+        # mint a NEW identity unless creation is declared, and shows the
+        # owner's live agents so a near-miss ('architect' typed where
+        # 'reveille-architect' exists) is caught at the prompt instead of
+        # becoming a fork that every health check reports as fine. The wizard
+        # asks; a script gets the refusal and passes --create on purpose.
+        live = tok.get("live_agents") or []
+        if confirm_create:
+            print(f"\nNo live agent of yours is named {agent!r}."
+                  + (" Your live agents:\n  " + "\n  ".join(live) if live
+                     else " You have no live agents yet."))
+            if confirm_create(agent):
+                code, tok, _ = _post(url, "/tokens",
+                                     {"agent_name": agent,
+                                      "label": f"native {agent}",
+                                      "mem_tier": tier, "create": True,
+                                      "rooms": want_ids}, cookie)
+            else:
+                raise RuntimeError(
+                    f"declined creating a new agent {agent!r}; nothing was "
+                    f"minted. Re-run with one of your live agent names to "
+                    f"attach this machine to it.")
+        else:
+            raise RuntimeError(
+                f"{tok.get('detail')} Your live agents: "
+                f"{', '.join(live) if live else '(none)'}. Re-run with "
+                f"--create to deliberately create a new agent.")
     if code != 200 or not tok.get("secret"):
         raise RuntimeError(f"mint failed ({code}): {tok.get('error') or tok}")
     attached = want
@@ -474,7 +503,11 @@ def cmd_init(a):
             token, attached, minted = mint_token(
                 url, user, read_password(user), name, a.rooms, a.tier,
                 pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
-                     if wizard else None)
+                     if wizard else None,
+                create=a.create,
+                confirm_create=(lambda n: ask(
+                    f"create NEW agent {n!r}? [y/N]", "N").lower().startswith("y"))
+                    if wizard else None)
         except RuntimeError as e:
             print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
                   file=sys.stderr)
@@ -595,6 +628,11 @@ def main(argv=None):
                         "is least privilege -- everything else lands as a draft)")
     i.add_argument("--type", help="agent type (architect, senior-dev, ui-ux, "
                                   "devops, ...) -- seeds a starter CLAUDE.md")
+    i.add_argument("--create", action="store_true",
+                   help="with --login: deliberately create a NEW agent when the "
+                        "name has no live identity. Without it, an unknown name "
+                        "is refused (the wizard asks instead) -- attaching to an "
+                        "existing agent never needs this")
     i.add_argument("--no-prompt", action="store_true",
                    help="never ask: fail on anything not supplied. For scripts "
                         "that would rather stop than block")

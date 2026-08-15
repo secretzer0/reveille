@@ -440,13 +440,13 @@ def test_the_mint_attaches_its_rooms_or_does_not_happen(tmp_path):
     room = store.create_room(conn, admin["id"], "Reveille")
 
     t = store.create_token(conn, admin["id"], "x", agent_name="dev",
-                           rooms=[room["id"]])
+                           rooms=[room["id"]], create=True)
     assert list(store.rooms_for_token(conn, t["id"])) == [room["id"]]
 
     import pytest as _pytest
     with _pytest.raises(store.BusError):
         store.create_token(conn, admin["id"], "x", agent_name="dev2",
-                           rooms=["no-such-room"])
+                           rooms=["no-such-room"], create=True)
     assert conn.execute("SELECT count(*) FROM tokens WHERE agent_id IN "
                         "(SELECT id FROM agents WHERE name='dev2')").fetchone()[0] == 0, \
         "a failed attach left the minted token behind"

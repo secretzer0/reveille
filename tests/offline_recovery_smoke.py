@@ -78,9 +78,9 @@ def main():
     store.migrate(conn, db)
     u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
     room = store.create_room(conn, u["id"], "gate")
-    tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE)
+    tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE, create=True)
     store.assign_room(conn, tok["id"], room["id"], u["id"])
-    admin = store.create_token(conn, u["id"], "ana", agent_name="ana")
+    admin = store.create_token(conn, u["id"], "ana", agent_name="ana", create=True)
     store.assign_room(conn, admin["id"], room["id"], u["id"])
     # The agent had JOINED before the outage -- that is the scenario. Membership
     # is what makes a unicast deliverable; a waked socket-holder is deliberately
