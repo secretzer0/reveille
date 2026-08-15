@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Register the bus, then run the agent inside tmux session "agent" with the ttyd
 # sidecar serving the browser plane (DES-002 T1). The registration is the same
-# `claude mcp add` a standalone agent runs (see `make register`) -- same URL, same two
-# headers. If this ever needs something a laptop cannot do, the container has become
-# special and that is the bug.
+# `reveille init` a laptop runs -- same installer, same three artifacts. If this
+# ever needs something a laptop cannot do, the container has become special and
+# that is the bug.
 set -euo pipefail
 
 : "${REVEILLE_AGENT_ROLE:?set REVEILLE_AGENT_ROLE (your bus name)}"
@@ -116,10 +116,32 @@ for mk in caveman ponytail; do
   fi
 done
 
-claude mcp remove reveille --scope user >/dev/null 2>&1 || true
-claude mcp add --transport http --scope user reveille "${REVEILLE_URL}/mcp" \
-  --header "Authorization: Bearer ${REVEILLE_TOKEN}" \
-  --header "X-Agent: ${REVEILLE_AGENT_ROLE}" >/dev/null
+# ONE INSTALLER, BOTH SHAPES (operator directive 2026-08-15). This block used
+# to be the pre-0.2.90 registration -- user-scope, with LITERAL
+# Authorization/X-Agent headers -- while every laptop had moved to per-directory
+# .mcp.json + headersHelper (0.2.91). Two patterns meant every registration fix
+# shipped twice or drifted, and a literal header bakes a superseded token into
+# the config until the next recreate; the helper reads the credential fresh on
+# every connect. `reveille init` writes the same three artifacts here as on any
+# laptop: ~/repos/.mcp.json (registration, headersHelper), ~/repos/.claude/
+# settings.local.json (credential, converged on re-provision), and the Stop
+# hook + mcp__reveille allow in ~/.claude/settings.json. It also converges away
+# a stale user-scope registration a pre-cutover home may still carry. The
+# container-only seeds below (bypassPermissions, onboarding, trust) are NOT
+# init's business and stay exactly as they are.
+#
+# init VERIFIES the credential against the broker before writing anything; a
+# boot that races the broker must still come up configured -- the values are
+# the launcher's own provision env, correct by construction, and waked retries
+# the bus forever -- so the retry carries --force. A second failure is a
+# missing env var, which is a launcher defect, and set -e makes it loud.
+if reveille init --no-prompt --dir /home/agent/repos >/dev/null; then
+  say "- mcp: registered via reveille init (project scope, headersHelper) in ~/repos"
+else
+  reveille init --no-prompt --force --dir /home/agent/repos >/dev/null
+  note "- mcp: registered via reveille init --force -- the broker did not answer"
+  say "  at boot; the credential is unverified and waked will keep retrying"
+fi
 
 # Provision step 3.2.4: clone the repo the launcher named, into ~/repos -- the
 # path the DES-005 data root persists (pre-P3 this was ~/work, which the bind
