@@ -36,15 +36,29 @@ import sqlite3
 import sys
 import time
 
-# Every table carrying an agent id. Enumerated, never discovered.
+# Every table carrying an agent id, re-pointed by a plain UPDATE. Enumerated,
+# never discovered.
+#
+# `tokens` is DELIBERATELY ABSENT. A revoke DELETES its row (store.revoke_token),
+# so every row in tokens is a LIVE credential -- re-pointing them would hand the
+# survivor a second live credential and break one-identity-one-live-credential
+# with the tool built to repair identity (devops rehearsal, msg 10959). Source
+# credentials are SUPERSEDED instead, below.
 ID_SITES = (
     ("messages", "sender_agent_id"),        # attribution of every message sent
     ("memories", "author_agent_id"),        # who authored a fact
     ("reads", "agent_id"),                  # receipts
-    ("tokens", "agent_id"),                 # credential history
     ("token_tombstones", "agent_id"),       # supersede signposts
     ("token_audit", "agent_id"),            # credential audit
 )
+
+
+def has_table(conn, name):
+    """A rehearsal against an older backup is legitimate, so an absent table is
+    reported rather than fatal -- but never silently skipped."""
+    return bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone())
 
 
 def die(msg):
@@ -85,19 +99,32 @@ def counts(conn, agent_id):
     """What would move, per site, before anything moves."""
     out = {}
     for table, col in ID_SITES:
+        if not has_table(conn, table):
+            out[f"{table}.{col}"] = "ABSENT"
+            continue
         out[f"{table}.{col}"] = conn.execute(
             f"SELECT count(*) FROM {table} WHERE {col}=?", (agent_id,)).fetchone()[0]
     out["memories.scope(state)"] = conn.execute(
         "SELECT count(*) FROM memories WHERE scope=?", (f"agent:{agent_id}",)).fetchone()[0]
     out["members(rows)"] = conn.execute(
         "SELECT count(*) FROM members WHERE agent_id=?", (agent_id,)).fetchone()[0]
+    out["tokens(live, to supersede)"] = conn.execute(
+        "SELECT count(*) FROM tokens WHERE agent_id=?", (agent_id,)).fetchone()[0]
     return out
 
 
-def merge(conn, src, dst):
-    """Re-point src onto dst inside the caller's transaction. Returns a report."""
+def merge(conn, src, dst, dst_rooms):
+    """Re-point src onto dst inside the caller's transaction. Returns a report.
+
+    dst_rooms is the survivor's room set, CARRIED ACROSS SOURCES and updated as
+    rooms are gained: merge() runs once per source, and a room the first source
+    handed over is one the second must already see as the survivor's.
+    """
     moved = {}
     for table, col in ID_SITES:
+        if not has_table(conn, table):
+            moved[f"{table}.{col}"] = 0
+            continue
         moved[f"{table}.{col}"] = conn.execute(
             f"UPDATE {table} SET {col}=? WHERE {col}=?", (dst["id"], src["id"])).rowcount
 
@@ -106,27 +133,56 @@ def merge(conn, src, dst):
         "UPDATE memories SET scope=? WHERE scope=?",
         (f"agent:{dst['id']}", f"agent:{src['id']}")).rowcount
 
-    # Membership is LIVE state, not history, so it is handled rather than
-    # copied. Where the survivor already holds the room, the loser's row is the
-    # ghost that keeps a dead name in presence -- delete it. Where it does not,
-    # re-label the row onto the survivor so no room reach is lost. members is
-    # keyed (room_id, name), so neither branch can collide.
-    dst_rooms = {r["room_id"] for r in conn.execute(
-        "SELECT room_id FROM members WHERE name=?", (dst["name"],))}
+    # THE MERGE IS A SUPERSESSION (devops rehearsal, msg 10959). A revoke
+    # DELETES the row, so every tokens row is a LIVE credential: re-pointing
+    # them would leave the survivor holding two, which is the invariant this
+    # whole design rests on, broken by the tool that repairs identity. The
+    # source's credentials are superseded exactly as the broker would --
+    # memberships orphaned, room grants dropped, row deleted -- and each leaves
+    # a TOMBSTONE, so the displaced body's next call gets the signpost rather
+    # than a bare refusal. That is honest: it WAS superseded, by this merge.
+    superseded = 0
+    for tok in conn.execute("SELECT id, secret_hash FROM tokens WHERE agent_id=?",
+                            (src["id"],)).fetchall():
+        if has_table(conn, "token_tombstones"):
+            conn.execute(
+                "INSERT OR REPLACE INTO token_tombstones"
+                "(secret_hash, agent_id, superseded_ns) VALUES(?,?,?)",
+                (tok["secret_hash"], dst["id"], time.time_ns()))
+        conn.execute("UPDATE members SET token_id=NULL WHERE token_id=?", (tok["id"],))
+        conn.execute("DELETE FROM token_rooms WHERE token_id=?", (tok["id"],))
+        conn.execute("DELETE FROM tokens WHERE id=?", (tok["id"],))
+        superseded += 1
+    moved["tokens.superseded"] = superseded
+
+    # MEMBERSHIP IS KEYED BY ID, NEVER BY NAME. Two of the folding identities
+    # share the SURVIVOR'S name, so a name-keyed pass reads the survivor's own
+    # rows as the loser's and deletes them -- measured: the survivor came out
+    # of a rehearsal in ZERO rooms, deaf the moment the broker restarted, with
+    # every transport signal green. That is tonight's failure rebuilt by its
+    # own repair tool, and the fix is to stop letting a NAME identify a body.
     dropped = relabelled = 0
-    for r in conn.execute("SELECT room_id FROM members WHERE name=?",
-                          (src["name"],)).fetchall():
+    for r in conn.execute("SELECT room_id, name FROM members WHERE agent_id=?",
+                          (src["id"],)).fetchall():
         if r["room_id"] in dst_rooms:
+            # The ghost that keeps a dead name in presence.
             conn.execute("DELETE FROM members WHERE room_id=? AND name=?",
-                         (r["room_id"], src["name"]))
+                         (r["room_id"], r["name"]))
             dropped += 1
         else:
             conn.execute(
                 "UPDATE members SET name=?, agent_id=? WHERE room_id=? AND name=?",
-                (dst["name"], dst["id"], r["room_id"], src["name"]))
+                (dst["name"], dst["id"], r["room_id"], r["name"]))
+            dst_rooms.add(r["room_id"])   # the next source must see it as ours
             relabelled += 1
     moved["members.dropped(ghost)"] = dropped
     moved["members.relabelled"] = relabelled
+
+    # Rows predating agent ids cannot be attributed, so they are COUNTED rather
+    # than guessed at -- a silent skip reads as "nothing there".
+    moved["members.unattributed(left)"] = conn.execute(
+        "SELECT count(*) FROM members WHERE agent_id IS NULL AND name=?",
+        (src["name"],)).fetchone()[0]
 
     # RETIRE, never delete: the row is the record that this name existed and
     # what became of it, and retiring frees the label for reuse.
@@ -185,8 +241,10 @@ def main():
     conn.execute("BEGIN IMMEDIATE")
     try:
         moved = {}
+        dst_rooms = {r["room_id"] for r in conn.execute(
+            "SELECT room_id FROM members WHERE agent_id=?", (dst["id"],))}
         for s in sources:
-            for k, v in merge(conn, s, dst).items():
+            for k, v in merge(conn, s, dst, dst_rooms).items():
                 moved[k] = moved.get(k, 0) + v
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
@@ -198,7 +256,8 @@ def main():
 
     for s in sources:
         left = counts(conn, s["id"])
-        stranded = {k: v for k, v in left.items() if v and not k.startswith("members")}
+        stranded = {k: v for k, v in left.items()
+                    if isinstance(v, int) and v and not k.startswith("members")}
         if stranded:
             die(f"rows still point at {s['id']}: {stranded}")
 
@@ -214,6 +273,14 @@ def main():
     for k, v in moved.items():
         print(f"  {v:6d}  {k}")
     print(f"\nrecorded in {log}")
+    survivor_rooms = [r["room_id"] for r in conn.execute(
+        "SELECT room_id FROM members WHERE agent_id=?", (dst["id"],))]
+    live_tokens = conn.execute("SELECT count(*) FROM tokens WHERE agent_id=?",
+                               (dst["id"],)).fetchone()[0]
+    print(f"survivor holds {len(survivor_rooms)} room(s) and {live_tokens} live "
+          f"credential(s)")
+    if not survivor_rooms:
+        die("the survivor ended in ZERO rooms -- it would be deaf on restart")
     print(f"{len(sources)} identities retired; their ids and rows are intact "
           f"and now point at {dst['name']!r} ({dst['id']}).")
 

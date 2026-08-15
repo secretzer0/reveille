@@ -30,6 +30,11 @@ def _tool():
     return mod
 
 
+def _rooms(c, agent):
+    return {r["room_id"] for r in c.execute(
+        "SELECT room_id FROM members WHERE agent_id=?", (agent["id"],))}
+
+
 def _two_bodies():
     """One owner, one room, two live identities -- the incident's shape."""
     path = os.path.join(tempfile.mkdtemp(), "broker.db")
@@ -67,7 +72,7 @@ def test_the_merge_repoints_every_site_including_the_scope_string():
     assert before["memories.scope(state)"] == 1
 
     c.execute("BEGIN IMMEDIATE")
-    m.merge(c, src, dst)
+    m.merge(c, src, dst, _rooms(c, dst))
     c.execute("COMMIT")
 
     # Nothing points at the merged-away id any more...
@@ -86,7 +91,8 @@ def test_the_loser_is_retired_and_never_deleted():
     m = _tool()
     src = m.live_agent(c, "architect")
     c.execute("BEGIN IMMEDIATE")
-    m.merge(c, src, m.live_agent(c, "reveille-architect"))
+    m.merge(c, src, m.live_agent(c, "reveille-architect"),
+            _rooms(c, m.live_agent(c, "reveille-architect")))
     c.execute("COMMIT")
 
     row = c.execute("SELECT name, retired_ns FROM agents WHERE id=?",
@@ -110,7 +116,7 @@ def test_the_ghost_membership_goes_and_room_reach_is_kept():
               " VALUES(?,?,?,?,?)", (other["id"], src["name"], src["id"], now, now))
 
     c.execute("BEGIN IMMEDIATE")
-    moved = m.merge(c, src, dst)
+    moved = m.merge(c, src, dst, _rooms(c, dst))
     c.execute("COMMIT")
 
     assert moved["members.dropped(ghost)"] == 1
@@ -149,6 +155,61 @@ def test_a_retired_identity_folds_by_id():
     assert again["id"] == src["id"] and again["retired_ns"]
 
     c.execute("BEGIN IMMEDIATE")
-    m.merge(c, again, dst)
+    m.merge(c, again, dst, _rooms(c, dst))
     c.execute("COMMIT")
     assert c.execute("SELECT sender_agent_id FROM messages").fetchone()[0] == dst["id"]
+
+
+# ---- the rehearsal defects (devops, msg 10959) --------------------------------
+
+def test_the_survivor_keeps_its_rooms_when_a_source_shares_its_name():
+    """Two folding identities share the SURVIVOR'S name, so a name-keyed pass
+    reads the survivor's own membership as the loser's and deletes it. Measured
+    on a live-db copy: the survivor came out in ZERO rooms -- deaf on restart,
+    with every transport signal green."""
+    c, path, admin, room, loser, keep = _two_bodies()
+    m = _tool()
+    dst = m.live_agent(c, "reveille-architect")
+    other = store.create_room(c, admin["id"], "OverSiteAI")
+    fork = m.live_agent(c, "architect")
+    # A RETIRED source carrying the survivor's own name -- the incident's shape.
+    store.create_token(c, admin["id"], "t", agent_name="twin", create=True)
+    twin_id = c.execute("SELECT id FROM agents WHERE name='twin'").fetchone()["id"]
+    c.execute("UPDATE agents SET name='reveille-architect', retired_ns=1 WHERE id=?",
+              (twin_id,))
+    for aid, rid, name in ((dst["id"], room["id"], dst["name"]),
+                           (fork["id"], other["id"], fork["name"])):
+        c.execute("INSERT INTO members(room_id, name, agent_id, joined_ns, seen_ns)"
+                  " VALUES(?,?,?,1,1)", (rid, name, aid))
+
+    dst_rooms = _rooms(c, dst)
+    c.execute("BEGIN IMMEDIATE")
+    for s in (m.any_agent(c, twin_id), fork):
+        m.merge(c, s, dst, dst_rooms)
+    c.execute("COMMIT")
+
+    held = _rooms(c, dst)
+    assert room["id"] in held, "the survivor must keep the room it speaks in"
+    assert other["id"] in held, "and gain the room only the fork held"
+
+
+def test_the_survivor_ends_with_one_live_credential():
+    """tokens rows are LIVE by construction -- a revoke deletes them -- so
+    re-pointing a source's token hands the survivor a second live credential
+    and breaks one-identity-one-live-credential with the identity tool."""
+    c, path, admin, room, loser, keep = _two_bodies()
+    m = _tool()
+    src, dst = m.live_agent(c, "architect"), m.live_agent(c, "reveille-architect")
+    before = c.execute("SELECT count(*) FROM tokens WHERE agent_id=?",
+                       (src["id"],)).fetchone()[0]
+    assert before == 1, "the fork holds a live credential"
+
+    c.execute("BEGIN IMMEDIATE")
+    moved = m.merge(c, src, dst, _rooms(c, dst))
+    c.execute("COMMIT")
+
+    assert moved["tokens.superseded"] == 1
+    assert c.execute("SELECT count(*) FROM tokens WHERE agent_id=?",
+                     (dst["id"],)).fetchone()[0] == 1
+    # and the displaced credential gets a signpost, not a bare refusal
+    assert c.execute("SELECT count(*) FROM token_tombstones").fetchone()[0] == 1
