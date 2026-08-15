@@ -177,6 +177,16 @@ DES-007 flagged these and they are what is left:
   `recipient_agent_id`. §3's resolution lands here.
 - **`create=true` on a held name** — attaches and rotates instead of refusing
   (§2). Smallest and first: it is one branch in `create_token`.
+- **the wake plane** — `waked --name`, the spool directory and the ring's
+  `from` are names. Wake REGISTRATION keys on the token (hence the
+  `agent_id`) — an aliased `bob-architect` attaches its waiter as itself and
+  a unicast to the alias must ring it. Ring PAYLOADS carry room-names, which
+  is what the human reads; nothing may key a spool or watcher on a ring's
+  `from` (devops 10973 finding 2).
+- **`merged_into` on `agents` and the rename log land TOGETHER** — they are
+  one fact, a label's history, seen from two ends; `trace()` on a July
+  message and the render must agree through something queryable (devops
+  10973 finding 3).
 
 Until these key on the id underneath, a rename is only safe on the planes
 already cut over. **This is the finishing slice**, and it is the one that
@@ -316,7 +326,11 @@ mattering.
 4. **One owner's live agents cannot share a name**, before and after a
    rename; `create=true` on a held name is REFUSED naming the existing agent
    and both remedies (§2), and the existing agent's credential is untouched
-   by the attempt.
+   by the attempt. **Sibling, same test file**: `create=false` on a held live
+   name BY ITS OWNER attaches, supersedes the previous credential and
+   tombstones it — the swap is legal, the fork is not (§2.1; devops 10973
+   finding 1). A slice that lands the refusal without this gate green has
+   closed the migration door by accident.
 5. **A fold is measured per room first**: the tool (or its runbook) reports
    each source's per-room message and authorship counts before `--apply`; a
    source whose activity is in another room than the survivor's is a refusal
