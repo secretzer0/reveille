@@ -341,14 +341,20 @@ mattering.
    previous token superseded, unread mail and state notes and both
    memberships (and any alias) present in the new body; then back to native
    the same way. At no instant do two live credentials exist for the id.
-## 10. Open
+## 10. Ruled 2026-08-15 (operator, msg 10983) — formerly Open
 
-- Whether `recipient_agent_id` is added beside `recipient` or replaces it. The
-  render rule (§4) means the name column has no readers left once the id
-  lands, but removing it is a data-loss decision and gets its own slice.
-- The rename log's shape — an `agent_names` history table, or an audit row.
-- Ownership transfer (`release_agent_name` → another owner claims it) under
-  per-owner naming: the receiving owner may already hold the name; the claim
-  refuses or renames-at-accept — ruled with the first real transfer.
-- Whether the alias also applies to broadcast fan-out display and to
-  `delivered_to`, which today list bare names.
+- **`recipient_agent_id` is ADDED beside `recipient`, backfilled by
+  (room, name, time), and every reader cuts over to it in the same commit
+  — no dual-read.** The name column stays, read-only: it is the only record
+  of what a message was addressed to before the rename log existed, and the
+  id plus an empty log cannot reproduce it. Dropping it is a separate
+  data-loss decision, not scheduled.
+- **The rename log is a table, `agent_names(agent_id, name, from_ns,
+  to_ns)`, and `agents.merged_into` lands in the same migration** — one
+  fact, a label's history, from two ends.
+- **Ownership transfer into an owner who already holds the name REFUSES
+  naming the collision**; the receiver renames their own agent first and
+  re-accepts. Ruled ahead of the first real transfer.
+- **The room-name (alias when in force) is what a human reads everywhere in
+  a room**: presence, history render, `delivered_to`, broadcast fan-out.
+  Bare names appear nowhere in a room where an alias is in force. One rule.
