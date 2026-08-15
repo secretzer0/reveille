@@ -130,3 +130,40 @@ def test_the_route_refuses_structured_and_create_true_proceeds():
                                {"agent_name": "wanderer", "label": "x2"}, cookie)
         assert code == 200 and body2["agent_id"] == body["agent_id"]
         assert body["id"] in body2["superseded"]
+
+
+# ---- the launcher: create is a parameter, never a property (msg 10919) --------
+# Baked into mint_bound_token, every future caller inherits deliberate-creation
+# silently -- and the next caller is S3 migration, whose contract is attach,
+# never fork. The default call (the edit path's shape) must mint with create
+# falsey; only the create-agent dialog passes True.
+
+def _launch_module():
+    import importlib.util
+    root = pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "rl_guard_test", root / "scripts" / "reveille_launch.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_default_mint_does_not_carry_creation_authority():
+    rl = _launch_module()
+    posted = []
+
+    def fake_broker(auth, cookie, method, path, body=None):
+        posted.append((method, path, body))
+        return {"id": "t1", "secret": "s"}
+
+    orig = rl._broker_json
+    rl._broker_json = fake_broker
+    try:
+        rl.mint_bound_token("http://b", "c=1", "wanderer", [])
+        assert not posted[0][2].get("create"), (
+            "the edit path's shape must not inherit creation authority")
+        posted.clear()
+        rl.mint_bound_token("http://b", "c=1", "wanderer", [], create=True)
+        assert posted[0][2].get("create") is True
+    finally:
+        rl._broker_json = orig
