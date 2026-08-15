@@ -2059,7 +2059,8 @@ def test_bound_mint_supersedes_the_owners_previous_tokens_for_that_name():
     # Supersession lives INSIDE the mint now (identity cutover): re-minting the
     # bound name IS the re-provision flow, one transaction, and the superseded
     # ids ride the return so a rotation is reported rather than silent.
-    t3 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev", create=True)
+    # bare attach: the swap verb (DES-011 2.1) -- create=True here is a refusal
+    t3 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev")
     assert t3["superseded"] == [t1["id"]]
     assert store.resolve_token(c, t1["secret"]) is None      # instantly dead
     # and the binding is by IDENTITY: both mints resolved to the same agents row

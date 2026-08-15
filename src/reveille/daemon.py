@@ -3487,6 +3487,20 @@ async def tokens_http(request):
                            f"bound mint attaches to an existing identity. Pass "
                            f"create=true to deliberately create a new agent.",
                  "live_agents": live}, status_code=400)
+    if agent_name and d.get("create"):
+        # DES-011 section 2: create=true on a name this owner already holds
+        # live is a REFUSAL, structured for the create dialog to render both
+        # remedies; the store guard beneath is the invariant.
+        live = store.live_agent_names(_conn, p.user_id)
+        if agent_name in live:
+            return JSONResponse(
+                {"error": "name_held",
+                 "detail": f"you already have a live agent named {agent_name!r}; "
+                           f"creating a duplicate is refused. Choose a unique "
+                           f"name, or add the existing agent to the room you "
+                           f"meant. To move it to a new body, mint without "
+                           f"create.",
+                 "live_agents": live}, status_code=409)
     t = store.create_token(_conn, p.user_id, (d.get("label") or "").strip(),
                            agent_name=d.get("agent_name"),
                            mem_tier=(d.get("mem_tier") or "state"),
