@@ -193,6 +193,31 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.95 CREATION IS A DELIBERATE ACT -- THE SPLIT-BRAIN RELEASE. A bound mint
+ATTACHES a body to an existing identity; bringing a NEW identity into the world
+must be declared. Measured live today: `architect` and `reveille-architect`
+were two identities for one role, each hearing only its own directs while
+presence, info() and the spool all read green. The refusal names the owner's
+live agents, so a near-miss is visible while it is still correctable. It closes
+every scripted, env-driven and typo path; a human deliberately typing a variant
+name can still fork, and the remedy for that half is removing the REASON to
+re-provision under a new name.
+
+Riding with it. The container registers through `reveille init` like any laptop
+(agent image 0.2.18), and its boot report renders what verify() SAID rather
+than a cause the script never established -- refused-token and unreachable-
+broker are different sentences now. /presence wears @_guard, so a bad or absent
+credential is a 401 instead of a 500: it was the one principal-resolving route
+without it, and cli.verify() probes exactly that route, so a broker crash used
+to read to every installer as a bad token. And a SUPERSEDED credential now
+leaves a tombstone (schema v22), so its refusal names the supersession, the
+agent, the date and the way back -- while a plain revoke stays a bare "bad
+token", because only a displaced body earns a signpost. And CI arrives: a PR
+gate with ruling 8433 mechanised, publish-on-main to ghcr where a tag is
+written once and a skip that would lie is a refusal, a no-identity-baked scan
+before every push -- and no deploy step, because merged still does not mean
+running.
+
 0.2.94 THE AGENT OWNS ITS UPDATER, AND ONE REAL DOOR. Agent image 0.2.17:
 claude and playwright live in /opt/npm, chowned to the agent uid, so claude's
 auto-updater stops warning "npm global folder isn't writable" -- NODE_PATH
