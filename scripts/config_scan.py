@@ -35,7 +35,12 @@ def suspicious(pairs):
     for k, v in pairs:
         if not v:
             continue
-        if CHECKSUM_NAME.search(k) and HEX.match(v):
+        # The allowance is worn by NOTHING that names a secret (architect
+        # BLOCKING 1, msg 10954): FOO_SECRET_SHA256 with a hex value is a
+        # secret with a checksum suffix, and hex is an ordinary shape for real
+        # credentials (HMAC keys, hex API tokens), so the value half alone
+        # cannot discriminate. Both checksum halves AND no secret word.
+        if CHECKSUM_NAME.search(k) and HEX.match(v) and not NAME.search(k):
             continue
         if NAME.search(k) or BLOB.match(v):
             bad.append(k)

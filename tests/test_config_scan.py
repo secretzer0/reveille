@@ -47,3 +47,13 @@ def test_the_original_reds_still_fire():
 def test_space_carrying_values_survive_and_labels_are_scanned():
     assert run([("MSG", "hello world")], {"org.label": "fine"}) == 0
     assert run([], {"deploy_token": "anything"}) == 1
+
+
+def test_a_secret_wearing_a_checksum_suffix_is_still_refused():
+    # BLOCKING 1 (msg 10954): the exemption is for published verification
+    # data, not for anything that happens to be hex. Red on ee5852c.
+    assert run([("FOO_SECRET_SHA256", HEX64)]) == 1
+    assert run([("GH_TOKEN_DIGEST", HEX64)]) == 1
+    assert run([("API_KEY_MD5", "0f" * 16)]) == 1
+    # and the real allowance still holds beside it
+    assert run([("PYTHON_SHA256", HEX64)]) == 0
