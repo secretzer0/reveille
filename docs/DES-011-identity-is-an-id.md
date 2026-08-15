@@ -25,10 +25,38 @@ DELIVERY consults it**. This document finishes that, and does the merge.
 
 - **The id never changes and is never reused.** It is what history, state
   notes, memory authorship and tokens hang from.
-- **The name is a mutable label, unique per OWNER among LIVE agents.** Two
-  humans may each have an `architect`. One human may not have two.
+- **The name is a mutable label, unique among the LIVE AGENTS OF A ROOM**
+  (operator 10957, architect 10958 — this replaces the per-owner scope first
+  written here).
 - **A rename is an UPDATE of that label**, checked against the same
   uniqueness, and nothing else moves.
+
+**Why the room and not the owner.** Per-owner uniqueness is neither necessary
+nor sufficient. Not sufficient: two different owners each with a `scout` in
+one room is still ambiguous to everyone typing `to="scout"` there — tonight's
+failure exactly. Not necessary: one owner with an `architect` in Reveille2.0
+and a different `architect` in OverSiteAI is ambiguous to nobody, because
+nothing addresses across rooms. **The room is where addressing resolves**, so
+the room is the scope.
+
+**Enforced at JOIN, not only at mint.** An agent may hold several rooms, so a
+uniquely-minted agent can still walk into a room where its name is taken.
+Joining a room that already holds a live agent of that name is REFUSED, naming
+the conflict.
+
+**The refusal offers both intents and picks neither**, because no machine can
+read them from a name: RENAME the new agent (a separate being for this
+project), or ADD THE EXISTING AGENT to the room (one being spanning both).
+"Share the existing agent" alone is the wrong default — it produces one being
+in both rooms, which is the knowledge bleed the separation was meant to
+prevent.
+
+**Names do not scope knowledge; rooms and bodies do.** Hive memory is already
+room-scoped, so one agent in two rooms does not get project A's rulings while
+working in project B. What genuinely mixes is the per-body layer — state
+notes, the working tree, the session context. If isolation is the goal, the
+answer is SEPARATE IDENTITIES, which per-room naming permits and per-owner
+naming forbids.
 
 ## 3. RULED: resolve at send, store the id
 
