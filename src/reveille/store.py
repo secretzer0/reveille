@@ -1487,8 +1487,16 @@ def delete_session(conn, secret):
 
 # ---- tokens ------------------------------------------------------------------
 
+def live_agent_names(conn, owner_id):
+    """The owner's live agent names, sorted. The suggestion list a creation
+    refusal shows -- it is the owner's own inventory, shown to the owner."""
+    return [r["name"] for r in conn.execute(
+        "SELECT name FROM agents WHERE owner_id=? AND retired_ns IS NULL "
+        "ORDER BY name", (owner_id,))]
+
+
 def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
-                 rooms=None):
+                 rooms=None, create=False):
     """Mint a credential; a bound one names an agent and THE MINT IS THE
     PROVISIONING EVENT (DES-008 ruling 1). A native agent has no container and
     the launcher never sees it, so minting a bound token for a name inserts that
@@ -1523,11 +1531,28 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
                 "AND retired_ns IS NULL", (owner_id, agent_name)).fetchone()
             if row:
                 agent_id = row["id"]
-            else:
+            elif create:
                 agent_id = str(uuid.uuid4())
                 conn.execute(
                     "INSERT INTO agents(id, owner_id, name, created_ns) "
                     "VALUES(?,?,?,?)", (agent_id, owner_id, agent_name, now))
+            else:
+                # THE GUARD AGAINST SILENT FORKS (ruling 10896, measured live
+                # 2026-08-15: 'architect' vs 'reveille-architect', mail split
+                # per name while every transport signal stayed green). Minting
+                # a bound token ATTACHES a body to an existing identity;
+                # bringing a NEW identity into the world is a separate,
+                # deliberate act. A name with no live identity used to mint
+                # one silently, so any variant spelling forked the agent and
+                # every control reported the fork healthy. The refusal names
+                # the owner's own live agents so a near-miss is visible at the
+                # moment it can still be corrected.
+                live = live_agent_names(conn, owner_id)
+                raise BusError(
+                    f"no live agent of yours is named {agent_name!r}. A bound "
+                    f"mint attaches to an existing identity; creating a new "
+                    f"agent is deliberate -- pass create=true. Your live "
+                    f"agents: {', '.join(live) if live else '(none)'}")
             superseded = supersede_bound_tokens(conn, owner_id, agent_id)
         conn.execute(
             "INSERT INTO tokens(id, secret_hash, owner_id, label, agent_id, mem_tier, "

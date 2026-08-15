@@ -103,7 +103,7 @@ def main():
     store.migrate(conn, db)
     u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
     room = store.create_room(conn, u["id"], "gate")
-    tok = store.create_token(conn, u["id"], "ana", agent_name="ana")
+    tok = store.create_token(conn, u["id"], "ana", agent_name="ana", create=True)
     store.assign_room(conn, tok["id"], room["id"], u["id"])
     secret = tok["secret"]
     conn.close()

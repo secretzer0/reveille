@@ -78,7 +78,7 @@ def main():
     store.migrate(conn, db)
     owner = store.create_user(conn, "smoke", "smoke-pw-not-a-real-secret")
     room = store.create_room(conn, owner["id"], "smoke")
-    tok = store.create_token(conn, owner["id"], ROLE, agent_name=ROLE)
+    tok = store.create_token(conn, owner["id"], ROLE, agent_name=ROLE, create=True)
     store.assign_room(conn, tok["id"], room["id"], owner["id"])
     secret = tok["secret"]
     conn.close()

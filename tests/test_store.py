@@ -69,16 +69,16 @@ def test_token_binding_minted_and_resolved():
     """Per-agent tokens (0.2.7): binding set at mint, immutable by construction --
     there is no update path, rebinding is a new token."""
     c, admin, room, tok = fixture()
-    b = store.create_token(c, admin["id"], "randy's", agent_name="randy-roc-ui")
+    b = store.create_token(c, admin["id"], "randy's", agent_name="randy-roc-ui", create=True)
     assert b["agent_name"] == "randy-roc-ui"
     assert store.resolve_token(c, b["secret"])["agent_name"] == "randy-roc-ui"
     assert store.resolve_token(c, tok["secret"])["agent_name"] is None  # unbound stays
     listed = {t["id"]: t for t in store.list_tokens(c, admin["id"])}
     assert listed[b["id"]]["agent_name"] == "randy-roc-ui"
     # whitespace-only = unbound, not a bound-to-"" credential
-    assert store.create_token(c, admin["id"], "x", agent_name="  ")["agent_name"] is None
+    assert store.create_token(c, admin["id"], "x", agent_name="  ", create=True)["agent_name"] is None
     try:
-        store.create_token(c, admin["id"], "y", agent_name="bad name!")
+        store.create_token(c, admin["id"], "y", agent_name="bad name!", create=True)
         assert False, "expected BusError -- binding must be a valid bus name"
     except store.BusError:
         pass
@@ -94,7 +94,7 @@ def test_token_binding_migration_v7_to_v8(tmp_path):
     c.execute("PRAGMA user_version=7")
     assert store.migrate(c, str(tmp_path / "x.db")) == store.SCHEMA_VERSION
     assert store.resolve_token(c, tok["secret"])["agent_name"] is None
-    b = store.create_token(c, admin["id"], "bound", agent_name="alice")
+    b = store.create_token(c, admin["id"], "bound", agent_name="alice", create=True)
     assert store.resolve_token(c, b["secret"])["agent_name"] == "alice"
 
 
@@ -333,7 +333,7 @@ def test_a_retired_identity_keeps_no_live_credential():
     leaves two live credentials answering to one name -- which it did."""
     c, admin, room, tok = fixture()
     old = store.create_token(c, admin["id"], "v1", agent_name="scout",
-                             rooms=[room["id"]])
+                             rooms=[room["id"]], create=True)
     # the fixture fired: the bound credential really exists before the retire
     assert store.resolve_token(c, old["secret"])["agent_name"] == "scout"
     identity = old["agent_id"]
@@ -345,7 +345,7 @@ def test_a_retired_identity_keeps_no_live_credential():
 
     # the recreate half of the operator's flow: same name, fresh identity
     new = store.create_token(c, admin["id"], "v2", agent_name="scout",
-                             rooms=[room["id"]])
+                             rooms=[room["id"]], create=True)
     assert new["agent_id"] != identity
     live = c.execute(
         "SELECT t.id FROM tokens t JOIN agents a ON a.id=t.agent_id "
@@ -359,7 +359,7 @@ def test_retire_revokes_without_orphaning_a_joined_member():
     row still pointing at the dying token must be orphaned, not violated."""
     c, admin, room, tok = fixture()
     b = store.create_token(c, admin["id"], "b", agent_name="scout",
-                           rooms=[room["id"]])
+                           rooms=[room["id"]], create=True)
     store.join(c, "scout", "boot", room["id"], token_id=b["id"])
     assert c.execute("SELECT 1 FROM members WHERE token_id=?",
                      (b["id"],)).fetchone(), "fixture never joined"
@@ -373,7 +373,7 @@ def test_release_revokes_the_identitys_tokens():
     it is the lock shipped with a copied key."""
     c, admin, room, tok = fixture()
     b = store.create_token(c, admin["id"], "b", agent_name="scout",
-                           rooms=[room["id"]])
+                           rooms=[room["id"]], create=True)
     store.release_agent_name(c, b["agent_id"], "admin")
     assert store.resolve_token(c, b["secret"]) is None
 
@@ -851,7 +851,7 @@ def test_memory_supersession_law():
 def test_recall_scoping_and_state_privacy():
     """global OR my rooms OR my OWN agent scope -- never another token's state."""
     c, admin, room, tok = fixture()
-    other = store.create_token(c, admin["id"], "other", agent_name="bob")
+    other = store.create_token(c, admin["id"], "other", agent_name="bob", create=True)
     store.assign_room(c, other["id"], room["id"], admin["id"])
     kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
     store.memory_add(c, **kw(kind="state", tier="state", fact="alice private tasks"))
@@ -1248,7 +1248,7 @@ def test_brief_composition_ranking_and_budget():
                              fact="leg carries field_ticket_id ONLY"))
     store.memory_add(c, **kw(fact="RunStatus has no TRANSPORT member"))
     store.memory_add(c, **kw(kind="state", tier="state", fact="my open task: S4"))
-    other = store.create_token(c, admin["id"], "other", agent_name="bob")
+    other = store.create_token(c, admin["id"], "other", agent_name="bob", create=True)
     store.memory_add(c, **kw(kind="state", tier="state", token_id=other["id"],
                              fact="bob secret state"))
 
@@ -1869,7 +1869,7 @@ def _member_fixture():
     """Owner travis with a private room; user bob with his own token."""
     c, admin, room, tok = fixture()
     bob = store.create_user(c, "bob", "hunter2hunter2")
-    btok = store.create_token(c, bob["id"], "bobs", agent_name="bob-agent")
+    btok = store.create_token(c, bob["id"], "bobs", agent_name="bob-agent", create=True)
     return c, admin, room, tok, bob, btok
 
 
@@ -1951,7 +1951,7 @@ def test_flip_to_private_spares_members_revokes_strangers():
     revokes every non-member's tokens instantly."""
     c, admin, room, tok, bob, btok = _member_fixture()
     carol = store.create_user(c, "carol", "hunter2hunter2")
-    ctok = store.create_token(c, carol["id"], "carols", agent_name="carol-agent")
+    ctok = store.create_token(c, carol["id"], "carols", agent_name="carol-agent", create=True)
     store.set_public(c, room["id"], admin["id"], True)
     store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")
     store.assign_room(c, btok["id"], room["id"], bob["id"])     # as member
@@ -2050,16 +2050,16 @@ def test_bound_mint_supersedes_the_owners_previous_tokens_for_that_name():
     Superseding is owner-scoped revocation: another owner's binding of the
     same name, unbound tokens, and other names are all untouched."""
     c, admin, room, tok = fixture()
-    t1 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev")
-    t2 = store.create_token(c, admin["id"], "other", agent_name="py-dev")
+    t1 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev", create=True)
+    t2 = store.create_token(c, admin["id"], "other", agent_name="py-dev", create=True)
     unbound = store.create_token(c, admin["id"], "fleet")
     other_user = store.create_user(c, "zoe", "hunter2hunter2")
-    theirs = store.create_token(c, other_user["id"], "ui", agent_name="ui-dev")
+    theirs = store.create_token(c, other_user["id"], "ui", agent_name="ui-dev", create=True)
 
     # Supersession lives INSIDE the mint now (identity cutover): re-minting the
     # bound name IS the re-provision flow, one transaction, and the superseded
     # ids ride the return so a rotation is reported rather than silent.
-    t3 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev")
+    t3 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev", create=True)
     assert t3["superseded"] == [t1["id"]]
     assert store.resolve_token(c, t1["secret"]) is None      # instantly dead
     # and the binding is by IDENTITY: both mints resolved to the same agents row

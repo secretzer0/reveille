@@ -68,9 +68,9 @@ def main():
         conn = store.connect(b.db)
         u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
         room = store.create_room(conn, u["id"], "gate")
-        tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE)
+        tok = store.create_token(conn, u["id"], ROLE, agent_name=ROLE, create=True)
         store.assign_room(conn, tok["id"], room["id"], u["id"])
-        adm = store.create_token(conn, u["id"], "ana", agent_name="ana")
+        adm = store.create_token(conn, u["id"], "ana", agent_name="ana", create=True)
         store.assign_room(conn, adm["id"], room["id"], u["id"])
         conn.close()
 

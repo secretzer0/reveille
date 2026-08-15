@@ -1886,14 +1886,24 @@ def _broker_me(auth_url, cookie_header):
     return principal_from_me(_broker_json(auth_url, cookie_header, "GET", "/me"))
 
 
-def mint_bound_token(auth_url, cookie_header, agent, rooms):
+def mint_bound_token(auth_url, cookie_header, agent, rooms, create=False):
     """P3: mint the agent's bound state-tier token THROUGH the broker's
     existing session routes, server-side with the user's own forwarded cookie
     -- the browser never holds the secret, the launcher holds it for this
     call's lifetime only, and the broker learns nothing new (same POST /tokens
-    + PATCH room-attach the Tokens tab issues). Raises LaunchError."""
+    + PATCH room-attach the Tokens tab issues). Raises LaunchError.
+
+    create IS A PARAMETER, NEVER A PROPERTY OF THIS FUNCTION (architect
+    BLOCKING 1, msg 10919): baked in here, every future caller would inherit
+    deliberate-creation silently -- and the next caller is S3 migration, whose
+    whole contract is that it attaches to the EXISTING identity and never
+    forks. The create-agent dialog passes True because the form IS the human's
+    deliberate act (10896/10905); the edit path keeps the default, where a
+    live name makes it inert and a dead one makes the refusal correct -- an
+    edit must never create."""
     t = _broker_json(auth_url, cookie_header, "POST", "/tokens",
-                     {"label": agent, "agent_name": agent, "mem_tier": "state"})
+                     {"label": agent, "agent_name": agent, "mem_tier": "state",
+                      "create": bool(create)})
     if not isinstance(t, dict) or not t.get("secret"):
         raise LaunchError("broker refused the token mint")
     for rid in rooms:
@@ -2291,7 +2301,8 @@ def build_api(auth_url):
         if not token and d.get("rooms"):
             minted_id, token = mint_bound_token(
                 auth_url, request.headers.get("cookie"),
-                (d.get("agent") or "").strip(), list(d["rooms"]))
+                (d.get("agent") or "").strip(), list(d["rooms"]),
+                create=True)
         role = (d.get("role") or "").strip()
         try:
             if role and role not in ROLE_PROMPTS:

@@ -220,7 +220,7 @@ def seed(db):
     for name in ("alice", "bob"):
         # BOUND tokens (0.2.7): the whole smoke then runs the per-agent path --
         # every MCP call and wake connect below is also a binding check.
-        tok = store.create_token(conn, owner["id"], name, agent_name=name)
+        tok = store.create_token(conn, owner["id"], name, agent_name=name, create=True)
         store.assign_room(conn, tok["id"], room["id"], owner["id"])
         secrets[name] = tok["secret"]
     conn.close()

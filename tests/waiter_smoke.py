@@ -138,7 +138,7 @@ def main():
     room = store.create_room(conn, owner["id"], "smoke")
     toks = {}
     for name in (AGENT, SENDER):
-        t = store.create_token(conn, owner["id"], name, agent_name=name)
+        t = store.create_token(conn, owner["id"], name, agent_name=name, create=True)
         store.assign_room(conn, t["id"], room["id"], owner["id"])
         toks[name] = t["secret"]
     conn.close()

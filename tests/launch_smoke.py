@@ -88,7 +88,7 @@ def seed(db):
     room = store.create_room(conn, owner["id"], "smoke")
     secrets = {}
     for role in ROLES:
-        tok = store.create_token(conn, owner["id"], role, agent_name=role)
+        tok = store.create_token(conn, owner["id"], role, agent_name=role, create=True)
         store.assign_room(conn, tok["id"], room["id"], owner["id"])
         secrets[role] = tok["secret"]
     conn.close()
