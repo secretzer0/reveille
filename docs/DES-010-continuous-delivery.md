@@ -176,3 +176,103 @@ Each proven RED before it is trusted, on a commit that carries the defect:
   settled before code is written, not during.
 - **The canary's identity** on a single-VM topology: which consumer eats a
   release first when there is only one host that matters.
+
+---
+
+# Part II — Promotion
+
+Added 2026-08-15 (operator directive msg 10934, architect ruling msg 10936,
+devops design points msg 10941). Sections above are unchanged and keep their
+numbers; §3 is amended by §13 below.
+
+## 13. RULED: build once at qa, promote by digest
+
+```
+feature/<name>  --PR-->  release/qa          BUILD + full gate. The artifact is born.
+release/qa      --PR-->  release/candidate   RETAG ONLY. No build, no lint, no tests.
+release/candidate --PR-->  main              Version + :latest, then prod.
+```
+
+**AN IMAGE IS BUILT ONCE AND IDENTIFIED BY ITS DIGEST.** Promotion adds NAMES
+to an existing digest and never produces bytes — a registry manifest
+operation, never pull-tag-push from a rebuilt context, which is a rebuild
+wearing a promotion's clothes.
+
+This amends §3: the human act moves from "cut a release" to "approve the
+promotion into main". The property §3 protects is unchanged — merged must not
+silently mean running — and a promotion nobody approved is exactly that
+failure with more branches.
+
+## 14. RULED: the artifact's identity is the commit, not the version
+
+The image is born at qa time; the version is assigned at merge to main by
+whoever merges (operator ruling 10904). The artifact therefore cannot be named
+by a version that does not exist yet.
+
+- **`:sha-<short>`** — the artifact's primary, immutable identity, written at
+  the qa build.
+- **`:0.x.y`** — an ALIAS added to that same digest at the main merge.
+- **`:latest`** — a POINTER for humans. It moves. **Nothing deploys from it.**
+
+"A tag is written once" (msg 10877) survives intact: sha and version tags are
+written once; `:latest` is declared a pointer rather than a tag, and the
+deployer pins a digest so it can always answer what it is running.
+
+## 15. RULED: promotion verifies provenance, and that is the only check it runs
+
+No relint, no retest. Re-running unit tests on bytes that did not change
+proves nothing and invites a flake to block a good release.
+
+In their place, **every** promotion verifies that the digest it is promoting
+is the digest the previous tier passed — a provenance equality, measured in
+seconds. Without it, retag-only quietly becomes trust-only.
+
+Two mechanical requirements, because a merge can change the tree and then the
+retag is a lie:
+
+1. The built image records its **source commit** as a label; promotion refuses
+   unless the branch head resolves to that same commit, naming both shas.
+2. **Promotion merges are fast-forward only**, and `release/qa` and
+   `release/candidate` are protected against direct pushes. A promotion branch
+   anyone can push to is not a promotion channel; it is a second main.
+
+## 16. RULED: no-retest is about code, not about environments
+
+A promotion still needs a gate. The honest one reads the ENVIRONMENT, not the
+source: qa must have ACCEPTED the artifact — deployed, healthy, observed —
+before it may be promoted. That is a different question from "do the tests
+pass", and it is the question promotion is actually asking.
+
+## 17. qa and rc are deployments, and they cost
+
+Not tags. Each is a stack with its own compose project, its own data root and
+its own hostname, fed by its tier's tag through the §2 deployer.
+
+- **COMPOSE_PROJECT is mandatory for every invocation.** A fixed project name
+  makes every same-host invocation the same stack regardless of container
+  names; this fleet has already paid for that once.
+- **qa/rc data is not a copy of prod's room history** without a deliberate
+  decision about what that publishes.
+- Sizing, data roots, and **who resets them** are open (§19).
+
+## 18. Cutover, not coexistence
+
+The pipeline merged in 0.2.95 is main-only. It stays exactly as it is until
+this design is built, and then the reshape lands in ONE cutover. Two tag
+grammars running at once is how a digest gets promoted by the wrong rule, and
+NO LEGACY is already doctrine.
+
+Branch doctrine changes wholesale with this: `feature/*` →
+`release/qa` → `release/candidate` → `main` re-bases the ship, verdict and
+merge process, not only the CI triggers. That is planning-session scale and it
+is named here so it is not discovered mid-reshape.
+
+## 19. Open, Part II
+
+- **Where qa and rc run**, how big, and who resets their data.
+- **Whether a verdict attaches to a branch head or to a digest** once the
+  artifact outlives the branch. Today a verdict names a head sha; under
+  promotion the digest is the thing that travels.
+- **The hotfix path's dwell time** — the PATH is fixed (feature → qa → rc →
+  main, built once); what may be compressed is how long an artifact rests in
+  each tier, and by whose word.
