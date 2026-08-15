@@ -60,11 +60,25 @@ def live_agent(conn, name):
     by a migration, silently (msg 9000). Ambiguity is the operator's to settle.
     """
     rows = conn.execute(
-        "SELECT id, owner_id, name FROM agents "
+        "SELECT id, owner_id, name, retired_ns FROM agents "
         "WHERE name=? AND retired_ns IS NULL", (name,)).fetchall()
     if len(rows) != 1:
         die(f"{name!r} resolves to {len(rows)} live agents; expected exactly 1")
     return rows[0]
+
+
+def any_agent(conn, ref):
+    """A source may be RETIRED, so sources resolve by ID as well as by name.
+
+    The live census found FOUR architect identities, two of them retired and
+    one of those holding 37 state notes -- the institutional memory worth
+    recovering (msg 10952). A tool that only speaks live names cannot fold
+    them, and a name that two retired rows share cannot be resolved at all.
+    An id is exact; a name still has to be unambiguous and live.
+    """
+    row = conn.execute("SELECT id, owner_id, name, retired_ns FROM agents "
+                       "WHERE id=?", (ref,)).fetchone()
+    return row if row else live_agent(conn, ref)
 
 
 def counts(conn, agent_id):
@@ -124,27 +138,39 @@ def merge(conn, src, dst):
 def main():
     p = argparse.ArgumentParser(description="DES-011 one-time identity merge")
     p.add_argument("--db", required=True)
-    p.add_argument("--from", dest="src", required=True, help="name being merged AWAY")
+    p.add_argument("--from", dest="src", action="append", required=True,
+                   metavar="NAME_OR_ID",
+                   help="identity merged AWAY; repeatable. A RETIRED identity "
+                        "must be named by id, because only live names resolve")
     p.add_argument("--to", dest="dst", required=True, help="surviving name")
     p.add_argument("--backup", help="path to the pre-merge backup (must exist)")
     p.add_argument("--apply", action="store_true",
                    help="without this, nothing is written")
     a = p.parse_args()
 
-    if a.src == a.dst:
-        die("--from and --to are the same name")
-
     conn = sqlite3.connect(a.db, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    src, dst = live_agent(conn, a.src), live_agent(conn, a.dst)
-    if src["owner_id"] != dst["owner_id"]:
-        die("these agents have different owners; merging across owners is a "
-            "different act and this tool refuses it")
+    dst = live_agent(conn, a.dst)
+    sources = [any_agent(conn, s) for s in a.src]
+    seen = set()
+    for s in sources:
+        if s["id"] == dst["id"]:
+            die("--from and --to resolve to the same identity")
+        if s["id"] in seen:
+            die(f"{s['id']} named twice as a source")
+        seen.add(s["id"])
+        if s["owner_id"] != dst["owner_id"]:
+            die(f"{s['name']} ({s['id']}) has a different owner than the "
+                f"survivor; merging across owners is a different act and this "
+                f"tool refuses it")
 
-    before = counts(conn, src["id"])
-    print(f"from {src['name']} ({src['id']})\n  to {dst['name']} ({dst['id']})\n")
-    for k, v in before.items():
-        print(f"  {v:6d}  {k}")
+    print(f"  to {dst['name']} ({dst['id']})\n")
+    for s in sources:
+        state = "retired" if s["retired_ns"] else "live"
+        print(f"from {s['name']} ({s['id']}, {state})")
+        for k, v in counts(conn, s["id"]).items():
+            print(f"  {v:6d}  {k}")
+        print()
 
     if not a.apply:
         print("\ndry run -- nothing written. Re-run with --apply.")
@@ -158,7 +184,10 @@ def main():
 
     conn.execute("BEGIN IMMEDIATE")
     try:
-        moved = merge(conn, src, dst)
+        moved = {}
+        for s in sources:
+            for k, v in merge(conn, s, dst).items():
+                moved[k] = moved.get(k, 0) + v
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
             raise RuntimeError(f"merge left {len(bad)} FK violations")
@@ -167,13 +196,16 @@ def main():
         conn.execute("ROLLBACK")
         raise
 
-    left = counts(conn, src["id"])
-    stranded = {k: v for k, v in left.items() if v and not k.startswith("members")}
-    if stranded:
-        die(f"rows still point at the merged-away id: {stranded}")
+    for s in sources:
+        left = counts(conn, s["id"])
+        stranded = {k: v for k, v in left.items() if v and not k.startswith("members")}
+        if stranded:
+            die(f"rows still point at {s['id']}: {stranded}")
 
-    record = {"ts_ns": time.time_ns(), "from": dict(src), "to": dict(dst),
-              "moved": moved, "des": "DES-011 section 7"}
+    record = {"ts_ns": time.time_ns(), "to": dict(dst), "des": "DES-011 section 7",
+              "from": [{"id": s["id"], "name": s["name"],
+                        "was_retired": bool(s["retired_ns"])} for s in sources],
+              "moved": moved}
     log = os.path.join(os.path.dirname(os.path.abspath(a.db)), "identity-merges.jsonl")
     with open(log, "a") as f:
         f.write(json.dumps(record) + "\n")
@@ -182,8 +214,8 @@ def main():
     for k, v in moved.items():
         print(f"  {v:6d}  {k}")
     print(f"\nrecorded in {log}")
-    print(f"{src['name']!r} is retired; its id and rows are intact and now "
-          f"point at {dst['name']!r}.")
+    print(f"{len(sources)} identities retired; their ids and rows are intact "
+          f"and now point at {dst['name']!r} ({dst['id']}).")
 
 
 if __name__ == "__main__":

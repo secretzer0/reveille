@@ -127,3 +127,28 @@ def test_an_ambiguous_name_refuses_rather_than_guessing():
     m = _tool()
     with pytest.raises(SystemExit):
         m.live_agent(c, "nobody-by-that-name")
+
+
+def test_a_retired_identity_folds_by_id():
+    """The live census found FOUR architect ids, two retired, one of those
+    holding 37 state notes -- a tool that only speaks live names cannot fold
+    them (msg 10952)."""
+    c, path, admin, room, loser, keep = _two_bodies()
+    m = _tool()
+    src = m.live_agent(c, "architect")
+    dst = m.live_agent(c, "reveille-architect")
+    c.execute("INSERT INTO messages(sender, recipient, subject, body, room, "
+              "sender_agent_id, ts_ns) VALUES('architect','*','s','b',?,?,1)",
+              (room["id"], src["id"]))
+    c.execute("UPDATE agents SET retired_ns=1 WHERE id=?", (src["id"],))
+
+    # A retired name no longer resolves; its id still does.
+    with pytest.raises(SystemExit):
+        m.any_agent(c, "architect")
+    again = m.any_agent(c, src["id"])
+    assert again["id"] == src["id"] and again["retired_ns"]
+
+    c.execute("BEGIN IMMEDIATE")
+    m.merge(c, again, dst)
+    c.execute("COMMIT")
+    assert c.execute("SELECT sender_agent_id FROM messages").fetchone()[0] == dst["id"]

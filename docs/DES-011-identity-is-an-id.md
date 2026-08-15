@@ -112,9 +112,58 @@ class of act: stop the broker, back up the database, run `--dry-run`, read the
 counts, run `--apply`, start the broker, verify. A merge under a live writer
 is the same gamble as a migration under one.
 
-**The merge record** is a JSON line beside the database plus the room message
-announcing it. A `merged_into` column on `agents` is the right home and it
-lands with §6 — the one-time act does not earn a schema migration tonight.
+### 7.1 Which ids fold (measured, msg 10952)
+
+The live census found **four** architect identities under the operator, not
+two:
+
+| id | name | state | note |
+|---|---|---|---|
+| `48a5d57c` | architect | retired | the original |
+| `9f8c13fa` | reveille-architect | retired | **37 state notes** — the largest state corpus in the fleet |
+| `3b29c8b1` | reveille-architect | LIVE | the body speaking on 2026-08-15 — **the survivor** |
+| `1b676b1d` | architect | LIVE | the silent fork, 1 state note |
+
+**All four fold onto `3b29c8b1`.** The operator's goal is one being with its
+whole history, and the 37 state notes on the retired `9f8c13fa` are exactly
+the institutional memory worth recovering — leaving them attached to a retired
+id is losing them in place.
+
+**Name the cost, because folding is irreversible**: DES-007's ids exist partly
+to SEGMENT instances of one label over time, and a fold spends that
+segmentation permanently. What preserves the truth afterwards is that the
+historical `sender`/`recipient` NAME strings are untouched, plus the merge
+record listing every folded id. Provenance moves from the id to the record —
+so the record has to be durable, which is why §7.2 puts it in the hive rather
+than only in a file.
+
+A source may therefore be RETIRED, and a retired name does not resolve — two
+retired rows can share one. **Sources are named by id; the survivor by live
+name.** The tool refuses any resolution it would have to guess.
+
+### 7.2 The merge record
+
+Three places, none of them a schema change:
+
+1. the JSON line beside the database (`identity-merges.jsonl`),
+2. the room message announcing it, and
+3. **a hive memory of kind `decision`** naming every folded id and the
+   survivor — the queryable one, and the one a stranger reaches through
+   `recall()`.
+
+A `merged_into` column on `agents` is the better home and it lands with §6. A
+one-time act does not earn a schema migration on the night it runs.
+
+### 7.3 The recipient side
+
+`messages.recipient_agent_id` does not exist yet (§6). The merge runs
+**name-based on the recipient plane this pass**, and the column backfills from
+names when §6 lands.
+
+Folding makes that later backfill SAFE rather than risky: once both
+`architect` and `reveille-architect` belong to one identity, a name-to-id
+backfill has exactly one answer for either spelling. Doing the fold first is
+what removes the ambiguity the backfill would otherwise have to guess at.
 
 ## 8. What the uuid does NOT buy
 
