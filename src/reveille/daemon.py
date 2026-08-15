@@ -2720,6 +2720,7 @@ async def agents_seen_http(request):
     return JSONResponse({"agents": store.agents_seen(_conn, rooms, exclude=people)})
 
 
+@_guard
 async def presence_http(request):
     """GET /presence[&room=] -> same view as the presence() tool, for the UI header."""
     p = _principal(request)
