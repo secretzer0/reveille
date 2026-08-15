@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""One-time identity merge (DES-011 section 7): re-point one agent's rows onto
+another, then retire the emptied name.
+
+MERGE, THEN RETIRE. NEVER PRUNE. prune() erases; the operator's condition for
+collapsing the two architect identities was that everything survives on the
+final name, so this tool only ever re-points and retires.
+
+WHY A SCRIPT AND NOT A FEATURE: the general operation belongs with DES-011
+section 6, once membership, receipts and routing key on the id underneath.
+Tonight there is exactly one merge to perform and a script that does it in one
+transaction, with a dry run anyone can read, is the smaller thing.
+
+THE SITE LIST IS ENUMERATED, so a missed one is a diff rather than a
+discovery. The site most easily missed is not a column at all: state notes
+live in memories.scope as the STRING 'agent:<id>' (store._rescope_state_notes
+is the precedent -- an earlier migration got that plane wrong and moved 47 of
+50 notes to dead scopes).
+
+Procedure, which is DES-010 section 7's discipline because it is the same
+class of act -- a bulk rewrite of the live database:
+
+    stop the broker
+    back it up            (sqlite3 db 'VACUUM INTO ...' )
+    identity-merge --db ... --from X --to Y --backup <file> --dry-run
+    read the counts
+    identity-merge ...    --apply
+    start the broker, verify
+
+A merge under a live writer is the same gamble as a migration under one.
+"""
+import argparse
+import json
+import os
+import sqlite3
+import sys
+import time
+
+# Every table carrying an agent id. Enumerated, never discovered.
+ID_SITES = (
+    ("messages", "sender_agent_id"),        # attribution of every message sent
+    ("memories", "author_agent_id"),        # who authored a fact
+    ("reads", "agent_id"),                  # receipts
+    ("tokens", "agent_id"),                 # credential history
+    ("token_tombstones", "agent_id"),       # supersede signposts
+    ("token_audit", "agent_id"),            # credential audit
+)
+
+
+def die(msg):
+    print(f"identity-merge: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def live_agent(conn, name):
+    """The one LIVE agents row for this name, or a refusal naming what it found.
+
+    Never resolves through a preference (ORDER BY, newest, live-first): a
+    resolution that guesses is how one agent's history gets handed to another
+    by a migration, silently (msg 9000). Ambiguity is the operator's to settle.
+    """
+    rows = conn.execute(
+        "SELECT id, owner_id, name FROM agents "
+        "WHERE name=? AND retired_ns IS NULL", (name,)).fetchall()
+    if len(rows) != 1:
+        die(f"{name!r} resolves to {len(rows)} live agents; expected exactly 1")
+    return rows[0]
+
+
+def counts(conn, agent_id):
+    """What would move, per site, before anything moves."""
+    out = {}
+    for table, col in ID_SITES:
+        out[f"{table}.{col}"] = conn.execute(
+            f"SELECT count(*) FROM {table} WHERE {col}=?", (agent_id,)).fetchone()[0]
+    out["memories.scope(state)"] = conn.execute(
+        "SELECT count(*) FROM memories WHERE scope=?", (f"agent:{agent_id}",)).fetchone()[0]
+    out["members(rows)"] = conn.execute(
+        "SELECT count(*) FROM members WHERE agent_id=?", (agent_id,)).fetchone()[0]
+    return out
+
+
+def merge(conn, src, dst):
+    """Re-point src onto dst inside the caller's transaction. Returns a report."""
+    moved = {}
+    for table, col in ID_SITES:
+        moved[f"{table}.{col}"] = conn.execute(
+            f"UPDATE {table} SET {col}=? WHERE {col}=?", (dst["id"], src["id"])).rowcount
+
+    # State notes hide in a STRING, not a column (DES-011 section 7).
+    moved["memories.scope(state)"] = conn.execute(
+        "UPDATE memories SET scope=? WHERE scope=?",
+        (f"agent:{dst['id']}", f"agent:{src['id']}")).rowcount
+
+    # Membership is LIVE state, not history, so it is handled rather than
+    # copied. Where the survivor already holds the room, the loser's row is the
+    # ghost that keeps a dead name in presence -- delete it. Where it does not,
+    # re-label the row onto the survivor so no room reach is lost. members is
+    # keyed (room_id, name), so neither branch can collide.
+    dst_rooms = {r["room_id"] for r in conn.execute(
+        "SELECT room_id FROM members WHERE name=?", (dst["name"],))}
+    dropped = relabelled = 0
+    for r in conn.execute("SELECT room_id FROM members WHERE name=?",
+                          (src["name"],)).fetchall():
+        if r["room_id"] in dst_rooms:
+            conn.execute("DELETE FROM members WHERE room_id=? AND name=?",
+                         (r["room_id"], src["name"]))
+            dropped += 1
+        else:
+            conn.execute(
+                "UPDATE members SET name=?, agent_id=? WHERE room_id=? AND name=?",
+                (dst["name"], dst["id"], r["room_id"], src["name"]))
+            relabelled += 1
+    moved["members.dropped(ghost)"] = dropped
+    moved["members.relabelled"] = relabelled
+
+    # RETIRE, never delete: the row is the record that this name existed and
+    # what became of it, and retiring frees the label for reuse.
+    conn.execute("UPDATE agents SET retired_ns=? WHERE id=?",
+                 (time.time_ns(), src["id"]))
+    return moved
+
+
+def main():
+    p = argparse.ArgumentParser(description="DES-011 one-time identity merge")
+    p.add_argument("--db", required=True)
+    p.add_argument("--from", dest="src", required=True, help="name being merged AWAY")
+    p.add_argument("--to", dest="dst", required=True, help="surviving name")
+    p.add_argument("--backup", help="path to the pre-merge backup (must exist)")
+    p.add_argument("--apply", action="store_true",
+                   help="without this, nothing is written")
+    a = p.parse_args()
+
+    if a.src == a.dst:
+        die("--from and --to are the same name")
+
+    conn = sqlite3.connect(a.db, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    src, dst = live_agent(conn, a.src), live_agent(conn, a.dst)
+    if src["owner_id"] != dst["owner_id"]:
+        die("these agents have different owners; merging across owners is a "
+            "different act and this tool refuses it")
+
+    before = counts(conn, src["id"])
+    print(f"from {src['name']} ({src['id']})\n  to {dst['name']} ({dst['id']})\n")
+    for k, v in before.items():
+        print(f"  {v:6d}  {k}")
+
+    if not a.apply:
+        print("\ndry run -- nothing written. Re-run with --apply.")
+        return
+
+    # The backup is checked HERE rather than trusted, because this is the
+    # point of no return and the remedy for getting it wrong is the backup.
+    if not a.backup or not os.path.isfile(a.backup) or os.path.getsize(a.backup) == 0:
+        die("--apply needs --backup naming an existing non-empty pre-merge "
+            "backup (sqlite3 db \"VACUUM INTO 'file'\"). Refusing.")
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        moved = merge(conn, src, dst)
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise RuntimeError(f"merge left {len(bad)} FK violations")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    left = counts(conn, src["id"])
+    stranded = {k: v for k, v in left.items() if v and not k.startswith("members")}
+    if stranded:
+        die(f"rows still point at the merged-away id: {stranded}")
+
+    record = {"ts_ns": time.time_ns(), "from": dict(src), "to": dict(dst),
+              "moved": moved, "des": "DES-011 section 7"}
+    log = os.path.join(os.path.dirname(os.path.abspath(a.db)), "identity-merges.jsonl")
+    with open(log, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+    print("\nmerged:")
+    for k, v in moved.items():
+        print(f"  {v:6d}  {k}")
+    print(f"\nrecorded in {log}")
+    print(f"{src['name']!r} is retired; its id and rows are intact and now "
+          f"point at {dst['name']!r}.")
+
+
+if __name__ == "__main__":
+    main()
