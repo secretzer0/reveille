@@ -61,28 +61,12 @@ scan_config() {  # <local-tag> -> 0 clean, 1 credential-shaped content
   # Two inspects, never one space-joined line: an env VALUE may contain a
   # space, and splitting the stream on the first one truncates the JSON --
   # found by this gate's own synthetic red before it found it in production.
+  # The judgement lives in scripts/config_scan.py so the suite can run it red
+  # -- its first live refusal was a FALSE POSITIVE (PYTHON_SHA256, the base
+  # image's checksum env) that blocked a real publish (msg 10949).
   { docker inspect --format '{{json .Config.Env}}' "$1";
     docker inspect --format '{{json .Config.Labels}}' "$1"; } \
-  | python3 -c '
-import json, re, sys
-env_json, labels_json = sys.stdin.read().splitlines()[:2]
-pairs = []
-for e in json.loads(env_json) or []:
-    k, _, v = e.partition("=")
-    pairs.append((k, v))
-pairs += list((json.loads(labels_json) or {}).items())
-NAME = re.compile(r"(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|"
-                  r"PAT|BEARER|OAUTH)(_|$)", re.I)
-# a long opaque run with no path separator: token-shaped. Dots and = admitted
-# so a JWT (a.b.c) or padded base64 does not slip the shape; PATH-like values
-# stay excluded by the missing slash.
-BLOB = re.compile(r"^[A-Za-z0-9_.=-]{32,}$")
-bad = [k for k, v in pairs if v and (NAME.search(k) or BLOB.match(v))]
-if bad:
-    print("credential-shaped config in image:", ", ".join(sorted(bad)),
-          file=sys.stderr)
-    sys.exit(1)
-'
+  | python3 "$(dirname "$0")/config_scan.py"
 }
 
 publish() {  # <name> <tag> <dockerfile>
