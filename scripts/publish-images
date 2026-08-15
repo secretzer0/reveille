@@ -58,10 +58,14 @@ tts_tag=$(grep -m1 '^TTS_IMAGE ?=' Makefile | cut -d= -f2- | tr -d ' ')
 server_tag="reveille-server:$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)"
 
 scan_config() {  # <local-tag> -> 0 clean, 1 credential-shaped content
-  docker inspect --format '{{json .Config.Env}} {{json .Config.Labels}}' "$1" \
+  # Two inspects, never one space-joined line: an env VALUE may contain a
+  # space, and splitting the stream on the first one truncates the JSON --
+  # found by this gate's own synthetic red before it found it in production.
+  { docker inspect --format '{{json .Config.Env}}' "$1";
+    docker inspect --format '{{json .Config.Labels}}' "$1"; } \
   | python3 -c '
 import json, re, sys
-env_json, _, labels_json = sys.stdin.read().partition(" ")
+env_json, labels_json = sys.stdin.read().splitlines()[:2]
 pairs = []
 for e in json.loads(env_json) or []:
     k, _, v = e.partition("=")
