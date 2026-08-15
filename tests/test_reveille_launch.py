@@ -1417,7 +1417,13 @@ def test_agent_image_check_refuses_a_tag_that_was_never_built():
 
     # The positive half. Docker is reachable -- proven one line up -- so exit 1
     # here means DEFAULT_IMAGE was bumped and never built, which is exactly the
-    # thing this gate is for. Failing, not skipping.
+    # thing this gate is for. Failing, not skipping -- ON A DEPLOY HOST. A CI
+    # runner is not one: it never provisions, so DEFAULT_IMAGE is legitimately
+    # unbuilt there and this half would red every PR while measuring nothing
+    # (ruling 10877.8: CI proves images build, never what a host deploys).
+    if os.environ.get("CI"):
+        pytest.skip("CI runner is not a deploy host; DEFAULT_IMAGE is "
+                    "legitimately unbuilt here")
     present = subprocess.run(["bash", str(script), rl.DEFAULT_IMAGE],
                              capture_output=True, text=True)
     assert present.returncode == 0, (

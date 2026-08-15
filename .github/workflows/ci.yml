@@ -1,0 +1,23 @@
+# PR gate (CI ruling 10877, checks 1+2): the two commands doctrine already
+# names, run where nobody can forget them, plus ruling 8433 mechanised.
+# HOSTED RUNNERS ONLY (10877.5): a public repo plus a self-hosted runner means
+# a stranger's forked PR executes on the machine holding the live bus. A green
+# run proves the gates passed -- never that a container boots or reaches the
+# bus (10877.8); doctrine 9055 two-shape verification stands.
+name: ci
+on:
+  pull_request:
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run pytest tests/ -q
+      - run: uv run ruff check src tests scripts
+      # base...head over the whole PR range: a stacked slice whose parent
+      # moved the pins is green; an input change with no pin move is red.
+      - run: scripts/image-pin-check "origin/${{ github.base_ref }}" HEAD

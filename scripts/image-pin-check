@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Ruling 8433, mechanised (CI ruling 10877 check 2): if a diff touches the
+# agent image's build inputs and the tag pin did not move in the same range,
+# exit RED. Honour-system since 8433 was made; honour-system is why three
+# tags shipped unbuilt and one shipped drifted.
+#
+# THE PINS ARE A CLOSED, ENUMERATED LIST -- adding a fourth pin is a diff to
+# this file, not a discovery. The INPUTS are the docker/ files the agent
+# Dockerfile bakes; src/ rides into the image via `uv tool install` but moves
+# on the VERSION axis (branches ship unversioned, the merger numbers), so it
+# is deliberately not an input here -- the version bump is its pin.
+#
+# Usage: image-pin-check <base-ref> <head-ref>   (exit 0 ok, 1 red, 2 usage)
+set -euo pipefail
+[ $# -eq 2 ] || { echo "usage: image-pin-check <base> <head>" >&2; exit 2; }
+base="$1" head="$2"
+
+INPUTS=(docker/Dockerfile docker/entrypoint.sh docker/tmux.conf
+        docker/attach-gate docker/agent-probe)
+PINS=(Makefile scripts/reveille_launch.py tests/test_reveille_launch.py)
+
+# No grep -q under pipefail: -q exits at first match, the producer dies on
+# SIGPIPE (141), and pipefail reports the pipeline failed ON a match. Plain
+# grep consumes the stream; stdout goes to /dev/null instead.
+changed() { git diff --name-only "$base...$head" -- "$@" | grep . >/dev/null; }
+
+if ! changed "${INPUTS[@]}"; then
+  echo "image-pin-check: no agent-image build inputs changed"
+  exit 0
+fi
+
+# An input moved: the tag literal must differ between base and head in EVERY
+# pin site, or two different images answer to one name.
+tag_at() { git show "$1:Makefile" 2>/dev/null | grep -m1 '^AGENT_IMAGE ?=' | cut -d= -f2- | tr -d ' '; }
+b_tag=$(tag_at "$base"); h_tag=$(tag_at "$head")
+if [ -z "$h_tag" ]; then
+  echo "image-pin-check: cannot read AGENT_IMAGE at $head" >&2; exit 2
+fi
+if [ "$b_tag" = "$h_tag" ]; then
+  echo "image-pin-check: RED -- agent-image build inputs changed but the tag" >&2
+  echo "  pin did not move ($h_tag at both ends). Two builds of one tag make" >&2
+  echo "  launcher.db provision records ambiguous (ruling 8433). Bump" >&2
+  echo "  AGENT_IMAGE, DEFAULT_IMAGE and the guarding test pin together." >&2
+  exit 1
+fi
+for f in scripts/reveille_launch.py tests/test_reveille_launch.py; do
+  if ! git show "$head:$f" | grep -F "$h_tag" >/dev/null; then
+    echo "image-pin-check: RED -- Makefile says $h_tag but $f does not carry" >&2
+    echo "  it; the three pins move together or not at all." >&2
+    exit 1
+  fi
+done
+echo "image-pin-check: inputs changed and every pin moved to $h_tag"

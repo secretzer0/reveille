@@ -1,0 +1,29 @@
+# Publish on main (CI ruling 10877, checks 3+4): per image, tag ABSENT from
+# the registry -> build and push; PRESENT -> skip and stay green. CI never
+# overwrites a tag and no human ever pushes one -- the exists-check IS the
+# write-once rule, enforced where the whole fleet can see it. The pipeline
+# ENDS at the push (10877.6): both deploy units stay human acts, because
+# MERGED DOES NOT MEAN RUNNING is doctrine, not an inconvenience.
+name: publish
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  packages: write
+# One publish at a time (msg 10922): two quick pushes must queue, not race --
+# the write-once rule should be structural, never argued from timing.
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      # event.before = the previous main head: the range whose input changes
+      # decide whether "tag already exists" is a skip or a refusal.
+      - run: scripts/publish-images "ghcr.io/${{ github.repository_owner }}" "${{ github.event.before }}"

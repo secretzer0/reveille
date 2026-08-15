@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# The main-branch publisher (CI ruling 10877). Per image: resolve the tag the
+# repo pins, skip green if the registry already holds it AND nothing that goes
+# into the image changed, otherwise build, GATE that no identity is baked in,
+# and push.
+#
+# THE SKIP MUST NOT LIE (architect BLOCKING 1, msg 10922): "tag already
+# exists" is success only when the image's inputs did not move. Inputs moved
+# and the tag exists = ruling 8433 one layer out -- two different mains, one
+# tag -- and the pipeline must FAIL LOUDLY, not report green. The agent image
+# is protected on PRs by image-pin-check; the server image's pin is the
+# VERSION, which branches deliberately do not bump (the merger numbers at
+# merge), so push-to-main is the first place the number exists and therefore
+# the only honest place to enforce it.
+#
+# The no-identity gate is 10877 check 4 made executable: the registry is
+# PUBLIC, so a token in the image config is a published credential -- fail on
+# any env/label whose NAME says secret (word-bounded: PAT must not match
+# PATH) or whose VALUE is a long opaque blob (dots and padding allowed, so a
+# JWT or base64 does not slip the shape).
+#
+# Usage: publish-images <registry-prefix> [<base-sha>]
+#        publish-images inputs-changed <image> <base> <head>   (gate hook)
+set -euo pipefail
+
+inputs_for() {  # <agent|server|tts> -> path list on stdout
+  case "$1" in
+    agent)  printf '%s\n' docker/Dockerfile docker/entrypoint.sh \
+                          docker/tmux.conf docker/attach-gate docker/agent-probe ;;
+    server) printf '%s\n' docker/Dockerfile.server src pyproject.toml uv.lock ;;
+    tts)    printf '%s\n' docker/Dockerfile.tts ;;
+    *) echo "unknown image: $1" >&2; return 2 ;;
+  esac
+}
+
+inputs_changed() {  # <image> <base> <head> -> exit 0 changed, 1 unchanged
+  local paths
+  mapfile -t paths < <(inputs_for "$1")
+  git diff --name-only "$2..$3" -- "${paths[@]}" | grep . >/dev/null
+}
+
+if [ "${1:-}" = "inputs-changed" ]; then
+  shift; inputs_changed "$@"; exit $?
+fi
+
+[ $# -ge 1 ] || { echo "usage: publish-images <registry-prefix> [<base-sha>]" >&2; exit 2; }
+REG="$1"
+BASE="${2:-}"
+# A push event's `before` is all zeros on a branch's first push; fall back to
+# the previous main commit, and to "no base" (skip stays trusted) on a
+# single-commit history.
+if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+  BASE=$(git rev-parse HEAD^ 2>/dev/null || true)
+fi
+
+agent_tag=$(grep -m1 '^AGENT_IMAGE ?=' Makefile | cut -d= -f2- | tr -d ' ')
+tts_tag=$(grep -m1 '^TTS_IMAGE ?=' Makefile | cut -d= -f2- | tr -d ' ')
+server_tag="reveille-server:$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)"
+
+scan_config() {  # <local-tag> -> 0 clean, 1 credential-shaped content
+  # Two inspects, never one space-joined line: an env VALUE may contain a
+  # space, and splitting the stream on the first one truncates the JSON --
+  # found by this gate's own synthetic red before it found it in production.
+  { docker inspect --format '{{json .Config.Env}}' "$1";
+    docker inspect --format '{{json .Config.Labels}}' "$1"; } \
+  | python3 -c '
+import json, re, sys
+env_json, labels_json = sys.stdin.read().splitlines()[:2]
+pairs = []
+for e in json.loads(env_json) or []:
+    k, _, v = e.partition("=")
+    pairs.append((k, v))
+pairs += list((json.loads(labels_json) or {}).items())
+NAME = re.compile(r"(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|"
+                  r"PAT|BEARER|OAUTH)(_|$)", re.I)
+# a long opaque run with no path separator: token-shaped. Dots and = admitted
+# so a JWT (a.b.c) or padded base64 does not slip the shape; PATH-like values
+# stay excluded by the missing slash.
+BLOB = re.compile(r"^[A-Za-z0-9_.=-]{32,}$")
+bad = [k for k, v in pairs if v and (NAME.search(k) or BLOB.match(v))]
+if bad:
+    print("credential-shaped config in image:", ", ".join(sorted(bad)),
+          file=sys.stderr)
+    sys.exit(1)
+'
+}
+
+publish() {  # <name> <tag> <dockerfile>
+  local name="$1" tag="$2" df="$3" ref="$REG/$2"
+  if docker manifest inspect "$ref" >/dev/null 2>&1; then
+    if [ -n "$BASE" ] && inputs_changed "$name" "$BASE" HEAD; then
+      echo "publish: REFUSING -- $name image inputs changed in $BASE..HEAD but" >&2
+      echo "  $ref already exists. A tag is written once: this main is no" >&2
+      echo "  longer what the registry holds under that name. Bump the pin" >&2
+      echo "  ($name=agent: AGENT_IMAGE trio; server: the version) and merge" >&2
+      echo "  the bump." >&2
+      return 1
+    fi
+    echo "publish: $ref already exists and no $name inputs moved -- skipping"
+    return 0
+  fi
+  echo "publish: building $ref from $df"
+  docker build -t "$ref" -f "$df" .
+  if ! scan_config "$ref"; then
+    echo "publish: REFUSING to push $ref -- the registry is public and the" >&2
+    echo "  image config carries credential-shaped content (see above)." >&2
+    return 1
+  fi
+  docker push "$ref"
+}
+
+publish agent "$agent_tag" docker/Dockerfile
+publish server "$server_tag" docker/Dockerfile.server
+publish tts "$tts_tag" docker/Dockerfile.tts
