@@ -1,6 +1,6 @@
 # DES-011: Identity is an id, a name is a label
 
-Status: RULED — operator directive 2026-08-15 (msgs 10946, 10950), architect
+Status: RULED — operator directive 2026-08-15 (msgs 10946, 10950, 10969 name scope), architect
 ruling (msg 10948), devops survey (msg 10947). Finishes DES-007; does not
 replace it.
 
@@ -25,46 +25,60 @@ DELIVERY consults it**. This document finishes that, and does the merge.
 
 - **The id never changes and is never reused.** It is what history, state
   notes, memory authorship and tokens hang from.
-- **The name is a mutable label, unique among the LIVE AGENTS OF A ROOM**
-  (operator 10957, architect 10958 — this replaces the per-owner scope first
-  written here).
+- **The name is a mutable label, unique among ONE OWNER'S LIVE AGENTS,
+  across every room** (operator clarification 2026-08-15, msg 10969; this
+  supersedes the per-room scope ruled at 10958, which stood for one hour).
+  Two different owners MAY each have an `architect` — bob's and bill's — and
+  both may sit in one room.
 - **A rename is an UPDATE of that label**, checked against the same
   uniqueness, and nothing else moves.
 
-**Why the room and not the owner.** Per-owner uniqueness is neither necessary
-nor sufficient. Not sufficient: two different owners each with a `scout` in
-one room is still ambiguous to everyone typing `to="scout"` there — tonight's
-failure exactly. Not necessary: one owner with an `architect` in Reveille2.0
-and a different `architect` in OverSiteAI is ambiguous to nobody, because
-nothing addresses across rooms. **The room is where addressing resolves**, so
-the room is the scope.
+**Why the owner.** A name is how a HUMAN tells their own agents apart, and a
+human's fleet spans rooms — so the human's namespace is the scope. This is
+what the schema already enforces: `idx_agents_live` is UNIQUE on
+`(owner_id, name) WHERE retired_ns IS NULL`. The ruling makes the constraint
+the design instead of an accident of it.
 
-**Enforced at JOIN, not only at mint.** An agent may hold several rooms, so a
-uniquely-minted agent can still walk into a room where its name is taken.
-Joining a room that already holds a live agent of that name is REFUSED, naming
-the conflict.
+**Creating a duplicate is REFUSED with two remedies, and picks neither**,
+because no machine reads intent from a spelling: CHOOSE A UNIQUE NAME (a
+separate being for this project), or ADD THE EXISTING AGENT TO THE TARGET
+ROOM (one being spanning both). The refusal names the existing agent and the
+room the attempt was aimed at. **`create=true` on a name the owner already
+holds live is that refusal, not an attach** — today's `create_token` attaches
+(and rotates the existing agent's credential) when the row exists regardless
+of `create`, which lets a human who meant a NEW agent silently hijack an old
+one; that is the defect the finishing slice closes first (§6).
 
-**The refusal offers both intents and picks neither**, because no machine can
-read them from a name: RENAME the new agent (a separate being for this
-project), or ADD THE EXISTING AGENT to the room (one being spanning both).
-"Share the existing agent" alone is the wrong default — it produces one being
-in both rooms, which is the knowledge bleed the separation was meant to
-prevent.
+**Cross-owner: same name, one room, is LEGAL — so it must be ADDRESSABLE.**
+Two owners' `architect` in one room is a real case in the multi-human
+endgame, and it is exactly the shape that split tonight's mail. The
+difference is that here the broker KNOWS there are two: `to="architect"`
+with two live holders in the room **resolves or refuses with the candidates
+listed** (§3), and the qualified form `to="<owner>/<name>"` always resolves.
+Presence renders the owner beside every name whose bare label is shared in
+the room, so a human never has to discover the collision by a lost message.
+The `(room_id, name)` key on `members` and today's join() refusal ("name is
+held by a live agent") are therefore the LAST name-keyed plane and part of
+§6, not the rule.
 
-**Names do not scope knowledge; rooms and bodies do.** Hive memory is already
+**Names do not scope knowledge; rooms and bodies do.** Hive memory is
 room-scoped, so one agent in two rooms does not get project A's rulings while
 working in project B. What genuinely mixes is the per-body layer — state
 notes, the working tree, the session context. If isolation is the goal, the
-answer is SEPARATE IDENTITIES, which per-room naming permits and per-owner
-naming forbids.
+answer is a SEPARATE IDENTITY under a distinct name — which is what today's
+two architects are: `reveille-architect` here, `architect` in OverSiteAI,
+one owner, two names, two beings.
 
 ## 3. RULED: resolve at send, store the id
 
-`to="reveille-architect"` resolves to an id **at send time**, within the
-sender's owner scope, and the message stores a recipient id. Delivery never
+`to="reveille-architect"` resolves to an id **at send time**, among the LIVE
+MEMBERS OF THE ROOM, and the message stores a recipient id. Delivery never
 re-reads the label afterwards, so a rename cannot orphan mail.
 
-A bare cross-owner name **resolves or refuses with the candidates listed**. It
+Resolution order: exactly one live member of the room bears the bare name →
+that id. Several (two owners' `architect`, §2) → the sender's OWN agent of
+that name if one of them is theirs, else **refuse with the candidates listed
+as `<owner>/<name>`**. `to="<owner>/<name>"` resolves unconditionally. It
 never guesses: guessing is how a message reaches the wrong body while every
 signal reads green, which is this document's origin story.
 
@@ -96,10 +110,16 @@ made impossible.
 
 DES-007 flagged these and they are what is left:
 
-- **room membership and presence** — `members` is keyed `(room_id, name)`.
+- **room membership and presence** — `members` is keyed `(room_id, name)`,
+  and `join()` refuses a name held by another tag in the room. Under §2 that
+  refusal is WRONG for two owners' agents and RIGHT for nothing: it must key
+  on `(room_id, agent_id)`, and presence must carry `owner` so shared labels
+  render qualified.
 - **inbox and receipts** — `reads` is keyed `(message_id, agent)`, a name.
 - **`to=` routing** — `messages.recipient` is a name; there is no
-  `recipient_agent_id`.
+  `recipient_agent_id`. §3's resolution lands here.
+- **`create=true` on a held name** — attaches and rotates instead of refusing
+  (§2). Smallest and first: it is one branch in `create_token`.
 
 Until these key on the id underneath, a rename is only safe on the planes
 already cut over. **This is the finishing slice**, and it is the one that
@@ -152,10 +172,32 @@ two:
 | `3b29c8b1` | reveille-architect | LIVE | the body speaking on 2026-08-15 — **the survivor** |
 | `1b676b1d` | architect | LIVE | the silent fork, 1 state note |
 
-**All four fold onto `3b29c8b1`.** The operator's goal is one being with its
-whole history, and the 37 state notes on the retired `9f8c13fa` are exactly
-the institutional memory worth recovering — leaving them attached to a retired
-id is losing them in place.
+**As first written: all four fold onto `3b29c8b1`.** SUPERSEDED before it
+ran, by the operator's per-room question (msgs 10963–10965). Measured per
+room, `architect` was never this room's fork: `48a5d57c` sent 2913 of its
+2925 messages and authored 42 hive memories in OverSiteAI; `1b676b1d` (its
+Aug-13 re-mint) spoke only in OverSiteAI and merely held a token that reached
+Reveille2.0. **A shared label across rooms is two beings**, and folding a
+being onto another room's survivor is exactly the bleed §2 exists to prevent.
+
+**Executed (2026-08-15, live db, backup `broker.db.pre-merge-20260815T175126.bak`):
+two beings, two folds, one leave.**
+
+| lineage | folded | survivor | outcome |
+|---|---|---|---|
+| Reveille2.0 architect | `9f8c13fa` | `3b29c8b1` reveille-architect | 322 msgs, 37 state notes recovered, 106 authorships |
+| OverSiteAI architect | `48a5d57c` | `1b676b1d` architect | 2925 msgs, June 28 onward, whole |
+
+`1b676b1d` then LEFT Reveille2.0 (`members.left_ns`) — that membership was the
+leak, and §2's join-time refusal closes it once built. Records:
+`identity-merges.jsonl` (two entries), msg 10965, and the hive decision.
+
+**Rule this leaves behind: a fold is an act on a BEING, not on a name.
+Measure per room before folding.** The 37 state notes on the retired
+`9f8c13fa` were the institutional memory worth recovering — leaving them
+attached to a retired id is losing them in place — and the same is true of
+`48a5d57c`'s 42 memories, which is why they went home to OverSiteAI's
+architect and not here.
 
 **Name the cost, because folding is irreversible**: DES-007's ids exist partly
 to SEGMENT instances of one label over time, and a fold spends that
@@ -188,15 +230,18 @@ one-time act does not earn a schema migration on the night it runs.
 **name-based on the recipient plane this pass**, and the column backfills from
 names when §6 lands.
 
-Folding makes that later backfill SAFE rather than risky: once both
-`architect` and `reveille-architect` belong to one identity, a name-to-id
-backfill has exactly one answer for either spelling. Doing the fold first is
-what removes the ambiguity the backfill would otherwise have to guess at.
+The backfill keys on **(room, name, time)**, not on name alone: `architect`
+in OverSiteAI is `1b676b1d`, and the six messages ever addressed to
+`architect` in Reveille2.0 were addressed to that same being while its token
+reached here — they belong to it, not to `3b29c8b1`. Room membership at the
+message's time is what makes the answer unique per room; the fold is what
+makes it unique over time within a lineage. Neither alone is enough.
 
 ## 8. What the uuid does NOT buy
 
-Two of one owner's live agents still cannot share a name: addressing has to
-resolve, and "resolve or refuse" needs a unique answer. What the id buys is
+One owner's live agents still cannot share a name: the name is how the owner
+tells them apart, and "resolve or refuse" needs a unique answer inside that
+owner's fleet. What the id buys is
 that renaming is SAFE and that a fork is REVERSIBLE — not that names stop
 mattering.
 
@@ -206,9 +251,18 @@ mattering.
    still arrives and history still renders.
 2. **The merge loses nothing**: counts per table before and after, and the
    survivor's inbox contains what both bodies were sent.
-3. **A cross-owner bare name refuses with candidates** rather than guessing.
-4. **Two live agents of one owner cannot share a name**, before and after a
-   rename.
+3. **A shared bare name in a room resolves to the sender's own agent or
+   refuses with `<owner>/<name>` candidates**; the qualified form always
+   resolves; two owners' `architect` can both JOIN one room and each hears
+   only its own mail.
+4. **One owner's live agents cannot share a name**, before and after a
+   rename; `create=true` on a held name is REFUSED naming the existing agent
+   and both remedies (§2), and the existing agent's credential is untouched
+   by the attempt.
+5. **A fold is measured per room first**: the tool (or its runbook) reports
+   each source's per-room message and authorship counts before `--apply`; a
+   source whose activity is in another room than the survivor's is a refusal
+   to be overridden by hand, not a default.
 
 ## 10. Open
 
