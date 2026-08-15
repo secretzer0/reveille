@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# The main-branch publisher (CI ruling 10877). Per image: resolve the tag the
+# repo pins, skip green if the registry already holds it, otherwise build,
+# GATE that no identity is baked in, and push. The gate is 10877 check 4 made
+# executable: the registry is PUBLIC, so a token in the image config is a
+# published credential -- fail the push on any env/label whose NAME says
+# secret or whose VALUE is a long opaque blob, and fire on the day someone
+# adds an ARG "just for testing".
+set -euo pipefail
+[ $# -eq 1 ] || { echo "usage: publish-images <registry-prefix>" >&2; exit 2; }
+REG="$1"
+
+agent_tag=$(grep -m1 '^AGENT_IMAGE ?=' Makefile | cut -d= -f2- | tr -d ' ')
+tts_tag=$(grep -m1 '^TTS_IMAGE ?=' Makefile | cut -d= -f2- | tr -d ' ')
+server_tag="reveille-server:$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)"
+
+scan_config() {  # <local-tag> -> 0 clean, 1 credential-shaped content
+  docker inspect --format '{{json .Config.Env}} {{json .Config.Labels}}' "$1" \
+  | python3 -c '
+import json, re, sys
+env_json, _, labels_json = sys.stdin.read().partition(" ")
+pairs = []
+for e in json.loads(env_json) or []:
+    k, _, v = e.partition("=")
+    pairs.append((k, v))
+pairs += list((json.loads(labels_json) or {}).items())
+NAME = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL", re.I)
+# a long opaque run with no path separator: token-shaped, PATH-proof
+BLOB = re.compile(r"^[A-Za-z0-9_-]{32,}$")
+bad = [k for k, v in pairs if v and (NAME.search(k) or BLOB.match(v))]
+if bad:
+    print("credential-shaped config in image:", ", ".join(sorted(bad)),
+          file=sys.stderr)
+    sys.exit(1)
+'
+}
+
+publish() {  # <tag> <dockerfile>
+  local tag="$1" df="$2" ref="$REG/$1"
+  if docker manifest inspect "$ref" >/dev/null 2>&1; then
+    echo "publish: $ref already exists -- a tag is written once; skipping"
+    return 0
+  fi
+  echo "publish: building $ref from $df"
+  docker build -t "$ref" -f "$df" .
+  if ! scan_config "$ref"; then
+    echo "publish: REFUSING to push $ref -- the registry is public and the" >&2
+    echo "  image config carries credential-shaped content (see above)." >&2
+    return 1
+  fi
+  docker push "$ref"
+}
+
+publish "$agent_tag" docker/Dockerfile
+publish "$server_tag" docker/Dockerfile.server
+publish "$tts_tag" docker/Dockerfile.tts
