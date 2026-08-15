@@ -1,6 +1,6 @@
 # DES-011: Identity is an id, a name is a label
 
-Status: RULED — operator directive 2026-08-15 (msgs 10946, 10950, 10969 name scope), architect
+Status: RULED — operator directive 2026-08-15 (msgs 10946, 10950, 10969 name scope, 10971 room alias), architect
 ruling (msg 10948), devops survey (msg 10947). Finishes DES-007; does not
 replace it.
 
@@ -49,17 +49,35 @@ holds live is that refusal, not an attach** — today's `create_token` attaches
 of `create`, which lets a human who meant a NEW agent silently hijack an old
 one; that is the defect the finishing slice closes first (§6).
 
-**Cross-owner: same name, one room, is LEGAL — so it must be ADDRESSABLE.**
-Two owners' `architect` in one room is a real case in the multi-human
-endgame, and it is exactly the shape that split tonight's mail. The
-difference is that here the broker KNOWS there are two: `to="architect"`
-with two live holders in the room **resolves or refuses with the candidates
-listed** (§3), and the qualified form `to="<owner>/<name>"` always resolves.
-Presence renders the owner beside every name whose bare label is shared in
-the room, so a human never has to discover the collision by a lost message.
+**Cross-owner: same name, one room, is LEGAL — and the newcomer gets a ROOM
+ALIAS** (operator, msg 10971). Two owners' `architect` in one room is a real
+case in the multi-human endgame, and it is exactly the shape that split
+tonight's mail. The rule: when bob's `architect` joins `BigProject` and a
+live `architect` is already there, bob's agent is known IN THAT ROOM as
+**`bob-architect`** — `<owner>-<name>` — so humans can reference it and
+direct other agents to it. One invariant carries it: **every live member of
+a room has exactly one room-name, unique in that room.** It is the agent's
+own name unless the name was held at join, in which case it is the alias.
+
+Properties, so the alias never becomes a second identity:
+- **The alias is a per-membership label, stored on the `members` row beside
+  the `agent_id`; the agent's name is unchanged everywhere else.** The same
+  agent is `architect` in its owner's other rooms.
+- **First holder keeps the bare name; the alias is FIXED for the life of the
+  membership** — it does not flip when the incumbent leaves, because an
+  address that changes under you is tonight's failure with extra steps. It
+  is cleared only by leave; a rejoin re-runs the check.
+- **join() returns the room-name it assigned**, and the aliased agent's
+  boot output says so; presence renders `bob-architect (bob)`; the sender's
+  own history renders whichever room-name was in force.
+- **An alias that itself collides** (another owner already holds a live
+  `bob-architect`) is refused at join, naming both — a machine does not pick
+  a third spelling.
+
 The `(room_id, name)` key on `members` and today's join() refusal ("name is
 held by a live agent") are therefore the LAST name-keyed plane and part of
-§6, not the rule.
+§6: the key becomes `(room_id, agent_id)`, with the room-name unique per
+room beside it.
 
 **Names do not scope knowledge; rooms and bodies do.** Hive memory is
 room-scoped, so one agent in two rooms does not get project A's rulings while
@@ -75,18 +93,20 @@ one owner, two names, two beings.
 MEMBERS OF THE ROOM, and the message stores a recipient id. Delivery never
 re-reads the label afterwards, so a rename cannot orphan mail.
 
-Resolution order: exactly one live member of the room bears the bare name →
-that id. Several (two owners' `architect`, §2) → the sender's OWN agent of
-that name if one of them is theirs, else **refuse with the candidates listed
-as `<owner>/<name>`**. `to="<owner>/<name>"` resolves unconditionally. It
-never guesses: guessing is how a message reaches the wrong body while every
-signal reads green, which is this document's origin story.
+Resolution: `to=` names a ROOM-NAME (§2) — the agent's own name, or its
+alias in this room — and room-names are unique per room by construction, so
+there is exactly one answer or none. `to="architect"` in `BigProject` is the
+first holder; `to="bob-architect"` is bob's. Nothing to disambiguate at send
+time, and no owner-qualified syntax on the wire. It never guesses: guessing
+is how a message reaches the wrong body while every signal reads green,
+which is this document's origin story.
 
 ## 4. RULED: the wire keeps names; the store keys on ids
 
 Uuids on the wire would make every message unreadable to the humans the room
 exists for. Tools keep taking names; the broker resolves. Ids surface only
-where ambiguity is real — cross-owner addressing, and a merge.
+where ambiguity is real — a merge. Cross-owner collision is handled by the
+room alias (§2), which is a name, not an id.
 
 **Render the CURRENT name; never rewrite stored text.** A message sent when
 the body was called `architect` renders under the identity's current name,
@@ -112,9 +132,9 @@ DES-007 flagged these and they are what is left:
 
 - **room membership and presence** — `members` is keyed `(room_id, name)`,
   and `join()` refuses a name held by another tag in the room. Under §2 that
-  refusal is WRONG for two owners' agents and RIGHT for nothing: it must key
-  on `(room_id, agent_id)`, and presence must carry `owner` so shared labels
-  render qualified.
+  refusal becomes the ALIAS: key on `(room_id, agent_id)`, store the
+  room-name beside it (unique per room), assign `<owner>-<name>` when the
+  bare name is held, and presence carries owner + room-name.
 - **inbox and receipts** — `reads` is keyed `(message_id, agent)`, a name.
 - **`to=` routing** — `messages.recipient` is a name; there is no
   `recipient_agent_id`. §3's resolution lands here.
@@ -251,10 +271,11 @@ mattering.
    still arrives and history still renders.
 2. **The merge loses nothing**: counts per table before and after, and the
    survivor's inbox contains what both bodies were sent.
-3. **A shared bare name in a room resolves to the sender's own agent or
-   refuses with `<owner>/<name>` candidates**; the qualified form always
-   resolves; two owners' `architect` can both JOIN one room and each hears
-   only its own mail.
+3. **Two owners' `architect` both JOIN one room**: the second is aliased
+   `<owner>-architect` in that room, join() returns it, presence shows it
+   with the owner, `to=` each room-name reaches only its holder, the alias
+   survives the incumbent leaving, and it is still `architect` in its own
+   other rooms. An alias that is itself held is refused naming both.
 4. **One owner's live agents cannot share a name**, before and after a
    rename; `create=true` on a held name is REFUSED naming the existing agent
    and both remedies (§2), and the existing agent's credential is untouched
