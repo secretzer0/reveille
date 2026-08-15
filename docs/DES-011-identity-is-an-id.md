@@ -31,7 +31,10 @@ DELIVERY consults it**. This document finishes that, and does the merge.
   Two different owners MAY each have an `architect` — bob's and bill's — and
   both may sit in one room.
 - **A rename is an UPDATE of that label**, checked against the same
-  uniqueness, and nothing else moves.
+  uniqueness, and nothing else moves — except that every membership re-runs
+  the room-name check of §2: where the new name is held by another owner's
+  agent in that room, the renamed agent takes the alias there; aliases it
+  already holds are untouched.
 
 **Why the owner.** A name is how a HUMAN tells their own agents apart, and a
 human's fleet spans rooms — so the human's namespace is the scope. This is
@@ -87,10 +90,44 @@ answer is a SEPARATE IDENTITY under a distinct name — which is what today's
 two architects are: `reveille-architect` here, `architect` in OverSiteAI,
 one owner, two names, two beings.
 
+### 2.1 One identity, many bodies, both worlds
+
+The endgame (operator, msg 10972): each human runs several agents; each agent
+is ONE identity that shares the hive of the projects it belongs to and moves
+between the native world (a directory on a host, `reveille init`) and the
+container world (launcher-provisioned) without becoming someone else.
+
+DES-011 makes that a consequence of §2, not a feature:
+
+- **The `agent_id` is what travels.** A body — native or container — holds
+  the identity by a BOUND TOKEN, and `create_token` is the one provisioning
+  path for both shapes ("one identity path, container or not"). A mint with
+  `create=false` ATTACHES a new body to the existing id and SUPERSEDES the
+  previous body's credential in the same transaction: one identity, one live
+  body, enforced by the token rather than by policy (operator 10905 §4; the
+  migration chain 10876→10879 keys on `agent_id` for the same reason).
+  Moving native→container is therefore a mint, not a rename, and history,
+  state notes, memberships, aliases and unread mail are all still hanging
+  from the same id when the new body wakes.
+- **Hive knowledge is scoped by ROOM; the agent's own state by ID.** An
+  agent in three project rooms reads three rooms' doctrine and contributes to
+  each; its state notes (`agent:<id>`) follow it into every room and every
+  body. That is the "singular identity across projects" the operator wants,
+  and it is why per-owner naming (not per-room) is the right scope: the
+  identity is one thing in N rooms; only its room-name may vary.
+- **Humans are a separate namespace.** A human's presence tag is `web:<name>`
+  and a human never resolves as a `to=` agent; an owner called `bob` and an
+  agent called `bob` do not collide. The alias `<owner>-<name>` uses the
+  owner's account name, sanitised to `NAME_RE` — an owner name that cannot be
+  sanitised into a valid alias is a refusal at join naming the reason, never
+  a silent substitute.
+
 ## 3. RULED: resolve at send, store the id
 
-`to="reveille-architect"` resolves to an id **at send time**, among the LIVE
-MEMBERS OF THE ROOM, and the message stores a recipient id. Delivery never
+`to="reveille-architect"` resolves to an id **at send time**, among the
+CURRENT MEMBERS OF THE ROOM (joined and not left — liveness is a delivery
+fact, never an addressing one: mail to a sleeping agent queues, it does not
+refuse), and the message stores a recipient id. Delivery never
 re-reads the label afterwards, so a rename cannot orphan mail.
 
 Resolution: `to=` names a ROOM-NAME (§2) — the agent's own name, or its
@@ -285,9 +322,19 @@ mattering.
    source whose activity is in another room than the survivor's is a refusal
    to be overridden by hand, not a default.
 
+6. **An identity travels**: mint native (create=true), speak, join two
+   rooms, mint again for a container body (create=false) — same `agent_id`,
+   previous token superseded, unread mail and state notes and both
+   memberships (and any alias) present in the new body; then back to native
+   the same way. At no instant do two live credentials exist for the id.
 ## 10. Open
 
 - Whether `recipient_agent_id` is added beside `recipient` or replaces it. The
   render rule (§4) means the name column has no readers left once the id
   lands, but removing it is a data-loss decision and gets its own slice.
 - The rename log's shape — an `agent_names` history table, or an audit row.
+- Ownership transfer (`release_agent_name` → another owner claims it) under
+  per-owner naming: the receiving owner may already hold the name; the claim
+  refuses or renames-at-accept — ruled with the first real transfer.
+- Whether the alias also applies to broadcast fan-out display and to
+  `delivered_to`, which today list bare names.
