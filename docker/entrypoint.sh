@@ -135,12 +135,25 @@ done
 # the launcher's own provision env, correct by construction, and waked retries
 # the bus forever -- so the retry carries --force. A second failure is a
 # missing env var, which is a launcher defect, and set -e makes it loud.
-if reveille init --no-prompt --dir /home/agent/repos >/dev/null; then
+# THE REPORT SAYS WHAT VERIFY SAID, never a cause this script did not
+# establish (architect BLOCKING 1, msg 10875). init exiting non-zero covers
+# two different worlds -- "the broker answered and refused this token" and
+# "the broker did not answer" -- and cli.verify() already speaks the
+# difference on stderr; discarding it left the one reader who cannot reach
+# docker logs holding the wrong half. Mint-supersede is the migration
+# mechanism between shapes now, so a REFUSED credential at boot is a state we
+# deliberately create, and a report saying "network" at that moment aims the
+# re-provision at the wrong thing.
+mcp_force_note() {
+  note "- mcp: registered via reveille init --force -- the credential is UNVERIFIED"
+  say "  init said: ${1%%$'\n'*}"
+  say "  waked will keep retrying the bus"
+}
+if init_said=$(reveille init --no-prompt --dir /home/agent/repos 2>&1 >/dev/null); then
   say "- mcp: registered via reveille init (project scope, headersHelper) in ~/repos"
 else
   reveille init --no-prompt --force --dir /home/agent/repos >/dev/null
-  note "- mcp: registered via reveille init --force -- the broker did not answer"
-  say "  at boot; the credential is unverified and waked will keep retrying"
+  mcp_force_note "$init_said"
 fi
 
 # Provision step 3.2.4: clone the repo the launcher named, into ~/repos -- the
