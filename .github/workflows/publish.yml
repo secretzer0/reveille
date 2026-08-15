@@ -11,10 +11,19 @@ on:
 permissions:
   contents: read
   packages: write
+# One publish at a time (msg 10922): two quick pushes must queue, not race --
+# the write-once rule should be structural, never argued from timing.
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - run: scripts/publish-images "ghcr.io/${{ github.repository_owner }}"
+      # event.before = the previous main head: the range whose input changes
+      # decide whether "tag already exists" is a skip or a refusal.
+      - run: scripts/publish-images "ghcr.io/${{ github.repository_owner }}" "${{ github.event.before }}"
