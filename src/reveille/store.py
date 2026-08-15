@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -168,6 +168,21 @@ CREATE TABLE IF NOT EXISTS tokens (
                  CHECK (mem_tier IN ('state','write','ratify')),
     created_ns   INTEGER NOT NULL,
     last_used_ns INTEGER
+);
+-- S2 (ruling 10876): a SUPERSEDED credential leaves a tombstone so its refusal
+-- can be a signpost -- the dormant body's one honest channel. EXACTLY these
+-- four fields, nothing else: the holder of a superseded token is either the
+-- former body or whoever stole a dead credential, and only one of those
+-- deserves an inventory. last_refusal_ns doubles as S3's liveness reading
+-- ("a human used that machine at T"). No FK: same discipline as token_audit,
+-- the record outlives both the token and, if pruned, the agent it names.
+-- Plain revoke does NOT tombstone -- revocation is deliberate and gets the
+-- generic refusal; only supersession (the body moved) earns a signpost.
+CREATE TABLE IF NOT EXISTS token_tombstones (
+    secret_hash     TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    superseded_ns   INTEGER NOT NULL,
+    last_refusal_ns INTEGER
 );
 -- The token->rooms mapping lives here, NOT in the token. Read on every request so
 -- assign/unassign/revoke/flip-to-private are all instant.
@@ -1142,6 +1157,22 @@ def _upgrade_v20(conn, db_path):
         conn.execute("PRAGMA user_version=21")
 
 
+def _upgrade_v21(conn, db_path):
+    """v21 -> v22: token_tombstones (S2, ruling 10876). Additive -- a superseded
+    credential's refusal becomes a signpost instead of a shrug. Existing rows
+    cannot be backfilled (supersession deleted the hashes), so migration is the
+    empty table and the signpost starts with the next supersede."""
+    with tx(conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS token_tombstones (
+                secret_hash     TEXT PRIMARY KEY,
+                agent_id        TEXT NOT NULL,
+                superseded_ns   INTEGER NOT NULL,
+                last_refusal_ns INTEGER
+            )""")
+        conn.execute("PRAGMA user_version=22")
+
+
 def _upgrade_v0(conn, db_path):
     """v0 (room = the shared secret, stored as a string on every row) -> v2 (rooms are
     uuid rows owned by a user). Ownerless rooms are claimed by the first admin at
@@ -1222,7 +1253,8 @@ def _upgrade_v0(conn, db_path):
 # nothing able to say so. v1 has no entry (it never shipped) and v6 is reachable
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
-             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20)}
+             (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+              21)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -1616,12 +1648,56 @@ def supersede_bound_tokens(conn, owner_id, agent_id):
     credential for one INSTANCE of a label, so a declined resurrect minting a
     new identity under a reused name does not revoke the retired instance's
     history of credentials by accident of spelling."""
-    ids = [r["id"] for r in conn.execute(
-        "SELECT id FROM tokens WHERE owner_id=? AND agent_id=?",
-        (owner_id, agent_id)).fetchall()]
-    for tid in ids:
-        revoke_token(conn, tid, owner_id)
-    return ids
+    rows = conn.execute(
+        "SELECT id, secret_hash FROM tokens WHERE owner_id=? AND agent_id=?",
+        (owner_id, agent_id)).fetchall()
+    now = time.time_ns()
+    for r in rows:
+        # The tombstone rides the same transaction as the supersede (S2, ruling
+        # 10876): the displaced credential's refusal becomes a signpost naming
+        # the way back, and its last_refusal_ns is S3's liveness reading. Only
+        # supersession tombstones -- plain revoke_token stays a bare delete.
+        conn.execute(
+            "INSERT OR REPLACE INTO token_tombstones"
+            "(secret_hash, agent_id, superseded_ns) VALUES(?,?,?)",
+            (r["secret_hash"], agent_id, now))
+        revoke_token(conn, r["id"], owner_id)
+    return [r["id"] for r in rows]
+
+
+# Fixed age (ruling 10876: "prune tombstones on a fixed age; past that the
+# refusal goes generic"). Prune rides the read -- an expired row is deleted the
+# next time its hash knocks, so there is no timer to lapse and the table is
+# bounded by the supersede count within the window.
+TOMBSTONE_TTL_NS = 30 * 86_400 * 1_000_000_000
+
+
+def tombstone_for(conn, secret):
+    """The signpost payload for a superseded credential, or None.
+
+    Reading refreshes last_refusal_ns: a refused call carrying this hash is
+    evidence that something RAN on the dormant body -- S3's honest liveness
+    reading ("a human used that machine at T", never "a daemon is up"). Past
+    TOMBSTONE_TTL_NS the row is deleted on sight and the caller falls back to
+    the generic refusal. Returns agent name via the agents row; an agent that
+    was pruned since leaves the join empty, which is the generic refusal too.
+    """
+    if not secret:
+        return None
+    h = _sha(secret)
+    r = conn.execute(
+        "SELECT t.agent_id, t.superseded_ns, a.name FROM token_tombstones t "
+        "JOIN agents a ON a.id = t.agent_id WHERE t.secret_hash=?", (h,)).fetchone()
+    if not r:
+        return None
+    now = time.time_ns()
+    if now - r["superseded_ns"] > TOMBSTONE_TTL_NS:
+        conn.execute("DELETE FROM token_tombstones WHERE secret_hash=?", (h,))
+        return None
+    conn.execute("UPDATE token_tombstones SET last_refusal_ns=? WHERE secret_hash=?",
+                 (now, h))
+    return {"agent_id": r["agent_id"], "agent_name": r["name"],
+            "superseded_ns": r["superseded_ns"]}
 
 
 def assign_room(conn, token_id, room_id, actor_id):

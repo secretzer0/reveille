@@ -1893,6 +1893,23 @@ def _agent_principal(request):
         raise store.AuthError("missing token")
     tok = store.resolve_token(_conn, secret)
     if not tok:
+        # S2 (ruling 10876): a SUPERSEDED credential's refusal is a signpost.
+        # It names the supersession and the way back -- never a credential, a
+        # room list or an inventory, because the caller is either the former
+        # body or someone holding a stolen dead secret. It does NOT name the
+        # shape the live body runs in: the broker records no shape at mint, and
+        # a word the predicate cannot establish stays unsaid (flagged to the
+        # architect). A never-valid secret stays the generic "bad token" --
+        # the two must be distinguishable or the signpost teaches nothing.
+        ts = store.tombstone_for(_conn, secret)
+        if ts:
+            when = time.strftime("%Y-%m-%d", time.gmtime(ts["superseded_ns"] / 1e9))
+            raise store.AuthError(
+                f"superseded: this credential for {ts['agent_name']!r} was "
+                f"replaced on {when} -- another body holds the identity now. "
+                f"To make this machine the body again, run `reveille init "
+                f"--login` in the agent's directory; to reach the live body, "
+                f"use the bus web UI.")
         raise store.AuthError("bad token")
     name = (request.headers.get("x-agent") if request else "") or ""
     bound = tok.get("agent_name")
