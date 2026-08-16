@@ -198,6 +198,14 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.103 THE WRITER'S HOST, AND OPEN STREAMS ARE COUNTED (DES-013 slice 6,
+materials). scripts/writer/ carries the writer VM's build (llama.cpp pinned,
+CUDA 12.8, sm_61), sha256-pinned model fetch (Qwen3.8-27B Q6_K / Q4_K_M),
+the bench that measures time-to-first-sentence and tok/s per quant and flag
+set, and the systemd unit -- the pin is the number the bench produces, not
+a guess. Broker: a script's remainder past the first sentence streams on a
+bounded helper (SCRIPT_REST_MAX = 2 open streams); past that the writer
+finishes in-line before the next item. Bus tools unchanged.
 0.2.102 THE SCRIPT WRITER, AND NOTHING IS MADE THAT NOBODY WOULD HEAR
 (DES-013 slice 5). A second worker calls a model behind REVEILLE_SCRIPT_URL
 (an OpenAI-compatible /v1/chat/completions -- llama-server; off by default,
