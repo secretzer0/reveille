@@ -32,6 +32,7 @@ import binascii
 import contextlib
 import hashlib
 import html
+import io
 import json
 import logging
 import queue
@@ -43,6 +44,7 @@ import re
 import struct
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -1797,29 +1799,39 @@ def _digest(name):
     return int(hashlib.sha256(name.encode("utf-8")).hexdigest()[:16], 16)
 
 
-def tts_voice(speaker, *, clips, bank):
-    """Which clip speaks for a name, and with what knobs (DES-009 section 5).
+def tts_voice(speaker, *, clips, predefined, assigned=None):
+    """Which clip speaks for a name, and with what knobs (DES-009 section 5,
+    DES-013 section 3).
 
-    A dropped `voices/<speaker>.wav` wins and is CLONED; otherwise the server's
-    predefined bank is indexed by the name's digest and the SAME digest offsets
-    the knobs, so two names on one bank clip do not sound identical. None when
-    there is nothing to speak with -- a silent message, not an error. Pure, so
-    the resolution is testable without a server."""
-    if f"{speaker}.wav" in clips:
+    An ASSIGNED bank voice (`bank-<id>.wav`, present in the synthesizer's
+    listing) is cloned first; assigned but not visible logs a line that names
+    the likely cause and falls through. Then a dropped `voices/<speaker>.wav`
+    is CLONED -- never a `bank-*` file, that prefix is the bank's (an agent
+    named bank-7 must not steal a bank voice). Otherwise the server's
+    PREDEFINED SET is indexed by the name's digest and the SAME digest offsets
+    the knobs, so two names on one predefined voice do not sound identical.
+    None when there is nothing to speak with -- a silent message, not an
+    error. Pure, so the resolution is testable without a server."""
+    if assigned:
+        if f"bank-{assigned}.wav" in clips:
+            return {"voice_mode": "clone", "reference_audio_filename": f"bank-{assigned}.wav"}
+        log.warning("tts: bank voice %s is not visible to the synthesizer -- is "
+                    "TTS_VOICES_DIR the broker's voices dir?", assigned)
+    if not speaker.startswith("bank-") and f"{speaker}.wav" in clips:
         return {"voice_mode": "clone", "reference_audio_filename": f"{speaker}.wav"}
-    if not bank:
+    if not predefined:
         return None
     # SORTED, because the server lists its directory in filesystem order and
     # section 5 says every host, restart and browser agree on who sounds like
     # what: the index must not depend on how upstream happened to readdir.
-    bank = sorted(bank)
+    predefined = sorted(predefined)
     h = _digest(speaker)
-    return {"voice_mode": "predefined", "predefined_voice_id": bank[h % len(bank)],
+    return {"voice_mode": "predefined", "predefined_voice_id": predefined[h % len(predefined)],
             "exaggeration": round(0.30 + 0.10 * ((h >> 16) % 5), 2),
             "cfg_weight": round(0.30 + 0.10 * ((h >> 32) % 5), 2)}
 
 
-def _tts_speak(url, token, speaker, text, timeout):
+def _tts_speak(url, token, speaker, text, timeout, assigned=None):
     """One synthesis request. Returns wav bytes, or None if the service could not
     answer -- a missing file is a SILENT message by design (section 7), so every
     failure here is a return rather than a raise.
@@ -1829,15 +1841,15 @@ def _tts_speak(url, token, speaker, text, timeout):
     very next message with no restart anywhere -- the directory is the
     interface (section 5)."""
     clips = _tts_get(url, token, "/get_reference_files", timeout) or []
-    bank = (_tts_get(url, token, "/v1/audio/voices", timeout) or {}).get("voices") or []
+    predefined = (_tts_get(url, token, "/v1/audio/voices", timeout) or {}).get("voices") or []
     # Strings only: an upstream shape change becomes a named refusal here, not
     # a dict posted as predefined_voice_id.
-    if not all(isinstance(v, str) for v in bank):
+    if not all(isinstance(v, str) for v in predefined):
         log.warning("tts: /v1/audio/voices returned non-string entries -- silent")
         return None
-    voice = tts_voice(speaker, clips=clips, bank=bank)
+    voice = tts_voice(speaker, clips=clips, predefined=predefined, assigned=assigned)
     if voice is None:
-        log.warning("tts: no clip for %r and the bank is empty -- silent", speaker)
+        log.warning("tts: no clip for %r and the predefined set is empty -- silent", speaker)
         return None
     body = json.dumps({"text": text, "output_format": "wav", "split_text": True,
                        "stream": True, **voice}).encode()
@@ -1898,7 +1910,7 @@ def _tts_worker(url, token, timeout):
         item = _tts_q.get()
         if item is None:
             return
-        mid, room, speaker, text = item
+        mid, room, speaker, text, assigned = item
         if first:
             # DEVICE REPORTED, NEVER INFERRED (section 4.1): a container with no
             # GPU reservation synthesizes on the CPU while looking perfectly
@@ -1911,7 +1923,7 @@ def _tts_worker(url, token, timeout):
                      "block on the model load", info.get("device") or "unreported",
                      info.get("loaded", "unreported"))
             first = False
-        chunks = _tts_speak(url, token, speaker, text, timeout)
+        chunks = _tts_speak(url, token, speaker, text, timeout, assigned)
         if chunks is None:
             continue                      # silent message: the feed already carried it
         # THE FIRST BYTE IS THE ANNOUNCEMENT. The .part fills as upstream
@@ -1958,11 +1970,13 @@ def _sweep_abandoned_audio(files_dir):
             log.info("tts: removed abandoned %s", p.name)
 
 
-def _tts_enqueue(mid, room, speaker, subject, body):
+def _tts_enqueue(mid, room, speaker, subject, body, assigned=None):
     """Queue one message for synthesis, if voices are on. Never blocks the send
-    path: the queue is unbounded and the worker is the only thing that waits."""
+    path: the queue is unbounded and the worker is the only thing that waits.
+    `assigned` is the speaker's bank voice id in this room (DES-013 section 4),
+    None until the speaker key exists (slice 3) -- the digest pick meanwhile."""
     if _tts_on:
-        _tts_q.put((mid, room, speaker, f"{subject}. {body}" if subject else body))
+        _tts_q.put((mid, room, speaker, f"{subject}. {body}" if subject else body, assigned))
 
 
 def _push_presence(room):
@@ -3048,6 +3062,125 @@ def file_headers(fname):
     return "application/octet-stream", "attachment"
 
 
+# THE BANK (DES-013 section 3): <db dir>/voices, a directory the broker OWNS
+# and the synthesizer reads (compose mounts it :ro as its reference dir). A
+# bank voice's clip is voices/bank-<id>.wav; a hand-dropped <name>.wav in the
+# same directory keeps working -- what changed is who writes the directory.
+_voices_dir = None  # set in main()
+VOICE_CLIP_MAX = 10 * 1024 * 1024
+VOICE_CLIP_SECONDS = (5.0, 30.0)   # turbo needs >= 5; the server rejects > 30
+
+
+def voice_clip_refusal(data):
+    """Why these bytes cannot be a bank clip, or None. Pure. WAV only, through
+    the stdlib -- there is no decoder on the broker, so an mp3 is refused, not
+    guessed at; PCM only (wave raises on anything else); 5.0 s <= duration <=
+    30.0 s; <= 10 MiB. The refusal names the bound it hit."""
+    if len(data) > VOICE_CLIP_MAX:
+        return f"too large ({len(data) >> 20}MB, cap {VOICE_CLIP_MAX >> 20}MB)"
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            rate, frames = w.getframerate(), w.getnframes()
+    except (wave.Error, EOFError, ValueError) as e:
+        return f"not a PCM WAV ({e}) -- the broker has no decoder; convert first"
+    if not rate:
+        return "not a PCM WAV (no sample rate)"
+    seconds = frames / rate
+    lo, hi = VOICE_CLIP_SECONDS
+    if seconds < lo:
+        return f"too short ({seconds:.1f} s; the synthesizer needs at least {lo:.0f} s)"
+    if seconds > hi:
+        return f"too long ({seconds:.1f} s; the synthesizer rejects more than {hi:.0f} s)"
+    return None
+
+
+def _voice_seconds(data):
+    with wave.open(io.BytesIO(data)) as w:
+        return w.getnframes() / w.getframerate()
+
+
+def _voice_editable(p, v):
+    """Governance (operator, DES-013 section 3): a NEW voice is anyone's to add;
+    REPLACE and persona edits are the uploader's or an admin's."""
+    return v is None or p.is_admin or v["uploaded_by"] == p.user_id
+
+
+@_guard
+async def voices_http(request):
+    """GET /voices -> {voices, llm}. `llm` says whether the persona-draft
+    button has anything behind it -- False until the script writer (slice 5)."""
+    p = _principal(request)
+    out = []
+    for v in store.voices(_conn):
+        v["editable"] = _voice_editable(p, v)
+        out.append(v)
+    return JSONResponse({"voices": out, "llm": False})
+
+
+@_guard
+async def voice_http(request):
+    """PATCH /voices/{vid} {name?, persona?} -- uploader or admin."""
+    p = _principal(request)
+    vid = request.path_params["vid"]
+    v = store.voice_get(_conn, vid)
+    if v is None:
+        return JSONResponse({"error": "no such voice"}, status_code=404)
+    if not _voice_editable(p, v):
+        raise store.AccessError("only the uploader or an admin edits a bank voice")
+    d = await request.json()
+    name = d.get("name")
+    persona = d.get("persona")
+    if name is not None and not (name := str(name).strip()):
+        return JSONResponse({"error": "name cannot be empty"}, status_code=400)
+    store.voice_patch(_conn, vid, name=name, persona=None if persona is None else str(persona))
+    return JSONResponse(store.voice_get(_conn, vid))
+
+
+@_guard
+async def voice_clip_http(request):
+    """PUT /voices/{vid}/clip?name=<label> -- RAW WAV bytes as the body, the
+    /upload shape (a multipart form is refused the same way). Creates the bank
+    voice or REPLACES its clip in place: written as bank-<id>.wav.tmp then
+    os.replace, so the synthesizer never sees a half file, and its conditioning
+    cache keys on mtime so the next utterance re-encodes."""
+    p = _principal(request)
+    vid = request.path_params["vid"]
+    store.valid_name(vid)
+    v = store.voice_get(_conn, vid)
+    if not _voice_editable(p, v):
+        raise store.AccessError("only the uploader or an admin replaces a bank voice's clip")
+    if _looks_multipart(request.headers.get("content-type")):
+        return JSONResponse({"error": _MULTIPART_HELP}, status_code=400)
+    declared = int(request.headers.get("content-length") or 0)
+    too_big = f"too large (cap {VOICE_CLIP_MAX >> 20}MB)"
+    if declared > VOICE_CLIP_MAX:
+        return JSONResponse({"error": too_big}, status_code=413)
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > VOICE_CLIP_MAX:
+            return JSONResponse({"error": too_big}, status_code=413)   # hangs up mid-stream
+    data = bytes(buf)
+    if data[:2] == b"--" and b"Content-Disposition: form-data" in data[:4096]:
+        return JSONResponse({"error": _MULTIPART_HELP}, status_code=400)
+    if (why := voice_clip_refusal(data)):
+        return JSONResponse({"error": why}, status_code=400)
+    name = (request.query_params.get("name") or "").strip() or (v["name"] if v else vid)
+    # ROW FIRST: the bank cap is the store's refusal, and a refused row must
+    # leave no clip behind. A row without a clip (crash between the two) is
+    # visible in the listing and heals on the next PUT; a clip without a row
+    # would be an orphan nothing lists.
+    row = store.voice_put(_conn, vid, name=name, uploaded_by=v["uploaded_by"] if v else p.user_id,
+                          seconds=_voice_seconds(data), nbytes=len(data))
+    final = _voices_dir / f"bank-{vid}.wav"
+    tmp = _voices_dir / f"bank-{vid}.wav.tmp"
+    tmp.write_bytes(data)
+    os.replace(tmp, final)
+    log.info("%s %s bank voice %s (%.1f s, %s bytes)", p.name,
+             "replaced" if v else "added", vid, row["seconds"], len(data))
+    return JSONResponse(row)
+
+
 _files_dir = None  # set in main(): <db dir>/files -- attachments live next to the broker db
 _FNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 MAX_UPLOAD = 25 * 1024 * 1024
@@ -3957,6 +4090,9 @@ def build_app():
             Route("/agents-seen", agents_seen_http),
             Route("/send", send_http, methods=["POST"]),
             Route("/upload", upload_http, methods=["POST"]),
+            Route("/voices", voices_http),
+            Route("/voices/{vid}", voice_http, methods=["PATCH"]),
+            Route("/voices/{vid}/clip", voice_clip_http, methods=["PUT"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
             Route("/audio/{mid}.wav", audio_http),
@@ -3988,7 +4124,7 @@ def _snap_path(reason):
 
 
 def main():
-    global _conn, _files_dir, _db_path, _tts_on
+    global _conn, _files_dir, _voices_dir, _db_path, _tts_on
     import uvicorn
     _setup_logging()
     root = os.environ.get("CLAUDE_AGENT_BUS") or os.path.expanduser("~/.claude/agent-bus")
@@ -3998,6 +4134,8 @@ def main():
     _files_dir = pathlib.Path(_db_path).parent / "files"
     _files_dir.mkdir(parents=True, exist_ok=True)
     _sweep_abandoned_audio(_files_dir)
+    _voices_dir = pathlib.Path(_db_path).parent / "voices"   # DES-013 section 3: the bank
+    _voices_dir.mkdir(parents=True, exist_ok=True)
     # The audio dies with the message, and store owns that choke point. Told
     # once, here, because the daemon owns the directory and store must not have
     # to guess it (DES-009 section 7).
