@@ -28,7 +28,7 @@ inputs_for() {  # <agent|server|tts> -> path list on stdout
     agent)  printf '%s\n' docker/Dockerfile docker/entrypoint.sh \
                           docker/tmux.conf docker/attach-gate docker/agent-probe ;;
     server) printf '%s\n' docker/Dockerfile.server src pyproject.toml uv.lock ;;
-    tts)    printf '%s\n' docker/Dockerfile.tts ;;
+    tts)    printf '%s\n' docker/tts.upstream ;;
     *) echo "unknown image: $1" >&2; return 2 ;;
   esac
 }
@@ -69,8 +69,8 @@ scan_config() {  # <local-tag> -> 0 clean, 1 credential-shaped content
   | python3 "$(dirname "$0")/config_scan.py"
 }
 
-publish() {  # <name> <tag> <dockerfile>
-  local name="$1" tag="$2" df="$3" ref="$REG/$2"
+publish() {  # <name> <tag> <dockerfile> [<context>]
+  local name="$1" tag="$2" df="$3" ctx="${4:-.}" ref="$REG/$2"
   if docker manifest inspect "$ref" >/dev/null 2>&1; then
     if [ -n "$BASE" ] && inputs_changed "$name" "$BASE" HEAD; then
       echo "publish: REFUSING -- $name image inputs changed in $BASE..HEAD but" >&2
@@ -83,8 +83,8 @@ publish() {  # <name> <tag> <dockerfile>
     echo "publish: $ref already exists and no $name inputs moved -- skipping"
     return 0
   fi
-  echo "publish: building $ref from $df"
-  docker build -t "$ref" -f "$df" .
+  echo "publish: building $ref from $df in $ctx"
+  docker build --no-cache -t "$ref" -f "$df" "$ctx"
   if ! scan_config "$ref"; then
     echo "publish: REFUSING to push $ref -- the registry is public and the" >&2
     echo "  image config carries credential-shaped content (see above)." >&2
@@ -95,4 +95,7 @@ publish() {  # <name> <tag> <dockerfile>
 
 publish agent "$agent_tag" docker/Dockerfile
 publish server "$server_tag" docker/Dockerfile.server
-publish tts "$tts_tag" docker/Dockerfile.tts
+# THE TTS IMAGE IS SOMEONE ELSE'S DOCKERFILE (DES-009 section 4.1): the context
+# is upstream's repo at the SHA docker/tts.upstream pins, so the pin file is the
+# image's only input on our side and the Dockerfile name is theirs.
+publish tts "$tts_tag" Dockerfile.cu128 "$(cat docker/tts.upstream)"

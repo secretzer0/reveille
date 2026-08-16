@@ -30,6 +30,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import hashlib
 import html
 import json
 import logging
@@ -1741,12 +1742,74 @@ def tts_config_refusal(url, token):
     return None
 
 
-def _tts_speak(url, token, text, timeout):
+def _tts_get(url, token, path, timeout):
+    """One GET against the synthesizer, JSON decoded, or None. The synthesizer
+    is devnen/Chatterbox-TTS-Server (DES-009 section 4.1): the token is what a
+    proxy in front of a remote one checks; on the compose network it is empty."""
+    req = urllib.request.Request(url.rstrip("/") + path)
+    if token:
+        req.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except Exception as e:
+        log.warning("tts: GET %s: %s", path, e)
+        return None
+
+
+def _digest(name):
+    """A STABLE hash. Not Python's hash(): it is salted per process (PEP 456), so
+    the same agent would get a different voice after every restart. sha256 is
+    stable across processes, hosts and versions -- section 5's whole
+    requirement, with no state kept."""
+    return int(hashlib.sha256(name.encode("utf-8")).hexdigest()[:16], 16)
+
+
+def tts_voice(speaker, *, clips, bank):
+    """Which clip speaks for a name, and with what knobs (DES-009 section 5).
+
+    A dropped `voices/<speaker>.wav` wins and is CLONED; otherwise the server's
+    predefined bank is indexed by the name's digest and the SAME digest offsets
+    the knobs, so two names on one bank clip do not sound identical. None when
+    there is nothing to speak with -- a silent message, not an error. Pure, so
+    the resolution is testable without a server."""
+    if f"{speaker}.wav" in clips:
+        return {"voice_mode": "clone", "reference_audio_filename": f"{speaker}.wav"}
+    if not bank:
+        return None
+    # SORTED, because the server lists its directory in filesystem order and
+    # section 5 says every host, restart and browser agree on who sounds like
+    # what: the index must not depend on how upstream happened to readdir.
+    bank = sorted(bank)
+    h = _digest(speaker)
+    return {"voice_mode": "predefined", "predefined_voice_id": bank[h % len(bank)],
+            "exaggeration": round(0.30 + 0.10 * ((h >> 16) % 5), 2),
+            "cfg_weight": round(0.30 + 0.10 * ((h >> 32) % 5), 2)}
+
+
+def _tts_speak(url, token, speaker, text, timeout):
     """One synthesis request. Returns wav bytes, or None if the service could not
     answer -- a missing file is a SILENT message by design (section 7), so every
-    failure here is a return rather than a raise."""
-    body = json.dumps({"text": text, "voice": "default", "knobs": {}}).encode()
-    req = urllib.request.Request(url.rstrip("/") + "/speak", data=body,
+    failure here is a return rather than a raise.
+
+    The clip lists are read per utterance rather than cached: two cheap GETs
+    that never touch the model, and a wav dropped into voices/ speaks on the
+    very next message with no restart anywhere -- the directory is the
+    interface (section 5)."""
+    clips = _tts_get(url, token, "/get_reference_files", timeout) or []
+    bank = (_tts_get(url, token, "/v1/audio/voices", timeout) or {}).get("voices") or []
+    # Strings only: an upstream shape change becomes a named refusal here, not
+    # a dict posted as predefined_voice_id.
+    if not all(isinstance(v, str) for v in bank):
+        log.warning("tts: /v1/audio/voices returned non-string entries -- silent")
+        return None
+    voice = tts_voice(speaker, clips=clips, bank=bank)
+    if voice is None:
+        log.warning("tts: no clip for %r and the bank is empty -- silent", speaker)
+        return None
+    body = json.dumps({"text": text, "output_format": "wav", "split_text": True,
+                       **voice}).encode()
+    req = urllib.request.Request(url.rstrip("/") + "/tts", data=body,
                                  headers={"content-type": "application/json"})
     if token:
         req.add_header("authorization", f"Bearer {token}")
@@ -1763,11 +1826,11 @@ def _tts_worker(url, token, timeout):
     announce the id on the existing feed.
 
     THE TIMEOUT IS GENEROUS ON PURPOSE and there is no retry. The model loads
-    lazily, so the FIRST request of a container's life blocks on that load --
-    minutes on a cold cache, seconds forever after (senior-ui-ux, msg 8944). A
-    short timeout with a retry is the wrong shape twice over: the retry hits the
-    same load, and both attempts then queue behind each other on a
-    single-threaded server. One long wait, one attempt, and a message that
+    at the server's start, so the FIRST request of a container's life may wait
+    on that load -- minutes on a cold cache, seconds forever after (senior-ui-ux,
+    msg 8944). A short timeout with a retry is the wrong shape twice over: the
+    retry hits the same load, and both attempts then queue behind each other on
+    a single-threaded server. One long wait, one attempt, and a message that
     arrives silent if it fails.
     """
     first = True
@@ -1775,19 +1838,20 @@ def _tts_worker(url, token, timeout):
         item = _tts_q.get()
         if item is None:
             return
-        mid, room, text = item
+        mid, room, speaker, text = item
         if first:
-            # TEN MINUTES OF SILENCE IS INDISTINGUISHABLE FROM A HANG unless
-            # something points at the thing that tells them apart. The service's
-            # /health reports {"status","device","loaded"}, so whoever is
-            # watching a first utterance take minutes can ask whether the model
-            # is still loading and on what device -- a container with no GPU
-            # reservation synthesizes on the CPU while looking perfectly healthy
-            # (architect 8946, senior-ui-ux 8944).
-            log.info("tts: the first utterance may block on the model load -- "
-                     "%s/health reports device and loaded", url.rstrip("/"))
+            # DEVICE REPORTED, NEVER INFERRED (section 4.1): a container with no
+            # GPU reservation synthesizes on the CPU while looking perfectly
+            # healthy (architect 8946), so the ONE fact that proves the GPU is
+            # in use is what the server says about itself -- logged here, and
+            # `device: unreported` when it says nothing, a silence that names
+            # itself.
+            info = _tts_get(url, token, "/api/model-info", timeout) or {}
+            log.info("tts: device: %s loaded: %s -- the first utterance may "
+                     "block on the model load", info.get("device") or "unreported",
+                     info.get("loaded", "unreported"))
             first = False
-        wav = _tts_speak(url, token, text, timeout)
+        wav = _tts_speak(url, token, speaker, text, timeout)
         if not wav:
             continue                      # silent message: the feed already carried it
         try:
@@ -1798,11 +1862,11 @@ def _tts_worker(url, token, timeout):
         _feed_push(room, {"event": "audio", "id": mid})
 
 
-def _tts_enqueue(mid, room, subject, body):
+def _tts_enqueue(mid, room, speaker, subject, body):
     """Queue one message for synthesis, if voices are on. Never blocks the send
     path: the queue is unbounded and the worker is the only thing that waits."""
     if _tts_on:
-        _tts_q.put((mid, room, f"{subject}. {body}" if subject else body))
+        _tts_q.put((mid, room, speaker, f"{subject}. {body}" if subject else body))
 
 
 def _push_presence(room):
@@ -2320,7 +2384,7 @@ async def send(to: str, body: str, subject: str = "",
                 "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": attachments or [], "ts_ns": time.time_ns()})
-    _tts_enqueue(res["id"], rid, subject, body)
+    _tts_enqueue(res["id"], rid, p.name, subject, body)
     log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s woke=%s",
              p.name, to, p.rooms.get(rid), res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
@@ -2842,7 +2906,7 @@ async def send_http(request):
                 "subject": d.get("subject") or "", "body": body,
                 "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
-    _tts_enqueue(res["id"], rid, d.get("subject") or "", body)
+    _tts_enqueue(res["id"], rid, sender, d.get("subject") or "", body)
     log.info("%s send(web) -> %s room=%s thread=%s id=%s delivered=%s woke=%s",
              sender, to, p.rooms.get(rid), res["thread_id"],
              res["id"], res["wake"], woke)
