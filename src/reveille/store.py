@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -340,6 +340,47 @@ CREATE TABLE IF NOT EXISTS message_entities (
 CREATE INDEX IF NOT EXISTS idx_msgent_msg ON message_entities(message_id);
 """
 
+# DES-013: THE BANK reveille owns (section 3), WHO SPEAKS WITH WHAT in a room
+# (section 4), and the script beside a message (section 6). Separate constant so
+# _upgrade_v22 lays exactly this; the fresh-db path gets it via _SCHEMA below.
+_VOICES_SCHEMA = """
+-- A bank voice: the row is the identity, the clip at <voices dir>/bank-<id>.wav
+-- is the bytes (replaceable in place -- identity is the id, not the bytes).
+CREATE TABLE IF NOT EXISTS voices (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    persona     TEXT NOT NULL DEFAULT '',
+    uploaded_by TEXT NOT NULL REFERENCES users(id),
+    seconds     REAL NOT NULL,
+    bytes       INTEGER NOT NULL,
+    created_ns  INTEGER NOT NULL,
+    updated_ns  INTEGER NOT NULL
+);
+-- speaker = 'agent:<agents.id>' | 'user:<users.id>' -- keyed by id, never by
+-- name (DES-011). One voice per speaker per room; no two speakers share a voice
+-- in a room. THE UNIQUE INDEX IS THE RULE; assign_refusal's message is the
+-- courtesy that names the holder.
+CREATE TABLE IF NOT EXISTS voice_assignments (
+    room_id  TEXT NOT NULL REFERENCES rooms(id),
+    speaker  TEXT NOT NULL,
+    voice_id TEXT NOT NULL REFERENCES voices(id),
+    set_by   TEXT NOT NULL CHECK (set_by IN ('owner', 'room', 'default')),
+    ts_ns    INTEGER NOT NULL,
+    PRIMARY KEY (room_id, speaker),
+    UNIQUE (room_id, voice_id)
+);
+-- The character script the writer produced for one message. Derived text: never
+-- in messages_fts, never in the hive. Dies with the message at _delete_messages.
+CREATE TABLE IF NOT EXISTS scripts (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+    text       TEXT NOT NULL,
+    voice_id   TEXT,
+    model      TEXT NOT NULL,
+    ms         INTEGER NOT NULL,
+    ts_ns      INTEGER NOT NULL
+);
+"""
+
 # The hive memory store (DES-001 S3). Separate constant so _upgrade_v8 can lay exactly
 # this without replaying the whole schema; the fresh-db path gets it via _SCHEMA below.
 _MEMORIES_SCHEMA = """
@@ -432,6 +473,7 @@ CREATE TABLE IF NOT EXISTS memory_entities (
 CREATE INDEX IF NOT EXISTS idx_mement_mem ON memory_entities(memory_id);
 """
 _SCHEMA += _MEMORIES_SCHEMA
+_SCHEMA += _VOICES_SCHEMA
 # messages_fts (DES-001 S1; tokenizer measured on the live corpus, bus msg 8366):
 # unicode61 with tokenchars '-_' keeps fleet vocabulary (ADR-061, wake-127, run_id) as
 # single tokens; trigram was refuted because <3-char queries (S1, qa) can never match a
@@ -1173,6 +1215,14 @@ def _upgrade_v21(conn, db_path):
         conn.execute("PRAGMA user_version=22")
 
 
+def _upgrade_v22(conn, db_path):
+    """v22 -> v23: voices, voice_assignments, scripts (DES-013 slice 1). Additive:
+    three empty tables; nothing existing is read or rewritten."""
+    with tx(conn):
+        _exec_script(conn, _VOICES_SCHEMA)
+        conn.execute("PRAGMA user_version=23")
+
+
 def _upgrade_v0(conn, db_path):
     """v0 (room = the shared secret, stored as a string on every row) -> v2 (rooms are
     uuid rows owned by a user). Ownerless rooms are claimed by the first admin at
@@ -1254,7 +1304,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21)}
+              21, 22)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -1962,6 +2012,204 @@ def set_retention(conn, room_id, owner_id, retention_ns):
     conn.execute("UPDATE rooms SET retention_ns=? WHERE id=?", (retention_ns, room_id))
 
 
+# ---- DES-013: the bank, who speaks with what, and the script row -----------------
+
+VOICE_BANK_MAX = 64   # every distinct clip costs the synthesizer ~175 MB of conds VRAM
+
+
+def voice_put(conn, voice_id, *, name, uploaded_by, seconds, nbytes):
+    """Create or replace a bank voice's ROW (the caller wrote the clip). Replace
+    keeps created_ns and moves updated_ns; identity is the id, not the bytes."""
+    valid_name(voice_id)
+    now = time.time_ns()
+    with tx(conn):
+        have = conn.execute("SELECT 1 FROM voices WHERE id=?", (voice_id,)).fetchone()
+        if not have and conn.execute("SELECT count(*) FROM voices").fetchone()[0] >= VOICE_BANK_MAX:
+            raise BusError(f"the bank holds VOICE_BANK_MAX={VOICE_BANK_MAX} voices; "
+                           f"replace one, or raise the cap (and CONDS_CACHE_MAX on the GPU host)")
+        conn.execute(
+            "INSERT INTO voices(id, name, uploaded_by, seconds, bytes, created_ns, updated_ns) "
+            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
+            "seconds=excluded.seconds, bytes=excluded.bytes, updated_ns=excluded.updated_ns",
+            (voice_id, name, uploaded_by, float(seconds), int(nbytes), now, now))
+    return voice_get(conn, voice_id)
+
+
+def voice_patch(conn, voice_id, *, name=None, persona=None):
+    """Edit the label or the persona. Returns rows changed (0 = no such voice)."""
+    fields = {k: v for k, v in (("name", name), ("persona", persona)) if v is not None}
+    if not fields:
+        return 0
+    fields["updated_ns"] = time.time_ns()
+    sets = [f"{k}=?" for k in fields]
+    args = list(fields.values())
+    with tx(conn):
+        return conn.execute(f"UPDATE voices SET {', '.join(sets)} WHERE id=?",
+                            args + [voice_id]).rowcount
+
+
+def voice_get(conn, voice_id):
+    r = conn.execute("SELECT * FROM voices WHERE id=?", (voice_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def voices(conn):
+    return [dict(r) for r in conn.execute("SELECT * FROM voices ORDER BY id")]
+
+
+def assign_refusal(actor_uid, is_admin, room_owner_id, speaker_owner_id, current, holder):
+    """DES-013 section 4, pure. Returns the set_by the write should carry, or raises.
+
+    Owner over room over default: the speaker's owner may set/unset over anything;
+    the room owner only over nothing/'default'/'room'; nobody else -- admin
+    included, rooms are the owner's (DES-004: reach, never rule). A voice held by
+    another speaker in this room is refused naming the holder, whoever asks."""
+    if speaker_owner_id is None:
+        raise BusError("this speaker has no owner (unbound token) and cannot be assigned "
+                       "a voice; it keeps the digest pick")
+    if holder:
+        raise BusError(f"that voice is held by {holder} in this room")
+    if actor_uid == speaker_owner_id:
+        return "owner"
+    if actor_uid == room_owner_id:
+        if current == "owner":
+            raise AccessError("the speaker's owner set this voice; only they can change it")
+        return "room"
+    raise AccessError("only the speaker's owner or the room's owner assigns voices"
+                      + (" -- admin has no reach here" if is_admin else ""))
+
+
+def voice_default(*, elsewhere, taken, bank):
+    """DES-013 section 4 default, pure: (a) the speaker's voice in another room if
+    free here (newest first), (b) the first free bank voice, else None -- the
+    caller falls to the digest pick from the predefined set."""
+    for v in elsewhere:
+        if v not in taken:
+            return v
+    for v in bank:
+        if v not in taken:
+            return v
+    return None
+
+
+def _holder(conn, room_id, voice_id):
+    """The KEY of the speaker holding this voice in this room, or None. A key,
+    never a name: two speakers can share a display name (per-owner uniqueness,
+    an agent:/user: coincidence) -- the very case this design keys by id for --
+    and a name comparison would let the courtesy check pass and the UNIQUE index
+    throw raw (verdict 11059)."""
+    r = conn.execute("SELECT speaker FROM voice_assignments WHERE room_id=? AND voice_id=?",
+                     (room_id, voice_id)).fetchone()
+    return r["speaker"] if r else None
+
+
+def _speaker_name(conn, speaker):
+    kind, _, sid = speaker.partition(":")
+    tbl = "agents" if kind == "agent" else "users"
+    r = conn.execute(f"SELECT name FROM {tbl} WHERE id=?", (sid,)).fetchone()
+    return r["name"] if r else speaker
+
+
+def assign_voice(conn, room_id, speaker, voice_id, *, set_by):
+    """Write the (room, speaker) -> voice row; the caller ran assign_refusal.
+    A collision that slipped past the courtesy check is the UNIQUE index's."""
+    if set_by not in ("owner", "room", "default"):
+        raise BusError(f"bad set_by {set_by!r}")
+    if not voice_get(conn, voice_id):
+        raise BusError(f"no such bank voice: {voice_id}")
+    holder = _holder(conn, room_id, voice_id)
+    if holder and holder != speaker:
+        raise BusError(f"that voice is held by {_speaker_name(conn, holder)} in this room")
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO voice_assignments(room_id, speaker, voice_id, set_by, ts_ns) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(room_id, speaker) DO UPDATE SET "
+            "voice_id=excluded.voice_id, set_by=excluded.set_by, ts_ns=excluded.ts_ns",
+            (room_id, speaker, voice_id, set_by, time.time_ns()))
+
+
+def unassign_voice(conn, room_id, speaker):
+    with tx(conn):
+        return conn.execute("DELETE FROM voice_assignments WHERE room_id=? AND speaker=?",
+                            (room_id, speaker)).rowcount
+
+
+def voice_for(conn, room_id, speaker):
+    """The bank voice this speaker uses in this room, materializing the default
+    on first sight (a row with set_by='default' -- stable and visible). None for
+    an unkeyed speaker or an empty bank: the caller uses the digest pick."""
+    if not speaker:
+        return None
+    r = conn.execute("SELECT voice_id FROM voice_assignments WHERE room_id=? AND speaker=?",
+                     (room_id, speaker)).fetchone()
+    if r:
+        return r["voice_id"]
+    elsewhere = [x["voice_id"] for x in conn.execute(
+        "SELECT voice_id FROM voice_assignments WHERE speaker=? ORDER BY ts_ns DESC",
+        (speaker,))]
+    taken = {x["voice_id"] for x in conn.execute(
+        "SELECT voice_id FROM voice_assignments WHERE room_id=?", (room_id,))}
+    pick = voice_default(elsewhere=elsewhere, taken=taken,
+                         bank=[v["id"] for v in voices(conn)])
+    if pick:
+        try:
+            assign_voice(conn, room_id, speaker, pick, set_by="default")
+        except (BusError, sqlite3.IntegrityError):
+            # Two callers materialized at once (worker thread and listing route)
+            # and the other one won: whatever landed is the answer, and if
+            # nothing did the pick is gone -- None, the digest, until next time.
+            r = conn.execute("SELECT voice_id FROM voice_assignments WHERE room_id=? "
+                             "AND speaker=?", (room_id, speaker)).fetchone()
+            return r["voice_id"] if r else None
+    return pick
+
+
+def room_speakers(conn, room_id):
+    """Every assigned speaker in a room plus every present keyed member, with
+    voice_id/set_by (None when unassigned) and whether the member is present.
+    Members with no agents.id are unkeyable and listed as such (voice None,
+    speaker None) so the owner sees why they cannot be assigned."""
+    now = time.time_ns()
+    out, seen = [], set()
+    for r in conn.execute(
+            "SELECT va.speaker, va.voice_id, va.set_by FROM voice_assignments va "
+            "WHERE va.room_id=? ORDER BY va.speaker", (room_id,)):
+        seen.add(r["speaker"])
+        kind = r["speaker"].partition(":")[0]
+        out.append({"speaker": r["speaker"], "name": _speaker_name(conn, r["speaker"]),
+                    "kind": kind, "present": False, "voice_id": r["voice_id"],
+                    "set_by": r["set_by"]})
+    by_key = {s["speaker"]: s for s in out}
+    for m in conn.execute(
+            "SELECT name, agent_id, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL",
+            (room_id,)):
+        if not _is_live(m["seen_ns"], now):
+            continue
+        key = f"agent:{m['agent_id']}" if m["agent_id"] else None
+        if key in by_key:
+            by_key[key]["present"] = True
+            continue
+        out.append({"speaker": key, "name": m["name"], "kind": "agent", "present": True,
+                    "voice_id": None, "set_by": None})
+    return out
+
+
+def script_put(conn, message_id, text, voice_id, model, ms):
+    """The writer's script for one message. INSERT OR REPLACE: a retry after a
+    partial write overwrites. CONTRACT: the message must exist -- a script for a
+    message retracted mid-write raises sqlite3.IntegrityError (FK), and the
+    writer worker (slice 5) owns that catch: no row, no frame, no orphan."""
+    with tx(conn):
+        conn.execute(
+            "INSERT OR REPLACE INTO scripts(message_id, text, voice_id, model, ms, ts_ns) "
+            "VALUES(?,?,?,?,?,?)", (message_id, text, voice_id, model, int(ms), time.time_ns()))
+
+
+def script_get(conn, message_id):
+    r = conn.execute("SELECT * FROM scripts WHERE message_id=?", (message_id,)).fetchone()
+    return dict(r) if r else None
+
+
 # WHERE AUDIO LIVES, set once by the daemon that owns the directory. It is here
 # rather than passed per call because the unlink below must be the ONLY unlink:
 # a per-caller one is exactly how the orphaned uploads happened (msg 8857), and
@@ -1994,6 +2242,7 @@ def _delete_messages(conn, ids):
         [(r["id"], r["subject"], r["body"]) for r in doomed])
     conn.execute(f"DELETE FROM message_entities WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM attachments WHERE message_id IN ({ph})", ids)
+    conn.execute(f"DELETE FROM scripts WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM reads WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM links WHERE parent_id IN ({ph}) OR child_id IN ({ph})", ids + ids)
     conn.execute(f"DELETE FROM messages WHERE id IN ({ph})", ids)
@@ -2021,6 +2270,7 @@ def purge_room(conn, room_id, owner_id):
         ids = [x["id"] for x in conn.execute("SELECT id FROM messages WHERE room=?", (room_id,))]
         _delete_messages(conn, ids)
         conn.execute("DELETE FROM files WHERE room_id=?", (room_id,))
+        conn.execute("DELETE FROM voice_assignments WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM members WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM room_members WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM token_rooms WHERE room_id=?", (room_id,))
@@ -2714,6 +2964,23 @@ def _with_attachments(conn, msgs):
     return msgs
 
 
+def _with_artifacts(conn, msgs):
+    """Stamp each message dict with has_script / has_audio (DES-013 section 6).
+    has_script is one IN query; has_audio is a per-row os.path.exists on the wav
+    or its .part -- fine at a 300-row backlog, and audio has no row on purpose."""
+    if not msgs:
+        return msgs
+    ids = [m["id"] for m in msgs]
+    scripted = {r[0] for r in conn.execute(
+        f"SELECT message_id FROM scripts WHERE message_id IN ({_ph(ids)})", ids)}
+    for m in msgs:
+        m["has_script"] = m["id"] in scripted
+        m["has_audio"] = bool(AUDIO_DIR) and any(
+            os.path.exists(os.path.join(AUDIO_DIR, f"tts-{m['id']}.wav{x}"))
+            for x in ("", ".part"))
+    return msgs
+
+
 def inbox(conn, agent, rooms):
     """Unread messages addressed to `agent` (direct or broadcast) across ALL of the
     caller's rooms, oldest first. Each message carries its room, which is what lets
@@ -3089,6 +3356,8 @@ def prune_agent(conn, agent_id, room_id):
         for r in new_roots:
             _rethread(conn, r)
         conn.execute("DELETE FROM reads WHERE agent_id=?", (agent_id,))
+        conn.execute("DELETE FROM voice_assignments WHERE room_id=? AND speaker=?",
+                     (room_id, f"agent:{agent_id}"))
         # The membership dies only if it is THIS identity's: a live successor
         # under the same label keeps its seat.
         conn.execute("DELETE FROM members WHERE room_id=? AND name=? "
