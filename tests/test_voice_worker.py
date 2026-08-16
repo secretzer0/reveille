@@ -462,3 +462,16 @@ def test_the_client_speaks_on_the_audio_frame_not_the_message_frame():
     assert "case 'audio':" in ui, "the client must queue on the audio frame"
     assert "case 'message':vPush" not in ui, "the message frame is not the cue to fetch"
     assert "case 'message':return add(m);" in ui
+
+
+def test_the_route_asks_the_registry_before_the_file():
+    """PR #21 BLOCKING 1: the worker renames .part -> .wav and THEN drops its
+    registry entry, so a route that checks the file first can lose the race --
+    rename + drop between its two checks -- and 404 a complete message. Registry
+    first is airtight because the drop follows the rename. Asserted over the
+    source, like the ?room= gate: the order is the property."""
+    src = pathlib.Path(daemon.__file__).read_text()
+    fn = src[src.index("async def audio_http("):]
+    fn = fn[:fn.index("\n@_guard")]
+    assert fn.index("_tts_inflight.get(mid)") < fn.index("path.is_file()"), \
+        "the registry must be consulted before the .wav is looked for"

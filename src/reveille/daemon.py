@@ -3190,20 +3190,23 @@ async def audio_http(request):
     headers = {"Content-Disposition": f'inline; filename="tts-{mid}.wav"',
                "X-Content-Type-Options": "nosniff",
                "Content-Security-Policy": "default-src 'none'; sandbox"}
-    # THREE STATES, ONE ROUTE (section 7): complete -> the file; in flight ->
-    # replay the .part so far, then tail it until the worker renames it; neither
-    # -> 404, a silent message. The .wav is checked FIRST and the worker drops
-    # its registry entry only after the rename, so a GET never sees neither.
-    if path.is_file():
-        return FileResponse(path, media_type="audio/wav", headers=headers)
+    # THREE STATES, ONE ROUTE (section 7): in flight -> replay the .part so far,
+    # then tail it until the worker renames it; complete -> the file; neither ->
+    # 404, a silent message. THE REGISTRY IS CHECKED FIRST (architect, PR #21):
+    # the worker renames and THEN drops its entry, so an entry present means the
+    # .part is there or has just become the .wav, and an entry absent means the
+    # .wav is final if it exists at all. Checking the file first left a gap --
+    # rename + drop between the two checks -- where a complete message 404s.
     done = _tts_inflight.get(mid)
     if done is None:
+        if path.is_file():
+            return FileResponse(path, media_type="audio/wav", headers=headers)
         return JSONResponse({"error": "not found"}, status_code=404)
     part = _files_dir / f"tts-{mid}.wav.part"
     try:
         f = open(part, "rb")
     except OSError:
-        # Renamed between the two checks: the file is the answer after all.
+        # Renamed since the registry check: the file is the answer after all.
         if path.is_file():
             return FileResponse(path, media_type="audio/wav", headers=headers)
         return JSONResponse({"error": "not found"}, status_code=404)
