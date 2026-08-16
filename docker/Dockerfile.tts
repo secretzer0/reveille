@@ -23,7 +23,19 @@ RUN groupadd -g ${GID} tts && useradd -m -u ${UID} -g ${GID} tts
 WORKDIR /app
 # Pinned rather than floating: an image tag has to mean one thing (the agent-image
 # discipline, one plane over). Bumping these is a deliberate act with its own tag.
-RUN pip install --no-cache-dir "chatterbox-tts==0.1.4" "torchaudio>=2.6"
+# numpy FIRST, in its own layer: pkuseg (transitive, via chatterbox-tts) ships a
+# legacy setup.py that `import numpy` at metadata time, so a clean pip has no
+# numpy when it needs it and the build dies with ModuleNotFoundError. Every host
+# that had built this image before had numpy in a warm pip cache -- the first
+# clean build was the CI runner (Actions run 31915896545), which is what a
+# hosted runner is for.
+# g++ in the same layer, and removed in it: pkuseg has no wheel for this
+# platform and compiles at install -- the second thing a warm cache had been
+# hiding. Purged after so the image stays slim and the toolchain never ships.
+RUN apt-get update && apt-get install -y --no-install-recommends g++ && \
+    pip install --no-cache-dir "numpy<2.3" && \
+    pip install --no-cache-dir "chatterbox-tts==0.1.4" "torchaudio>=2.6" && \
+    apt-get purge -y --auto-remove g++ && rm -rf /var/lib/apt/lists/*
 
 # The service is one file and it is the repo's, so it stays under src/ where the
 # unit suite can import and drive it without this image existing at all.
