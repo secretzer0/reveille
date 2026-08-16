@@ -366,9 +366,10 @@
  .row:hover .del{opacity:1}
  /* DES-013 section 7: the artifacts beside a message. Hover-revealed like .mid;
     .scripted marks a row whose body is showing the character script. */
- .head .play,.head .scr{color:var(--faint);font-size:.74rem;opacity:0;cursor:pointer;padding:0 .2rem}
+ .arts .play,.arts .scr{color:var(--faint);font-size:.74rem;opacity:0;cursor:pointer;padding:0 .2rem}
  .row:hover .play,.row:hover .scr,.row.scripted .scr{opacity:1}
- .head .play:hover,.head .scr:hover{color:var(--gold)}
+ .arts .play:hover,.arts .scr:hover{color:var(--gold)}
+ .row.cont .arts{float:right;margin-left:.5rem;line-height:1.2}
  .row.scripted .scr{color:var(--gold)}
  .row.scripted .body{border-left:2px solid var(--gold);padding-left:.5rem}
  .scrlab{display:block;font-size:.62rem;letter-spacing:.1em;color:var(--faint);margin-bottom:.2rem}
@@ -1122,10 +1123,8 @@ function artIcons(m){
    'aria-label="view the script">&#9998;</span>':'');
 }
 function paintIcons(m){
- const row=document.querySelector('.row[data-id="'+m.id+'"] .head');
- if(!row)return;
- for(const el of row.querySelectorAll('.play,.scr'))el.remove();
- row.insertAdjacentHTML('beforeend',artIcons(m));
+ const arts=document.querySelector('.row[data-id="'+m.id+'"] .arts');
+ if(arts)arts.innerHTML=artIcons(m);
 }
 function playOne(id){
  vStop();vBusy=true;
@@ -1168,8 +1167,11 @@ function render(m){
     +(m.thread_id!==m.id?' &middot; thread '+m.thread_id:'')+'</span>'
     +(m.from===myName?'<span class="del" data-del="'+m.id
       +'" title="retract (only while nobody has read it)">&#10007;</span>':'')
-    +artIcons(m)
+    +'<span class="arts">'+artIcons(m)+'</span>'
     +'</div>')
+  // A CONTINUATION ROW HAS NO HEAD, so its icons ride beside the body: a
+  // stacked message is a message and must be playable (operator, eval box).
+  +(cont?'<span class="arts">'+artIcons(m)+'</span>':'')
   +(m.subject?'<div class="subj">'+esc(m.subject)+'</div>':'')
   +'<div class="body">'+esc(m.body)+'</div>'+attHtml(m.attachments)+'</div>';
  for(const el of row.querySelectorAll('.mdview[data-src]'))hydrateMd(el);

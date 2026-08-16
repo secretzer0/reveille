@@ -111,3 +111,16 @@ def test_the_page_paints_icons_from_the_flags_and_the_frames():
     # Row click ignores the icons (they own their click), like .mid does.
     assert "if(e.target.closest('.play')){playOne(m.id);return;}" in UI
     assert "if(e.target.closest('.scr')){toggleScript(row,m);return;}" in UI
+
+
+def test_a_continuation_row_carries_its_icons_too():
+    """Operator, eval box: the second of two stacked messages had no play icon
+    because icons lived in the head and a continuation row has none. Every row
+    has an .arts holder now -- inside the head, or beside the body."""
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "ui", "bus",
+                           "index.html")).read()
+    assert "+(cont?'<span class=\"arts\">'+artIcons(m)+'</span>':'')" in ui
+    assert "'<span class=\"arts\">'+artIcons(m)+'</span>'\n    +'</div>')" in ui
+    paint = ui[ui.index("function paintIcons(m){"):]
+    paint = paint[:paint.index("\n}\n")]
+    assert '.arts' in paint and ".head" not in paint
