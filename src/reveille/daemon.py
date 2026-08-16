@@ -193,6 +193,17 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.96 A HELD NAME IS NOT A NEW AGENT, AND THE HUMAN IS TOLD. create=true on
+a name you already hold live is a REFUSAL (DES-011 s2), naming the existing
+agent, its rooms, and both remedies -- choose a unique name, or add the
+existing agent to the room you meant; the existing credential is untouched.
+Bare attach (create=false) on a held name stays the body-swap verb: attach,
+supersede, tombstone -- one being, one live credential. The launcher's create
+dialog and `reveille init --login` now surface the broker's refusal detail
+instead of a bare "refused". Also on this main: the publish scanner allows
+checksum envs (a checksum is not a secret), the TTS image builds cold, and
+the workflows run on Node 24. Broker + launcher change; agent image unchanged.
+
 0.2.95 CREATION IS A DELIBERATE ACT -- THE SPLIT-BRAIN RELEASE. A bound mint
 ATTACHES a body to an existing identity; bringing a NEW identity into the world
 must be declared. Measured live today: `architect` and `reveille-architect`
