@@ -31,6 +31,42 @@ def test_the_bank_is_indexed_by_digest_and_the_same_digest_offsets_the_knobs():
     assert a["predefined_voice_id"] == BANK[h % len(BANK)]
 
 
+def test_the_bank_order_the_server_lists_does_not_change_the_voice():
+    """Verdict 11010 BLOCKING 1: the server lists its directory in filesystem
+    order, which differs across hosts and upstream bumps. Section 5 says every
+    host agrees, so the index runs over the SORTED bank -- same bank in two
+    orders, one answer."""
+    a = daemon.tts_voice("architect", clips=[], bank=BANK)
+    b = daemon.tts_voice("architect", clips=[], bank=list(reversed(BANK)))
+    assert a == b
+
+
+class _OddStub(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body = json.dumps([] if self.path == "/get_reference_files"
+                          else {"voices": [{"filename": "Abigail.wav"}]}).encode()
+        self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        raise AssertionError("a bank of dicts must never reach /tts")
+
+
+def test_a_bank_of_the_wrong_shape_is_a_named_silence_not_a_dict_in_the_request():
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _OddStub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert daemon._tts_speak(f"http://127.0.0.1:{srv.server_address[1]}",
+                                 "", "a", "x", 5) is None
+    finally:
+        srv.shutdown()
+
+
 def test_nothing_to_speak_with_is_silence_not_an_error():
     assert daemon.tts_voice("architect", clips=[], bank=[]) is None
 

@@ -1777,6 +1777,10 @@ def tts_voice(speaker, *, clips, bank):
         return {"voice_mode": "clone", "reference_audio_filename": f"{speaker}.wav"}
     if not bank:
         return None
+    # SORTED, because the server lists its directory in filesystem order and
+    # section 5 says every host, restart and browser agree on who sounds like
+    # what: the index must not depend on how upstream happened to readdir.
+    bank = sorted(bank)
     h = _digest(speaker)
     return {"voice_mode": "predefined", "predefined_voice_id": bank[h % len(bank)],
             "exaggeration": round(0.30 + 0.10 * ((h >> 16) % 5), 2),
@@ -1794,6 +1798,11 @@ def _tts_speak(url, token, speaker, text, timeout):
     interface (section 5)."""
     clips = _tts_get(url, token, "/get_reference_files", timeout) or []
     bank = (_tts_get(url, token, "/v1/audio/voices", timeout) or {}).get("voices") or []
+    # Strings only: an upstream shape change becomes a named refusal here, not
+    # a dict posted as predefined_voice_id.
+    if not all(isinstance(v, str) for v in bank):
+        log.warning("tts: /v1/audio/voices returned non-string entries -- silent")
+        return None
     voice = tts_voice(speaker, clips=clips, bank=bank)
     if voice is None:
         log.warning("tts: no clip for %r and the bank is empty -- silent", speaker)
