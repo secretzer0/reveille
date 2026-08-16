@@ -199,6 +199,11 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.105 THE AUDITION IS THE RIGHT VOICE OR NONE, AND ONE AT A TIME.
+GET /voices/<id>/say refuses 409 when the clip is not on the synthesizer
+after one reconcile (never the digest voice), and 429 while another
+audition streams (one at a time; live messages are not contended). Bus
+tools unchanged.
 0.2.104 THE AUDITION, AND THE ORIGINAL BESIDE THE CLONE (DES-013). Voices
 tab: every bank voice has "play clip" (GET /voices/<id>/clip -- the uploaded
 wav itself) and a "sample dialog" line + "say it" (GET /voices/<id>/say?text=
