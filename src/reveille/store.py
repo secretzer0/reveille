@@ -2093,9 +2093,14 @@ def voice_default(*, elsewhere, taken, bank):
 
 
 def _holder(conn, room_id, voice_id):
+    """The KEY of the speaker holding this voice in this room, or None. A key,
+    never a name: two speakers can share a display name (per-owner uniqueness,
+    an agent:/user: coincidence) -- the very case this design keys by id for --
+    and a name comparison would let the courtesy check pass and the UNIQUE index
+    throw raw (verdict 11059)."""
     r = conn.execute("SELECT speaker FROM voice_assignments WHERE room_id=? AND voice_id=?",
                      (room_id, voice_id)).fetchone()
-    return _speaker_name(conn, r["speaker"]) if r else None
+    return r["speaker"] if r else None
 
 
 def _speaker_name(conn, speaker):
@@ -2113,8 +2118,8 @@ def assign_voice(conn, room_id, speaker, voice_id, *, set_by):
     if not voice_get(conn, voice_id):
         raise BusError(f"no such bank voice: {voice_id}")
     holder = _holder(conn, room_id, voice_id)
-    if holder and holder != _speaker_name(conn, speaker):
-        raise BusError(f"that voice is held by {holder} in this room")
+    if holder and holder != speaker:
+        raise BusError(f"that voice is held by {_speaker_name(conn, holder)} in this room")
     with tx(conn):
         conn.execute(
             "INSERT INTO voice_assignments(room_id, speaker, voice_id, set_by, ts_ns) "
@@ -2147,7 +2152,15 @@ def voice_for(conn, room_id, speaker):
     pick = voice_default(elsewhere=elsewhere, taken=taken,
                          bank=[v["id"] for v in voices(conn)])
     if pick:
-        assign_voice(conn, room_id, speaker, pick, set_by="default")
+        try:
+            assign_voice(conn, room_id, speaker, pick, set_by="default")
+        except (BusError, sqlite3.IntegrityError):
+            # Two callers materialized at once (worker thread and listing route)
+            # and the other one won: whatever landed is the answer, and if
+            # nothing did the pick is gone -- None, the digest, until next time.
+            r = conn.execute("SELECT voice_id FROM voice_assignments WHERE room_id=? "
+                             "AND speaker=?", (room_id, speaker)).fetchone()
+            return r["voice_id"] if r else None
     return pick
 
 
@@ -2183,7 +2196,9 @@ def room_speakers(conn, room_id):
 
 def script_put(conn, message_id, text, voice_id, model, ms):
     """The writer's script for one message. INSERT OR REPLACE: a retry after a
-    partial write overwrites, and a retracted message's row is already gone."""
+    partial write overwrites. CONTRACT: the message must exist -- a script for a
+    message retracted mid-write raises sqlite3.IntegrityError (FK), and the
+    writer worker (slice 5) owns that catch: no row, no frame, no orphan."""
     with tx(conn):
         conn.execute(
             "INSERT OR REPLACE INTO scripts(message_id, text, voice_id, model, ms, ts_ns) "

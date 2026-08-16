@@ -199,3 +199,38 @@ def test_purge_room_and_prune_agent_drop_the_assignments():
     left = {(r["room_id"], r["speaker"]) for r in
             c.execute("SELECT room_id, speaker FROM voice_assignments")}
     assert left == {(r2["id"], k1)}
+
+
+def test_two_speakers_with_one_display_name_still_collide_by_key():
+    """Verdict 11059 BLOCKING 1: admin's 'picard' and vyzon's 'picard' are two
+    keys under one label. The holder check compares KEYS, so the second one is
+    refused with the courtesy message -- not passed through to a raw
+    IntegrityError from the UNIQUE index."""
+    c = db()
+    admin, user, r1, r2, a1, a2 = world(c)
+    twin = store.mint_agent(c, user["id"], "picard")
+    k1, kt = f"agent:{a1['id']}", f"agent:{twin['id']}"
+    assert k1 != kt
+    store.assign_voice(c, r1["id"], k1, "picard", set_by="owner")
+    with pytest.raises(store.BusError, match="held by picard"):
+        store.assign_voice(c, r1["id"], kt, "picard", set_by="owner")
+    # And the holder re-asserting its own voice is not a collision with itself.
+    store.assign_voice(c, r1["id"], k1, "picard", set_by="room")
+
+
+def test_a_lost_materialization_race_reads_back_the_winner(monkeypatch):
+    """Verdict 11059 (2): worker and listing route materialize the default at
+    once; the loser must return whatever landed, never raise."""
+    c = db()
+    admin, user, r1, r2, a1, a2 = world(c)
+    k1, k2 = f"agent:{a1['id']}", f"agent:{a2['id']}"
+    real = store.assign_voice
+
+    def stolen(conn, room_id, speaker, voice_id, *, set_by):
+        real(conn, room_id, k2, voice_id, set_by="owner")   # the other caller took it
+        real(conn, room_id, speaker, voice_id, set_by=set_by)
+
+    monkeypatch.setattr(store, "assign_voice", stolen)
+    assert store.voice_for(c, r1["id"], k1) is None
+    monkeypatch.setattr(store, "assign_voice", real)
+    assert store.voice_for(c, r1["id"], k1) == "picard"    # next time: first free
