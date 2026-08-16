@@ -259,3 +259,15 @@ def test_a_membership_healed_by_readmit_is_still_keyed_by_its_bound_token(world)
     rows = store.room_speakers(c, r2)
     assert [r["speaker"] for r in rows] == [w["kp"]], rows
     assert rows[0]["present"] is True
+
+
+def test_a_web_users_membership_is_not_an_unbound_agent_row(world):
+    """Eval box: travis (a web session, members.tag web:travis) listed twice --
+    once by his user:<id> assignment and once as a present 'unbound' agent."""
+    w = world
+    c, r2 = w["c"], w["r2"]["id"]
+    store.join(c, "travis", tag="web:travis", room_id=r2, fresh=True)
+    me = f"user:{w['admin']['id']}"
+    assert store.voice_for(c, r2, me) is not None
+    rows = store.room_speakers(c, r2)
+    assert [r["speaker"] for r in rows] == [me]
