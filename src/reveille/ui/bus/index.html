@@ -502,6 +502,8 @@
  .pRow .on{color:var(--green)}
  .pDim{color:var(--faint);font-size:.72rem}
  .pDim.err{color:#e8555a}
+ .pRow textarea.vPersona{flex:1;min-width:12rem;background:var(--bg);border:1px solid var(--line);
+  border-radius:6px;color:var(--fg);font:inherit;font-size:.78rem;padding:.3rem .45rem;resize:vertical}
  .pRow input{flex:1;min-width:7rem;background:var(--bg);border:1px solid var(--line);
   border-radius:6px;color:var(--fg);padding:.3rem .5rem;font:inherit;font-size:.78rem}
  .pRow button{background:var(--chip);border:1px solid var(--line);border-radius:6px;
@@ -791,6 +793,7 @@
    <button class="tab" data-tab="rooms">Rooms</button>
    <button class="tab" data-tab="memory">Memory</button>
    <button class="tab" data-tab="tokens">Tokens</button>
+   <button class="tab" data-tab="voices">Voices</button>
    <button class="tab" data-tab="users">Users</button>
    <button class="tab" data-tab="account">Account</button>
    <button id="panX" title="close">&#10005;</button>
@@ -1742,7 +1745,7 @@ $('panX').onclick=closePanel;
 $('pan').onclick=e=>{if(e.target.id==='pan')closePanel();};
 $('panOut').onclick=async()=>{await fetch('/logout',{method:'POST'});location.reload();};
 const TABS={rooms:()=>openRooms(),memory:()=>openMemories(),tokens:()=>openTokens(),
- users:()=>openUsers(),account:()=>openAccount()};
+ voices:()=>openVoices(),users:()=>openUsers(),account:()=>openAccount()};
 for(const b of $('panTabs').querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.tab]();
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();});
 async function api(path,opts){
@@ -3141,6 +3144,62 @@ async function openMemories(){
    {method:'POST',body:'{}'});toast('promoted — global law now',true);}
   catch(e){toast(e.message);}
   openMemories();},openMemories);
+}
+
+// THE BANK (DES-013 section 3): voices reveille owns. Anyone signed in adds one;
+// the uploader or an admin replaces its clip or edits its persona. The clip is a
+// PCM WAV, 5-30 s, sent as raw bytes to PUT /voices/<id>/clip -- the /upload
+// shape, so the same multipart refusal guards it. Assignment (who speaks with
+// what, per room) is a later slice; this tab is the bank only.
+const VOICE_ID_RE=/^[a-z0-9][a-z0-9_-]{0,63}$/;
+async function putVoiceClip(id,name,file){
+ const r=await fetch('/voices/'+encodeURIComponent(id)+'/clip?name='+encodeURIComponent(name||''),
+  {method:'PUT',body:file});
+ if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||e.error||r.status);}
+ return r.json();
+}
+async function openVoices(){
+ const d=await api('/voices');
+ const rows=d.voices.map(v=>
+  '<div class="pRow"><b>'+esc(v.name)+' <span class="pDim">'+esc(v.id)+' \u00b7 '+
+   (Math.round(v.seconds*10)/10)+' s</span></b>'+
+   (v.editable
+    ?'<label class="chip">replace clip <input type="file" accept="audio/wav,.wav" hidden data-vclip="'+esc(v.id)+'"></label>'
+    :'<span class="pDim">not yours to edit</span>')+
+  '</div>'+
+  '<div class="pRow"><textarea class="vPersona" data-vpersona="'+esc(v.id)+'" rows="2" '+
+   'placeholder="persona: how this voice speaks (tone, cadence, attitude)"'+
+   (v.editable?'':' readonly')+'>'+esc(v.persona||'')+'</textarea>'+
+   (v.editable?'<button data-vsave="'+esc(v.id)+'">save persona</button>':'')+
+  '</div>').join('')||'<div class="pDim">the bank is empty</div>';
+ panel('voices',
+  '<div class="pDim">A bank voice is a clip reveille keeps: PCM WAV, 5 to 30 seconds, one '+
+  'speaker, clean room tone. Anyone signed in may add one; only its uploader or an admin '+
+  'replaces the clip or edits the persona. Re-uploading under the same id REPLACES it -- '+
+  'the id is the identity, the bytes are not.</div>'+rows+
+  '<div class="pSec">ADD A VOICE</div>'+
+  '<div class="pRow"><input id="newVoiceId" placeholder="id (e.g. quark)" maxlength="64">'+
+  '<input id="newVoiceName" placeholder="display name (optional)">'+
+  '<label class="chip">choose wav <input id="newVoiceFile" type="file" accept="audio/wav,.wav" hidden></label>'+
+  '<span class="pDim" id="newVoiceFileName"></span>'+
+  '<button id="addVoice">add</button></div>');
+ $('newVoiceFile').onchange=()=>{const f=$('newVoiceFile').files[0];
+  $('newVoiceFileName').textContent=f?f.name:'';};
+ $('addVoice').onclick=async()=>{
+  const id=$('newVoiceId').value.trim().toLowerCase(), f=$('newVoiceFile').files[0];
+  if(!VOICE_ID_RE.test(id)){toast('id: lowercase letters, digits, - and _');return;}
+  if(!f){toast('choose a wav first');return;}
+  try{await putVoiceClip(id,$('newVoiceName').value.trim(),f);openVoices();}
+  catch(e){toast(e.message);}};
+ for(const el of document.querySelectorAll('[data-vclip]'))el.onchange=async()=>{
+  const f=el.files[0];if(!f)return;
+  try{await putVoiceClip(el.dataset.vclip,'',f);toast('clip replaced');openVoices();}
+  catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-vsave]'))b.onclick=async()=>{
+  const ta=document.querySelector('[data-vpersona="'+CSS.escape(b.dataset.vsave)+'"]');
+  try{await api('/voices/'+encodeURIComponent(b.dataset.vsave),
+    {method:'PATCH',body:JSON.stringify({persona:ta.value})});toast('persona saved');}
+  catch(e){toast(e.message);}};
 }
 
 async function openUsers(){

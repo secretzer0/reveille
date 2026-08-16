@@ -110,11 +110,14 @@ services:
       # 8 OOMs); the VM's 12 GB 3060 can take 8 once it is measured there.
       TTS_BATCH_SIZE: "4"
     volumes:
-      # The directory is the interface (section 5): voices/<name>.wav is that
-      # name's clip, cloned. Mounted as their REFERENCE dir so their predefined
-      # voices (28 shipped in the image, /app/voices) stay the bank -- a fresh
-      # host speaks with 28 distinct voices before anyone drops a wav.
-      - ${TTS_VOICES_DIR:-./voices}:/app/reference_audio:ro
+      # The directory is the interface (DES-009 section 5): voices/<name>.wav is
+      # that name's clip, cloned. Mounted as their REFERENCE dir so their
+      # predefined set (28 shipped in the image, /app/voices) still answers when
+      # nothing is dropped. THE BROKER OWNS THIS DIRECTORY (DES-013 section 3):
+      # it is <SERVER_DATA>/voices, the same tree the broker sees rw at
+      # /data/voices, and an uploaded bank voice lands there as bank-<id>.wav --
+      # the synthesizer sees it on the next utterance, read-only, no restart.
+      - ${TTS_VOICES_DIR:-${SERVER_DATA}/voices}:/app/reference_audio:ro
       # The model is about a gigabyte and downloads into HF_HOME. Without this,
       # removing the container re-downloads it -- a ten-minute first start every
       # time, which the operator would meet on their SECOND deploy rather than
