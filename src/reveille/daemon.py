@@ -196,6 +196,17 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.100 THE ARTIFACTS BESIDE A MESSAGE (DES-013 slice 4). Every listing
+(inbox, thread, tail, search) now carries `has_audio` and `has_script`; the
+web feed shows a play icon on messages that have audio (an explicit play,
+works with the voice toggle off) and a script icon on messages the writer has
+scripted -- the script replaces the terse body in place, click again to get
+the terse text back. `GET /script/<mid>` -> {id, text, voice_id, model, ts_ns}
+for anyone in the message's room (404 = no script; ?room= is ignored, like
+/audio). Nothing writes scripts yet (that is the writer, slice 5), so the
+script icon stays dark until it ships. Bus tools unchanged; the two new
+fields are additive on every message dict.
+
 0.2.99 THE BANK, AND WHO SPEAKS WITH WHAT (DES-013 slices 2-3). (#26) the
 broker OWNS a voices directory (<db dir>/voices; compose mounts
 ${SERVER_DATA}/voices into the synthesizer read-only as its reference dir):
