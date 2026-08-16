@@ -364,6 +364,14 @@
  .row:hover .mid{opacity:1}
  .head .del{color:#e8555a;font-size:.78rem;opacity:0;cursor:pointer;padding:0 .2rem}
  .row:hover .del{opacity:1}
+ /* DES-013 section 7: the artifacts beside a message. Hover-revealed like .mid;
+    .scripted marks a row whose body is showing the character script. */
+ .head .play,.head .scr{color:var(--faint);font-size:.74rem;opacity:0;cursor:pointer;padding:0 .2rem}
+ .row:hover .play,.row:hover .scr,.row.scripted .scr{opacity:1}
+ .head .play:hover,.head .scr:hover{color:var(--gold)}
+ .row.scripted .scr{color:var(--gold)}
+ .row.scripted .body{border-left:2px solid var(--gold);padding-left:.5rem}
+ .scrlab{display:block;font-size:.62rem;letter-spacing:.1em;color:var(--faint);margin-bottom:.2rem}
  .head .del:hover{font-weight:900}
  .subj{font-weight:650;margin:.12rem 0 .05rem;font-size:.92rem}
  .body{color:#c3ccd8;white-space:pre-wrap;word-break:break-word;
@@ -1101,6 +1109,39 @@ async function hydrateMd(el){
  el.removeAttribute('data-src');
 }
 
+// THE ARTIFACTS BESIDE A MESSAGE (DES-013 section 7): a play icon when audio
+// exists (has_audio from the listing, or the live `audio` frame) and a script
+// icon when the writer left one (has_script / the `script` frame). Play is an
+// explicit gesture: it works with the toggle off, stops what is sounding, and
+// hands the queue back when done. The script view REPLACES the terse body in
+// place and a second click restores it -- the terse text is the record.
+function artIcons(m){
+ return (m.has_audio?'<span class="play" data-play="'+m.id+'" title="play audio" '+
+   'aria-label="play audio">&#9654;</span>':'')
+  +(m.has_script?'<span class="scr" data-scr="'+m.id+'" title="view the script" '+
+   'aria-label="view the script">&#9998;</span>':'');
+}
+function paintIcons(m){
+ const row=document.querySelector('.row[data-id="'+m.id+'"] .head');
+ if(!row)return;
+ for(const el of row.querySelectorAll('.play,.scr'))el.remove();
+ row.insertAdjacentHTML('beforeend',artIcons(m));
+}
+function playOne(id){
+ vStop();vBusy=true;
+ vPlay(id,vUrl(id));
+}
+async function toggleScript(row,m){
+ const body=row.querySelector('.body');
+ if(row.classList.contains('scripted')){
+  body.innerHTML=esc(m.body);row.classList.remove('scripted');return;}
+ try{
+  if(!m.script){const d=await api('/script/'+encodeURIComponent(m.id)+qs());m.script=d.text;}
+  body.innerHTML='<span class="scrlab">SCRIPT \u00b7 generated, in character'+
+   (m.script_voice?' \u00b7 '+esc(m.script_voice):'')+'</span>'+mdToHtml(m.script);
+  row.classList.add('scripted');
+ }catch(e){toast(e.status===404?'no script for this message':e.message);}
+}
 function render(m){
  const frag=document.createDocumentFragment();
  if(!prevMsg||dayOf(prevMsg.ts_ns)!==dayOf(m.ts_ns)){
@@ -1127,6 +1168,7 @@ function render(m){
     +(m.thread_id!==m.id?' &middot; thread '+m.thread_id:'')+'</span>'
     +(m.from===myName?'<span class="del" data-del="'+m.id
       +'" title="retract (only while nobody has read it)">&#10007;</span>':'')
+    +artIcons(m)
     +'</div>')
   +(m.subject?'<div class="subj">'+esc(m.subject)+'</div>':'')
   +'<div class="body">'+esc(m.body)+'</div>'+attHtml(m.attachments)+'</div>';
@@ -1134,6 +1176,8 @@ function render(m){
  row.style.display=matches(m)?'':'none';
  row.addEventListener('click',e=>{
   if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click
+  if(e.target.closest('.play')){playOne(m.id);return;}
+  if(e.target.closest('.scr')){toggleScript(row,m);return;}
   selectRow(row,m);
  });
  frag.appendChild(row);
@@ -1271,13 +1315,15 @@ function vStop(){
  const c=vCtl;vCtl=null;c.abort();
  for(const s of c.srcs)try{s.stop();}catch(e){}
 }
+// ONE place builds the audio URL (a gate counts it): the queue and the play icon.
+const vUrl=id=>'/audio/'+encodeURIComponent(id)+'.wav'+qs();
 function vPump(){
  if(vBusy||!voiceOn)return;
  const t=vTake(vQ,V_MAX);
  if(!t)return;
  if(t.dropped)vMark(t.dropped);
  vBusy=true;
- vPlay(t.id,'/audio/'+encodeURIComponent(t.id)+'.wav'+qs());
+ vPlay(t.id,vUrl(t.id));
 }
 function vDone(){vBusy=false;vPump();}
 function vPush(m){
@@ -1571,7 +1617,9 @@ function connect(){
   // never heard a live message unless the worker happened to be idle. LIVE arrivals
   // only: msgs holds what add() rendered live, so a late joiner is not blasted with
   // a queue of history nobody is waiting to hear (section 2).
-  case 'audio':{const mm=msgs.get(m.id);if(mm)vPush(mm);return;}
+  case 'audio':{const mm=msgs.get(m.id);if(mm){mm.has_audio=true;paintIcons(mm);vPush(mm);}return;}
+  case 'script':{const mm=msgs.get(m.id);if(mm){mm.has_script=true;mm.script=m.text||mm.script;
+    mm.script_voice=m.voice_id||mm.script_voice;paintIcons(mm);}return;}
   case 'message':return add(m);
   default:return;       // an event this build does not know is not an error --
   }                     // the broker may be newer, and the poll still covers us

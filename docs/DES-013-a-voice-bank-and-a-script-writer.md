@@ -193,10 +193,12 @@ fine at 300 rows; said in a comment, and moved on.
   character" label and `row.classList.toggle('scripted')`; click again restores the
   terse text.
 - Voices tab in the settings modal (`TABS.voices`): BANK rows (name, id, seconds,
-  uploader, persona, draft button when `llm`, save, replace clip); ADD VOICE; MY
-  SPEAKERS (per room, editable rows with a `<select>`; taken voices disabled and
-  labelled by holder). `openRooms()`'s AGENTS IN THIS ROOM rows gain the same select
-  plus a "you" row. `toggleVoice` sends `{voice}` on the socket.
+  uploader, persona, draft button when `llm`, save, replace clip); ADD VOICE; WHO
+  SPEAKS WITH WHAT (per room the viewer can reach, one renderer: a `<select>` on the
+  rows the pure rule lets this user set, taken voices disabled and labelled by holder,
+  a "you" row always present). **RULED 11096 (slice 3 as shipped):** this section of
+  the Voices tab is THE ONE PLACE — `openRooms()` gains no rows; one renderer, one
+  place. `toggleVoice` sends `{voice}` on the socket (slice 5).
 
 ## 8. The model, and how it is chosen (measurement, not preference)
 

@@ -3421,6 +3421,27 @@ async def files_http(request):
 
 
 @_guard
+async def script_http(request):
+    """GET /script/<msg-id> -> the character script written for that message,
+    if you are in its room (DES-013 section 6). Mirrors audio_http exactly: THE
+    ROOM COMES FROM THE MESSAGE AND ?room= IS IGNORED; 404 = no script, which is
+    a defined state (the writer was off, slow, or skipped) and not an error."""
+    p = _principal(request)
+    raw = request.path_params["mid"]
+    if not raw.isdigit():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    mid = int(raw)
+    row = _conn.execute("SELECT room FROM messages WHERE id=?", (mid,)).fetchone()
+    if row is None or row["room"] not in p.rooms:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    sc = store.script_get(_conn, mid)
+    if sc is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"id": mid, "text": sc["text"], "voice_id": sc["voice_id"],
+                         "model": sc["model"], "ts_ns": sc["ts_ns"]})
+
+
+@_guard
 async def audio_http(request):
     """GET /audio/<msg-id>.wav -> the spoken form of that message, if you are in
     its room.
@@ -4208,6 +4229,7 @@ def build_app():
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
             Route("/audio/{mid}.wav", audio_http),
+            Route("/script/{mid}", script_http),
             WebSocketRoute("/wake", wake_ws),
             WebSocketRoute("/feed", feed_ws),
             Mount("/", app=mcp_app),

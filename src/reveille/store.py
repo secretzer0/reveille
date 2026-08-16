@@ -2977,7 +2977,9 @@ def _with_attachments(conn, msgs):
             {"url": r["url"], "name": r["name"], "bytes": r["bytes"]})
     for m in msgs:
         m["attachments"] = by.get(m["id"], [])
-    return msgs
+    # Every listing carries the artifact flags too (DES-013 section 6): one IN
+    # query and a stat per row, and the browser paints its icons from them.
+    return _with_artifacts(conn, msgs)
 
 
 def _with_artifacts(conn, msgs):
