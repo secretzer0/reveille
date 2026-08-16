@@ -194,6 +194,21 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.98 THE VOICE PLAYS AS IT IS SYNTHESIZED, AND THE BANK HAS A SCHEMA. Four
+PRs, one bump. (#20) TTS batching back ON at 4: the fork's decode is pad-aware
+(_t3_inference_padded), so a batched row stops at its own text instead of
+babbling to the pad; TTS_IMAGE 0.2.2. (#21, DES-009 s2/s7 amended) synthesis
+streams: the worker writes <files>/tts-<id>.wav.part as bytes land, the feed's
+`audio` frame fires at the FIRST byte, and /audio/<mid>.wav serves three states
+(in flight -> tail the .part; complete -> the file; neither -> 404); the delete
+choke point unlinks both names. (#22) the browser plays through a Web Audio
+player instead of <audio> -- frame-to-first-sound under 10 ms where <audio>
+waited on a 230 KB byte floor; the toggle resumes the context on the gesture.
+(#24, DES-013 slice 1) schema v23: `voices`, `voice_assignments` (PK room+speaker,
+UNIQUE room+voice), `scripts` (PK message_id) -- empty tables and the store API
+behind them; nothing speaks differently yet. SCHEMA RELEASE: deploy is
+stop -> backup -> migrate -> start (DES-010). The bus API did not move.
+
 CHANGES (newest first; re-read after any broker version bump):
 
 0.2.97 THE SYNTHESIZER IS SOMEONE ELSE'S TORCH (DES-009 s4.1). The voice
