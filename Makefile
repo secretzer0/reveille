@@ -110,10 +110,19 @@ unregister:
 SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
 # DES-009 section 4.1: devnen/Chatterbox-TTS-Server built from THEIR
 # Dockerfile.cu128 at the SHA docker/tts.upstream pins -- their resolution, our
-# provenance. Not the repo version: the broker's identity does not depend on it
+# provenance. Pinned to OUR FORK (secretzer0/Chatterbox-TTS-Server) while the
+# fixes it carries are open upstream: upstream main plus (1) an inference_mode
+# guard around generate (upstream PR #164; without it every distinct voice
+# pins ~200 MB of autograd graph in their conds cache and a 12 GB card OOMs
+# after about 40 voices), (2) divider lines split chunks (upstream PR #156;
+# without it "---" glues a whole message into one chunk), and (3) a request's
+# chunks go through the turbo decoder in one batched pass (upstream PR #161,
+# with #160 it builds on; measured here 6.42s -> 3.28s for a 6-chunk message,
+# guarded with inference_mode on the fork). Move the pin back to upstream the
+# day they merge. Not the repo version: the broker's identity does not depend on it
 # and it must not be rebuilt on every bump. Move the pin, bump this tag
 # (image-pin-check enforces the pair).
-TTS_IMAGE ?= reveille-tts:0.2.0
+TTS_IMAGE ?= reveille-tts:0.2.1
 TTS_UPSTREAM := $(shell cat docker/tts.upstream)
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
