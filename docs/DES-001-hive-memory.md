@@ -41,6 +41,9 @@ G3. Onboarding: a fresh agent with a fresh token is productive after join() + br
     provenance with it; the fact survives, its source_msg_id goes NULL. Amended R1-B3).
 G4. Zero new hard dependencies. The broker boots with no API key and no model. LLM work
     happens only at the edges (authors) or in an opt-in distiller agent.
+    (Amended 2026-08-16, DES-013 ruling 11045: the broker never LOADS a model; it may
+    CALL one behind an opt-in URL, off by default, and boots without it -- the same
+    posture as the DES-009 synthesizer.)
 G5. Honest memory: add-only with supersession. Nothing is silently rewritten. History
     remains queryable after the fact it records is dead.
 
