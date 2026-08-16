@@ -91,32 +91,34 @@ services:
   # whose REVEILLE_TTS_URL is unset simply runs no voice worker.
   tts:
     profiles: [voices]
+    # devnen/Chatterbox-TTS-Server built from THEIR Dockerfile.cu128 at the SHA
+    # docker/tts.upstream pins (DES-009 section 4.1): we own zero torch. Its
+    # port is 8004 and the broker's REVEILLE_TTS_URL is http://reveille-tts:8004.
     image: ${TTS_IMAGE:-reveille-tts:dev}
     container_name: ${TTS_NAME:-reveille-tts}
     restart: unless-stopped
     networks:
       reveille:
         aliases: [reveille-tts]
-    environment:
-      TTS_PORT: "8770"
-      TTS_VOICES: /voices
-      # Empty on this network, where the absence of a published port IS the
-      # boundary. Required by the broker only when the URL is remote (§3).
-      TTS_TOKEN: ${REVEILLE_TTS_TOKEN:-}
     volumes:
-      - ${TTS_VOICES_DIR:-./voices}:/voices:ro
-      # The model is about a gigabyte and from_pretrained downloads it into HOME.
-      # Without this, removing the container re-downloads it -- a ten-minute first
-      # start every time, which the operator would meet on their SECOND deploy
-      # rather than their first.
-      - tts-cache:/home/tts/.cache
+      # The directory is the interface (section 5): voices/<name>.wav is that
+      # name's clip, cloned. Mounted as their REFERENCE dir so their predefined
+      # voices (28 shipped in the image, /app/voices) stay the bank -- a fresh
+      # host speaks with 28 distinct voices before anyone drops a wav.
+      - ${TTS_VOICES_DIR:-./voices}:/app/reference_audio:ro
+      # The model is about a gigabyte and downloads into HF_HOME. Without this,
+      # removing the container re-downloads it -- a ten-minute first start every
+      # time, which the operator would meet on their SECOND deploy rather than
+      # their first.
+      - tts-cache:/app/hf_cache
     # THE GPU, RESERVED EXPLICITLY. Without this the container has no /dev/nvidia*,
     # torch.cuda.is_available() is False, and the service synthesizes on the CPU
     # while looking perfectly healthy -- three GPUs idle and the only symptom is
     # "it feels slow" (architect, msg 8941). The service also SAYS which device it
-    # took, because a reservation that silently fails to apply is the same defect
-    # one layer up. Behind the voices profile, so a host with no nvidia runtime is
-    # unaffected: that is what the profile buys.
+    # took (/api/model-info, logged by the broker at worker start), because a
+    # reservation that silently fails to apply is the same defect one layer up.
+    # Behind the voices profile, so a host with no nvidia runtime is unaffected:
+    # that is what the profile buys.
     deploy:
       resources:
         reservations:
@@ -125,11 +127,14 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "python", "-c",
-             "import json,urllib.request as u; assert json.load(u.urlopen('http://127.0.0.1:8770/health', timeout=3))['status'] == 'ok'"]
+      test: ["CMD", "python3", "-c",
+             "import json,urllib.request as u; assert json.load(u.urlopen('http://127.0.0.1:8004/api/model-info', timeout=3))['loaded']"]
       interval: 30s
       timeout: 5s
       retries: 3
+      # The model loads at start and downloads on a fresh cache volume: minutes,
+      # not seconds, and unhealthy-during-download would restart it mid-download.
+      start_period: 15m
 
   proxy:
     image: ${PROXY_IMAGE:-caddy:2-alpine}

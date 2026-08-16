@@ -108,10 +108,13 @@ unregister:
 # host process (pinned clone + Stop hook); agent containers are launcher-created and
 # join the same network.
 SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
-# DES-009: pinned by the model stack in docker/Dockerfile.tts, not by the repo
-# version -- the broker's identity does not depend on it and it must not be
-# rebuilt on every bump.
-TTS_IMAGE ?= reveille-tts:0.1.1
+# DES-009 section 4.1: devnen/Chatterbox-TTS-Server built from THEIR
+# Dockerfile.cu128 at the SHA docker/tts.upstream pins -- their resolution, our
+# provenance. Not the repo version: the broker's identity does not depend on it
+# and it must not be rebuilt on every bump. Move the pin, bump this tag
+# (image-pin-check enforces the pair).
+TTS_IMAGE ?= reveille-tts:0.2.0
+TTS_UPSTREAM := $(shell cat docker/tts.upstream)
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
 # agent reaches the bus at http://reveille-server:8765, and container names only
@@ -163,17 +166,18 @@ server-image:
 	fi
 	docker build -t $(SERVER_IMAGE) -f docker/Dockerfile.server .
 
-# DES-009. NOT wired into `up`: this image carries torch and a 350M model, takes
-# minutes to build and gigabytes to hold, and a fleet that has not asked for
-# voices must never pay for it during a deploy. The compose service sits behind
-# the `voices` profile for the same reason, so the two decisions cannot drift.
+# DES-009. NOT wired into `up`: this image carries CUDA torch and a 350M model,
+# takes minutes to build and gigabytes to hold, and a fleet that has not asked
+# for voices must never pay for it during a deploy. The compose service sits
+# behind the `voices` profile for the same reason, so the two decisions cannot
+# drift.
 #   make tts-image && docker compose --profile voices up -d tts
-# No refuse-to-rebuild here, and that is deliberate rather than an omission: this
-# tag is not a version claim about the repo -- nothing in the broker's identity
-# depends on it, and the model pins live in the Dockerfile where a change is a
-# visible edit.
+# The build context IS the upstream repo at the pinned SHA -- no Dockerfile of
+# ours, nothing vendored, and the pin file is the only input (publish-images and
+# image-pin-check read the same file). No refuse-to-rebuild here, deliberately:
+# this tag is not a version claim about the repo.
 tts-image:
-	docker build -t $(TTS_IMAGE) -f docker/Dockerfile.tts .
+	docker build -t $(TTS_IMAGE) -f Dockerfile.cu128 $(TTS_UPSTREAM)
 
 up:
 	@bash scripts/deploy-preflight "$(SERVER_DATA)" "$(BROKER_NAME)"

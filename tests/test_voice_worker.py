@@ -120,30 +120,43 @@ def test_the_worker_writes_the_file_and_announces_it(monkeypatch, tmp_path):
     synthesizer, so this measures the broker's half and nothing else."""
     monkeypatch.setattr(daemon, "_files_dir", tmp_path)
     monkeypatch.setattr(daemon, "_tts_speak", lambda *a, **k: b"RIFF-stub")
+    monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append((room, msg)))
-    daemon._tts_q.put((7, "r1", "hello"))
+    daemon._tts_q.put((7, "r1", "alice", "hello"))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert (tmp_path / "tts-7.wav").read_bytes() == b"RIFF-stub"
     assert pushed == [("r1", {"event": "audio", "id": 7})]
 
 
-def test_the_cold_load_wait_says_where_to_look(monkeypatch, tmp_path, caplog):
-    """A first utterance can block for minutes on the lazy model load, and
-    silence that long is indistinguishable from a hang. /health reports device
-    and loaded; nothing pointed at it until this line (architect, 8946)."""
+@pytest.mark.parametrize("info,device,loaded", [
+    ({"device": "cuda", "loaded": True}, "cuda", "True"),   # the 3060 is in use
+    ({"device": "cpu", "loaded": True}, "cpu", "True"),     # reservation did not apply
+    (None, "unreported", "unreported"),                    # a silence that names itself
+])
+def test_the_worker_logs_the_device_the_server_reports(monkeypatch, tmp_path, caplog,
+                                                       info, device, loaded):
+    """DES-009 section 4.1: device REPORTED, never inferred. A container with no
+    GPU reservation synthesizes on the CPU while looking perfectly healthy
+    (architect 8946), so the one fact that proves the GPU is in use is what
+    the server says about itself -- logged once at worker start, and
+    `unreported` when it says nothing."""
     monkeypatch.setattr(daemon, "_files_dir", tmp_path)
     monkeypatch.setattr(daemon, "_tts_speak", lambda *a, **k: b"RIFF")
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
-    daemon._tts_q.put((1, "r1", "a"))
-    daemon._tts_q.put((2, "r1", "b"))
+    asked = []
+    monkeypatch.setattr(daemon, "_tts_get",
+                        lambda url, token, path, timeout: asked.append(path) or info)
+    daemon._tts_q.put((1, "r1", "a", "x"))
+    daemon._tts_q.put((2, "r1", "a", "y"))
     daemon._tts_q.put(None)
     with caplog.at_level("INFO"):
-        daemon._tts_worker("http://tts:8100/", "", 1)
-    said = [r.getMessage() for r in caplog.records if "health" in r.getMessage()]
-    assert len(said) == 1, f"the cold-load hint fired {len(said)}x -- once, or it is noise"
-    assert "http://tts:8100/health" in said[0]
+        daemon._tts_worker("http://tts:8004/", "", 1)
+    said = [r.getMessage() for r in caplog.records if "device:" in r.getMessage()]
+    assert len(said) == 1, f"the device line fired {len(said)}x -- once, or it is noise"
+    assert f"device: {device} loaded: {loaded}" in said[0]
+    assert asked == ["/api/model-info"]
 
 
 def test_a_service_that_is_down_leaves_a_silent_message(monkeypatch, tmp_path):
@@ -153,9 +166,10 @@ def test_a_service_that_is_down_leaves_a_silent_message(monkeypatch, tmp_path):
     behaviour rather than an error surface."""
     monkeypatch.setattr(daemon, "_files_dir", tmp_path)
     monkeypatch.setattr(daemon, "_tts_speak", lambda *a, **k: None)
+    monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append(msg))
-    daemon._tts_q.put((7, "r1", "hello"))
+    daemon._tts_q.put((7, "r1", "alice", "hello"))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert list(tmp_path.iterdir()) == []
@@ -167,7 +181,7 @@ def test_enqueue_is_a_no_op_while_voices_are_off(monkeypatch):
     growth, no work handed to a thread that is not running."""
     monkeypatch.setattr(daemon, "_tts_on", False)
     before = daemon._tts_q.qsize()
-    daemon._tts_enqueue(1, "r1", "s", "b")
+    daemon._tts_enqueue(1, "r1", "alice", "s", "b")
     assert daemon._tts_q.qsize() == before
 
 
