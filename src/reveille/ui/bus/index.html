@@ -1221,6 +1221,9 @@ async function vPlay(id,url){
  try{res=await fetch(url,{credentials:'same-origin',signal:ctl.signal});}
  catch(e){return vCtl===ctl?vDone():undefined;}
  if(!res.ok||!res.body)return vDone();      // 404 = a silent message (section 7)
+ // resume() is async: the first utterance after the click can read "suspended" for
+ // a tick. Await it once, so only a browser that still refuses is called a refusal.
+ if(ctx.state!=='running'){try{await ctx.resume();}catch(e){}}
  if(ctx.state!=='running')return vRefused();
  const rd=res.body.getReader();
  let head=new Uint8Array(0),hdr=null,carry=new Uint8Array(0),next=0,pending=0,ended=false;
