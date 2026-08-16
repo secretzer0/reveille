@@ -1823,6 +1823,8 @@ _script_url = ""
 _script_model = ""
 _script_token = ""
 SCRIPT_MAX = 8                 # queue depth past which a message skips the writer, visibly
+SCRIPT_REST_MAX = 2            # scripts finishing concurrently past their first sentence
+_script_rest_slots = threading.BoundedSemaphore(SCRIPT_REST_MAX)
 SCRIPT_MAX_CHARS = 700         # a script longer than this is not a script; terse
 SCRIPT_BODY_CAP = 1500         # what the writer is shown of a long body
 _SCRIPT_FRAME = (
@@ -1958,11 +1960,22 @@ def _script_one(item, url, model, token, first_timeout, wait=False):
             break
         full = (full + " " + x).strip()
         stream.q.put(x)
-    t = threading.Thread(target=_script_rest, name=f"script-{mid}", daemon=True,
-                         args=(pieces, rest, full, stream, mid, room, voice, model, t0))
-    t.start()
-    if wait:
-        t.join()
+    # BOUNDED (architect 11136): a slow model must never face a pile of open
+    # streams. At most SCRIPT_REST_MAX scripts finish concurrently; past that,
+    # this thread finishes the rest itself before taking the next item -- the
+    # ordering point holds either way, only N+1's first sentence waits.
+    if _script_rest_slots.acquire(blocking=False):
+        def run():
+            try:
+                _script_rest(pieces, rest, full, stream, mid, room, voice, model, t0)
+            finally:
+                _script_rest_slots.release()
+        t = threading.Thread(target=run, name=f"script-{mid}", daemon=True)
+        t.start()
+        if wait:
+            t.join()
+    else:
+        _script_rest(pieces, rest, full, stream, mid, room, voice, model, t0)
     return True
 
 

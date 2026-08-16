@@ -295,3 +295,18 @@ def test_the_first_batch_is_capped_too(llama, world, monkeypatch):
     stream = daemon._tts_q.get_nowait()[3]
     assert _drain_stream(stream) == ["Sentence one is here."]
     assert store.script_get(world["c"], world["mid"])["text"] == "Sentence one is here."
+
+
+def test_open_script_streams_are_bounded(llama, world, monkeypatch):
+    """Architect 11136: with every slot taken, the worker finishes the rest of
+    the script itself (in-line) instead of opening another stream."""
+    monkeypatch.setattr(daemon, "_script_rest_slots", daemon.threading.BoundedSemaphore(1))
+    daemon._script_rest_slots.acquire()               # the one slot is busy
+    _Llama.tokens = ["First one. ", "Second one."]
+    started = daemon.threading.active_count()
+    assert daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5) is True
+    stream = daemon._tts_q.get_nowait()[3]
+    assert _drain_stream(stream) == ["First one.", "Second one."]
+    assert store.script_get(world["c"], world["mid"])["text"] == "First one. Second one."
+    assert daemon.threading.active_count() <= started + 1   # the stub server's handler at most
+    daemon._script_rest_slots.release()

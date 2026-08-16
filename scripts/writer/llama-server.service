@@ -1,0 +1,21 @@
+# /etc/systemd/system/llama-server.service -- the script writer (DES-013 s8).
+# LAN only: it binds every interface of a VM that has no route from outside;
+# there is no auth on purpose (the broker's REVEILLE_LAN_PLAINTEXT=1 is the
+# operator's stated acceptance). Fill MODEL and FLAGS from bench.sh's winner.
+[Unit]
+Description=llama-server -- reveille script writer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=MODEL=/opt/writer/models/Qwen3.8-27B-Q4_K_M.gguf
+# Measured flags go here (bench.sh prints the winning line). Baseline:
+Environment=FLAGS=-c 32768 -fa on -ctk q8_0 -ctv q8_0 -np 1 --jinja -ngl 999 --split-mode tensor
+ExecStart=/opt/writer/llama.cpp/build/bin/llama-server -m ${MODEL} --host 0.0.0.0 --port 8080 --alias writer $FLAGS
+Restart=on-failure
+RestartSec=5
+User=writer
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
