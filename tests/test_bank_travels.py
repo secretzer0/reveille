@@ -270,3 +270,38 @@ def test_the_default_meets_a_bank_voice_named_like_the_speaker(broker):
     D = store.voice_default
     assert D(elsewhere=[("picard", "default")], taken=set(), bank=["picard", "quark"], name="quark") == "quark"
     assert D(elsewhere=[("picard", "default")], taken={"quark"}, bank=["picard", "quark"], name="quark") == "picard"
+
+
+def _say(vid, text):
+    req = Request({"type": "http", "method": "GET", "path": f"/voices/{vid}/say",
+                   "headers": [], "query_string": ("text=" + text).encode(),
+                   "path_params": {"vid": vid}})
+    return asyncio.run(daemon.voice_say_http(req))
+
+
+async def _drain(resp):
+    out = b""
+    async for b in resp.body_iterator:
+        out += b
+    return out
+
+
+def test_the_audition_speaks_a_line_in_that_bank_voice_and_keeps_nothing(broker):
+    st, row = _put_clip("quark", wav(6))
+    assert st == 200
+    _Synth.tts.clear()
+    r = _say("quark", "Rule%20of%20Acquisition%20number%20one.")
+    assert r.status_code == 200 and r.media_type == "audio/wav"
+    assert asyncio.run(_drain(r)) == b"RIFFstub"
+    assert len(_Synth.tts) == 1
+    assert _Synth.tts[0]["text"] == "Rule of Acquisition number one."
+    assert _Synth.tts[0]["reference_audio_filename"] == daemon.clip_name(row)
+    # NOTHING KEPT: no tts-*.wav in files, no scripts row, no message.
+    assert not [p for p in daemon._files_dir.iterdir() if p.name.startswith("tts-")]
+    assert broker["c"].execute("SELECT count(*) FROM messages").fetchone()[0] == 0
+    # Refusals are named: no such voice, empty line, too long, voices off.
+    assert _say("nobody", "hi").status_code == 404
+    assert _say("quark", "%20%20").status_code == 400
+    assert _say("quark", "x" * (daemon.VOICE_SAY_MAX + 1)).status_code == 400
+    daemon._tts_on = False
+    assert _say("quark", "hi").status_code == 503
