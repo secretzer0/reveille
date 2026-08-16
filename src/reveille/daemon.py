@@ -3665,6 +3665,63 @@ async def persona_draft_http(request):
     return JSONResponse({"persona": persona[:1000]})
 
 
+VOICE_SAY_MAX = 300                # characters of audition text; a line, not a speech
+VOICE_SAY_TIMEOUT = 120.0          # a warm synthesizer answers in seconds; cold, the worker's 600 is not for a click
+
+
+@_guard
+async def voice_say_http(request):
+    """GET /voices/{vid}/say?text=<line> -> audio/wav: THAT bank voice speaking
+    THAT line, streamed as the synthesizer yields it. The audition: hear a clip
+    you uploaded (or any bank voice) say something before assigning it. Nothing
+    is kept -- no file, no row, no frame; the bytes go to the one ear that asked.
+    Any signed-in user may listen (hearing is not editing); a synthesizer that
+    is off is a 503, one that cannot answer a 502."""
+    p = _principal(request)
+    vid = request.path_params["vid"]
+    v = store.voice_get(_conn, vid)
+    if v is None:
+        return JSONResponse({"error": "no such voice"}, status_code=404)
+    text = " ".join((request.query_params.get("text") or "").split())
+    if not text:
+        return JSONResponse({"error": "text: say what?"}, status_code=400)
+    if len(text) > VOICE_SAY_MAX:
+        return JSONResponse({"error": f"text: {VOICE_SAY_MAX} characters at most"}, status_code=400)
+    if not _tts_on:
+        return JSONResponse({"error": "voices are off"}, status_code=503)
+    # OFF THE LOOP, like the push: urllib blocks for the whole synthesis.
+    chunks = await asyncio.to_thread(_tts_speak, _tts_url, _tts_token, vid, text,
+                                     VOICE_SAY_TIMEOUT, clip_name(v))
+    if chunks is None:
+        return JSONResponse({"error": "the synthesizer did not answer"}, status_code=502)
+    log.info("%s auditions bank voice %s (%d chars)", p.name, vid, len(text))
+
+    async def body():
+        while (b := await asyncio.to_thread(next, chunks, None)) is not None:
+            yield b
+    return StreamingResponse(body(), media_type="audio/wav",
+                             headers={"Cache-Control": "no-store",
+                                      "X-Content-Type-Options": "nosniff",
+                                      "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
+@_guard
+async def voice_clip_get_http(request):
+    """GET /voices/{vid}/clip -> the bank clip itself, the ORIGINAL the clones
+    are measured against (operator: hear original vs clone side by side). Any
+    signed-in user; 404 when the row has no clip yet."""
+    _principal(request)
+    vid = request.path_params["vid"]
+    store.valid_name(vid)
+    path = _voices_dir / f"bank-{vid}.wav"
+    if store.voice_get(_conn, vid) is None or not path.is_file():
+        return JSONResponse({"error": "no such clip"}, status_code=404)
+    return FileResponse(path, media_type="audio/wav",
+                        headers={"Content-Disposition": f'inline; filename="bank-{vid}.wav"',
+                                 "X-Content-Type-Options": "nosniff",
+                                 "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
 @_guard
 async def voice_clip_http(request):
     """PUT /voices/{vid}/clip?name=<label> -- RAW WAV bytes as the body, the
@@ -4739,7 +4796,9 @@ def build_app():
             Route("/voices", voices_http),
             Route("/voices/{vid}", voice_http, methods=["PATCH"]),
             Route("/voices/{vid}/clip", voice_clip_http, methods=["PUT"]),
+            Route("/voices/{vid}/clip", voice_clip_get_http),
             Route("/voices/{vid}/persona/draft", persona_draft_http, methods=["POST"]),
+            Route("/voices/{vid}/say", voice_say_http),
             Route("/rooms/{rid}/voices", room_voices_http),
             Route("/rooms/{rid}/voices/{speaker}", room_voice_http, methods=["PUT", "DELETE"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),

@@ -994,7 +994,8 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     #    running.
     assert "src.onended=()=>{pending--;finish();}" in player, \
         "the queue must advance from the last buffer's onended"
-    assert "if(!res.ok||!res.body)return vDone();" in player, "a 404 is a silent message: done, next"
+    assert "if(!res.ok||!res.body){" in player and "res.status!==404" in player and \
+        "return vDone();}" in player, "a 404 is a silent message: done, next; any other refusal names itself"
     assert "setTimeout" not in player and "setInterval" not in player, \
         "the player advances on a timer -- a backgrounded tab throttles it to a stop"
     # 4. Refusal is NAMED and turns the toggle back off. Without this the queue drains

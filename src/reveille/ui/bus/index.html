@@ -472,7 +472,7 @@
   display:none;align-items:center;justify-content:center;z-index:26}
  #pan.on{display:flex}
  #panCard{background:var(--card);border:1px solid var(--line);border-radius:14px;
-  width:32rem;max-width:94vw;box-shadow:0 12px 48px rgba(0,0,0,.5);overflow:hidden;
+  width:46rem;max-width:94vw;box-shadow:0 12px 48px rgba(0,0,0,.5);overflow:hidden;
   display:flex;flex-direction:column;max-height:82vh}
  #panTabs{display:flex;align-items:center;gap:.15rem;padding:.5rem .6rem 0;
   border-bottom:1px solid var(--line);flex:none}
@@ -1271,7 +1271,9 @@ async function vPlay(id,url){
  let res;
  try{res=await fetch(url,{credentials:'same-origin',signal:ctl.signal});}
  catch(e){return vCtl===ctl?vDone():undefined;}
- if(!res.ok||!res.body)return vDone();      // 404 = a silent message (section 7)
+ if(!res.ok||!res.body){                     // 404 = a silent message (section 7)
+  if(res.status!==404)res.json().then(j=>toast(j.error||('audio: '+res.status))).catch(()=>{});
+  return vDone();}
  // resume() is async: the first utterance after the click can read "suspended" for
  // a tick. Await it once, so only a browser that still refuses is called a refusal.
  if(ctx.state!=='running'){try{await ctx.resume();}catch(e){}}
@@ -1311,6 +1313,21 @@ async function vPlay(id,url){
  }catch(e){}
  ended=true;
  finish();
+}
+// A whole file, decoded by the browser (any PCM width, unlike the s16 stream
+// path): the bank clip, played once on the same context so vStop still rules.
+async function vPlayClip(url){
+ let ctx;
+ try{ctx=vCtxUp();}catch(e){return vRefused();}
+ const ctl=vCtl={srcs:[],abort(){}};
+ try{
+  const res=await fetch(url,{credentials:'same-origin'});
+  if(!res.ok){res.json().then(j=>toast(j.error||('clip: '+res.status))).catch(()=>{});return vDone();}
+  const buf=await ctx.decodeAudioData(await res.arrayBuffer());
+  if(vCtl!==ctl)return;
+  const src=ctx.createBufferSource();src.buffer=buf;src.connect(ctx.destination);
+  ctl.srcs.push(src);src.onended=()=>{if(vCtl===ctl)vDone();};src.start();
+ }catch(e){toast('clip: '+e.message);if(vCtl===ctl)vDone();}
 }
 function vStop(){
  if(!vCtl)return;
@@ -3306,6 +3323,9 @@ async function openVoices(){
  const rows=d.voices.map(v=>
   '<div class="pRow"><b>'+esc(v.name)+' <span class="pDim">'+esc(v.id)+' \u00b7 '+
    (Math.round(v.seconds*10)/10)+' s</span></b>'+
+   // THE ORIGINAL beside the clone: play the bank clip itself, so a voice can
+   // be judged against what it was cloned from (operator, eval box).
+   '<button type="button" data-vorig="'+esc(v.id)+'" title="play the uploaded clip itself">play clip</button>'+
    (v.editable
     ?'<button type="button" data-vpick="'+esc(v.id)+'">replace clip</button>'+
      '<input type="file" accept="audio/wav,.wav" hidden data-vclip="'+esc(v.id)+'">'
@@ -3318,7 +3338,12 @@ async function openVoices(){
    // THE DRAFT BUTTON exists only when a writer is configured (d.llm) -- the
    // one place writer output becomes text a human edits, behind a click.
    (v.editable&&d.llm?'<button data-vdraft="'+esc(v.id)+'" title="ask the script writer for a first draft; you edit and save">draft persona</button>':'')+
-  '</div>').join('')||'<div class="pDim">the bank is empty</div>';
+  '</div>'+
+  // THE AUDITION: hear this clip say a line of your choosing before anyone is
+  // assigned to it. Nothing is kept server-side; the same player as the feed.
+  '<div class="pRow"><input data-vsay="'+esc(v.id)+'" maxlength="300" '+
+   'placeholder="sample dialog: type a line and hear this voice say it">'+
+   '<button type="button" data-vsaybtn="'+esc(v.id)+'">say it</button></div>').join('')||'<div class="pDim">the bank is empty</div>';
  panel('voices',
   '<div class="pDim">A bank voice is a clip reveille keeps: PCM WAV, 5 to 30 seconds, one '+
   'speaker, clean room tone. Anyone signed in may add one; only its uploader or an admin '+
@@ -3376,6 +3401,15 @@ async function openVoices(){
   const f=el.files[0];if(!f)return;
   try{await putVoiceClip(el.dataset.vclip,'',f);toast('clip replaced');openVoices();}
   catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-vorig]'))b.onclick=()=>{
+  vStop();vBusy=true;vPlayClip('/voices/'+encodeURIComponent(b.dataset.vorig)+'/clip');};
+ for(const b of document.querySelectorAll('[data-vsaybtn]')){
+  const inp=document.querySelector('[data-vsay="'+CSS.escape(b.dataset.vsaybtn)+'"]');
+  const say=()=>{const t=inp.value.trim();if(!t){toast('type a line first');return;}
+   vStop();vBusy=true;
+   vPlay('say:'+b.dataset.vsaybtn,'/voices/'+encodeURIComponent(b.dataset.vsaybtn)+
+    '/say?text='+encodeURIComponent(t));};
+  b.onclick=say;inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();say();}};}
  for(const b of document.querySelectorAll('[data-vdraft]'))b.onclick=async()=>{
   const ta=document.querySelector('[data-vpersona="'+CSS.escape(b.dataset.vdraft)+'"]');
   b.disabled=true;b.textContent='drafting\u2026';
