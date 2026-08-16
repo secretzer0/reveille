@@ -119,7 +119,7 @@ def broker(tmp_path, monkeypatch, synth):
     vd.mkdir()
     monkeypatch.setattr(daemon, "_conn", c)
     monkeypatch.setattr(daemon, "_db_path", path)
-    monkeypatch.setattr(daemon, "_worker_conn", None)
+    monkeypatch.setattr(daemon, "_worker_local", threading.local())
     monkeypatch.setattr(daemon, "_voices_dir", vd)
     monkeypatch.setattr(daemon, "_files_dir", tmp_path)
     monkeypatch.setattr(daemon, "_tts_on", True)
@@ -319,3 +319,29 @@ def test_the_original_clip_plays_back_as_it_was_uploaded(broker):
     req = Request({"type": "http", "method": "GET", "path": "/voices/nobody/clip",
                    "headers": [], "query_string": b"", "path_params": {"vid": "nobody"}})
     assert asyncio.run(daemon.voice_clip_get_http(req)).status_code == 404
+
+
+def test_the_audition_is_the_right_voice_or_none_and_one_at_a_time(broker):
+    st, row = _put_clip("quark", wav(6))
+    assert st == 200
+    # The clip vanishes from the synthesizer and it refuses the re-push: 409,
+    # never the digest voice (verdict 11144), and no /tts call is made.
+    _Synth.files.remove(daemon.clip_name(row))
+    _Synth.refuse_upload = True
+    _Synth.tts.clear()
+    r = _say("quark", "hello")
+    assert r.status_code == 409 and json.loads(r.body)["error"] == "clip not on the synthesizer yet"
+    assert _Synth.tts == []
+    assert daemon._say_slot.acquire(blocking=False), "a refusal returns the slot"
+    daemon._say_slot.release()
+    # The re-push succeeds when the synthesizer allows it: reconciled, then spoken.
+    _Synth.refuse_upload = False
+    r = _say("quark", "hello")
+    assert r.status_code == 200
+    # ONE AT A TIME: while a stream is open the next caller is told to wait.
+    assert not daemon._say_slot.acquire(blocking=False), "the open stream holds the slot"
+    assert _say("quark", "again").status_code == 429
+    asyncio.run(_drain(r))
+    assert daemon._say_slot.acquire(blocking=False), "draining the stream returns the slot"
+    daemon._say_slot.release()
+    assert len(_Synth.tts) == 1

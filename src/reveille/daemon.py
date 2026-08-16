@@ -44,6 +44,7 @@ import pathlib
 import re
 import secrets
 import struct
+import sqlite3
 import threading
 import time
 import wave
@@ -2016,22 +2017,16 @@ def _script_rest(pieces, buf, full, stream, mid, room, voice, model, t0):
     finally:
         stream.q.put(None)
     ms = int((time.monotonic() - t0) * 1000)
+    # THIS thread's connection (verdict on #41): the rest of a script runs on a
+    # helper thread, and sqlite binds a connection to the thread that made it.
+    # ONLY the retract is quiet: a message gone mid-write fails the FK -> no
+    # row, no frame, the audio dies with it. Anything else is loud.
     try:
-        store.script_put(_script_conn(), mid, full.strip(), voice["id"], model, ms)
-        _feed_push(room, {"event": "script", "id": mid, "text": full.strip(), "voice_id": voice["id"]})
-    except Exception as e:
-        # A retracted message: FK. No row, no frame -- the audio dies with it too.
-        log.info("script: %s not kept: %s", mid, e)
-
-
-_script_conn_ = None
-
-
-def _script_conn():
-    global _script_conn_
-    if _script_conn_ is None:
-        _script_conn_ = store.connect(_db_path)
-    return _script_conn_
+        store.script_put(_conn_for_worker(), mid, full.strip(), voice["id"], model, ms)
+    except sqlite3.IntegrityError as e:
+        log.info("script: %s not kept (retracted): %s", mid, e)
+        return
+    _feed_push(room, {"event": "script", "id": mid, "text": full.strip(), "voice_id": voice["id"]})
 
 
 def _script_worker(url, model, token, first_timeout):
@@ -2237,16 +2232,18 @@ def _tts_reconcile(url, token, timeout, clips=None):
     return clips
 
 
-_worker_conn = None
+_worker_local = threading.local()
 
 
 def _conn_for_worker():
-    """The worker thread's OWN sqlite connection -- worker threads never touch
-    _conn (the request thread's). Read-only use: the voices table."""
-    global _worker_conn
-    if _worker_conn is None and _db_path:
-        _worker_conn = store.connect(_db_path)
-    return _worker_conn
+    """THIS thread's OWN sqlite connection -- worker and pool threads never touch
+    _conn (the loop's). One per thread, cached (sqlite objects are bound to the
+    thread that made them; the audition reconciles from a to_thread pool thread,
+    the synth worker from its own). Read-only use: the voices table."""
+    conn = getattr(_worker_local, "conn", None)
+    if conn is None and _db_path:
+        conn = _worker_local.conn = store.connect(_db_path)
+    return conn
 
 
 def _tts_speak(url, token, speaker, text, timeout, assigned=None):
@@ -3673,6 +3670,9 @@ async def persona_draft_http(request):
 
 VOICE_SAY_MAX = 300                # characters of audition text; a line, not a speech
 VOICE_SAY_TIMEOUT = 120.0          # a warm synthesizer answers in seconds; cold, the worker's 600 is not for a click
+# ONE audition at a time (verdict 11144): the synthesizer is single-threaded and
+# live messages queue behind it; a curl loop must not contend with the room.
+_say_slot = threading.BoundedSemaphore(1)
 
 
 @_guard
@@ -3695,16 +3695,39 @@ async def voice_say_http(request):
         return JSONResponse({"error": f"text: {VOICE_SAY_MAX} characters at most"}, status_code=400)
     if not _tts_on:
         return JSONResponse({"error": "voices are off"}, status_code=503)
-    # OFF THE LOOP, like the push: urllib blocks for the whole synthesis.
-    chunks = await asyncio.to_thread(_tts_speak, _tts_url, _tts_token, vid, text,
-                                     VOICE_SAY_TIMEOUT, clip_name(v))
-    if chunks is None:
-        return JSONResponse({"error": "the synthesizer did not answer"}, status_code=502)
+    if not _say_slot.acquire(blocking=False):
+        return JSONResponse({"error": "an audition is already playing -- try again in a moment"},
+                            status_code=429)
+    held = True
+    try:
+        # THE RIGHT VOICE OR NONE (verdict 11144): the worker falls through to the
+        # digest pick when a clip is missing, and an audition in the wrong voice
+        # reads as a bad clip. Reconcile once; still missing -> refuse.
+        name = clip_name(v)
+        clips = await asyncio.to_thread(_tts_get, _tts_url, _tts_token, "/get_reference_files",
+                                        VOICE_SAY_TIMEOUT) or []
+        if name not in clips:
+            clips = await asyncio.to_thread(_tts_reconcile, _tts_url, _tts_token,
+                                            VOICE_SAY_TIMEOUT, clips)
+        if name not in clips:
+            return JSONResponse({"error": "clip not on the synthesizer yet"}, status_code=409)
+        # OFF THE LOOP, like the push: urllib blocks for the whole synthesis.
+        chunks = await asyncio.to_thread(_tts_speak, _tts_url, _tts_token, vid, text,
+                                         VOICE_SAY_TIMEOUT, name)
+        if chunks is None:
+            return JSONResponse({"error": "the synthesizer did not answer"}, status_code=502)
+        held = False                     # the stream owns the slot from here
+    finally:
+        if held:
+            _say_slot.release()
     log.info("%s auditions bank voice %s (%d chars)", p.name, vid, len(text))
 
     async def body():
-        while (b := await asyncio.to_thread(next, chunks, None)) is not None:
-            yield b
+        try:
+            while (b := await asyncio.to_thread(next, chunks, None)) is not None:
+                yield b
+        finally:
+            _say_slot.release()          # the slot lives as long as the stream
     return StreamingResponse(body(), media_type="audio/wav",
                              headers={"Cache-Control": "no-store",
                                       "X-Content-Type-Options": "nosniff",

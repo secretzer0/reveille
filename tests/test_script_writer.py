@@ -94,14 +94,19 @@ def world(tmp_path, monkeypatch):
     store.voice_patch(c, "quark", persona="A Ferengi bartender.")
     monkeypatch.setattr(daemon, "_conn", c)
     monkeypatch.setattr(daemon, "_db_path", path)
-    monkeypatch.setattr(daemon, "_script_conn_", None)
+    monkeypatch.setattr(daemon, "_worker_local", threading.local())
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append(msg))
     while not daemon._tts_q.empty():
         daemon._tts_q.get_nowait()
     v = store.voice_get(c, "quark")
     item = (m["id"], room["id"], "quark", "s. terse body", daemon.clip_name(v), v, "s", "terse body")
-    return dict(c=c, mid=m["id"], room=room["id"], item=item, pushed=pushed, voice=v)
+    yield dict(c=c, mid=m["id"], room=room["id"], item=item, pushed=pushed, voice=v)
+    # A rest still finishing on a helper thread must not outlive the world it
+    # writes to (its row goes to THIS db; after teardown it would be loud).
+    for t in threading.enumerate():
+        if t.name.startswith("script-"):
+            t.join(5)
 
 
 def _drain_stream(stream):
@@ -310,3 +315,24 @@ def test_open_script_streams_are_bounded(llama, world, monkeypatch):
     assert store.script_get(world["c"], world["mid"])["text"] == "First one. Second one."
     assert daemon.threading.active_count() <= started + 1   # the stub server's handler at most
     daemon._script_rest_slots.release()
+
+
+def test_two_scripts_finishing_on_two_threads_both_leave_rows(llama, world):
+    """Verdict on #41: the rest of a script runs on a helper thread, and sqlite
+    binds a connection to the thread that made it -- one process-global writer
+    connection lost every row written from the second thread, quietly."""
+    c, v = world["c"], world["voice"]
+    m2 = store.send(c, "quark", "*", "second body", room=world["room"])
+    item2 = (m2["id"], world["room"], "quark", "s. second body", daemon.clip_name(v), v, "s", "second body")
+    _Llama.tokens = ["First one. ", "Second one."]
+    _Llama.pace = 0.05
+    assert daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5) is True
+    assert daemon._script_one(item2, llama, "qwen", "", first_timeout=1.5) is True
+    s1, s2 = daemon._tts_q.get_nowait()[3], daemon._tts_q.get_nowait()[3]
+    _drain_stream(s1), _drain_stream(s2)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not (
+            store.script_get(c, world["mid"]) and store.script_get(c, m2["id"])):
+        time.sleep(0.05)
+    assert store.script_get(c, world["mid"])["text"] == "First one. Second one."
+    assert store.script_get(c, m2["id"])["text"] == "First one. Second one."
