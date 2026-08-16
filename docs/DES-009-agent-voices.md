@@ -107,22 +107,28 @@ What is unchanged, because it was never about the server:
   requires https AND an authenticating proxy in front (the bearer the broker
   already sends is what the proxy checks); the broker's start-time refusal is
   the same refusal. Voices off beats a transcript in flight.
-- **§5 the directory is the interface.** `voices/` is bind-mounted into their
-  container as their voices dir: `voices/<name>.wav` is that name's clip,
-  `voices/bank/*.wav` the bank; the hash-to-bank and knob offset move into
-  `_tts_speak` (broker side, ~10 lines) and become their `voice` +
-  exaggeration/cfg params. No new file, no column.
+- **§5 the directory is the interface.** `voices/` is bind-mounted as their
+  REFERENCE dir: `voices/<name>.wav` is that name's clip, cloned. **The bank
+  is upstream's predefined voice set** (28 shipped in the image; a fresh host
+  speaks with 28 distinct voices before anyone drops a wav) — `voices/bank/`
+  is gone, one less thing we own. The digest-to-bank index and the knob
+  offset live in the broker's `tts_voice()` (pure, sha256 — never Python's
+  salted `hash()`), and the bank is SORTED before indexing so every host,
+  restart and upstream bump agrees on who sounds like what. No new file, no
+  column.
 - **§7 silent-on-failure**, §6 the cap, nobody-hears-themselves, humans are
   speakers: broker and browser rules, untouched.
-- **Device reported, never inferred**: the broker logs what their `/health`
-  (or equivalent) reports at worker start, or logs `device: unreported` — a
-  silence that names itself.
+- **Device reported, never inferred**: the broker logs what their
+  `/api/model-info` reports (device, loaded) at worker start, or logs
+  `device: unreported` — a silence that names itself. They have no `/health`;
+  the compose healthcheck asserts `loaded` on the same route, with a
+  `start_period` long enough for the model download.
 
 What is deleted: `src/reveille/tts_service.py`, `Dockerfile.tts`, and their
 tests; the caller is tested against a stub HTTP server. Gates: (1) the
-compose file still publishes no port for the synthesizer; (2) `_tts_speak`
+compose file still publishes no port for the synthesizer; (2) `tts_voice`
 resolves `voices/<name>.wav` → clone and otherwise bank+knob deterministically
-(same name, same voice, across restarts); (3) the §3 refusal still fires on a
+(same name, same voice, across restarts AND with the bank fed in two orders); (3) the §3 refusal still fires on a
 plaintext remote URL; (4) a down service still leaves messages arriving
 silent; (5) CI builds the image `--no-cache` from the pinned SHA.
 
@@ -136,7 +142,7 @@ CUDA path at all — 738128e's "CPU fallback that says nothing" existed because
 the GPU path was never real — which is one more reason (a) is the only
 option that meets the target. The canary of 10913.6e stays a CPU box; a GPU
 host is a poor canary. "device reported" above is what proves the 3060 is in
-use: `/health` says cuda, or the log says otherwise.
+use: `/api/model-info` says cuda, or the log says otherwise.
 
 The "one function, no plugin layer" sentence in §4 is why this is a day's
 slice and not a redesign — it just turned out the function that changes is
