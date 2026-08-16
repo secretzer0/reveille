@@ -154,10 +154,10 @@ def test_the_default_mint_does_not_carry_creation_authority():
 
     def fake_broker(auth, cookie, method, path, body=None):
         posted.append((method, path, body))
-        return {"id": "t1", "secret": "s"}
+        return 200, {"id": "t1", "secret": "s"}
 
-    orig = rl._broker_json
-    rl._broker_json = fake_broker
+    orig = rl._broker_call
+    rl._broker_call = fake_broker
     try:
         rl.mint_bound_token("http://b", "c=1", "wanderer", [])
         assert not posted[0][2].get("create"), (
@@ -166,7 +166,7 @@ def test_the_default_mint_does_not_carry_creation_authority():
         rl.mint_bound_token("http://b", "c=1", "wanderer", [], create=True)
         assert posted[0][2].get("create") is True
     finally:
-        rl._broker_json = orig
+        rl._broker_call = orig
 
 
 # ---- DES-011 section 2 / gate 9.4 and its sibling (ruling 10978) -------------
@@ -229,3 +229,31 @@ def test_the_route_refuses_a_held_name_structured():
                                {"agent_name": "wanderer", "label": "swap"}, cookie)
         assert code == 200 and body2["agent_id"] == first["agent_id"]
         assert first["id"] in body2["superseded"]
+
+
+# ---- BLOCKING 1 on PR #7 (msg 11000): refused AND told --------------------------
+# The store message and the 409 body carry both remedies; the launcher's create
+# path dropped them (broker error -> None -> "broker refused the token mint").
+# The human-facing consumer must surface the detail, not just the refusal.
+
+def test_the_launcher_create_path_tells_the_human_both_remedies():
+    seed = pathlib.Path(tempfile.mkdtemp()) / "broker.db"
+    c, _ = db(str(seed))
+    admin(c)
+    c.close()
+    rl = _launch_module()
+    with scratch_broker(env_extra={"REVEILLE_DB": str(seed)}) as b:
+        code, body, cookie = _post(b.base, "/login",
+                                   {"name": "travis", "password": "hunter2hunter2"})
+        assert code == 200, body
+        cookie = cookie.split(";", 1)[0]
+        rl.mint_bound_token(b.base, cookie, "wanderer", [], create=True)   # first: created
+        with pytest.raises(rl.LaunchError) as e:
+            rl.mint_bound_token(b.base, cookie, "wanderer", [], create=True)
+        said = str(e.value)
+        assert "409" in said and "already have a live agent" in said, said
+        assert "unique name" in said and "add the existing agent" in said, (
+            "refused but not told: both remedies must reach the human")
+        # and a bare attach through the same function still swaps
+        tid, secret = rl.mint_bound_token(b.base, cookie, "wanderer", [])
+        assert secret
