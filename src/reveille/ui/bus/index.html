@@ -3260,7 +3260,8 @@ async function openVoices(){
   '<div class="pRow"><b>'+esc(v.name)+' <span class="pDim">'+esc(v.id)+' \u00b7 '+
    (Math.round(v.seconds*10)/10)+' s</span></b>'+
    (v.editable
-    ?'<label class="chip">replace clip <input type="file" accept="audio/wav,.wav" hidden data-vclip="'+esc(v.id)+'"></label>'
+    ?'<button type="button" data-vpick="'+esc(v.id)+'">replace clip</button>'+
+     '<input type="file" accept="audio/wav,.wav" hidden data-vclip="'+esc(v.id)+'">'
     :'<span class="pDim">not yours to edit</span>')+
   '</div>'+
   '<div class="pRow"><textarea class="vPersona" data-vpersona="'+esc(v.id)+'" rows="2" '+
@@ -3276,7 +3277,10 @@ async function openVoices(){
   '<div class="pSec">ADD A VOICE</div>'+
   '<div class="pRow"><input id="newVoiceId" placeholder="id (e.g. quark)" maxlength="64">'+
   '<input id="newVoiceName" placeholder="display name (optional)">'+
-  '<label class="chip">choose wav <input id="newVoiceFile" type="file" accept="audio/wav,.wav" hidden></label>'+
+  // A BUTTON THAT CLICKS THE HIDDEN INPUT -- the pattern #attachBtn already
+  // uses; a <label> around a hidden file input did not open the picker here.
+  '<button type="button" id="newVoicePick">choose wav</button>'+
+  '<input id="newVoiceFile" type="file" accept="audio/wav,.wav" hidden>'+
   '<span class="pDim" id="newVoiceFileName"></span>'+
   '<button id="addVoice">add</button></div>'+
   '<div class="pSec">WHO SPEAKS WITH WHAT</div>'+
@@ -3285,8 +3289,11 @@ async function openVoices(){
   'the speaker\'s owner does. A voice held by someone else here is greyed with the holder\'s '+
   'name.</div>'+per.join(''));
  wireSpeakerSelects(openVoices);
+ $('newVoicePick').onclick=()=>$('newVoiceFile').click();
  $('newVoiceFile').onchange=()=>{const f=$('newVoiceFile').files[0];
   $('newVoiceFileName').textContent=f?f.name:'';};
+ for(const b of document.querySelectorAll('[data-vpick]'))b.onclick=()=>
+  document.querySelector('[data-vclip="'+CSS.escape(b.dataset.vpick)+'"]').click();
  $('addVoice').onclick=async()=>{
   const id=$('newVoiceId').value.trim().toLowerCase(), f=$('newVoiceFile').files[0];
   if(!VOICE_ID_RE.test(id)){toast('id: lowercase letters, digits, - and _');return;}
