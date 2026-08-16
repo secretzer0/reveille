@@ -8,7 +8,7 @@ broker boots with no model — G4, amended here in words).
 ## 1. Problem
 
 The voiced bus (DES-009) speaks a message's terse text in a voice picked by a name's
-digest. The operator heard two things this week that are the product: an all-hands
+digest from the synthesizer's predefined set. The operator heard two things this week that are the product: an all-hands
 render where every source in the lab spoke a line in character, and a captain's-log
 read of a design message. Both were produced by hand — a coding model turned terse
 bus prose into character dialogue, one message at a time. That is the wrong tool
@@ -30,7 +30,7 @@ user. The key comes from the **credential** — `Principal` carries `agent_id` f
 `resolve_token`; a web user is their own owner — never from `agent_id_for(name)`,
 which is ambiguous the moment two owners run one name (the case that most needs
 distinct voices). An unbound-token agent has no key: it is not assignable and keeps
-today's digest voice.
+today's digest voice from the predefined set.
 
 **Binding:** ONE function derives the key from a Principal, and every later feature
 that needs "who is speaking" (DES-011 §6(b) delivery-by-id included) calls it. No
@@ -40,6 +40,11 @@ second derivation.
 one voice per speaker per room, and no two speakers share a voice in a room.
 
 ## 3. RULED: the bank is reveille's, and the directory is STILL the interface (DES-009 §5 kept)
+
+**Terminology (ruling 11052):** the synthesizer's built-in voices are the **predefined
+set** (parameter `predefined`; DES-009 §5 called it "the bank" — that name is
+retired); the reveille-owned `voices` table is **the bank**. Both are arguments to one
+function, so the words must not share.
 
 - `voices(id PK slug, name, persona, uploaded_by, seconds, bytes, created_ns,
   updated_ns)`; the clip lives at `<db dir>/voices/bank-<id>.wav`, a directory the
@@ -69,7 +74,7 @@ one voice per speaker per room, and no two speakers share a voice in a room.
 - **Governance (operator):** any signed-in user adds a NEW voice; REPLACE and persona
   edit are the uploader's or an admin's; the bank is global; assignment is per room.
   No delete route in v1 — replace covers a bad clip.
-- Resolution: `tts_voice(speaker, *, clips, bank, assigned=None)`: an assigned
+- Resolution: `tts_voice(speaker, *, clips, predefined, assigned=None)`: an assigned
   `bank-<id>.wav` present in the synthesizer's listing is cloned; assigned but not
   visible logs `bank voice X is not visible to the synthesizer -- is TTS_VOICES_DIR the
   broker's voices dir?` and falls through to today's rule (a silence that names
@@ -93,7 +98,7 @@ current, holder)`:
 - **Default**, at a speaker's first utterance in a room (and when the listing route
   runs, so an owner sees it before the first message), in THREE steps: (a) the
   speaker's voice in any other room if free here; (b) the first free bank voice; (c)
-  the digest pick, shared and named as such in the UI. Materialized as a row with
+  the digest pick from the predefined set, shared and named as such in the UI. Materialized as a row with
   `set_by='default'` — the row is what makes it stable and visible; the digest is not.
 - Store: `assign_voice`, `unassign_voice`, `room_speakers` (present members → keys;
   assigned-but-absent flagged; unkeyable flagged), `voice_for`. `purge_room` drops the
