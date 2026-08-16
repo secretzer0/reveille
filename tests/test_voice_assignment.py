@@ -225,6 +225,7 @@ def test_the_send_path_hands_the_assigned_voice_to_the_worker(world, monkeypatch
     r1, kp = w["r1"]["id"], w["kp"]
     assert _put(w, "travis", r1, kp, "picard")[0] == 200
     monkeypatch.setattr(daemon, "_tts_on", True)
+    monkeypatch.setattr(daemon, "_room_listening", lambda room: True)
     while not daemon._tts_q.empty():
         daemon._tts_q.get_nowait()
     daemon._tts_enqueue(9, r1, "picard", "s", "b", key=kp)
