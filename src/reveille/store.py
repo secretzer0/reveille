@@ -2079,12 +2079,25 @@ def assign_refusal(actor_uid, is_admin, room_owner_id, speaker_owner_id, current
                       + (" -- admin has no reach here" if is_admin else ""))
 
 
-def voice_default(*, elsewhere, taken, bank):
-    """DES-013 section 4 default, pure: (a) the speaker's voice in another room if
-    free here (newest first), (b) the first free bank voice, else None -- the
-    caller falls to the digest pick from the predefined set."""
-    for v in elsewhere:
-        if v not in taken:
+def voice_default(*, elsewhere, taken, bank, name=None):
+    """DES-013 section 4 default, pure (ruling 11121). THE INVARIANT: explicit
+    choices travel; the NAME beats anything derived. `elsewhere` is
+    [(voice_id, set_by), ...] newest first, this speaker's rows in other rooms.
+      1. a voice held elsewhere with set_by in (owner, room), if free here --
+         somebody chose it, it travels;
+      2. a bank voice whose id EQUALS the speaker's name, if free here
+         (DES-009 section 5's voices/<name>.wav carried into the bank);
+      3. a voice held elsewhere with set_by=default, if free here --
+         consistency across rooms for the unnamed;
+      4. the first free bank voice; else None -- the caller falls to the
+         digest pick from the predefined set."""
+    for v, how in elsewhere:
+        if how in ("owner", "room") and v not in taken:
+            return v
+    if name and name in bank and name not in taken:
+        return name
+    for v, how in elsewhere:
+        if how == "default" and v not in taken:
             return v
     for v in bank:
         if v not in taken:
@@ -2155,13 +2168,14 @@ def voice_for(conn, room_id, speaker):
                      (room_id, speaker)).fetchone()
     if r:
         return r["voice_id"]
-    elsewhere = [x["voice_id"] for x in conn.execute(
-        "SELECT voice_id FROM voice_assignments WHERE speaker=? ORDER BY ts_ns DESC",
+    elsewhere = [(x["voice_id"], x["set_by"]) for x in conn.execute(
+        "SELECT voice_id, set_by FROM voice_assignments WHERE speaker=? ORDER BY ts_ns DESC",
         (speaker,))]
     taken = {x["voice_id"] for x in conn.execute(
         "SELECT voice_id FROM voice_assignments WHERE room_id=?", (room_id,))}
     pick = voice_default(elsewhere=elsewhere, taken=taken,
-                         bank=[v["id"] for v in voices(conn)])
+                         bank=[v["id"] for v in voices(conn)],
+                         name=_speaker_name(conn, speaker))
     if pick:
         try:
             assign_voice(conn, room_id, speaker, pick, set_by="default")

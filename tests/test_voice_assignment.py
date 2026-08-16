@@ -193,8 +193,9 @@ def test_the_listing_materializes_defaults_carries_across_rooms_and_marks_editab
     w = world
     r1, r2, kp = w["r1"]["id"], w["r2"]["id"], w["kp"]
     assert _put(w, "travis", r1, kp, "quark")[0] == 200       # picard: quark in r1 (owner)
-    # A message from picard in r2 (send path) resolves through the same key and
-    # carries quark across, materialized as default.
+    # A message from picard in r2 (send path) resolves through the same key.
+    # Ruling 11121: EXPLICIT choices travel -- the quark his owner chose in r1
+    # comes to r2 ahead of the bank voice named picard. Materialized as default.
     assert store.voice_for(w["c"], r2, kp) == "quark"
     st, out = _get(w, "vyzon", r2)                              # vyzon reads r2 (travis's room)
     assert st == 200
@@ -228,7 +229,8 @@ def test_the_send_path_hands_the_assigned_voice_to_the_worker(world, monkeypatch
         daemon._tts_q.get_nowait()
     daemon._tts_enqueue(9, r1, "picard", "s", "b", key=kp)
     daemon._tts_enqueue(10, r1, "wanderer", "s", "b", key=None)
-    assert daemon._tts_q.get_nowait() == (9, r1, "picard", "s. b", "picard")
+    v = store.voice_get(w["c"], "picard")
+    assert daemon._tts_q.get_nowait() == (9, r1, "picard", "s. b", daemon.clip_name(v))
     assert daemon._tts_q.get_nowait() == (10, r1, "wanderer", "s. b", None)
 
 

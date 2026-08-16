@@ -61,14 +61,16 @@ def test_the_clip_refusal_names_the_bound_it_hit():
 # ---- resolution ---------------------------------------------------------------
 
 def test_an_assigned_bank_voice_is_cloned_when_visible_and_falls_through_when_not(caplog):
-    clips = ["architect.wav", "bank-quark.wav"]
-    v = daemon.tts_voice("architect", clips=clips, predefined=["A.wav"], assigned="quark")
-    assert v == {"voice_mode": "clone", "reference_audio_filename": "bank-quark.wav"}
+    # `assigned` is the VERSIONED clip name the row derives (ruling 11104):
+    # bank-<id>-<updated_ns>.wav -- a replace is a new name.
+    assert daemon.clip_name({"id": "quark", "updated_ns": 7}) == "bank-quark-7.wav"
+    clips = ["architect.wav", "bank-quark-7.wav"]
+    v = daemon.tts_voice("architect", clips=clips, predefined=["A.wav"], assigned="bank-quark-7.wav")
+    assert v == {"voice_mode": "clone", "reference_audio_filename": "bank-quark-7.wav"}
     with caplog.at_level("WARNING"):
-        v = daemon.tts_voice("architect", clips=clips, predefined=["A.wav"], assigned="picard")
+        v = daemon.tts_voice("architect", clips=clips, predefined=["A.wav"], assigned="bank-picard-1.wav")
     assert v == {"voice_mode": "clone", "reference_audio_filename": "architect.wav"}
-    assert "bank voice picard is not visible" in caplog.text
-    assert "TTS_VOICES_DIR" in caplog.text
+    assert "bank clip bank-picard-1.wav is not visible" in caplog.text
 
 
 def test_the_bank_prefix_is_reserved_a_name_never_matches_a_bank_file():
@@ -88,10 +90,11 @@ def test_the_worker_hands_the_assignment_to_the_synthesizer(monkeypatch, tmp_pat
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
     monkeypatch.setattr(daemon, "_tts_on", True)
     monkeypatch.setattr(store, "voice_for", lambda conn, room, key: "quark" if key == "agent:a1" else None)
+    monkeypatch.setattr(store, "voice_get", lambda conn, vid: {"id": vid, "updated_ns": 7})
     daemon._tts_enqueue(7, "r1", "alice", "s", "b", key="agent:a1")
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
-    assert seen == {"speaker": "alice", "assigned": "quark"}
+    assert seen == {"speaker": "alice", "assigned": "bank-quark-7.wav"}
 
 
 # ---- routes ------------------------------------------------------------------
@@ -226,13 +229,6 @@ def test_the_bank_cap_is_a_named_refusal_at_the_door(monkeypatch, tmp_path):
 
 
 # ---- compose and the tab -----------------------------------------------------
-
-def test_compose_mounts_the_brokers_voices_dir_into_the_synthesizer_read_only():
-    """Section 3: TTS_VOICES_DIR defaults to <SERVER_DATA>/voices -- the tree the
-    broker sees rw at /data/voices -- and the synthesizer sees it :ro. Read from
-    the shipped file: the default is what a fresh host gets."""
-    compose = open(os.path.join(os.path.dirname(__file__), "..", "docker", "compose.yml")).read()
-    assert "${TTS_VOICES_DIR:-${SERVER_DATA}/voices}:/app/reference_audio:ro" in compose
 
 
 def test_the_voices_tab_speaks_the_routes_shape():

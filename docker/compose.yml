@@ -110,14 +110,16 @@ services:
       # 8 OOMs); the VM's 12 GB 3060 can take 8 once it is measured there.
       TTS_BATCH_SIZE: "4"
     volumes:
-      # The directory is the interface (DES-009 section 5): voices/<name>.wav is
-      # that name's clip, cloned. Mounted as their REFERENCE dir so their
-      # predefined set (28 shipped in the image, /app/voices) still answers when
-      # nothing is dropped. THE BROKER OWNS THIS DIRECTORY (DES-013 section 3):
-      # it is <SERVER_DATA>/voices, the same tree the broker sees rw at
-      # /data/voices, and an uploaded bank voice lands there as bank-<id>.wav --
-      # the synthesizer sees it on the next utterance, read-only, no restart.
-      - ${TTS_VOICES_DIR:-${SERVER_DATA}/voices}:/app/reference_audio:ro
+      # THE SYNTHESIZER'S REFERENCE DIR IS ITS OWN (DES-013 section 3 as amended,
+      # ruling 11104): bank clips arrive by PUSH over its /upload_reference as
+      # bank-<id>-<updated_ns>.wav -- the same path whether it runs beside the
+      # broker or on another machine, so there is NO bind mount from the
+      # broker's voices dir here. The broker's <SERVER_DATA>/voices stays the
+      # source of truth; the worker reconciles at start and on any clip the
+      # listing lacks. A hand-dropped <name>.wav in this volume is a per-host
+      # convenience (their semantics), and their predefined set (28 shipped in
+      # the image, /app/voices) still answers when nothing is assigned.
+      - tts-reference:/app/reference_audio
       # The model is about a gigabyte and downloads into HF_HOME. Without this,
       # removing the container re-downloads it -- a ten-minute first start every
       # time, which the operator would meet on their SECOND deploy rather than
@@ -175,5 +177,9 @@ volumes:
   # DES-009. The model cache: a downloaded artifact, so losing it costs ten
   # minutes and nothing else -- which is exactly the thing a named volume is for.
   tts-cache:
+  # DES-013: the synthesizer's reference clips. Reconstructible from the
+  # broker's <SERVER_DATA>/voices by the reconcile, so losing it costs one
+  # push per bank voice on the next worker start.
+  tts-reference:
   # ACME certificates and account keys (see the proxy's /data mount).
   caddy-data:
