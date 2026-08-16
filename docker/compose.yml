@@ -101,14 +101,17 @@ services:
       reveille:
         aliases: [reveille-tts]
     environment:
-      # Upstream PR #161 (on our fork): a request's chunks share one voice, so
-      # they go through the turbo decoder in one pass. Measured on a real
-      # 953-char bus message (9 chunks of ~120 chars): batch 4 = 22.7s vs 40.6s
-      # sequential at a 7.7 GB VRAM peak; batch 8 OOMed an 8 GB card and fell
-      # back to sequential, silently losing the speedup on exactly the long
-      # messages where it matters. 4 is the proven value; raise it on the
-      # RTX 3060 (12 GB) only after measuring the peak there.
-      TTS_BATCH_SIZE: "4"
+      # Upstream PR #161 (on our fork) batches a request's chunks through the
+      # turbo decoder: measured 1.8x on a real 9-chunk bus message. OFF, because
+      # the audio is not honest: per-row durations against the sequential path
+      # showed short rows in a batch coming out 2-3x longer than they should
+      # (58 chars: 3.7s sequential, 10.9s batched; 40 chars: 2.9s vs 9.3s) --
+      # padded rows keep generating past their text, and the first-stop-token
+      # truncation does not catch it; a long row was also heard cutting off
+      # early. Fixing it is pad-aware attention in chatterbox's inference_turbo,
+      # not server code. Turn on (4 fits an 8 GB card at a 7.7 GB peak; 8 does
+      # not) only after a per-row measurement shows equal durations.
+      TTS_BATCH_SIZE: "1"
     volumes:
       # The directory is the interface (section 5): voices/<name>.wav is that
       # name's clip, cloned. Mounted as their REFERENCE dir so their predefined
