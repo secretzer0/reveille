@@ -198,6 +198,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.104 THE AUDITION, AND THE ORIGINAL BESIDE THE CLONE (DES-013). Voices
+tab: every bank voice has "play clip" (GET /voices/<id>/clip -- the uploaded
+wav itself) and a "sample dialog" line + "say it" (GET /voices/<id>/say?text=
+-- that voice speaking that line, streamed from the synthesizer, nothing
+kept), so a clip is judged against its clone before anyone is assigned to
+it. The settings modal is wider. Bus tools unchanged.
 0.2.103 THE WRITER'S HOST, AND OPEN STREAMS ARE COUNTED (DES-013 slice 6,
 materials). scripts/writer/ carries the writer VM's build (llama.cpp pinned,
 CUDA 12.8, sm_61), sha256-pinned model fetch (Qwen3.8-27B Q6_K / Q4_K_M),
