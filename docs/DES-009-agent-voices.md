@@ -88,6 +88,48 @@ If the cap is ever lifted so whole messages are read, switch to F5-TTS. The
 engine call is one function so that this is a day's work; that is the entire
 reason it is one function, and there is no plugin layer.
 
+### 4.1 RULED (2026-08-16, msg 11003): the engine stays Chatterbox; the SERVER is someone else's
+
+Our own `tts_service.py` + `Dockerfile.tts` failed clean twice on the first
+cold CI build (devops 11002): a floating torchaudio, a stale chatterbox pin,
+numpy downgraded mid-install by a transitive dep. Every prior host had a warm
+cache, so nobody had ever built it. **We own zero torch.** The synthesizer is
+`devnen/Chatterbox-TTS-Server` (MIT, OpenAI-compatible `/v1/audio/speech`,
+predefined voices + cloning, maintained CPU/CUDA/ROCm Dockerfiles), built
+from THEIR Dockerfile at a SHA WE PIN — their resolution, our provenance. The
+pin joins the closed image-pin list (ruling 10877) so a bump without a moved
+pin is red.
+
+What is unchanged, because it was never about the server:
+- **§3 boundary.** Their server is unauthenticated; that is fine exactly where
+  ours already was — one caller, no host port, compose network. The
+  off-network rule stands and gets sharper: a non-loopback, non-compose URL
+  requires https AND an authenticating proxy in front (the bearer the broker
+  already sends is what the proxy checks); the broker's start-time refusal is
+  the same refusal. Voices off beats a transcript in flight.
+- **§5 the directory is the interface.** `voices/` is bind-mounted into their
+  container as their voices dir: `voices/<name>.wav` is that name's clip,
+  `voices/bank/*.wav` the bank; the hash-to-bank and knob offset move into
+  `_tts_speak` (broker side, ~10 lines) and become their `voice` +
+  exaggeration/cfg params. No new file, no column.
+- **§7 silent-on-failure**, §6 the cap, nobody-hears-themselves, humans are
+  speakers: broker and browser rules, untouched.
+- **Device reported, never inferred**: the broker logs what their `/health`
+  (or equivalent) reports at worker start, or logs `device: unreported` — a
+  silence that names itself.
+
+What is deleted: `src/reveille/tts_service.py`, `Dockerfile.tts`, and their
+tests; the caller is tested against a stub HTTP server. Gates: (1) the
+compose file still publishes no port for the synthesizer; (2) `_tts_speak`
+resolves `voices/<name>.wav` → clone and otherwise bank+knob deterministically
+(same name, same voice, across restarts); (3) the §3 refusal still fires on a
+plaintext remote URL; (4) a down service still leaves messages arriving
+silent; (5) CI builds the image `--no-cache` from the pinned SHA.
+
+The "one function, no plugin layer" sentence in §4 is why this is a day's
+slice and not a redesign — it just turned out the function that changes is
+the client, not the engine.
+
 ## 5. RULED: a voice is a clip plus a knob, resolved by name
 
 ```
