@@ -3245,6 +3245,44 @@ function wireSpeakerSelects(refresh){
    refresh();
   }catch(e){toast(e.message);refresh();}};
 }
+// RECORD YOUR OWN VOICE (operator, eval box): getUserMedia -> Web Audio PCM ->
+// a 16-bit mono WAV built in the browser -> the SAME PUT the file picker uses.
+// MediaRecorder is not used: it yields webm/opus and the broker has no decoder
+// (section 3 refuses anything but PCM WAV) -- so the PCM is taken straight
+// from the graph. Ceiling: a ScriptProcessorNode (deprecated, universally
+// supported); an AudioWorklet is the upgrade if a browser drops it.
+let vRec=null;            // {ctx,stream,node,chunks,rate,t0} while recording
+function vRecStart(){
+ return navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}})
+ .then(stream=>{
+  const ctx=new (window.AudioContext||window.webkitAudioContext)();
+  const src=ctx.createMediaStreamSource(stream);
+  const node=ctx.createScriptProcessor(4096,1,1);
+  const rec={ctx,stream,node,chunks:[],rate:ctx.sampleRate,t0:performance.now()};
+  node.onaudioprocess=e=>{rec.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));};
+  src.connect(node);node.connect(ctx.destination);
+  vRec=rec;return rec;});
+}
+function vRecStop(){
+ const r=vRec;if(!r)return null;vRec=null;
+ r.node.disconnect();for(const t of r.stream.getTracks())t.stop();r.ctx.close();
+ const n=r.chunks.reduce((a,c)=>a+c.length,0);
+ const pcm=new Int16Array(n);let o=0;
+ for(const c of r.chunks)for(let i=0;i<c.length;i++){const v=Math.max(-1,Math.min(1,c[i]));pcm[o++]=v<0?v*32768:v*32767;}
+ return {blob:wavBlob(pcm,r.rate),seconds:n/r.rate};
+}
+// A canonical 44-byte RIFF/WAVE header + s16le mono -- what the stdlib `wave`
+// on the broker reads and what voice_clip_refusal measures.
+function wavBlob(pcm,rate){
+ const b=new ArrayBuffer(44+pcm.length*2),d=new DataView(b);
+ const str=(o,s)=>{for(let i=0;i<s.length;i++)d.setUint8(o+i,s.charCodeAt(i));};
+ str(0,'RIFF');d.setUint32(4,36+pcm.length*2,true);str(8,'WAVE');
+ str(12,'fmt ');d.setUint32(16,16,true);d.setUint16(20,1,true);d.setUint16(22,1,true);
+ d.setUint32(24,rate,true);d.setUint32(28,rate*2,true);d.setUint16(32,2,true);d.setUint16(34,16,true);
+ str(36,'data');d.setUint32(40,pcm.length*2,true);
+ new Int16Array(b,44).set(pcm);
+ return new Blob([b],{type:'audio/wav'});
+}
 async function openVoices(){
  me=await api('/me');
  const d=await api('/voices');
@@ -3281,8 +3319,12 @@ async function openVoices(){
   // uses; a <label> around a hidden file input did not open the picker here.
   '<button type="button" id="newVoicePick">choose wav</button>'+
   '<input id="newVoiceFile" type="file" accept="audio/wav,.wav" hidden>'+
+  '<button type="button" id="newVoiceRec" title="record 5 to 30 seconds from your microphone">record</button>'+
   '<span class="pDim" id="newVoiceFileName"></span>'+
   '<button id="addVoice">add</button></div>'+
+  '<div class="pDim">Or RECORD: id defaults to your username, so the voice is yours in every '+
+  'room the moment it lands (a bank voice named like its speaker is that speaker\'s '+
+  'default). Read 10-20 seconds of anything in your normal voice, one speaker, quiet room.</div>'+
   '<div class="pSec">WHO SPEAKS WITH WHAT</div>'+
   '<div class="pDim">One bank voice per speaker per room, and no two speakers share one in a '+
   'room. A speaker\'s owner may set it anywhere; a room owner may set it in their room until '+
@@ -3290,14 +3332,32 @@ async function openVoices(){
   'name.</div>'+per.join(''));
  wireSpeakerSelects(openVoices);
  $('newVoicePick').onclick=()=>$('newVoiceFile').click();
- $('newVoiceFile').onchange=()=>{const f=$('newVoiceFile').files[0];
+ let recorded=null;                       // {blob,seconds} from the microphone
+ $('newVoiceFile').onchange=()=>{const f=$('newVoiceFile').files[0];recorded=null;
   $('newVoiceFileName').textContent=f?f.name:'';};
+ $('newVoiceRec').onclick=async()=>{
+  const b=$('newVoiceRec');
+  if(vRec){const r=vRecStop();recorded=r;b.textContent='record';
+   $('newVoiceFileName').textContent='recorded '+r.seconds.toFixed(1)+' s'+
+    (r.seconds<5?' -- too short, the synthesizer needs 5':r.seconds>30?' -- too long, 30 max':'');
+   if(!$('newVoiceId').value.trim())$('newVoiceId').value=myName;return;}
+  try{await vRecStart();b.textContent='stop';
+   // THE LENGTH IS SHOWN WHILE RECORDING (ruling 11121): the 5-30 s bound is
+   // met before the PUT, not discovered as a refusal after it.
+   const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
+    $('newVoiceFileName').textContent='recording '+sec.toFixed(1)+' s'+
+     (sec<5?' (need 5)':sec>30?' (30 max -- stop)':' (ok)');
+    if(vRec)setTimeout(tick,250);};
+   tick();
+   if(!$('newVoiceId').value.trim())$('newVoiceId').value=myName;}
+  catch(e){toast('microphone refused: '+e.message);}};
  for(const b of document.querySelectorAll('[data-vpick]'))b.onclick=()=>
   document.querySelector('[data-vclip="'+CSS.escape(b.dataset.vpick)+'"]').click();
  $('addVoice').onclick=async()=>{
-  const id=$('newVoiceId').value.trim().toLowerCase(), f=$('newVoiceFile').files[0];
+  const id=$('newVoiceId').value.trim().toLowerCase();
+  const f=recorded?recorded.blob:$('newVoiceFile').files[0];
   if(!VOICE_ID_RE.test(id)){toast('id: lowercase letters, digits, - and _');return;}
-  if(!f){toast('choose a wav first');return;}
+  if(!f){toast('choose a wav or record one first');return;}
   try{await putVoiceClip(id,$('newVoiceName').value.trim(),f);openVoices();}
   catch(e){toast(e.message);}};
  for(const el of document.querySelectorAll('[data-vclip]'))el.onchange=async()=>{

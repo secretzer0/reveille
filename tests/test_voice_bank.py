@@ -238,3 +238,23 @@ def test_the_voices_tab_speaks_the_routes_shape():
     assert "'/voices/'+encodeURIComponent(id)+'/clip?name='" in ui   # PUT raw bytes
     assert "method:'PATCH',body:JSON.stringify({persona:" in ui
     assert "accept=\"audio/wav,.wav\"" in ui
+
+
+def test_the_recorder_builds_a_pcm_wav_in_the_browser_and_uses_the_same_put():
+    """A human records their own sample (operator). MediaRecorder is NOT used
+    (webm/opus, no decoder on the broker); the PCM comes from the Web Audio
+    graph and a 16-bit RIFF/WAVE is built client-side, then the ordinary PUT
+    carries it. The id defaults to the username so the (a0) name-match makes
+    it the speaker's; the length shows while recording (ruling 11121)."""
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "ui", "bus",
+                           "index.html")).read()
+    assert "MediaRecorder" not in ui.replace("MediaRecorder is not used", "")
+    assert "getUserMedia({audio:" in ui and "createScriptProcessor(" in ui
+    w = ui[ui.index("function wavBlob(pcm,rate){"):]
+    w = w[:w.index("\n}\n")]
+    for needle in ("'RIFF'", "'WAVE'", "'fmt '", "d.setUint16(20,1,true)", "d.setUint16(22,1,true)",
+                   "d.setUint16(34,16,true)", "'data'"):
+        assert needle in w, needle
+    assert "const f=recorded?recorded.blob:$('newVoiceFile').files[0];" in ui
+    assert "$('newVoiceId').value=myName" in ui
+    assert "'recording '+sec.toFixed(1)+' s'" in ui
