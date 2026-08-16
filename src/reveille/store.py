@@ -2191,9 +2191,14 @@ def room_speakers(conn, room_id):
                     "kind": kind, "present": False, "voice_id": r["voice_id"],
                     "set_by": r["set_by"]})
     by_key = {s["speaker"]: s for s in out}
+    # THE KEY COMES FROM THE CREDENTIAL: members.agent_id is stamped at join,
+    # but a membership healed by readmit() (send path, reap recovery) carries
+    # only token_id -- so the bound token's agent_id is the fallback, or the
+    # eval box listed every speaker twice, once keyed and once "unbound".
     for m in conn.execute(
-            "SELECT name, agent_id, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL",
-            (room_id,)):
+            "SELECT m.name, COALESCE(m.agent_id, t.agent_id) AS agent_id, m.seen_ns "
+            "FROM members m LEFT JOIN tokens t ON t.id=m.token_id "
+            "WHERE m.room_id=? AND m.left_ns IS NULL", (room_id,)):
         if not _is_live(m["seen_ns"], now):
             continue
         key = f"agent:{m['agent_id']}" if m["agent_id"] else None
@@ -2972,7 +2977,9 @@ def _with_attachments(conn, msgs):
             {"url": r["url"], "name": r["name"], "bytes": r["bytes"]})
     for m in msgs:
         m["attachments"] = by.get(m["id"], [])
-    return msgs
+    # Every listing carries the artifact flags too (DES-013 section 6): one IN
+    # query and a stat per row, and the browser paints its icons from them.
+    return _with_artifacts(conn, msgs)
 
 
 def _with_artifacts(conn, msgs):

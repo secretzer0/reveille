@@ -241,3 +241,18 @@ def test_the_voices_tab_renders_who_speaks_with_what_through_the_routes():
     assert "{method:'DELETE'}" in ui
     assert "held by '+esc(taken[v.id])" in ui        # the holder is named, escaped
     assert "esc(sp.name)" in ui and "esc(sp.kind)" in ui
+
+
+def test_a_membership_healed_by_readmit_is_still_keyed_by_its_bound_token(world):
+    """Found on the eval box: an agent that never called join() (send readmits
+    the membership with token_id only, agent_id NULL) listed twice -- once by
+    its assignment, once as a present 'unbound' row. The key comes from the
+    credential: the member's bound token names the agent."""
+    w = world
+    c, r2 = w["c"], w["r2"]["id"]          # travis's room, travis's agent
+    tok = store.create_token(c, w["admin"]["id"], "b", agent_name="picard", rooms=[r2])
+    store.readmit(c, "picard", "t", [r2], token_id=tok["id"])
+    assert store.voice_for(c, r2, w["kp"]) is not None
+    rows = store.room_speakers(c, r2)
+    assert [r["speaker"] for r in rows] == [w["kp"]], rows
+    assert rows[0]["present"] is True
