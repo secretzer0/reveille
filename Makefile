@@ -121,12 +121,19 @@ SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut
 # packaged inference_turbo reads right-padded EOS as text, so short rows in a
 # mixed-length batch babbled 2-3x past their words; the fork's decode passes
 # the tokenizer mask and per-row position ids through, gated by
-# scripts/babble_proof.py there. See the TTS_BATCH_SIZE note in
-# docker/compose.yml. Move the pin back to upstream the day they merge. Not
-# the repo version: the broker's identity does not depend on it and it must
-# not be rebuilt on every bump. Move the pin, bump this tag (image-pin-check
-# enforces the pair).
-TTS_IMAGE ?= reveille-tts:0.2.2
+# scripts/babble_proof.py there; and (4) the stream path's FIRST chunk is cut
+# short and synthesized alone (d534a39, TTS_FIRST_CHUNK_CHARS default 60),
+# then the rest batched -- the Web Audio player starts on that first chunk,
+# which is what makes send-to-first-sound a function of the chunk and not of
+# the message. See the TTS_BATCH_SIZE note in docker/compose.yml. Move the pin
+# back to upstream the day they merge. THE MODEL LIBRARY (chatterbox-v2)
+# FLOATS ON PURPOSE (operator 11076): newer models arrive on the next cold
+# build; the cost is that (3) reaches into its T3, so every rebuilt tag is
+# vetted with the fork's babble_proof on the GPU host BEFORE compose points at
+# it. Not the repo version: the broker's identity does not depend on it and it
+# must not be rebuilt on every bump. Move the pin, bump this tag
+# (image-pin-check enforces the pair).
+TTS_IMAGE ?= reveille-tts:0.2.3
 TTS_UPSTREAM := $(shell cat docker/tts.upstream)
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
