@@ -168,8 +168,8 @@ and that carries provenance (voice, model). A file per script would re-derive al
 four the slow way.
 
 **Binding:** the script is DERIVED — never in `messages_fts`, never in hive
-memory/recall, never spoken to its own author (DES-009 §9 "nobody hears themselves"
-kept); the terse text is the record and is always rendered beside or under the script
+memory/recall, never spoken to its own author (DES-009 §5 RULED "nobody hears themselves", restated in §9 -- kept);
+the terse text is the record and is always rendered beside or under the script
 (the bound on prompt injection: a hijacked script is checkable at a glance).
 `GET /script/<mid>` mirrors `audio_http` exactly — the room comes from the message,
 `?room=` is ignored, 404 = no script.
