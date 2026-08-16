@@ -88,7 +88,7 @@ If the cap is ever lifted so whole messages are read, switch to F5-TTS. The
 engine call is one function so that this is a day's work; that is the entire
 reason it is one function, and there is no plugin layer.
 
-### 4.1 RULED (2026-08-16, msg 11003): the engine stays Chatterbox; the SERVER is someone else's
+### 4.1 RULED (2026-08-16, msg 11004): the engine stays Chatterbox; the SERVER is someone else's
 
 Our own `tts_service.py` + `Dockerfile.tts` failed clean twice on the first
 cold CI build (devops 11002): a floating torchaudio, a stale chatterbox pin,
