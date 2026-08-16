@@ -118,15 +118,19 @@ def test_voice_for_materializes_the_default_once_and_carries_it_across_rooms():
     c = db()
     admin, user, r1, r2, a1, a2 = world(c)
     k1, k2 = f"agent:{a1['id']}", f"agent:{a2['id']}"
-    store.assign_voice(c, r1["id"], k1, "quark", set_by="owner")
-    # First utterance in r2: quark is free there, so it follows him.
-    assert store.voice_for(c, r2["id"], k1) == "quark"
+    # scotty (no bank voice by that name) was given quark in r1; first utterance
+    # in r2: quark is free there, so it follows him (a).
+    store.assign_voice(c, r1["id"], k2, "quark", set_by="owner")
+    assert store.voice_for(c, r2["id"], k2) == "quark"
     row = c.execute("SELECT set_by FROM voice_assignments WHERE room_id=? AND speaker=?",
-                    (r2["id"], k1)).fetchone()
+                    (r2["id"], k2)).fetchone()
     assert row["set_by"] == "default"
-    # Scotty in r2: quark is held, so the first free bank voice, and it sticks.
-    assert store.voice_for(c, r2["id"], k2) == "mr-scott"
-    assert store.voice_for(c, r2["id"], k2) == "mr-scott"
+    # picard in r2: (a0) the bank voice named picard is free -- his, and it sticks.
+    assert store.voice_for(c, r2["id"], k1) == "picard"
+    assert store.voice_for(c, r2["id"], k1) == "picard"
+    # A third keyed speaker with no name match and nothing elsewhere: first free (b).
+    a3 = store.mint_agent(c, admin["id"], "worf")
+    assert store.voice_for(c, r2["id"], f"agent:{a3['id']}") == "mr-scott"
     # An unkeyed speaker gets nothing and leaves no row.
     assert store.voice_for(c, r2["id"], None) is None
 
@@ -231,6 +235,6 @@ def test_a_lost_materialization_race_reads_back_the_winner(monkeypatch):
         real(conn, room_id, speaker, voice_id, set_by=set_by)
 
     monkeypatch.setattr(store, "assign_voice", stolen)
-    assert store.voice_for(c, r1["id"], k1) is None
+    assert store.voice_for(c, r1["id"], k1) is None        # picard (a0) was taken under me
     monkeypatch.setattr(store, "assign_voice", real)
-    assert store.voice_for(c, r1["id"], k1) == "picard"    # next time: first free
+    assert store.voice_for(c, r1["id"], k1) == "mr-scott"  # next time: first free

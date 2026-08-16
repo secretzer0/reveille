@@ -2079,10 +2079,15 @@ def assign_refusal(actor_uid, is_admin, room_owner_id, speaker_owner_id, current
                       + (" -- admin has no reach here" if is_admin else ""))
 
 
-def voice_default(*, elsewhere, taken, bank):
-    """DES-013 section 4 default, pure: (a) the speaker's voice in another room if
-    free here (newest first), (b) the first free bank voice, else None -- the
-    caller falls to the digest pick from the predefined set."""
+def voice_default(*, elsewhere, taken, bank, name=None):
+    """DES-013 section 4 default, pure: (a0) a bank voice whose id EQUALS the
+    speaker's name, if free here (ruling 11119 -- DES-009 section 5's
+    voices/<name>.wav carried into the bank: an agent named quark and a voice
+    uploaded as quark meet without a click); (a) the speaker's voice in another
+    room if free here (newest first); (b) the first free bank voice; else None
+    -- the caller falls to the digest pick from the predefined set."""
+    if name and name in bank and name not in taken:
+        return name
     for v in elsewhere:
         if v not in taken:
             return v
@@ -2161,7 +2166,8 @@ def voice_for(conn, room_id, speaker):
     taken = {x["voice_id"] for x in conn.execute(
         "SELECT voice_id FROM voice_assignments WHERE room_id=?", (room_id,))}
     pick = voice_default(elsewhere=elsewhere, taken=taken,
-                         bank=[v["id"] for v in voices(conn)])
+                         bank=[v["id"] for v in voices(conn)],
+                         name=_speaker_name(conn, speaker))
     if pick:
         try:
             assign_voice(conn, room_id, speaker, pick, set_by="default")

@@ -132,7 +132,7 @@ def broker(tmp_path, monkeypatch, synth):
     return dict(c=c, vd=vd, admin=admin, url=synth)
 
 
-def _put_clip(vid, data, name=""):
+def _put_req(vid, data, name=""):
     sent = {"done": False}
 
     async def receive():
@@ -144,7 +144,11 @@ def _put_clip(vid, data, name=""):
                    "headers": [(b"content-type", b"application/octet-stream"),
                                (b"content-length", str(len(data)).encode())],
                    "query_string": f"name={name}".encode(), "path_params": {"vid": vid}}, receive)
-    r = asyncio.run(daemon.voice_clip_http(req))
+    return req
+
+
+def _put_clip(vid, data, name=""):
+    r = asyncio.run(daemon.voice_clip_http(_put_req(vid, data, name)))
     return r.status_code, json.loads(r.body)
 
 
@@ -215,3 +219,54 @@ def test_compose_no_longer_mounts_the_brokers_voices_dir_into_the_synthesizer():
     assert "/app/reference_audio" in compose, "the synthesizer's reference dir is its own volume"
     tts = compose[compose.index("reveille-tts:"):]
     assert re.search(r"-\s+tts-reference:/app/reference_audio\b", tts), tts[:400]
+
+
+def test_a_blackholed_synthesizer_costs_the_put_its_timeout_and_nobody_else_anything(broker, monkeypatch):
+    """Verdict 11119 BLOCKING 1: the push is blocking urllib; on the event loop
+    a synthesizer that accepts and never answers would stall every request for
+    the timeout. Off the loop (asyncio.to_thread), the PUT alone waits and
+    returns pushed:false; another route answers meanwhile."""
+    import socket
+    hole = socket.socket()
+    hole.bind(("127.0.0.1", 0))
+    hole.listen(1)                       # accepts, never reads, never answers
+    monkeypatch.setattr(daemon, "_tts_url", f"http://127.0.0.1:{hole.getsockname()[1]}")
+    monkeypatch.setattr(daemon, "VOICE_PUSH_TIMEOUT", 1.0)
+    order = []
+
+    async def go():
+        # The PUT (slow) and a listing (fast) start together on ONE loop.
+        async def slow():
+            r = await daemon.voice_clip_http(_put_req("quark", wav(6)))
+            order.append("put")
+            return json.loads(r.body)
+
+        async def fast():
+            await asyncio.sleep(0.05)
+            r = await daemon.voices_http(Request({"type": "http", "method": "GET", "path": "/voices",
+                                                  "headers": [], "query_string": b"",
+                                                  "path_params": {}}))
+            order.append("list")
+            return r.status_code
+        return await asyncio.gather(slow(), fast())
+    row, st = asyncio.run(go())
+    hole.close()
+    assert st == 200 and order == ["list", "put"], order
+    assert row["pushed"] is False
+    assert (broker["vd"] / "bank-quark.wav").exists()
+
+
+def test_the_default_meets_a_bank_voice_named_like_the_speaker(broker):
+    """Ruling 11119 (a0): an agent named quark and a bank voice uploaded as quark
+    meet without a click -- before the elsewhere/first-free steps."""
+    c = broker["c"]
+    for vid in ("mr-scott", "picard", "quark"):
+        store.voice_put(c, vid, name=vid, uploaded_by=broker["admin"]["id"], seconds=6, nbytes=1)
+    room = store.create_room(c, broker["admin"]["id"], "lab")
+    a = store.mint_agent(c, broker["admin"]["id"], "quark")
+    assert store.voice_for(c, room["id"], f"agent:{a['id']}") == "quark"
+    b = store.mint_agent(c, broker["admin"]["id"], "worf")   # no such voice: first free
+    assert store.voice_for(c, room["id"], f"agent:{b['id']}") == "mr-scott"
+    D = store.voice_default
+    assert D(elsewhere=["picard"], taken=set(), bank=["picard", "quark"], name="quark") == "quark"
+    assert D(elsewhere=["picard"], taken={"quark"}, bank=["picard", "quark"], name="quark") == "picard"

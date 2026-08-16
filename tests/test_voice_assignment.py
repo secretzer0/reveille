@@ -193,20 +193,22 @@ def test_the_listing_materializes_defaults_carries_across_rooms_and_marks_editab
     w = world
     r1, r2, kp = w["r1"]["id"], w["r2"]["id"], w["kp"]
     assert _put(w, "travis", r1, kp, "quark")[0] == 200       # picard: quark in r1 (owner)
-    # A message from picard in r2 (send path) resolves through the same key and
-    # carries quark across, materialized as default.
-    assert store.voice_for(w["c"], r2, kp) == "quark"
+    # A message from picard in r2 (send path) resolves through the same key.
+    # Ruling 11119: (a0) name-match comes BEFORE the carry-across -- a bank voice
+    # named picard is free in r2, so picard speaks as picard there, not as the
+    # quark his owner chose in r1. Materialized as default.
+    assert store.voice_for(w["c"], r2, kp) == "picard"
     st, out = _get(w, "vyzon", r2)                              # vyzon reads r2 (travis's room)
     assert st == 200
     by = {s["speaker"]: s for s in out["speakers"]}
-    assert by[kp]["voice_id"] == "quark" and by[kp]["set_by"] == "default"
+    assert by[kp]["voice_id"] == "picard" and by[kp]["set_by"] == "default"
     assert by[kp]["editable"] is False, "vyzon is neither room owner nor picard's owner"
     # vyzon's own row is present (a human picks their own voice before speaking),
     # editable, and materialized with the first free voice.
     me = f"user:{w['user']['id']}"
     assert by[me]["you"] is True and by[me]["editable"] is True
     assert by[me]["voice_id"] == "mr-scott" and by[me]["set_by"] == "default"
-    assert out["taken"] == {"quark": "picard", "mr-scott": "vyzon"}
+    assert out["taken"] == {"picard": "picard", "mr-scott": "vyzon"}
     assert [v["id"] for v in out["voices"]] == ["mr-scott", "picard", "quark"]
     # travis (room owner of r2) sees BOTH rows editable: picard's as its owner,
     # vyzon's because a default yields to the room owner (section 4).

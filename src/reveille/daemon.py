@@ -3199,6 +3199,7 @@ def file_headers(fname):
 # same directory keeps working -- what changed is who writes the directory.
 _voices_dir = None  # set in main()
 VOICE_CLIP_MAX = 10 * 1024 * 1024
+VOICE_PUSH_TIMEOUT = 10.0          # the PUT-time push; the reconcile uses the worker's
 VOICE_CLIP_SECONDS = (5.0, 30.0)   # turbo needs >= 5; the server rejects > 30
 
 
@@ -3311,8 +3312,11 @@ async def voice_clip_http(request):
              "replaced" if v else "added", vid, row["seconds"], len(data))
     # THE CLIP TRAVELS BY PUSH (ruling 11104): the same path on one box or two.
     # Best effort here -- a synthesizer that is down learns it at reconcile.
+    # OFF THE LOOP (verdict 11119): urllib blocks, and a blackholed synthesizer
+    # host must cost this one PUT ten seconds, not every agent's request.
     if _tts_on:
-        row["pushed"] = _tts_push(_tts_url, _tts_token, clip_name(row), data, 30)
+        row["pushed"] = await asyncio.to_thread(_tts_push, _tts_url, _tts_token,
+                                                clip_name(row), data, VOICE_PUSH_TIMEOUT)
     return JSONResponse(row)
 
 
