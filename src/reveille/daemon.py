@@ -198,6 +198,22 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.102 THE SCRIPT WRITER, AND NOTHING IS MADE THAT NOBODY WOULD HEAR
+(DES-013 slice 5). A second worker calls a model behind REVEILLE_SCRIPT_URL
+(an OpenAI-compatible /v1/chat/completions -- llama-server; off by default,
+the broker never loads a model) and turns a message from a speaker whose bank
+voice carries a PERSONA into a short in-character script, STREAMED: the first
+sentence must close inside REVEILLE_SCRIPT_TIMEOUT (1.5 s) or the terse text
+speaks now; sentences are spoken as they close into one wav; the script is
+kept beside the message (pencil icon; GET /script/<mid>) and the `script`
+frame tells the web feed. LISTENER GATE: the browser tells the feed socket
+its voice toggle; a room where nobody has voice on gets neither script nor
+audio -- what was heard live is kept, what nobody heard was never made.
+ONE refusal for every upstream URL: REVEILLE_LAN_PLAINTEXT=1 allows a private
+LAN host in the clear (banner + /version name it); public hosts still need
+https + a token. Voices tab: "draft persona" (behind a button, when a writer
+is configured). Bus tools unchanged.
+
 0.2.101 THE BANK TRAVELS BY PUSH, AND YOU CAN RECORD YOUR OWN VOICE (DES-013
 slice 3b + recorder). The synthesizer no longer shares a directory with the
 broker: every bank clip is PUSHED to it over its own API as
