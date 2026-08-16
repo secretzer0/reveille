@@ -16,17 +16,17 @@ BANK = ["Abigail.wav", "Adrian.wav", "Alexander.wav", "Alice.wav"]
 
 
 def test_a_dropped_clip_wins_and_is_cloned():
-    v = daemon.tts_voice("architect", clips=["architect.wav"], bank=BANK)
+    v = daemon.tts_voice("architect", clips=["architect.wav"], predefined=BANK)
     assert v == {"voice_mode": "clone", "reference_audio_filename": "architect.wav"}
 
 
 def test_the_bank_is_indexed_by_digest_and_the_same_digest_offsets_the_knobs():
-    a = daemon.tts_voice("architect", clips=[], bank=BANK)
+    a = daemon.tts_voice("architect", clips=[], predefined=BANK)
     assert a["voice_mode"] == "predefined" and a["predefined_voice_id"] in BANK
     assert 0.30 <= a["exaggeration"] <= 0.70 and 0.30 <= a["cfg_weight"] <= 0.70
     # Stable: sha256, not hash() -- the same name speaks with the same voice
     # after every restart (section 5).
-    assert daemon.tts_voice("architect", clips=[], bank=BANK) == a
+    assert daemon.tts_voice("architect", clips=[], predefined=BANK) == a
     h = daemon._digest("architect")
     assert a["predefined_voice_id"] == BANK[h % len(BANK)]
 
@@ -36,8 +36,8 @@ def test_the_bank_order_the_server_lists_does_not_change_the_voice():
     order, which differs across hosts and upstream bumps. Section 5 says every
     host agrees, so the index runs over the SORTED bank -- same bank in two
     orders, one answer."""
-    a = daemon.tts_voice("architect", clips=[], bank=BANK)
-    b = daemon.tts_voice("architect", clips=[], bank=list(reversed(BANK)))
+    a = daemon.tts_voice("architect", clips=[], predefined=BANK)
+    b = daemon.tts_voice("architect", clips=[], predefined=list(reversed(BANK)))
     assert a == b
 
 
@@ -68,7 +68,7 @@ def test_a_bank_of_the_wrong_shape_is_a_named_silence_not_a_dict_in_the_request(
 
 
 def test_nothing_to_speak_with_is_silence_not_an_error():
-    assert daemon.tts_voice("architect", clips=[], bank=[]) is None
+    assert daemon.tts_voice("architect", clips=[], predefined=[]) is None
 
 
 class _Stub(http.server.BaseHTTPRequestHandler):

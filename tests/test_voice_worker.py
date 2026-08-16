@@ -126,7 +126,7 @@ def test_the_worker_writes_the_file_and_announces_it(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append((room, msg)))
-    daemon._tts_q.put((7, "r1", "alice", "hello"))
+    daemon._tts_q.put((7, "r1", "alice", "hello", None))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert (tmp_path / "tts-7.wav").read_bytes() == b"RIFF-stub"
@@ -153,8 +153,8 @@ def test_the_worker_logs_the_device_the_server_reports(monkeypatch, tmp_path, ca
     asked = []
     monkeypatch.setattr(daemon, "_tts_get",
                         lambda url, token, path, timeout: asked.append(path) or info)
-    daemon._tts_q.put((1, "r1", "a", "x"))
-    daemon._tts_q.put((2, "r1", "a", "y"))
+    daemon._tts_q.put((1, "r1", "a", "x", None))
+    daemon._tts_q.put((2, "r1", "a", "y", None))
     daemon._tts_q.put(None)
     with caplog.at_level("INFO"):
         daemon._tts_worker("http://tts:8004/", "", 1)
@@ -174,7 +174,7 @@ def test_a_service_that_is_down_leaves_a_silent_message(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append(msg))
-    daemon._tts_q.put((7, "r1", "alice", "hello"))
+    daemon._tts_q.put((7, "r1", "alice", "hello", None))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert list(tmp_path.iterdir()) == []
@@ -304,7 +304,7 @@ def test_the_audio_event_fires_at_the_first_byte_not_at_the_end(monkeypatch, tmp
     chunk 1 has landed, chunk 2 has not been released, and the event is already
     on the feed. Red on the whole-file worker, which announced after the write."""
     speak = _Gated([_wav_header() + b"\x00" * 4800, b"\x01" * 4800])
-    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello")])
+    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
     assert speak.first_out.wait(5)
     part = tmp_path / "tts-7.wav.part"
     assert part.exists() and part.stat().st_size == 44 + 4800, "chunk 1 is on disk as .part"
@@ -353,7 +353,7 @@ def test_the_route_serves_an_in_flight_message_then_the_file(monkeypatch, tmp_pa
     sees neither."""
     mid = _seed_message(monkeypatch, tmp_path)
     speak = _Gated([_wav_header() + b"\x00" * 4800, b"\x01" * 4800, b"\x02" * 4800])
-    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(mid, "r1", "alice", "hello")])
+    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(mid, "r1", "alice", "hello", None)])
     assert speak.first_out.wait(5)
 
     async def go():
@@ -393,7 +393,7 @@ def test_the_completed_file_is_a_wav_the_stdlib_reads_to_the_last_frame(monkeypa
     data -- `wave` reports the true frame count, never 0xFFFFFFFF."""
     frames = b"\x00\x01" * 12000
     speak = lambda *a, **k: iter([_wav_header() + frames[:100], frames[100:]])  # noqa: E731
-    _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello")])
+    _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
     t.join(5)
     with wave.open(str(tmp_path / "tts-7.wav")) as w:
         assert w.getnframes() == 12000
@@ -404,7 +404,7 @@ def test_a_message_deleted_mid_flight_leaves_no_wav_and_no_part(monkeypatch, tmp
     """Gate 5. The choke point unlinks the .part while the worker writes; the
     worker's rename then finds no .part and fails closed. Nothing lands."""
     speak = _Gated([_wav_header() + b"\x00" * 480, b"\x01" * 480])
-    _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello")])
+    _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
     assert speak.first_out.wait(5)
     # what _delete_messages does, with the same two names
     (tmp_path / "tts-7.wav.part").unlink()
@@ -435,7 +435,7 @@ def test_a_reader_that_leaves_mid_tail_does_not_wedge_the_worker(monkeypatch, tm
         calls["n"] += 1
         return speak(*a, **k) if calls["n"] == 1 else plain(*a, **k)
     pushed, t = _run_worker(monkeypatch, tmp_path, speak_both,
-                            [(mid, "r1", "alice", "hello"), (mid + 100, "r1", "bob", "next")])
+                            [(mid, "r1", "alice", "hello", None), (mid + 100, "r1", "bob", "next", None)])
     assert speak.first_out.wait(5)
 
     async def one_chunk_then_leave():
