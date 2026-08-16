@@ -189,7 +189,7 @@ tts-image:
 	docker build -t $(TTS_IMAGE) -f Dockerfile.cu128 $(TTS_UPSTREAM)
 
 up:
-	@bash scripts/deploy-preflight "$(SERVER_DATA)" "$(BROKER_NAME)"
+	@bash scripts/deploy-preflight "$(SERVER_DATA)" "$(BROKER_NAME)" "$(PROXY_NAME)" "$(PROXY_SITE)"
 	@bash scripts/agent-image-check
 	@docker image inspect $(SERVER_IMAGE) >/dev/null 2>&1 || $(MAKE) server-image
 	@docker network create $(SERVER_NETWORK) 2>/dev/null || true
