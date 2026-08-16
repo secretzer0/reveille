@@ -102,10 +102,13 @@ services:
         aliases: [reveille-tts]
     environment:
       # Upstream PR #161 (on our fork): a request's chunks share one voice, so
-      # they go through the turbo decoder in one pass. 4 is upstream's ceiling
-      # for a 6 GB card; the RTX 3060 has 12 GB and batch 8 measured 6.6 GB
-      # peak (1.96x over sequential vs 1.7x at 4).
-      TTS_BATCH_SIZE: "8"
+      # they go through the turbo decoder in one pass. Measured on a real
+      # 953-char bus message (9 chunks of ~120 chars): batch 4 = 22.7s vs 40.6s
+      # sequential at a 7.7 GB VRAM peak; batch 8 OOMed an 8 GB card and fell
+      # back to sequential, silently losing the speedup on exactly the long
+      # messages where it matters. 4 is the proven value; raise it on the
+      # RTX 3060 (12 GB) only after measuring the peak there.
+      TTS_BATCH_SIZE: "4"
     volumes:
       # The directory is the interface (section 5): voices/<name>.wav is that
       # name's clip, cloned. Mounted as their REFERENCE dir so their predefined
