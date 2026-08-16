@@ -113,7 +113,7 @@ def test_the_first_closed_sentence_reaches_the_synth_queue_before_the_script_end
                      "Hew-mons."]
     _Llama.pace = 0.05
     t0 = time.monotonic()
-    ok = daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5)
+    ok = daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5, wait=True)
     assert ok is True
     mid, room, speaker, stream, assigned = daemon._tts_q.get_nowait()
     assert isinstance(stream, daemon._SentenceStream) and assigned == world["item"][4]
@@ -150,7 +150,7 @@ def test_a_slow_first_sentence_or_a_dead_writer_speaks_the_terse_text_now(llama,
 
 def test_think_blocks_never_reach_the_synthesizer(llama, world):
     _Llama.tokens = ["<think>", "hmm hmm. ", "</think>", "Make it so. ", "Engage."]
-    assert daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5) is True
+    assert daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5, wait=True) is True
     stream = daemon._tts_q.get_nowait()[3]
     assert _drain_stream(stream) == ["Make it so.", "Engage."]
 
@@ -212,10 +212,18 @@ def test_enqueue_routes_to_the_writer_only_with_a_listener_and_a_persona(world, 
     assert daemon._script_q.qsize() == 1 and daemon._tts_q.empty()
     it = daemon._script_q.get_nowait()
     assert it[:5] == (1, world["room"], "quark", "s. b", world["item"][4]) and it[5]["id"] == "quark"
-    # No persona -> the synth queue, terse.
+    # No persona -> STILL the writer's queue (the one ordering point), as the
+    # 5-tuple the worker passes straight through.
     store.voice_patch(world["c"], "quark", persona="")
     daemon._tts_enqueue(2, world["room"], "quark", "s", "b", key="agent:x")
-    assert daemon._script_q.empty() and daemon._tts_q.get_nowait()[0] == 2
+    it = daemon._script_q.get_nowait()
+    assert daemon._tts_q.empty() and it[:4] == (2, world["room"], "quark", "s. b") and len(it) == 5
+    assert it[4].startswith("bank-quark-")           # the patch moved updated_ns: a new clip name
+    # Writer off -> the synth queue directly.
+    monkeypatch.setattr(daemon, "_script_on", False)
+    daemon._tts_enqueue(4, world["room"], "quark", "s", "b", key="agent:x")
+    assert daemon._script_q.empty() and daemon._tts_q.get_nowait()[0] == 4
+    monkeypatch.setattr(daemon, "_script_on", True)
     # Nobody listening -> nothing at all.
     monkeypatch.setattr(daemon, "_room_listening", lambda room: False)
     daemon._tts_enqueue(3, world["room"], "quark", "s", "b", key="agent:x")
@@ -257,3 +265,33 @@ def test_the_persona_draft_is_behind_a_button_and_a_configured_writer(world, lla
                            "index.html")).read()
     assert "v.editable&&d.llm?'<button data-vdraft=" in ui
     assert "'/persona/draft'" in ui and "ta.value=d.persona" in ui
+
+
+def test_a_scripted_message_holds_its_place_ahead_of_the_terse_one_after_it(llama, world):
+    """Verdict on #35 BLOCKING 1: N (scripted, slow first sentence) then N+1
+    (terse) -- the synth queue must receive N first. The worker holds N+1
+    behind N's first sentence (at most the budget), never ahead of it. And N's
+    remaining sentences do not hold N+1: the rest streams on a helper thread."""
+    _Llama.tokens = ["Slow ", "opening ", "line. ", "Then a long ", "tail. ", "End."]
+    _Llama.pace = 0.2                                        # ~0.6 s to the first sentence
+    n = world["item"]
+    n1 = (n[0] + 1, n[1], "worf", "terse from worf", None)
+    daemon._script_q.put(n)
+    daemon._script_q.put(n1)
+    daemon._script_q.put(None)
+    t0 = time.monotonic()
+    daemon._script_worker(llama, "qwen", "", 1.5)
+    order = [daemon._tts_q.get_nowait()[0] for _ in range(2)]
+    assert order == [n[0], n[0] + 1], "message order is the synth queue's order"
+    assert time.monotonic() - t0 < 1.5, "N+1 was not held for N's whole script"
+
+
+def test_the_first_batch_is_capped_too(llama, world, monkeypatch):
+    """Non-blocking 2 on #35: a first response of three long sentences must not
+    escape SCRIPT_MAX_CHARS just because it arrived in one piece."""
+    monkeypatch.setattr(daemon, "SCRIPT_MAX_CHARS", 30)
+    _Llama.tokens = ["Sentence one is here. Sentence two is longer than that. Three."]
+    assert daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5, wait=True) is True
+    stream = daemon._tts_q.get_nowait()[3]
+    assert _drain_stream(stream) == ["Sentence one is here."]
+    assert store.script_get(world["c"], world["mid"])["text"] == "Sentence one is here."

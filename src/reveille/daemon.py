@@ -1890,41 +1890,73 @@ class _SentenceStream:
             yield s
 
 
-def _script_one(item, url, model, token, first_timeout):
+def _script_one(item, url, model, token, first_timeout, wait=False):
     """Write one message's script, streaming sentences into the synth queue.
-    Returns True if the message went scripted, False if it went terse."""
+    Returns True if the message went scripted, False if it went terse.
+
+    THE ORDERING POINT (verdict on #35, BLOCKING 1): this returns as soon as the
+    message has been PUT to the synth queue -- scripted (a sentence stream, at
+    its first closed sentence) or terse (on a miss) -- so the worker takes the
+    next item only after this one holds its place. The REST of the script
+    streams on a helper thread: message N+1's first sentence is not made to
+    wait for message N's last. `wait=True` joins that helper (tests)."""
     mid, room, speaker, text, assigned, voice, subject, body = item
     messages = script_prompt(voice["name"], voice.get("persona") or "", speaker, subject, body)
     t0 = time.monotonic()
     stream = _SentenceStream()
-    buf, full, sent_first, in_think = "", "", False, False
+    buf, in_think = "", False
     try:
-        for piece in _llm_stream(url, model, token, messages, timeout=max(first_timeout, 1.0) + 30):
+        pieces = _llm_stream(url, model, token, messages, timeout=max(first_timeout, 1.0) + 30)
+        for piece in pieces:
             buf += piece
-            if not sent_first:
-                # Nothing but a closed first sentence counts, and it must close
-                # inside the budget: the budget is time to FIRST SENTENCE.
-                clean = strip_think(buf)
-                if "<think>" in buf and "</think>" not in buf:
-                    in_think = True
-                if in_think and "</think>" in buf:
-                    in_think = False
-                sentences, rest = split_sentences(clean) if not in_think else ([], clean)
-                if not sentences:
-                    if time.monotonic() - t0 > first_timeout:
-                        raise TimeoutError("first sentence past the budget")
-                    continue
-                first = sentences[0]
-                full = first
-                _tts_q.put((mid, room, speaker, stream, assigned))
-                _feed_push(room, {"event": "script", "id": mid, "text": first, "voice_id": voice["id"]})
-                stream.q.put(first)
-                for x in sentences[1:]:
-                    full += " " + x
-                    stream.q.put(x)
-                buf = rest
-                sent_first = True
+            # Nothing but a closed first sentence counts, and it must close
+            # inside the budget: the budget is time to FIRST SENTENCE.
+            clean = strip_think(buf)
+            if "<think>" in buf and "</think>" not in buf:
+                in_think = True
+            if in_think and "</think>" in buf:
+                in_think = False
+            sentences, rest = split_sentences(clean) if not in_think else ([], clean)
+            if not sentences:
+                if time.monotonic() - t0 > first_timeout:
+                    raise TimeoutError("first sentence past the budget")
                 continue
+            break
+        else:
+            raise ValueError("the writer closed no sentence")
+    except Exception as e:
+        log.info("script: %s falls to terse: %s", mid, e)
+        stream.q.put(None)
+        _tts_q.put((mid, room, speaker, text, assigned))
+        return False
+    # THE FIRST SENTENCE CLOSED INSIDE THE BUDGET: this message holds its place
+    # in the synth queue NOW, and the feed learns a script exists.
+    _tts_q.put((mid, room, speaker, stream, assigned))
+    _feed_push(room, {"event": "script", "id": mid, "text": sentences[0], "voice_id": voice["id"]})
+    full = ""
+    for x in sentences:
+        # Non-blocking 2 on #35: the cap governs the first batch too.
+        if full and len(full) + len(x) > SCRIPT_MAX_CHARS:
+            rest = ""
+            sentences = []
+            break
+        full = (full + " " + x).strip()
+        stream.q.put(x)
+    t = threading.Thread(target=_script_rest, name=f"script-{mid}", daemon=True,
+                         args=(pieces, rest, full, stream, mid, room, voice, model, t0))
+    t.start()
+    if wait:
+        t.join()
+    return True
+
+
+def _script_rest(pieces, buf, full, stream, mid, room, voice, model, t0):
+    """The rest of one script: sentences as they close, then the row and the
+    final frame. Failure past the first sentence ends the script early -- what
+    was spoken stands (falling behind is allowed, silently is not)."""
+    try:
+        for piece in pieces:
+            buf += piece
             sentences, buf = split_sentences(strip_think(buf))
             for x in sentences:
                 if len(full) + len(x) > SCRIPT_MAX_CHARS:
@@ -1933,23 +1965,13 @@ def _script_one(item, url, model, token, first_timeout):
                 full += " " + x
                 stream.q.put(x)
         tail = strip_think(buf).strip()
-        if sent_first and tail and len(full) + len(tail) <= SCRIPT_MAX_CHARS:
+        if tail and len(full) + len(tail) <= SCRIPT_MAX_CHARS:
             full += " " + tail
             stream.q.put(tail)
     except Exception as e:
-        if sent_first:
-            # Past the first sentence a failure ends the script early; what
-            # was spoken stands (falling behind is allowed, silently is not).
-            log.warning("script: %s ended early: %s", mid, e)
-        else:
-            log.info("script: %s falls to terse: %s", mid, e)
-            _tts_q.put((mid, room, speaker, text, assigned))
-            return False
+        log.warning("script: %s ended early: %s", mid, e)
     finally:
         stream.q.put(None)
-    if not sent_first:
-        _tts_q.put((mid, room, speaker, text, assigned))
-        return False
     ms = int((time.monotonic() - t0) * 1000)
     try:
         store.script_put(_script_conn(), mid, full.strip(), voice["id"], model, ms)
@@ -1957,7 +1979,6 @@ def _script_one(item, url, model, token, first_timeout):
     except Exception as e:
         # A retracted message: FK. No row, no frame -- the audio dies with it too.
         log.info("script: %s not kept: %s", mid, e)
-    return True
 
 
 _script_conn_ = None
@@ -1971,13 +1992,21 @@ def _script_conn():
 
 
 def _script_worker(url, model, token, first_timeout):
-    """Take scripted items IN ORDER. Depth past SCRIPT_MAX hands the item to
-    the synth queue untouched and says so (DES-009 section 6)."""
+    """ONE ORDERING POINT (verdict on #35): while the writer is on, EVERY
+    enqueued message passes through here in message order. An unscripted item
+    (5-tuple) is handed straight to the synth queue; a scripted one (8-tuple)
+    is held until its first sentence closes or it falls to terse -- either way
+    it is put before the next item is taken, so the synth queue receives
+    messages in id order by construction (DES-009 section 2, 11020). Depth past
+    SCRIPT_MAX hands a scripted item through unscripted and says so."""
     while True:
         item = _script_q.get()
         if item is None:
             return
         mid, room, speaker, text, assigned = item[:5]
+        if len(item) == 5:
+            _tts_q.put(item)
+            continue
         if _script_q.qsize() > SCRIPT_MAX:
             log.warning("script skipped for %s -- falling behind (%d queued)", mid,
                         _script_q.qsize())
@@ -2381,8 +2410,13 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None):
         v = store.voice_get(_conn, vid) if vid else None
         assigned = clip_name(v) if v else None
         text = f"{subject}. {body}" if subject else body
+        # WHILE THE WRITER IS ON, EVERYTHING GOES THROUGH ITS QUEUE (the one
+        # ordering point): scripted as an 8-tuple, unscripted as the 5-tuple
+        # the writer passes straight through, in message order.
         if _script_on and v and (v.get("persona") or "").strip():
             _script_q.put((mid, room, speaker, text, assigned, v, subject, body))
+        elif _script_on:
+            _script_q.put((mid, room, speaker, text, assigned))
         else:
             _tts_q.put((mid, room, speaker, text, assigned))
 
