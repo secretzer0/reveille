@@ -992,11 +992,16 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     # 4. Autoplay refusal is NAMED. Without this the queue drains into silence and
     #    reads as a broken synthesizer.
     assert "NotAllowedError" in pump, "an autoplay refusal must be visible, not silent"
-    # 5. Live arrivals only: the speak call hangs off the socket's message case, not
-    #    off add(), which also renders backlog.
-    case = PAGE[PAGE.index("case 'message':"):]
+    # 5. Live arrivals only: the speak call hangs off the socket's AUDIO case (the
+    #    frame that says a first byte exists -- DES-009 section 2 as amended, ruling
+    #    11018), not off the message case (which lands seconds before there is
+    #    anything to play) and not off add(), which also renders backlog.
+    case = PAGE[PAGE.index("case 'audio':"):]
     case = case[:case.index("\n")]
-    assert "vPush(m)" in case, "voices must be fed by the live socket case"
+    assert "vPush(" in case, "voices must be fed by the live socket's audio case"
+    msg_case = PAGE[PAGE.index("case 'message':"):]
+    msg_case = msg_case[:msg_case.index("\n")]
+    assert "vPush" not in msg_case, "the message frame is not the cue to fetch"
     body = PAGE[PAGE.index("function add(m){"):]
     body = body[:body.index("\n}\n")]
     assert "vPush" not in body, \
