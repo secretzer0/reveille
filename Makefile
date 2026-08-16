@@ -117,13 +117,16 @@ SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut
 # after about 40 voices), (2) divider lines split chunks (upstream PR #156;
 # without it "---" glues a whole message into one chunk), and (3) upstream
 # PR #161's batched turbo decode (with #160 it builds on; guarded with
-# inference_mode on the fork) -- carried but OFF in compose: fast (1.8x) yet
-# short rows in a mixed-length batch come out 2-3x too long, see the
-# TTS_BATCH_SIZE note in docker/compose.yml. Move the pin back to upstream
-# the day they merge. Not the repo version: the broker's identity does not depend on it
-# and it must not be rebuilt on every bump. Move the pin, bump this tag
-# (image-pin-check enforces the pair).
-TTS_IMAGE ?= reveille-tts:0.2.1
+# inference_mode on the fork) made pad-aware on the fork (fc464a8): the
+# packaged inference_turbo reads right-padded EOS as text, so short rows in a
+# mixed-length batch babbled 2-3x past their words; the fork's decode passes
+# the tokenizer mask and per-row position ids through, gated by
+# scripts/babble_proof.py there. See the TTS_BATCH_SIZE note in
+# docker/compose.yml. Move the pin back to upstream the day they merge. Not
+# the repo version: the broker's identity does not depend on it and it must
+# not be rebuilt on every bump. Move the pin, bump this tag (image-pin-check
+# enforces the pair).
+TTS_IMAGE ?= reveille-tts:0.2.2
 TTS_UPSTREAM := $(shell cat docker/tts.upstream)
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
