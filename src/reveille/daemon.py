@@ -197,6 +197,20 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.101 THE BANK TRAVELS BY PUSH, AND YOU CAN RECORD YOUR OWN VOICE (DES-013
+slice 3b + recorder). The synthesizer no longer shares a directory with the
+broker: every bank clip is PUSHED to it over its own API as
+bank-<id>-<updated_ns>.wav (a replace is a new name), reconciled at worker
+start and whenever a clip is missing -- so reveille-tts can run on any machine
+reachable by REVEILLE_TTS_URL, one path on one box or two. Compose: the
+synthesizer's reference dir is the `tts-reference` volume; TTS_VOICES_DIR is
+gone. Defaults (ruling 11121): explicit choices travel between rooms; a bank
+voice named like the speaker beats derived ones; then a default held
+elsewhere; then the first free. Web: record your own sample in the Voices tab
+(microphone -> 16-bit PCM WAV built in the browser -> the same upload; the id
+defaults to your username so it is your voice everywhere); play icons on
+stacked messages; the clip pickers are buttons. Bus tools unchanged.
+
 0.2.100 THE ARTIFACTS BESIDE A MESSAGE (DES-013 slice 4). Every listing
 (inbox, thread, tail, search) now carries `has_audio` and `has_script`; the
 web feed shows a play icon on messages that have audio (an explicit play,
