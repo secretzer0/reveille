@@ -161,9 +161,23 @@ otherwise                       ->  bank[hash(name) % len(bank)]
 ```
 
 The hash means every browser, every restart and every host agree on who sounds
-like what with no state to keep. The knob offset is what stops two agents that
-land on the same bank clip sounding identical — bank alone runs out at about a
-dozen agents, bank plus knobs does not.
+like what with no state to keep. The knob offset is meant to stop two agents
+that land on the same bank clip sounding identical — bank alone runs out at
+about a dozen agents, bank plus knobs does not.
+
+**Amended (2026-08-16, ruling 11024): the knobs are honored by the ENGINE, and
+the engine in use ignores them.** On turbo (§4.1) `exaggeration` and
+`cfg_weight` are no-ops — the server says so on every request: `CFG, min_p and
+exaggeration are not supported by Turbo version and will be ignored` — and the
+original Chatterbox honors them (measured 2026-08-16: original's takes moved
+from 12.6 s to 14.6–17.1 s across the knob sweep, turbo's did not). So on turbo
+**the voice IS the clip**: two names that digest to the same bank clip sound the
+same, and that is acceptable — the distinguisher is the clip, and the lever when
+the fleet outgrows distinct clips is a wav dropped into `voices/`, never a
+sampling knob. A temperature offset was considered and REFUSED: it changes
+variance per utterance, not identity, so it buys the property on paper and
+nothing at the ear. The broker keeps sending the knobs `tts_voice` computes:
+harmless on turbo, honored the day the engine changes.
 
 **The DIRECTORY is the interface** (senior-ui-ux's implementation, ruled better
 than this document's first version): `voices/<name>.wav` is that name's voice and
