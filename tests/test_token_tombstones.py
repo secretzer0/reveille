@@ -36,7 +36,7 @@ def minted_twice(c):
     """An owner, a bound mint, and the re-mint that supersedes it."""
     admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
     old = store.create_token(c, admin["id"], "body-1", agent_name="wanderer", create=True)
-    new = store.create_token(c, admin["id"], "body-2", agent_name="wanderer", create=True)
+    new = store.create_token(c, admin["id"], "body-2", agent_name="wanderer")
     assert old["id"] in new["superseded"]
     return admin, old, new
 

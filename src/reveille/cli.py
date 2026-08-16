@@ -273,7 +273,10 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
                 f"{', '.join(live) if live else '(none)'}. Re-run with "
                 f"--create to deliberately create a new agent.")
     if code != 200 or not tok.get("secret"):
-        raise RuntimeError(f"mint failed ({code}): {tok.get('error') or tok}")
+        # detail carries the WHY and, for a held name, both remedies; the bare
+        # error word alone ("name_held") refuses without telling.
+        raise RuntimeError(
+            f"mint failed ({code}): {tok.get('detail') or tok.get('error') or tok}")
     attached = want
     # CLOSE THE SESSION. It was minted for three calls and there is no reason for
     # it to outlive them; leaving it valid means the installer left a live

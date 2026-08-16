@@ -154,10 +154,10 @@ def test_the_default_mint_does_not_carry_creation_authority():
 
     def fake_broker(auth, cookie, method, path, body=None):
         posted.append((method, path, body))
-        return {"id": "t1", "secret": "s"}
+        return 200, {"id": "t1", "secret": "s"}
 
-    orig = rl._broker_json
-    rl._broker_json = fake_broker
+    orig = rl._broker_call
+    rl._broker_call = fake_broker
     try:
         rl.mint_bound_token("http://b", "c=1", "wanderer", [])
         assert not posted[0][2].get("create"), (
@@ -166,4 +166,94 @@ def test_the_default_mint_does_not_carry_creation_authority():
         rl.mint_bound_token("http://b", "c=1", "wanderer", [], create=True)
         assert posted[0][2].get("create") is True
     finally:
-        rl._broker_json = orig
+        rl._broker_call = orig
+
+
+# ---- DES-011 section 2 / gate 9.4 and its sibling (ruling 10978) -------------
+# create=true on a name the owner already holds LIVE is a refusal that names
+# the existing agent and both remedies, and leaves its credential UNTOUCHED.
+# The sibling: create=false on that same held name is the BODY-SWAP verb --
+# attach, supersede, tombstone -- and MUST stay open, or migration dies with
+# the refusal. Both green in one commit or the slice does not ship.
+
+def test_create_true_on_a_held_live_name_is_refused_and_touches_nothing():
+    c, _ = db()
+    a = admin(c)
+    first = store.create_token(c, a["id"], "b1", agent_name="wanderer", create=True)
+    with pytest.raises(store.BusError) as e:
+        store.create_token(c, a["id"], "b2", agent_name="wanderer", create=True)
+    said = str(e.value)
+    assert "already have a live agent named 'wanderer'" in said
+    assert "unique name" in said and "add the existing" in said, "both remedies named"
+    # the existing credential is untouched: still resolves, still the only one
+    assert store.resolve_token(c, first["secret"])["id"] == first["id"]
+    assert c.execute("SELECT count(*) FROM tokens WHERE agent_id=?",
+                     (first["agent_id"],)).fetchone()[0] == 1
+    assert c.execute("SELECT count(*) FROM token_tombstones").fetchone()[0] == 0
+
+
+def test_the_sibling_bare_attach_on_a_held_name_is_the_body_swap():
+    c, _ = db()
+    a = admin(c)
+    first = store.create_token(c, a["id"], "laptop", agent_name="wanderer", create=True)
+    second = store.create_token(c, a["id"], "container", agent_name="wanderer")
+    assert second["agent_id"] == first["agent_id"], "same being, new body"
+    assert first["id"] in second["superseded"]
+    assert store.resolve_token(c, first["secret"]) is None, "old body superseded"
+    assert store.tombstone_for(c, first["secret"]), "old body gets the signpost"
+    assert c.execute("SELECT count(*) FROM tokens WHERE agent_id=?",
+                     (first["agent_id"],)).fetchone()[0] == 1, "one live credential"
+
+
+def test_the_route_refuses_a_held_name_structured():
+    seed = pathlib.Path(tempfile.mkdtemp()) / "broker.db"
+    c, _ = db(str(seed))
+    admin(c)
+    c.close()
+    with scratch_broker(env_extra={"REVEILLE_DB": str(seed)}) as b:
+        code, body, cookie = _post(b.base, "/login",
+                                   {"name": "travis", "password": "hunter2hunter2"})
+        assert code == 200, body
+        cookie = cookie.split(";", 1)[0]
+        code, first, _ = _post(b.base, "/tokens",
+                               {"agent_name": "wanderer", "label": "x",
+                                "create": True}, cookie)
+        assert code == 200, first
+        code, body, _ = _post(b.base, "/tokens",
+                              {"agent_name": "wanderer", "label": "dup",
+                               "create": True}, cookie)
+        assert code == 409 and body["error"] == "name_held", body
+        assert "wanderer" in body["live_agents"]
+        # sibling on the wire: bare attach still swaps
+        code, body2, _ = _post(b.base, "/tokens",
+                               {"agent_name": "wanderer", "label": "swap"}, cookie)
+        assert code == 200 and body2["agent_id"] == first["agent_id"]
+        assert first["id"] in body2["superseded"]
+
+
+# ---- BLOCKING 1 on PR #7 (msg 11000): refused AND told --------------------------
+# The store message and the 409 body carry both remedies; the launcher's create
+# path dropped them (broker error -> None -> "broker refused the token mint").
+# The human-facing consumer must surface the detail, not just the refusal.
+
+def test_the_launcher_create_path_tells_the_human_both_remedies():
+    seed = pathlib.Path(tempfile.mkdtemp()) / "broker.db"
+    c, _ = db(str(seed))
+    admin(c)
+    c.close()
+    rl = _launch_module()
+    with scratch_broker(env_extra={"REVEILLE_DB": str(seed)}) as b:
+        code, body, cookie = _post(b.base, "/login",
+                                   {"name": "travis", "password": "hunter2hunter2"})
+        assert code == 200, body
+        cookie = cookie.split(";", 1)[0]
+        rl.mint_bound_token(b.base, cookie, "wanderer", [], create=True)   # first: created
+        with pytest.raises(rl.LaunchError) as e:
+            rl.mint_bound_token(b.base, cookie, "wanderer", [], create=True)
+        said = str(e.value)
+        assert "409" in said and "already have a live agent" in said, said
+        assert "unique name" in said and "add the existing agent" in said, (
+            "refused but not told: both remedies must reach the human")
+        # and a bare attach through the same function still swaps
+        tid, secret = rl.mint_bound_token(b.base, cookie, "wanderer", [])
+        assert secret

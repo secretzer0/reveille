@@ -1882,6 +1882,33 @@ def _broker_json(auth_url, cookie_header, method, path, body=None):
         return None
 
 
+def _broker_call(auth_url, cookie_header, method, path, body=None):
+    """_broker_json that KEEPS THE BROKER'S REFUSAL. Returns (status, parsed
+    body): 200 with the payload, or the HTTP status with the broker's error
+    document, or (0, None) when nothing answered. Used where the human must be
+    TOLD why (architect BLOCKING 1 on PR #7): the tokens route answers a held
+    name with 409 name_held and BOTH remedies, and swallowing that into None
+    made the create dialog say "broker refused the token mint" -- refused but
+    not told, which the operator's rule (10969) forbids. Every other caller
+    keeps _broker_json's None-on-failure: fail-closed is right for reads."""
+    if not cookie_header:
+        return 0, None
+    req = urllib.request.Request(
+        auth_url.rstrip("/") + path, method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Cookie": cookie_header, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except (ValueError, UnicodeDecodeError):
+            return e.code, None
+    except (urllib.error.URLError, TimeoutError):
+        return 0, None
+
+
 def _broker_me(auth_url, cookie_header):
     return principal_from_me(_broker_json(auth_url, cookie_header, "GET", "/me"))
 
@@ -1901,11 +1928,15 @@ def mint_bound_token(auth_url, cookie_header, agent, rooms, create=False):
     deliberate act (10896/10905); the edit path keeps the default, where a
     live name makes it inert and a dead one makes the refusal correct -- an
     edit must never create."""
-    t = _broker_json(auth_url, cookie_header, "POST", "/tokens",
-                     {"label": agent, "agent_name": agent, "mem_tier": "state",
-                      "create": bool(create)})
+    code, t = _broker_call(auth_url, cookie_header, "POST", "/tokens",
+                           {"label": agent, "agent_name": agent,
+                            "mem_tier": "state", "create": bool(create)})
     if not isinstance(t, dict) or not t.get("secret"):
-        raise LaunchError("broker refused the token mint")
+        # THE HUMAN IS TOLD, not merely refused: the broker's detail carries
+        # both remedies for a held name and the reason for anything else.
+        detail = (t or {}).get("detail") or (t or {}).get("error") if isinstance(t, dict) else None
+        raise LaunchError(f"broker refused the token mint ({code}): {detail}"
+                          if detail else "broker refused the token mint")
     for rid in rooms:
         out = _broker_json(auth_url, cookie_header, "PATCH",
                            f"/tokens/{t['id']}", {"room": rid, "attach": True})

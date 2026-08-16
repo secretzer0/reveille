@@ -1529,7 +1529,32 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
             row = conn.execute(
                 "SELECT id FROM agents WHERE owner_id=? AND name=? "
                 "AND retired_ns IS NULL", (owner_id, agent_name)).fetchone()
+            if row and create:
+                # A HELD NAME IS NOT A NEW AGENT (DES-011 section 2, ruling
+                # 10969). create=True declares "bring a NEW being into the
+                # world"; landing on an existing live agent and rotating its
+                # credential would let a human who meant a new agent silently
+                # hijack an old one's token. Refuse, name the existing agent
+                # and where it lives, offer both remedies, touch nothing. The
+                # existing credential is untouched BY CONSTRUCTION: this raise
+                # sits before supersede_bound_tokens.
+                rooms = [r["name"] for r in conn.execute(
+                    "SELECT r.name FROM members m JOIN rooms r ON r.id=m.room_id "
+                    "WHERE m.agent_id=? AND m.left_ns IS NULL ORDER BY r.name",
+                    (row["id"],))]
+                raise BusError(
+                    f"you already have a live agent named {agent_name!r} "
+                    f"(in: {', '.join(rooms) if rooms else 'no rooms'}). "
+                    f"Creating a duplicate is refused. Either choose a unique "
+                    f"name for a separate agent, or add the existing "
+                    f"{agent_name!r} to the room you meant. To move that "
+                    f"agent to a new body instead, mint WITHOUT create.")
             if row:
+                # BARE ATTACH IS THE BODY-SWAP VERB (DES-011 section 2.1): the
+                # owner re-minting a held name attaches a new body to the
+                # EXISTING identity and supersedes the previous body's
+                # credential in this same transaction. This branch must stay
+                # open or migration dies with it -- gated as such.
                 agent_id = row["id"]
             elif create:
                 agent_id = str(uuid.uuid4())
