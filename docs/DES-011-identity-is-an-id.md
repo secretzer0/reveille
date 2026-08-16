@@ -192,6 +192,39 @@ Until these key on the id underneath, a rename is only safe on the planes
 already cut over. **This is the finishing slice**, and it is the one that
 makes §2 true rather than aspirational.
 
+### 6.1 RULED: three slices, in this order (devops proposal 10992, accepted)
+
+One branch would let a rendering nit hold a migration hostage, and the three
+pieces are verified by three different means. Each is a PR, red-provable
+alone, shippable alone.
+
+**(a) SCHEMA + BACKFILL — a migration, no reader changes.**
+`recipient_agent_id` added and backfilled by (room, name, time) from
+`members` history; `agent_names(agent_id, name, from_ns, to_ns)` seeded from
+today's `agents.name`; `agents.merged_into` set from `identity-merges.jsonl`
+— one migration. Gate: every historical direct message resolves to exactly
+one id, or is LISTED as unresolvable with its (room, name, ts); the count of
+unresolvable is printed, never silent. Rides DES-010 §7 stop-migrate-start
+on the live db; rehearsed on a fresh copy first (lesson
+a-fold-is-an-act-on-a-being-not-a-name: the rehearsal proves the tool).
+
+**(b) DELIVERY BY ID — the behaviour change.** `send` resolves the room-name
+at send and stores the id; `inbox`/`reads`/receipts key on `agent_id`;
+`members` re-keyed `(room_id, agent_id)` with the room-name beside it,
+alias assigned at join and re-checked at rename; `create_token` (a) is
+untouched. Gates 9.1 (rename orphans nothing) and 9.3 (two owners'
+`architect` in one room). Verified on BOTH shapes (doctrine 9055) before
+merge — devops holds the socket.
+
+**(c) THE HUMAN SURFACE — rendering.** presence, `delivered_to`, broadcast
+fan-out and rings carry room-name + owner; wake registration keys on the
+token; docs and usage() text. Gate: render the same message in a room with
+and without an alias in force and assert the room-name is what appears.
+
+The name column `recipient` stays through all three (§10). No slice
+introduces a dual-read: (a) writes and nobody reads; (b) cuts every reader
+over in one commit; (c) changes what humans see, not what the store keys.
+
 ## 7. The one-time merge (executed 2026-08-15)
 
 `scripts/identity-merge` re-points one identity's rows onto another and
