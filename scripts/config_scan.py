@@ -20,14 +20,27 @@ import json
 import re
 import sys
 
+# *_KEY is secret-shaped by name (a PEM block has spaces and dashes, so the
+# BLOB shape never catches a private key -- found by this file's own negative
+# for GPG_KEY); the two public shapes below (checksums, fingerprints) are the
+# only allowances, and both are keyed on the value as well as the name.
 NAME = re.compile(r"(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|"
-                  r"PAT|BEARER|OAUTH)(_|$)", re.I)
+                  r"PAT|BEARER|OAUTH|PRIVATE|KEY)(_|$)", re.I)
 # a long opaque run with no path separator: token-shaped. Dots and = admitted
 # so a JWT (a.b.c) or padded base64 does not slip the shape; PATH-like values
 # stay excluded by the missing slash.
 BLOB = re.compile(r"^[A-Za-z0-9_.=-]{32,}$")
 CHECKSUM_NAME = re.compile(r"_(SHA256|SHA512|SHA1|MD5|CHECKSUM|DIGEST)$", re.I)
 HEX = re.compile(r"^[0-9a-fA-F]{32,128}$")
+# An OpenPGP FINGERPRINT is a public identifier of a signing key, not the key:
+# the python base image ships GPG_KEY=<40 hex> so the build can verify the
+# source tarball's signature (the second published-verification-data refusal;
+# the first was PYTHON_SHA256). Same both-halves rule: the name says gpg/pgp
+# key AND the value is exactly a fingerprint (40 hex, v4) -- a private key is
+# never 40 hex, so the value half is decisive here in a way it was not for
+# checksums. Anything else named *_KEY stays a secret.
+FINGERPRINT_NAME = re.compile(r"(^|_)(GPG|PGP)_KEY$", re.I)
+FINGERPRINT = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 def suspicious(pairs):
@@ -41,6 +54,8 @@ def suspicious(pairs):
         # credentials (HMAC keys, hex API tokens), so the value half alone
         # cannot discriminate. Both checksum halves AND no secret word.
         if CHECKSUM_NAME.search(k) and HEX.match(v) and not NAME.search(k):
+            continue
+        if FINGERPRINT_NAME.search(k) and FINGERPRINT.match(v):
             continue
         if NAME.search(k) or BLOB.match(v):
             bad.append(k)

@@ -57,3 +57,14 @@ def test_a_secret_wearing_a_checksum_suffix_is_still_refused():
     assert run([("API_KEY_MD5", "0f" * 16)]) == 1
     # and the real allowance still holds beside it
     assert run([("PYTHON_SHA256", HEX64)]) == 0
+
+
+def test_a_gpg_fingerprint_is_public_and_a_gpg_private_key_is_not():
+    # publish run 31916613068: python:3.11-slim ships GPG_KEY=<40 hex>, the
+    # fingerprint of the release-signing key -- a public identifier used to
+    # VERIFY. Allowed on both halves; anything else shaped like a key stays red.
+    assert run([("GPG_KEY", "A035C8C19219BA821ECEA86B64E628F8D684696D")]) == 0
+    assert run([("GPG_KEY", "-----BEGIN PGP PRIVATE KEY BLOCK-----" + "A" * 40)]) == 1
+    assert run([("GPG_KEY", "A" * 64)]) == 1, "64 hex is not a fingerprint"
+    assert run([("API_KEY", "A035C8C19219BA821ECEA86B64E628F8D684696D")]) == 1, (
+        "the fingerprint shape does not launder a key named anything else")
