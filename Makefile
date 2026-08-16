@@ -115,11 +115,12 @@ SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut
 # guard around generate (upstream PR #164; without it every distinct voice
 # pins ~200 MB of autograd graph in their conds cache and a 12 GB card OOMs
 # after about 40 voices), (2) divider lines split chunks (upstream PR #156;
-# without it "---" glues a whole message into one chunk), and (3) a request's
-# chunks go through the turbo decoder in one batched pass (upstream PR #161,
-# with #160 it builds on; measured here 6.42s -> 3.28s for a 6-chunk message,
-# guarded with inference_mode on the fork). Move the pin back to upstream the
-# day they merge. Not the repo version: the broker's identity does not depend on it
+# without it "---" glues a whole message into one chunk), and (3) upstream
+# PR #161's batched turbo decode (with #160 it builds on; guarded with
+# inference_mode on the fork) -- carried but OFF in compose: fast (1.8x) yet
+# short rows in a mixed-length batch come out 2-3x too long, see the
+# TTS_BATCH_SIZE note in docker/compose.yml. Move the pin back to upstream
+# the day they merge. Not the repo version: the broker's identity does not depend on it
 # and it must not be rebuilt on every bump. Move the pin, bump this tag
 # (image-pin-check enforces the pair).
 TTS_IMAGE ?= reveille-tts:0.2.1
