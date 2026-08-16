@@ -3341,7 +3341,14 @@ async function openVoices(){
    $('newVoiceFileName').textContent='recorded '+r.seconds.toFixed(1)+' s'+
     (r.seconds<5?' -- too short, the synthesizer needs 5':r.seconds>30?' -- too long, 30 max':'');
    if(!$('newVoiceId').value.trim())$('newVoiceId').value=myName;return;}
-  try{await vRecStart();b.textContent='stop';$('newVoiceFileName').textContent='recording\u2026';
+  try{await vRecStart();b.textContent='stop';
+   // THE LENGTH IS SHOWN WHILE RECORDING (ruling 11121): the 5-30 s bound is
+   // met before the PUT, not discovered as a refusal after it.
+   const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
+    $('newVoiceFileName').textContent='recording '+sec.toFixed(1)+' s'+
+     (sec<5?' (need 5)':sec>30?' (30 max -- stop)':' (ok)');
+    if(vRec)setTimeout(tick,250);};
+   tick();
    if(!$('newVoiceId').value.trim())$('newVoiceId').value=myName;}
   catch(e){toast('microphone refused: '+e.message);}};
  for(const b of document.querySelectorAll('[data-vpick]'))b.onclick=()=>
