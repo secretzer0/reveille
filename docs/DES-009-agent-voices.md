@@ -148,6 +148,16 @@ option that meets the target. The canary of 10913.6e stays a CPU box; a GPU
 host is a poor canary. "device reported" above is what proves the 3060 is in
 use: `/api/model-info` says cuda, or the log says otherwise.
 
+**Vetting a rebuilt tag (2026-08-16, operator 11076).** The model library the
+server's Dockerfile installs (`chatterbox-v2@master`) is deliberately NOT
+pinned: newer models arrive on the next cold build. The fork's pad-aware
+batched decode reaches into that library's T3, so a rebuilt `reveille-tts`
+tag is vetted on the GPU host with the fork's `scripts/babble_proof.py`
+(per-row durations, sequential vs batched: a short row batched beside a long
+one must end where its own text ends) BEFORE compose points at it. Measured
+for 0.2.3 (fork d534a39): short rows 1.5–2.4 s sequential / 2.0–2.2 s batched,
+long row 14.5 s / 11.9–13.1 s — batching holds.
+
 The "one function, no plugin layer" sentence in §4 is why this is a day's
 slice and not a redesign — it just turned out the function that changes is
 the client, not the engine.
