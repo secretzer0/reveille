@@ -980,18 +980,35 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     assert "localStorage" not in PAGE[PAGE.index("let voiceOn=false;"):
                                       PAGE.index("function clearFeed()")], \
         "a restored 'on' has no user gesture behind it and would queue into silence"
-    # 2. The player is never given a src at load: preload none, no src attribute.
-    assert '<audio id="vPlayer" preload="none"></audio>' in PAGE
-    # 3. The queue advances on media EVENTS. A timer-driven queue stops draining in a
-    #    backgrounded tab, which is exactly where audio gets left running.
-    for ev in ("'ended',vDone", "'error',vDone"):
-        assert ev in PAGE, f"the queue does not advance on {ev}"
-    pump = PAGE[PAGE.index("function vPump()"):PAGE.index("function vDone()")]
-    assert "setTimeout" not in pump and "setInterval" not in pump, \
-        "vPump advances on a timer -- a backgrounded tab throttles it to a stop"
-    # 4. Autoplay refusal is NAMED. Without this the queue drains into silence and
-    #    reads as a broken synthesizer.
-    assert "NotAllowedError" in pump, "an autoplay refusal must be visible, not silent"
+    # 2. No <audio> element at all (ruling 11020: the player is Web Audio, and an
+    #    <audio> would not start an unknown-length stream before ~230 KB). Nothing is
+    #    fetched at load: the only fetch of /audio/ is inside vPump's play call.
+    assert 'id="vPlayer"' not in PAGE and "<audio id=" not in PAGE, \
+        "the <audio> element is gone; the player is Web Audio"
+    player = PAGE[PAGE.index("const V_LEAD="):PAGE.index("function vPush(m)")]
+    assert PAGE.count("'/audio/'") == 1 and "'/audio/'" in player, \
+        "exactly one place builds an /audio/ URL, and it is the player"
+    # 3. The queue advances on EVENTS: the last scheduled buffer's onended, the fetch
+    #    ending, a fetch/decode error, a 404 -- never a timer. A timer-driven queue
+    #    stops draining in a backgrounded tab, which is exactly where audio gets left
+    #    running.
+    assert "src.onended=()=>{pending--;finish();}" in player, \
+        "the queue must advance from the last buffer's onended"
+    assert "if(!res.ok||!res.body)return vDone();" in player, "a 404 is a silent message: done, next"
+    assert "setTimeout" not in player and "setInterval" not in player, \
+        "the player advances on a timer -- a backgrounded tab throttles it to a stop"
+    # 4. Refusal is NAMED and turns the toggle back off. Without this the queue drains
+    #    into silence and reads as a broken synthesizer. The toggle click is the gesture:
+    #    the context is resumed there, and a context that is still not running when the
+    #    bytes arrive is the refusal.
+    assert "function vRefused()" in player and "blocked audio" in player
+    assert "if(ctx.state!=='running')return vRefused();" in player
+    toggle = PAGE[PAGE.index("function toggleVoice()"):PAGE.index("function clearFeed()")]
+    assert "vCtxUp()" in toggle, "the toggle's click must resume the AudioContext -- it is the gesture"
+    assert "vStop()" in toggle and "vQ.length=0" in toggle, \
+        "toggle off must abort the utterance in flight and empty the queue"
+    # 4b. Underrun is a GAP, not a stall: a late chunk re-anchors to now + lead.
+    assert "if(next<now)next=now+V_LEAD;" in player
     # 5. Live arrivals only: the speak call hangs off the socket's AUDIO case (the
     #    frame that says a first byte exists -- DES-009 section 2 as amended, ruling
     #    11018), not off the message case (which lands seconds before there is
