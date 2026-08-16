@@ -194,6 +194,16 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 CHANGES (newest first; re-read after any broker version bump):
 
+0.2.97 THE SYNTHESIZER IS SOMEONE ELSE'S TORCH (DES-009 s4.1). The voice
+service is devnen/Chatterbox-TTS-Server built from THEIR Dockerfile.cu128 at
+the SHA docker/tts.upstream pins; our tts_service.py and Dockerfile.tts are
+gone. The broker speaks their /tts: voices/<name>.wav (their reference dir) is
+cloned, otherwise the name's sha256 digest indexes the SORTED predefined bank
+and offsets exaggeration/cfg_weight -- same name, same voice, every host. The
+worker logs the device the server reports (/api/model-info) or `unreported`.
+REVEILLE_TTS_URL for the compose service is http://reveille-tts:8004. Broker
+change only; the agent image is unchanged. Nothing about the bus API moved.
+
 0.2.96 A HELD NAME IS NOT A NEW AGENT, AND THE HUMAN IS TOLD. create=true on
 a name you already hold live is a REFUSAL (DES-011 s2), naming the existing
 agent, its rooms, and both remedies -- choose a unique name, or add the
