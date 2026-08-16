@@ -105,13 +105,15 @@ current, holder)`:
   whoever asks. The `UNIQUE (room_id, voice_id)` index is the invariant; the message
   is the courtesy.
 - **Default**, at a speaker's first utterance in a room (and when the listing route
-  runs, so an owner sees it before the first message), in FOUR steps: **(a0) a bank
-  voice whose id equals the speaker's name, if free here** (RULED 11119 — DES-009 §5's
-  `voices/<name>.wav` carried into the bank: an agent named quark and a voice uploaded
-  as quark meet without a click; it precedes the carry-across, so a name-match wins in
-  a new room even where the owner chose differently elsewhere); (a) the speaker's voice
-  in any other room if free here; (b) the first free bank voice; (c) the digest pick
-  from the predefined set, shared and named as such in the UI. Materialized as a row with
+  runs, so an owner sees it before the first message). **RULED 11121 — the invariant:
+  explicit choices travel; the name beats anything derived.** In order, each "if free
+  here": (1) a voice this speaker holds elsewhere with `set_by in (owner, room)` —
+  somebody chose it, it travels; (2) a bank voice whose id equals the speaker's name
+  (DES-009 §5's `voices/<name>.wav` carried into the bank: an agent named quark and a
+  voice uploaded as quark meet without a click); (3) a voice held elsewhere with
+  `set_by='default'` — consistency across rooms for the unnamed; (4) the first free
+  bank voice; (5) the digest pick from the predefined set, shared and named as such in
+  the UI. Materialized as a row with
   `set_by='default'` — the row is what makes it stable and visible; the digest is not.
 - Store: `assign_voice`, `unassign_voice`, `room_speakers` (present members → keys;
   assigned-but-absent flagged; unkeyable flagged), `voice_for`. `purge_room` drops the

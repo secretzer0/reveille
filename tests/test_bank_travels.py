@@ -268,5 +268,5 @@ def test_the_default_meets_a_bank_voice_named_like_the_speaker(broker):
     b = store.mint_agent(c, broker["admin"]["id"], "worf")   # no such voice: first free
     assert store.voice_for(c, room["id"], f"agent:{b['id']}") == "mr-scott"
     D = store.voice_default
-    assert D(elsewhere=["picard"], taken=set(), bank=["picard", "quark"], name="quark") == "quark"
-    assert D(elsewhere=["picard"], taken={"quark"}, bank=["picard", "quark"], name="quark") == "picard"
+    assert D(elsewhere=[("picard", "default")], taken=set(), bank=["picard", "quark"], name="quark") == "quark"
+    assert D(elsewhere=[("picard", "default")], taken={"quark"}, bank=["picard", "quark"], name="quark") == "picard"

@@ -105,11 +105,24 @@ def test_the_speakers_owner_wins_the_room_owner_yields_a_stranger_is_refused():
 def test_the_default_carries_a_free_voice_across_rooms_then_takes_the_first_free():
     D = store.voice_default
     bank = ["mr-scott", "picard", "quark"]
-    assert D(elsewhere=["quark"], taken=set(), bank=bank) == "quark"
-    assert D(elsewhere=["quark"], taken={"quark"}, bank=bank) == "mr-scott"
+    assert D(elsewhere=[("quark", "owner")], taken=set(), bank=bank) == "quark"
+    assert D(elsewhere=[("quark", "default")], taken=set(), bank=bank) == "quark"
+    assert D(elsewhere=[("quark", "owner")], taken={"quark"}, bank=bank) == "mr-scott"
     assert D(elsewhere=[], taken={"mr-scott", "picard"}, bank=bank) == "quark"
     assert D(elsewhere=[], taken=set(bank), bank=bank) is None
     assert D(elsewhere=[], taken=set(), bank=[]) is None
+
+
+def test_explicit_choices_travel_and_the_name_beats_derived_ones():
+    """Ruling 11121: owner/room-set elsewhere beats the name; the name beats a
+    default elsewhere; a default elsewhere beats the first free."""
+    D = store.voice_default
+    bank = ["mr-scott", "picard", "quark"]
+    assert D(elsewhere=[("quark", "owner")], taken=set(), bank=bank, name="picard") == "quark"
+    assert D(elsewhere=[("quark", "room")], taken=set(), bank=bank, name="picard") == "quark"
+    assert D(elsewhere=[("quark", "default")], taken=set(), bank=bank, name="picard") == "picard"
+    assert D(elsewhere=[("quark", "default")], taken=set(), bank=bank, name="worf") == "quark"
+    assert D(elsewhere=[("quark", "owner")], taken={"quark"}, bank=bank, name="picard") == "picard"
 
 
 # ---- store API ---------------------------------------------------------------
