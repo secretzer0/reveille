@@ -24,8 +24,12 @@ join-mid-stream story, and per-client back-pressure — a new failure domain tha
 is live whenever the broker is. It buys nothing that message ids do not already
 give.
 
-**One file per message, played in id order by each browser.** Consequences, all
-in the wanted direction:
+**One file per message, played in id order by each browser; a file may be READ
+while it is still being WRITTEN** (amended 2026-08-16, ruling 11018: the feed's
+`audio` event fires at the first synthesized byte, and `/audio/<msg-id>.wav`
+serves an in-flight message as a progressive WAV -- the human hears the first
+chunk while the rest is still being made). Consequences, all in the wanted
+direction:
 
 - a late joiner is not blasted with backlog; it starts at the next message
 - mute, volume and per-agent silencing are client-side, no round trip
@@ -157,9 +161,23 @@ otherwise                       ->  bank[hash(name) % len(bank)]
 ```
 
 The hash means every browser, every restart and every host agree on who sounds
-like what with no state to keep. The knob offset is what stops two agents that
-land on the same bank clip sounding identical — bank alone runs out at about a
-dozen agents, bank plus knobs does not.
+like what with no state to keep. The knob offset is meant to stop two agents
+that land on the same bank clip sounding identical — bank alone runs out at
+about a dozen agents, bank plus knobs does not.
+
+**Amended (2026-08-16, ruling 11024): the knobs are honored by the ENGINE, and
+the engine in use ignores them.** On turbo (§4.1) `exaggeration` and
+`cfg_weight` are no-ops — the server says so on every request: `CFG, min_p and
+exaggeration are not supported by Turbo version and will be ignored` — and the
+original Chatterbox honors them (measured 2026-08-16: original's takes moved
+from 12.6 s to 14.6–17.1 s across the knob sweep, turbo's did not). So on turbo
+**the voice IS the clip**: two names that digest to the same bank clip sound the
+same, and that is acceptable — the distinguisher is the clip, and the lever when
+the fleet outgrows distinct clips is a wav dropped into `voices/`, never a
+sampling knob. A temperature offset was considered and REFUSED: it changes
+variance per utterance, not identity, so it buys the property on paper and
+nothing at the ear. The broker keeps sending the knobs `tts_voice` computes:
+harmless on turbo, honored the day the engine changes.
 
 **The DIRECTORY is the interface** (senior-ui-ux's implementation, ruled better
 than this document's first version): `voices/<name>.wav` is that name's voice and
@@ -211,6 +229,21 @@ There is **no database row** for an audio file. The message id is the key, its
 message's room is the authorization (§3), the filename is the record, and a
 missing file means a silent message. Nothing to migrate, nothing to reconcile,
 nothing that can lapse into disagreement with the bytes on disk.
+
+**The `.part` file is the record of in-flight** (ruling 11018). The worker
+writes `tts-<msg-id>.wav.part` as upstream's `stream=true` bytes land and
+announces the id on the feed at the first byte; on completion it patches the
+true RIFF sizes into the header, renames `.part` to `.wav`, and only then drops
+its in-memory registry entry -- so `/audio/<msg-id>.wav` has three states and
+one route: complete serves the file, in flight replays the `.part` so far and
+tails it to the true end, neither is a 404 and a silent message. Only the
+in-flight bytes carry the 0xFFFFFFFF streaming sizes; replay and late listeners
+never depend on them. `_delete_messages` unlinks **both** names, and a rename
+that finds no `.part` is a message deleted mid-flight: fail closed, no `.wav`
+lands, nothing to orphan. A `.part` found at startup is a broker that died
+mid-synthesis: swept, and the message stays silent. The worker never waits on
+a reader; a slow or departed tail cannot stall the queue. The client is
+unchanged: `ended`, `error` and 404 all still mean "done, next".
 
 ## 8. Slice shape
 

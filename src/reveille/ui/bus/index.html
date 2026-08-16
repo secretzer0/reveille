@@ -705,9 +705,6 @@
   <div id="histInfo"><span id="histLabel"></span><span><b id="backLive">back to live</b></span></div>
   <div id="empty">no traffic yet</div></div></div>
  <button id="jump">&darr; latest</button>
- <!-- One player, reused. Not autoplay: nothing is ever assigned a src until the
-      toggle has been pressed, so a page load issues no audio request at all. -->
- <audio id="vPlayer" preload="none"></audio>
  <div id="composerWrap">
   <form id="composer">
    <div class="ctop">
@@ -1187,27 +1184,95 @@ function vMark(n){
   o.start();o.stop(vCtx.currentTime+0.12);}catch(e){}
  toast(n+' message'+(n>1?'s':'')+' skipped -- audio was falling behind');
 }
+// ---- the player: Web Audio, bytes as they arrive (ruling 11020) ------------------
+// An <audio> element will not start a stream of unknown length before ~230 KB have
+// arrived (Chrome; bytes, not seconds -- measured for PR #21), so a short first chunk
+// from the synthesizer bought the ear nothing there. This player fetches
+// /audio/<id>.wav, decodes the s16 PCM as it lands and schedules every network chunk
+// on ONE AudioContext -- vCtx, the same one vMark rings, resumed on the toggle's click
+// because that click IS the autoplay gesture. Invariants carried unchanged: id order,
+// one at a time, ADVANCED BY EVENTS AND NEVER BY A TIMER (the last scheduled buffer's
+// onended, the fetch ending with nothing scheduled, a fetch or decode error, a 404 --
+// all mean "done, next"; a backgrounded tab throttles timers to a stop, and audio is
+// exactly what people background); toggle off issues no request and aborts the one in
+// flight; a refusal to sound turns the toggle back off and says so; late joiners are
+// not blasted (vPush is fed by the live socket only). Underrun policy: a small lead,
+// and a chunk that arrives late is a GAP in the sound, never a stall of the queue.
+const V_LEAD=0.15;         // seconds between "first bytes" and "first sound"
+let vCtl=null;             // AbortController of the utterance in flight; .srcs = its buffers
+let vLast=null;            // {id, firstAt}: when the utterance first sounded (a gate reads it)
+function vCtxUp(){
+ vCtx=vCtx||new (window.AudioContext||window.webkitAudioContext)();
+ if(vCtx.state==='suspended')vCtx.resume();
+ return vCtx;
+}
+// Refusal is the failure mode worth naming: without this the queue drains into
+// silence and looks like a broken synthesizer. The toggle was the gesture; if the
+// browser still refused, say so and turn it back off rather than pretending.
+function vRefused(){
+ vBusy=false;voiceOn=false;paintVoice();
+ toast('your browser blocked audio -- click voice again to allow it');
+}
+async function vPlay(id,url){
+ const ctl=vCtl=new AbortController();ctl.srcs=[];
+ let ctx;
+ try{ctx=vCtxUp();}catch(e){return vRefused();}
+ let res;
+ try{res=await fetch(url,{credentials:'same-origin',signal:ctl.signal});}
+ catch(e){return vCtl===ctl?vDone():undefined;}
+ if(!res.ok||!res.body)return vDone();      // 404 = a silent message (section 7)
+ // resume() is async: the first utterance after the click can read "suspended" for
+ // a tick. Await it once, so only a browser that still refuses is called a refusal.
+ if(ctx.state!=='running'){try{await ctx.resume();}catch(e){}}
+ if(ctx.state!=='running')return vRefused();
+ const rd=res.body.getReader();
+ let head=new Uint8Array(0),hdr=null,carry=new Uint8Array(0),next=0,pending=0,ended=false;
+ const finish=()=>{if(ended&&pending===0&&vCtl===ctl)vDone();};
+ try{
+  for(;;){
+   const {value,done}=await rd.read();
+   if(done||ctl.signal.aborted)break;
+   let bytes=value;
+   if(!hdr){                                   // upstream's 44-byte header, then PCM
+    const h=new Uint8Array(head.length+bytes.length);h.set(head);h.set(bytes,head.length);head=h;
+    if(head.length<44)continue;
+    const dv=new DataView(head.buffer,head.byteOffset,head.byteLength);
+    hdr={ch:dv.getUint16(22,true)||1,sr:dv.getUint32(24,true),bits:dv.getUint16(34,true)};
+    if(String.fromCharCode(...head.subarray(0,4))!=='RIFF'||hdr.bits!==16)throw new Error('not an s16 wav');
+    bytes=head.subarray(44);
+   }
+   let all=bytes;
+   if(carry.length){all=new Uint8Array(carry.length+bytes.length);all.set(carry);all.set(bytes,carry.length);}
+   const frames=Math.floor(all.length/(2*hdr.ch));
+   carry=all.slice(frames*2*hdr.ch);          // a dangling sample waits for the next chunk
+   if(!frames)continue;
+   const dv=new DataView(all.buffer,all.byteOffset,frames*2*hdr.ch);
+   const buf=ctx.createBuffer(hdr.ch,frames,hdr.sr);
+   for(let c=0;c<hdr.ch;c++){const d=buf.getChannelData(c);
+    for(let i=0;i<frames;i++)d[i]=dv.getInt16((i*hdr.ch+c)*2,true)/32768;}
+   const src=ctx.createBufferSource();src.buffer=buf;src.connect(ctx.destination);
+   const now=ctx.currentTime;
+   if(next<now)next=now+V_LEAD;               // first chunk, or a late one: lead, then a gap
+   if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};
+   pending++;src.onended=()=>{pending--;finish();};
+   ctl.srcs.push(src);src.start(next);next+=buf.duration;
+  }
+ }catch(e){}
+ ended=true;
+ finish();
+}
+function vStop(){
+ if(!vCtl)return;
+ const c=vCtl;vCtl=null;c.abort();
+ for(const s of c.srcs)try{s.stop();}catch(e){}
+}
 function vPump(){
  if(vBusy||!voiceOn)return;
  const t=vTake(vQ,V_MAX);
  if(!t)return;
  if(t.dropped)vMark(t.dropped);
  vBusy=true;
- const a=$('vPlayer');
- a.src='/audio/'+encodeURIComponent(t.id)+'.wav'+qs();
- // ADVANCED BY EVENTS, NEVER BY A TIMER. A backgrounded tab has its timers throttled
- // to once a minute or worse, so a timer-driven queue stops draining the moment
- // somebody switches tabs -- and audio is exactly the feature people background.
- // ended and error both mean "this one is done"; a missing file is a silent message,
- // never an error surface and never a stall (DES-009 section 7).
- a.play().catch(e=>{
-  // Autoplay refusal is the failure mode worth naming: without this the queue drains
-  // into silence and looks like a broken synthesizer. The toggle was the gesture; if
-  // the browser still refused, say so and turn it back off rather than pretending.
-  vBusy=false;
-  if(e&&e.name==='NotAllowedError'){voiceOn=false;paintVoice();
-   toast('your browser blocked audio -- click voice again to allow it');}
- });
+ vPlay(t.id,'/audio/'+encodeURIComponent(t.id)+'.wav'+qs());
 }
 function vDone(){vBusy=false;vPump();}
 function vPush(m){
@@ -1223,7 +1288,8 @@ function paintVoice(){
 }
 function toggleVoice(){
  voiceOn=!voiceOn;
- if(!voiceOn){const a=$('vPlayer');a.pause();a.removeAttribute('src');vQ.length=0;vBusy=false;}
+ if(voiceOn){try{vCtxUp();}catch(e){}}      // the click is the gesture: resume here
+ else{vStop();vQ.length=0;vBusy=false;}
  paintVoice();
 }
 
@@ -1493,10 +1559,15 @@ function connect(){
   case 'presence':
    if(m.room===room)renderPresence(m.agents);
    return;
-  // Speak LIVE arrivals only, which is why this hangs off the socket rather than off
-  // add(): add() also renders the backlog, and a late joiner must not be blasted with
-  // a queue of history nobody is waiting to hear (DES-009 section 2).
-  case 'message':vPush(m);return add(m);
+  // Speak on the AUDIO frame, not the message frame: the feed names an id the moment
+  // its first synthesized byte exists (DES-009 section 2 as amended, ruling 11018).
+  // The message frame lands seconds before there is anything to play, and a fetch
+  // at that moment was a 404 read as silence -- the shipped client keyed on it and
+  // never heard a live message unless the worker happened to be idle. LIVE arrivals
+  // only: msgs holds what add() rendered live, so a late joiner is not blasted with
+  // a queue of history nobody is waiting to hear (section 2).
+  case 'audio':{const mm=msgs.get(m.id);if(mm)vPush(mm);return;}
+  case 'message':return add(m);
   default:return;       // an event this build does not know is not an error --
   }                     // the broker may be newer, and the poll still covers us
  };
@@ -1529,18 +1600,6 @@ $('histBtn').onclick=()=>{
  $('histBar').classList.toggle('on');
 };
 $('voice').onclick=toggleVoice;
-// Both events mean "this utterance is over": ended for a file that played, error for
-// one that is not there. A missing file is a silent message, so the queue moves on
-// rather than surfacing anything (DES-009 section 7).
-//
-// THESE TWO AND NO OTHERS. Do not add abort or emptied here, however much they read
-// like the same family: the HTML media load algorithm fires abort (step 6) and
-// emptied (step 7.1) on every REASSIGNMENT of src, which is what vPump does on each
-// advance. Listening would make one utterance's start end the previous one, so the
-// queue would drain in a burst and only the last file would be heard -- and it would
-// look like the synthesizer skipping, not like this line.
-$('vPlayer').addEventListener('ended',vDone);
-$('vPlayer').addEventListener('error',vDone);
 $('hGo').onclick=e=>{e.preventDefault();
  const p={limit:500};
  if($('hKw').value.trim())p.keywords=$('hKw').value.trim();

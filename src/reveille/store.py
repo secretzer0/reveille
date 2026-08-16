@@ -2002,8 +2002,12 @@ def _delete_messages(conn, ids):
             # Best effort by design: a missing file is the normal case (voices
             # off, service down, message never spoken) and must not fail a
             # delete. The delete is the authority here; the bytes follow it.
-            with contextlib.suppress(OSError):
-                os.unlink(os.path.join(AUDIO_DIR, f"tts-{mid}.wav"))
+            # Both names: the .part is the record of an in-flight synthesis, and
+            # a worker whose rename then finds no .part fails closed -- no .wav
+            # lands for a deleted message, with no second code path.
+            for name in (f"tts-{mid}.wav", f"tts-{mid}.wav.part"):
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.join(AUDIO_DIR, name))
 
 
 def purge_room(conn, room_id, owner_id):
