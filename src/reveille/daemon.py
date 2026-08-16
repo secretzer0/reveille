@@ -44,6 +44,7 @@ import pathlib
 import re
 import secrets
 import struct
+import sqlite3
 import threading
 import time
 import wave
@@ -2016,22 +2017,16 @@ def _script_rest(pieces, buf, full, stream, mid, room, voice, model, t0):
     finally:
         stream.q.put(None)
     ms = int((time.monotonic() - t0) * 1000)
+    # THIS thread's connection (verdict on #41): the rest of a script runs on a
+    # helper thread, and sqlite binds a connection to the thread that made it.
+    # ONLY the retract is quiet: a message gone mid-write fails the FK -> no
+    # row, no frame, the audio dies with it. Anything else is loud.
     try:
-        store.script_put(_script_conn(), mid, full.strip(), voice["id"], model, ms)
-        _feed_push(room, {"event": "script", "id": mid, "text": full.strip(), "voice_id": voice["id"]})
-    except Exception as e:
-        # A retracted message: FK. No row, no frame -- the audio dies with it too.
-        log.info("script: %s not kept: %s", mid, e)
-
-
-_script_conn_ = None
-
-
-def _script_conn():
-    global _script_conn_
-    if _script_conn_ is None:
-        _script_conn_ = store.connect(_db_path)
-    return _script_conn_
+        store.script_put(_conn_for_worker(), mid, full.strip(), voice["id"], model, ms)
+    except sqlite3.IntegrityError as e:
+        log.info("script: %s not kept (retracted): %s", mid, e)
+        return
+    _feed_push(room, {"event": "script", "id": mid, "text": full.strip(), "voice_id": voice["id"]})
 
 
 def _script_worker(url, model, token, first_timeout):
