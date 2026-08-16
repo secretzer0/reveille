@@ -161,7 +161,9 @@ def test_the_worker_logs_the_device_the_server_reports(monkeypatch, tmp_path, ca
     said = [r.getMessage() for r in caplog.records if "device:" in r.getMessage()]
     assert len(said) == 1, f"the device line fired {len(said)}x -- once, or it is noise"
     assert f"device: {device} loaded: {loaded}" in said[0]
-    assert asked == ["/api/model-info"]
+    # The worker's first act after the device line is the reconcile listing
+    # (DES-013 section 3 as amended): what the synthesizer holds vs the bank.
+    assert asked == ["/api/model-info", "/get_reference_files"]
 
 
 def test_a_service_that_is_down_leaves_a_silent_message(monkeypatch, tmp_path):

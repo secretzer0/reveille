@@ -228,7 +228,8 @@ def test_the_send_path_hands_the_assigned_voice_to_the_worker(world, monkeypatch
         daemon._tts_q.get_nowait()
     daemon._tts_enqueue(9, r1, "picard", "s", "b", key=kp)
     daemon._tts_enqueue(10, r1, "wanderer", "s", "b", key=None)
-    assert daemon._tts_q.get_nowait() == (9, r1, "picard", "s. b", "picard")
+    v = store.voice_get(w["c"], "picard")
+    assert daemon._tts_q.get_nowait() == (9, r1, "picard", "s. b", daemon.clip_name(v))
     assert daemon._tts_q.get_nowait() == (10, r1, "wanderer", "s. b", None)
 
 

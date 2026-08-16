@@ -41,6 +41,7 @@ import urllib.request
 import os
 import pathlib
 import re
+import secrets
 import struct
 import threading
 import time
@@ -1764,6 +1765,8 @@ def _feed_push(room, msg):
 
 _tts_q = queue.Queue()
 _tts_on = False        # set by main() only when the config refusal passed
+_tts_url = ""          # the synthesizer, for the clip push on the request thread
+_tts_token = ""
 # THE .part FILE IS THE RECORD OF IN-FLIGHT (section 7). This registry is only
 # how a reader learns the write is still going: mid -> Event set when the .part
 # has been renamed (or abandoned). Never the truth about the bytes -- the file
@@ -1840,10 +1843,10 @@ def tts_voice(speaker, *, clips, predefined, assigned=None):
     None when there is nothing to speak with -- a silent message, not an
     error. Pure, so the resolution is testable without a server."""
     if assigned:
-        if f"bank-{assigned}.wav" in clips:
-            return {"voice_mode": "clone", "reference_audio_filename": f"bank-{assigned}.wav"}
-        log.warning("tts: bank voice %s is not visible to the synthesizer -- is "
-                    "TTS_VOICES_DIR the broker's voices dir?", assigned)
+        if assigned in clips:
+            return {"voice_mode": "clone", "reference_audio_filename": assigned}
+        log.warning("tts: bank clip %s is not visible to the synthesizer even after "
+                    "a push -- speaking with the digest pick", assigned)
     if not speaker.startswith("bank-") and f"{speaker}.wav" in clips:
         return {"voice_mode": "clone", "reference_audio_filename": f"{speaker}.wav"}
     if not predefined:
@@ -1858,6 +1861,84 @@ def tts_voice(speaker, *, clips, predefined, assigned=None):
             "cfg_weight": round(0.30 + 0.10 * ((h >> 32) % 5), 2)}
 
 
+def clip_name(v):
+    """THE VERSIONED NAME a bank clip travels under (DES-013 section 3 as
+    amended, ruling 11104): bank-<id>-<updated_ns>.wav. A replace is a NEW
+    name, because upstream's /upload_reference skips duplicates and cannot
+    overwrite -- and the synthesizer's conditioning cache never sees changed
+    bytes under an old name. Pure; the row is the only input."""
+    return f"bank-{v['id']}-{v['updated_ns']}.wav"
+
+
+def _tts_push(url, token, name, data, timeout):
+    """One clip to the synthesizer's reference dir over ITS API (upstream
+    POST /upload_reference, multipart). True when the listing it returns names
+    the file. Measured on tts-vet before this was written: an arbitrary
+    sanitized filename is accepted, a duplicate is reported as uploaded and
+    left alone, and /tts clones by that name. Every failure is a False and a
+    log line -- the caller falls back to the digest pick, never stalls."""
+    boundary = "----reveille" + secrets.token_hex(8)
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; "
+            f"filename=\"{name}\"\r\nContent-Type: audio/wav\r\n\r\n").encode() \
+        + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(url.rstrip("/") + "/upload_reference", data=body, headers={
+        "content-type": f"multipart/form-data; boundary={boundary}"})
+    if token:
+        req.add_header("authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            out = json.load(r)
+    except Exception as e:
+        log.warning("tts: push of %s failed: %s", name, e)
+        return False
+    ok = name in (out.get("all_reference_files") or [])
+    if not ok:
+        log.warning("tts: push of %s not confirmed by the synthesizer's listing", name)
+    return ok
+
+
+def _tts_reconcile(url, token, timeout, clips=None):
+    """RECONCILE, NOT HOPE (ruling 11104): the synthesizer's clip set must be a
+    superset of the bank. List theirs, push every bank version they lack from
+    the broker's own voices dir. Runs at worker start and whenever an assigned
+    clip is not in the listing. Returns the listing after the pushes."""
+    if clips is None:
+        clips = _tts_get(url, token, "/get_reference_files", timeout) or []
+    conn = _conn_for_worker()
+    if conn is None or _voices_dir is None:
+        return clips                     # no bank on this broker: nothing to push
+    have = set(clips)
+    pushed = []
+    for v in store.voices(conn):
+        name = clip_name(v)
+        if name in have:
+            continue
+        local = _voices_dir / f"bank-{v['id']}.wav"
+        try:
+            data = local.read_bytes()
+        except OSError:
+            log.warning("tts: bank voice %s has a row but no clip at %s", v["id"], local)
+            continue
+        if _tts_push(url, token, name, data, timeout):
+            pushed.append(name)
+    if pushed:
+        log.info("tts: pushed %d bank clip(s) to the synthesizer: %s", len(pushed), ", ".join(pushed))
+        return _tts_get(url, token, "/get_reference_files", timeout) or list(have | set(pushed))
+    return clips
+
+
+_worker_conn = None
+
+
+def _conn_for_worker():
+    """The worker thread's OWN sqlite connection -- worker threads never touch
+    _conn (the request thread's). Read-only use: the voices table."""
+    global _worker_conn
+    if _worker_conn is None and _db_path:
+        _worker_conn = store.connect(_db_path)
+    return _worker_conn
+
+
 def _tts_speak(url, token, speaker, text, timeout, assigned=None):
     """One synthesis request. Returns wav bytes, or None if the service could not
     answer -- a missing file is a SILENT message by design (section 7), so every
@@ -1868,6 +1949,10 @@ def _tts_speak(url, token, speaker, text, timeout, assigned=None):
     very next message with no restart anywhere -- the directory is the
     interface (section 5)."""
     clips = _tts_get(url, token, "/get_reference_files", timeout) or []
+    if assigned and assigned not in clips:
+        # "Not visible" is the TRIGGER, not just a warning (11104): push what
+        # the synthesizer lacks and read the listing again, once.
+        clips = _tts_reconcile(url, token, timeout, clips)
     predefined = (_tts_get(url, token, "/v1/audio/voices", timeout) or {}).get("voices") or []
     # Strings only: an upstream shape change becomes a named refusal here, not
     # a dict posted as predefined_voice_id.
@@ -1949,6 +2034,7 @@ def _tts_worker(url, token, timeout):
             log.info("tts: device: %s loaded: %s -- the first utterance may "
                      "block on the model load", info.get("device") or "unreported",
                      info.get("loaded", "unreported"))
+            _tts_reconcile(url, token, timeout)
             first = False
         chunks = _tts_speak(url, token, speaker, text, timeout, assigned)
         if chunks is None:
@@ -2005,7 +2091,9 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None):
     utterance (DES-013 section 4) -- the worker thread never touches _conn.
     None (unbound token, or no bank voice) means the digest pick."""
     if _tts_on:
-        assigned = store.voice_for(_conn, room, key) if key else None
+        vid = store.voice_for(_conn, room, key) if key else None
+        v = store.voice_get(_conn, vid) if vid else None
+        assigned = clip_name(v) if v else None
         _tts_q.put((mid, room, speaker, f"{subject}. {body}" if subject else body, assigned))
 
 
@@ -3221,6 +3309,10 @@ async def voice_clip_http(request):
     os.replace(tmp, final)
     log.info("%s %s bank voice %s (%.1f s, %s bytes)", p.name,
              "replaced" if v else "added", vid, row["seconds"], len(data))
+    # THE CLIP TRAVELS BY PUSH (ruling 11104): the same path on one box or two.
+    # Best effort here -- a synthesizer that is down learns it at reconcile.
+    if _tts_on:
+        row["pushed"] = _tts_push(_tts_url, _tts_token, clip_name(row), data, 30)
     return JSONResponse(row)
 
 
@@ -4269,7 +4361,7 @@ def _snap_path(reason):
 
 
 def main():
-    global _conn, _files_dir, _voices_dir, _db_path, _tts_on
+    global _conn, _files_dir, _voices_dir, _db_path, _tts_on, _tts_url, _tts_token
     import uvicorn
     _setup_logging()
     root = os.environ.get("CLAUDE_AGENT_BUS") or os.path.expanduser("~/.claude/agent-bus")
@@ -4296,6 +4388,7 @@ def main():
         print(f"VOICES REFUSED: {why}", flush=True)
     elif tts_url:
         _tts_on = True
+        _tts_url, _tts_token = tts_url, tts_token
         # 600s and no retry: the first request of the service's life blocks on a
         # lazy model load -- minutes on a cold cache, seconds after. A short
         # timeout plus a retry queues two of those behind each other on a

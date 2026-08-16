@@ -49,13 +49,22 @@ function, so the words must not share.
 - `voices(id PK slug, name, persona, uploaded_by, seconds, bytes, created_ns,
   updated_ns)`; the clip lives at `<db dir>/voices/bank-<id>.wav`, a directory the
   **broker owns** (sibling of `files/`, created in `main()`).
-- Compose mounts that directory into the synthesizer as its reference dir, read-only:
-  `TTS_VOICES_DIR` defaults to `${SERVER_DATA}/voices`; the broker sees it rw, the
-  TTS container sees `/app/reference_audio:ro`. `voices/<name>.wav` is still that
-  name's clip, cloned — what changes is WHO writes the directory (the broker, from an
-  upload), not what a file there means. The TTS server's own `/upload_reference` is
-  not used: it skips duplicates and has no delete or rename, and the mount is
-  read-only from its side anyway. Hand-dropped `<name>.wav` clips keep working.
+- **RULED 11104/11106 (slice 3b, replaces the mount shipped in slice 2): the clip
+  TRAVELS BY PUSH, one path on one box or two.** The synthesizer's reference dir is
+  its own volume (`tts-reference`) wherever it runs; nothing is bind-mounted from the
+  broker. The broker pushes every bank clip over the synthesizer's own API (upstream
+  `POST /upload_reference`, multipart) under the **versioned name**
+  `bank-<id>-<updated_ns>.wav` (`clip_name(row)`, derived from the row — no new
+  column): a REPLACE is a new upload under a new name, because upstream skips
+  duplicates and cannot overwrite, and the conditioning cache never sees changed bytes
+  under an old name. **Reconcile, not hope:** at worker start and whenever an assigned
+  clip is missing from `/get_reference_files`, the broker lists theirs and pushes what
+  the bank has and they lack — the synthesizer's clip set is a superset of the bank.
+  Failure = the log line + the digest pick, never a stall. Old versions linger on the
+  synthesizer host (v1 has no delete; a sweep may come later). Measured on tts-vet
+  before it was written (11115): arbitrary sanitized filename accepted, duplicate a
+  no-op 200, `/tts` clones by the pushed name. Hand-dropped `<name>.wav` in the
+  synthesizer's volume stays a per-host convenience; the BANK is the portable thing.
 - **Binding:** the `bank-` prefix is RESERVED. Name-to-clip resolution for a
   hand-dropped `<name>.wav` must never match a `bank-*` file — an agent named
   `bank-7` must not steal a bank voice.
@@ -261,8 +270,9 @@ Slices 1–4 need no model. The docs PR (this file) lands before slice 1 merges.
 - **No script in search, memory or recall.** Derived text is not the record.
 - **No delete of a bank voice in v1.** Replace covers a bad clip; delete is a later
   admin slice with "refused while assigned".
-- **No off-host synthesizer sync.** The bank directory is shared by mount; an off-host
-  synthesizer would need a copy — named, not built.
+- ~~No off-host synthesizer sync.~~ **Built (slice 3b, ruling 11104):** the bank
+  travels by push; see §3. What is still not built: deleting stale versions from the
+  synthesizer host.
 - **No cross-user concurrency on the writer.** One worker, in message order, with a
   visible depth skip; a second card gets a second server if it is ever needed.
 - **Follow-ups named:** seed the synthesizer's 28 predefined voices as bank rows

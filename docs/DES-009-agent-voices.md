@@ -75,6 +75,18 @@ synthesizer on someone else's LAN is a bus transcript in flight; refusing at
 configuration time is the only place that refusal is cheap. Voices stay off
 rather than a room going silently unencrypted.
 
+**Standalone synthesizer host (2026-08-16, operator 11102 / ruling 11104).** The
+synthesizer runs alone on any machine: the `voices` compose profile on that host
+(or the published `reveille-tts` image bare) with its own `tts-reference` volume
+and model cache, its port published **behind TLS and a bearer** (a proxy that
+checks `REVEILLE_TTS_TOKEN`) — or, on the operator's own LAN, plaintext with
+`REVEILLE_LAN_PLAINTEXT=1` once DES-013 slice 5 lands the shared refusal (until
+then, https + token off-host, as above). The broker's compose passes
+`REVEILLE_TTS_URL` / `REVEILLE_TTS_TOKEN` through unchanged. Bank clips reach it by
+push (DES-013 §3), so nothing is shared but the URL. Gate (11104): a broker on host A
+speaks through a synthesizer on host B with a bank voice uploaded on A, and a
+replaced clip is heard on the next utterance.
+
 ## 4. RULED: Chatterbox, and the fact that would change it
 
 Chatterbox (Resemble AI, MIT, ~350M), zero-shot cloning from a 5–20 second
