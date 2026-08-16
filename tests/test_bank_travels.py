@@ -19,6 +19,7 @@ exist and compose still mounts TTS_VOICES_DIR :ro.
 import asyncio
 import http.server
 import io
+import pathlib
 import json
 import os
 import re
@@ -305,3 +306,16 @@ def test_the_audition_speaks_a_line_in_that_bank_voice_and_keeps_nothing(broker)
     assert _say("quark", "x" * (daemon.VOICE_SAY_MAX + 1)).status_code == 400
     daemon._tts_on = False
     assert _say("quark", "hi").status_code == 503
+
+
+def test_the_original_clip_plays_back_as_it_was_uploaded(broker):
+    data = wav(6)
+    assert _put_clip("quark", data)[0] == 200
+    req = Request({"type": "http", "method": "GET", "path": "/voices/quark/clip",
+                   "headers": [], "query_string": b"", "path_params": {"vid": "quark"}})
+    r = asyncio.run(daemon.voice_clip_get_http(req))
+    assert r.status_code == 200 and r.media_type == "audio/wav"
+    assert pathlib.Path(r.path).read_bytes() == data
+    req = Request({"type": "http", "method": "GET", "path": "/voices/nobody/clip",
+                   "headers": [], "query_string": b"", "path_params": {"vid": "nobody"}})
+    assert asyncio.run(daemon.voice_clip_get_http(req)).status_code == 404

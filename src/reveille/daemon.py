@@ -3706,6 +3706,23 @@ async def voice_say_http(request):
 
 
 @_guard
+async def voice_clip_get_http(request):
+    """GET /voices/{vid}/clip -> the bank clip itself, the ORIGINAL the clones
+    are measured against (operator: hear original vs clone side by side). Any
+    signed-in user; 404 when the row has no clip yet."""
+    _principal(request)
+    vid = request.path_params["vid"]
+    store.valid_name(vid)
+    path = _voices_dir / f"bank-{vid}.wav"
+    if store.voice_get(_conn, vid) is None or not path.is_file():
+        return JSONResponse({"error": "no such clip"}, status_code=404)
+    return FileResponse(path, media_type="audio/wav",
+                        headers={"Content-Disposition": f'inline; filename="bank-{vid}.wav"',
+                                 "X-Content-Type-Options": "nosniff",
+                                 "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
+@_guard
 async def voice_clip_http(request):
     """PUT /voices/{vid}/clip?name=<label> -- RAW WAV bytes as the body, the
     /upload shape (a multipart form is refused the same way). Creates the bank
@@ -4779,6 +4796,7 @@ def build_app():
             Route("/voices", voices_http),
             Route("/voices/{vid}", voice_http, methods=["PATCH"]),
             Route("/voices/{vid}/clip", voice_clip_http, methods=["PUT"]),
+            Route("/voices/{vid}/clip", voice_clip_get_http),
             Route("/voices/{vid}/persona/draft", persona_draft_http, methods=["POST"]),
             Route("/voices/{vid}/say", voice_say_http),
             Route("/rooms/{rid}/voices", room_voices_http),

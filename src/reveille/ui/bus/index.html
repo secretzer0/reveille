@@ -1314,6 +1314,21 @@ async function vPlay(id,url){
  ended=true;
  finish();
 }
+// A whole file, decoded by the browser (any PCM width, unlike the s16 stream
+// path): the bank clip, played once on the same context so vStop still rules.
+async function vPlayClip(url){
+ let ctx;
+ try{ctx=vCtxUp();}catch(e){return vRefused();}
+ const ctl=vCtl={srcs:[],abort(){}};
+ try{
+  const res=await fetch(url,{credentials:'same-origin'});
+  if(!res.ok){res.json().then(j=>toast(j.error||('clip: '+res.status))).catch(()=>{});return vDone();}
+  const buf=await ctx.decodeAudioData(await res.arrayBuffer());
+  if(vCtl!==ctl)return;
+  const src=ctx.createBufferSource();src.buffer=buf;src.connect(ctx.destination);
+  ctl.srcs.push(src);src.onended=()=>{if(vCtl===ctl)vDone();};src.start();
+ }catch(e){toast('clip: '+e.message);if(vCtl===ctl)vDone();}
+}
 function vStop(){
  if(!vCtl)return;
  const c=vCtl;vCtl=null;c.abort();
@@ -3308,6 +3323,9 @@ async function openVoices(){
  const rows=d.voices.map(v=>
   '<div class="pRow"><b>'+esc(v.name)+' <span class="pDim">'+esc(v.id)+' \u00b7 '+
    (Math.round(v.seconds*10)/10)+' s</span></b>'+
+   // THE ORIGINAL beside the clone: play the bank clip itself, so a voice can
+   // be judged against what it was cloned from (operator, eval box).
+   '<button type="button" data-vorig="'+esc(v.id)+'" title="play the uploaded clip itself">play clip</button>'+
    (v.editable
     ?'<button type="button" data-vpick="'+esc(v.id)+'">replace clip</button>'+
      '<input type="file" accept="audio/wav,.wav" hidden data-vclip="'+esc(v.id)+'">'
@@ -3383,6 +3401,8 @@ async function openVoices(){
   const f=el.files[0];if(!f)return;
   try{await putVoiceClip(el.dataset.vclip,'',f);toast('clip replaced');openVoices();}
   catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-vorig]'))b.onclick=()=>{
+  vStop();vBusy=true;vPlayClip('/voices/'+encodeURIComponent(b.dataset.vorig)+'/clip');};
  for(const b of document.querySelectorAll('[data-vsaybtn]')){
   const inp=document.querySelector('[data-vsay="'+CSS.escape(b.dataset.vsaybtn)+'"]');
   const say=()=>{const t=inp.value.trim();if(!t){toast('type a line first');return;}
