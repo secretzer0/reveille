@@ -1493,10 +1493,15 @@ function connect(){
   case 'presence':
    if(m.room===room)renderPresence(m.agents);
    return;
-  // Speak LIVE arrivals only, which is why this hangs off the socket rather than off
-  // add(): add() also renders the backlog, and a late joiner must not be blasted with
-  // a queue of history nobody is waiting to hear (DES-009 section 2).
-  case 'message':vPush(m);return add(m);
+  // Speak on the AUDIO frame, not the message frame: the feed names an id the moment
+  // its first synthesized byte exists (DES-009 section 2 as amended, ruling 11018).
+  // The message frame lands seconds before there is anything to play, and a fetch
+  // at that moment was a 404 read as silence -- the shipped client keyed on it and
+  // never heard a live message unless the worker happened to be idle. LIVE arrivals
+  // only: msgs holds what add() rendered live, so a late joiner is not blasted with
+  // a queue of history nobody is waiting to hear (section 2).
+  case 'audio':{const mm=msgs.get(m.id);if(mm)vPush(mm);return;}
+  case 'message':return add(m);
   default:return;       // an event this build does not know is not an error --
   }                     // the broker may be newer, and the poll still covers us
  };

@@ -40,6 +40,7 @@ import urllib.request
 import os
 import pathlib
 import re
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -48,7 +49,8 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                                 StreamingResponse)
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -1718,6 +1720,11 @@ def _feed_push(room, msg):
 
 _tts_q = queue.Queue()
 _tts_on = False        # set by main() only when the config refusal passed
+# THE .part FILE IS THE RECORD OF IN-FLIGHT (section 7). This registry is only
+# how a reader learns the write is still going: mid -> Event set when the .part
+# has been renamed (or abandoned). Never the truth about the bytes -- the file
+# is. Dropped AFTER the rename, so a GET never sees neither.
+_tts_inflight = {}
 
 
 def tts_config_refusal(url, token):
@@ -1818,17 +1825,45 @@ def _tts_speak(url, token, speaker, text, timeout):
         log.warning("tts: no clip for %r and the bank is empty -- silent", speaker)
         return None
     body = json.dumps({"text": text, "output_format": "wav", "split_text": True,
-                       **voice}).encode()
+                       "stream": True, **voice}).encode()
     req = urllib.request.Request(url.rstrip("/") + "/tts", data=body,
                                  headers={"content-type": "application/json"})
     if token:
         req.add_header("authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read()
+        r = urllib.request.urlopen(req, timeout=timeout)
     except Exception as e:
         log.warning("tts: %s", e)
         return None
+
+    # stream=true: upstream yields a 0xFFFFFFFF-sized WAV header with the first
+    # synthesized chunk and PCM per chunk after -- the bytes exist before the
+    # message is finished, and the worker writes them as they land (section 2:
+    # a file may be read while it is still being written). A break mid-stream
+    # raises out of this iterator; the worker abandons the .part.
+    def chunks():
+        with r:
+            while True:
+                b = r.read(65536)
+                if not b:
+                    return
+                yield b
+    return chunks()
+
+
+def _wav_patch_sizes(path):
+    """Write the TRUE RIFF and data sizes into a completed streamed WAV. Only
+    the in-flight bytes carry 0xFFFFFFFF; replay and late listeners get a file
+    the stdlib `wave` module reads with the right frame count."""
+    size = os.path.getsize(path)
+    with open(path, "r+b") as f:
+        head = f.read(44)
+        if len(head) < 44 or head[:4] != b"RIFF" or head[36:40] != b"data":
+            return
+        f.seek(4)
+        f.write(struct.pack("<I", size - 8))
+        f.seek(40)
+        f.write(struct.pack("<I", size - 44))
 
 
 def _tts_worker(url, token, timeout):
@@ -1861,15 +1896,51 @@ def _tts_worker(url, token, timeout):
                      "block on the model load", info.get("device") or "unreported",
                      info.get("loaded", "unreported"))
             first = False
-        wav = _tts_speak(url, token, speaker, text, timeout)
-        if not wav:
+        chunks = _tts_speak(url, token, speaker, text, timeout)
+        if chunks is None:
             continue                      # silent message: the feed already carried it
+        # THE FIRST BYTE IS THE ANNOUNCEMENT. The .part fills as upstream
+        # synthesizes; the feed names the id as soon as there is something to
+        # play, and /audio/<mid>.wav tails the .part until this loop renames it.
+        # The worker never waits on a reader: a slow or gone tail costs nothing
+        # here. Any failure past the first byte abandons the .part -- a silent
+        # message, and a tail that ends early, which the client already treats
+        # as done (section 7).
+        part = _files_dir / f"tts-{mid}.wav.part"
+        done = threading.Event()
+        _tts_inflight[mid] = done
+        announced = False
         try:
-            (_files_dir / f"tts-{mid}.wav").write_bytes(wav)
-        except OSError as e:
-            log.warning("tts: cannot write audio for %s: %s", mid, e)
-            continue
-        _feed_push(room, {"event": "audio", "id": mid})
+            with open(part, "wb") as f:
+                for b in chunks:
+                    f.write(b)
+                    f.flush()
+                    if not announced:
+                        _feed_push(room, {"event": "audio", "id": mid})
+                        announced = True
+            if not announced:
+                raise OSError("upstream sent no audio")
+            _wav_patch_sizes(part)
+            # A rename that finds no .part is a message deleted mid-flight:
+            # fail closed, no .wav lands, nothing to orphan.
+            os.replace(part, _files_dir / f"tts-{mid}.wav")
+        except Exception as e:
+            log.warning("tts: audio for %s abandoned: %s", mid, e)
+            with contextlib.suppress(OSError):
+                os.unlink(part)
+        finally:
+            done.set()
+            _tts_inflight.pop(mid, None)
+
+
+def _sweep_abandoned_audio(files_dir):
+    """A .part left on disk is a broker that died mid-synthesis. Nothing will
+    finish it and no registry names it, so it is not in flight and not
+    complete: remove it, and the message stays silent (section 7)."""
+    for p in pathlib.Path(files_dir).glob("tts-*.wav.part"):
+        with contextlib.suppress(OSError):
+            p.unlink()
+            log.info("tts: removed abandoned %s", p.name)
 
 
 def _tts_enqueue(mid, room, speaker, subject, body):
@@ -3116,12 +3187,45 @@ async def audio_http(request):
     if row is None or row["room"] not in p.rooms:
         return JSONResponse({"error": "not found"}, status_code=404)
     path = _files_dir / f"tts-{mid}.wav"
-    if not path.is_file():
+    headers = {"Content-Disposition": f'inline; filename="tts-{mid}.wav"',
+               "X-Content-Type-Options": "nosniff",
+               "Content-Security-Policy": "default-src 'none'; sandbox"}
+    # THREE STATES, ONE ROUTE (section 7): complete -> the file; in flight ->
+    # replay the .part so far, then tail it until the worker renames it; neither
+    # -> 404, a silent message. The .wav is checked FIRST and the worker drops
+    # its registry entry only after the rename, so a GET never sees neither.
+    if path.is_file():
+        return FileResponse(path, media_type="audio/wav", headers=headers)
+    done = _tts_inflight.get(mid)
+    if done is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(path, media_type="audio/wav", headers={
-        "Content-Disposition": f'inline; filename="tts-{mid}.wav"',
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox"})
+    part = _files_dir / f"tts-{mid}.wav.part"
+    try:
+        f = open(part, "rb")
+    except OSError:
+        # Renamed between the two checks: the file is the answer after all.
+        if path.is_file():
+            return FileResponse(path, media_type="audio/wav", headers=headers)
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    async def tail():
+        # The open fd survives the rename (same inode), so this reads to the
+        # true end of the file however the worker finishes. One full drain
+        # after `done` is set, because the last chunk and the set race.
+        with f:
+            draining = False
+            while True:
+                b = f.read(65536)
+                if b:
+                    yield b
+                    continue
+                if draining:
+                    return
+                if done.is_set():
+                    draining = True
+                    continue
+                await asyncio.sleep(0.05)
+    return StreamingResponse(tail(), media_type="audio/wav", headers=headers)
 
 
 @_guard
@@ -3875,6 +3979,7 @@ def main():
     v = store.migrate(_conn, _db_path)   # versioned + transactional; snapshots itself
     _files_dir = pathlib.Path(_db_path).parent / "files"
     _files_dir.mkdir(parents=True, exist_ok=True)
+    _sweep_abandoned_audio(_files_dir)
     # The audio dies with the message, and store owns that choke point. Told
     # once, here, because the daemon owns the directory and store must not have
     # to guess it (DES-009 section 7).

@@ -24,8 +24,12 @@ join-mid-stream story, and per-client back-pressure — a new failure domain tha
 is live whenever the broker is. It buys nothing that message ids do not already
 give.
 
-**One file per message, played in id order by each browser.** Consequences, all
-in the wanted direction:
+**One file per message, played in id order by each browser; a file may be READ
+while it is still being WRITTEN** (amended 2026-08-16, ruling 11018: the feed's
+`audio` event fires at the first synthesized byte, and `/audio/<msg-id>.wav`
+serves an in-flight message as a progressive WAV -- the human hears the first
+chunk while the rest is still being made). Consequences, all in the wanted
+direction:
 
 - a late joiner is not blasted with backlog; it starts at the next message
 - mute, volume and per-agent silencing are client-side, no round trip
@@ -211,6 +215,21 @@ There is **no database row** for an audio file. The message id is the key, its
 message's room is the authorization (§3), the filename is the record, and a
 missing file means a silent message. Nothing to migrate, nothing to reconcile,
 nothing that can lapse into disagreement with the bytes on disk.
+
+**The `.part` file is the record of in-flight** (ruling 11018). The worker
+writes `tts-<msg-id>.wav.part` as upstream's `stream=true` bytes land and
+announces the id on the feed at the first byte; on completion it patches the
+true RIFF sizes into the header, renames `.part` to `.wav`, and only then drops
+its in-memory registry entry -- so `/audio/<msg-id>.wav` has three states and
+one route: complete serves the file, in flight replays the `.part` so far and
+tails it to the true end, neither is a 404 and a silent message. Only the
+in-flight bytes carry the 0xFFFFFFFF streaming sizes; replay and late listeners
+never depend on them. `_delete_messages` unlinks **both** names, and a rename
+that finds no `.part` is a message deleted mid-flight: fail closed, no `.wav`
+lands, nothing to orphan. A `.part` found at startup is a broker that died
+mid-synthesis: swept, and the message stays silent. The worker never waits on
+a reader; a slow or departed tail cannot stall the queue. The client is
+unchanged: `ended`, `error` and 404 all still mean "done, next".
 
 ## 8. Slice shape
 

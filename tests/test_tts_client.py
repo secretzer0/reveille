@@ -118,12 +118,15 @@ def stub():
 def test_the_client_speaks_upstreams_tts_route(stub):
     """POST /tts with the resolved voice and knobs, wav out, and the bearer only
     when configured -- what a proxy in front of a remote server checks (§3)."""
-    assert daemon._tts_speak(stub, "sekrit", "architect", "hello", 5) == b"RIFFstub"
-    assert daemon._tts_speak(stub, "", "devops", "hi", 5) == b"RIFFstub"
+    assert b"".join(daemon._tts_speak(stub, "sekrit", "architect", "hello", 5)) == b"RIFFstub"
+    assert b"".join(daemon._tts_speak(stub, "", "devops", "hi", 5)) == b"RIFFstub"
     (p1, auth1, r1), (p2, auth2, r2) = _Stub.seen
     assert p1 == p2 == "/tts"
     assert auth1 == "Bearer sekrit" and auth2 is None
+    # stream=true: the bytes exist before the message is finished, and the
+    # worker writes them as they land (section 2 as amended).
     assert r1 == {"text": "hello", "output_format": "wav", "split_text": True,
+                  "stream": True,
                   "voice_mode": "clone", "reference_audio_filename": "architect.wav"}
     assert r2["voice_mode"] == "predefined" and r2["predefined_voice_id"] in BANK
     assert {"exaggeration", "cfg_weight"} <= set(r2)
