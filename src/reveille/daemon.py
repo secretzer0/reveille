@@ -196,6 +196,22 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.99 THE BANK, AND WHO SPEAKS WITH WHAT (DES-013 slices 2-3). (#26) the
+broker OWNS a voices directory (<db dir>/voices; compose mounts
+${SERVER_DATA}/voices into the synthesizer read-only as its reference dir):
+`GET /voices`, `PUT /voices/<id>/clip?name=` (raw PCM WAV bytes, 5-30 s,
+<= 10 MiB, replace in place = same id), `PATCH /voices/<id>` {name, persona};
+anyone adds, the uploader or an admin replaces/edits. The web Voices tab is the
+bank. (#28) a speaker is keyed by its CREDENTIAL (agent:<agents.id> for a
+bound token, user:<id> for a web user; unbound tokens keep the digest pick):
+`GET /rooms/<rid>/voices` lists who speaks with what here (defaults
+materialized: a free voice carried from another room, else the first free bank
+voice), `PUT/DELETE /rooms/<rid>/voices/<speaker>` {voice_id} -- the speaker's
+owner over the room's owner over the default, one voice per speaker per room,
+a held voice refused naming the holder, admin has no reach. Every message from
+a keyed speaker is now spoken in its assigned bank voice. Bus API for agents:
+unchanged tools; the routes above are HTTP.
+
 0.2.98 THE VOICE PLAYS AS IT IS SYNTHESIZED, AND THE BANK HAS A SCHEMA. Four
 PRs, one bump. (#20) TTS batching back ON at 4: the fork's decode is pad-aware
 (_t3_inference_padded), so a batched row stops at its own text instead of
