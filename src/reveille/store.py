@@ -2210,11 +2210,13 @@ def room_speakers(conn, room_id):
     # only token_id -- so the bound token's agent_id is the fallback, or the
     # eval box listed every speaker twice, once keyed and once "unbound".
     for m in conn.execute(
-            "SELECT m.name, COALESCE(m.agent_id, t.agent_id) AS agent_id, m.seen_ns "
+            "SELECT m.name, m.tag, COALESCE(m.agent_id, t.agent_id) AS agent_id, m.seen_ns "
             "FROM members m LEFT JOIN tokens t ON t.id=m.token_id "
             "WHERE m.room_id=? AND m.left_ns IS NULL", (room_id,)):
         if not _is_live(m["seen_ns"], now):
             continue
+        if (m["tag"] or "").startswith("web:"):
+            continue          # a human: keyed user:<id> by their own row, never "unbound"
         key = f"agent:{m['agent_id']}" if m["agent_id"] else None
         if key in by_key:
             by_key[key]["present"] = True

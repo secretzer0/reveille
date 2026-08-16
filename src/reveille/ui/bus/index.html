@@ -1261,7 +1261,7 @@ function vCtxUp(){
 // silence and looks like a broken synthesizer. The toggle was the gesture; if the
 // browser still refused, say so and turn it back off rather than pretending.
 function vRefused(){
- vBusy=false;voiceOn=false;paintVoice();
+ vBusy=false;voiceOn=false;paintVoice();vTell();
  toast('your browser blocked audio -- click voice again to allow it');
 }
 async function vPlay(id,url){
@@ -1339,11 +1339,17 @@ function paintVoice(){
  b.setAttribute('aria-pressed',voiceOn?'true':'false');
  b.textContent=voiceOn?'voice on':'voice off';
 }
+// THE LISTENER STATE LIVES ON THE SOCKET (DES-013 section 5): the broker
+// scripts and speaks a room's messages only while a human here has voice on,
+// so the toggle is told to the feed socket -- at every flip and once after
+// connect -- and a closed socket is voice off. Nobody keeps a GPU warm by
+// leaving a tab open with the toggle off.
+function vTell(){try{if(ws&&ws.readyState===1)ws.send(JSON.stringify({voice:voiceOn}));}catch(e){}}
 function toggleVoice(){
  voiceOn=!voiceOn;
  if(voiceOn){try{vCtxUp();}catch(e){}}      // the click is the gesture: resume here
  else{vStop();vQ.length=0;vBusy=false;}
- paintVoice();
+ paintVoice();vTell();
 }
 
 function clearFeed(){
@@ -1594,7 +1600,7 @@ function connect(){
  ws=new WebSocket(proto+'://'+location.host+'/feed'+qs());
  ws.onopen=()=>{$('status').classList.add('on');$('meDot').classList.add('on');
   $('agents').classList.remove('stale');$('agents').title='';loadPresence();
-  $('meDot').title='connected to the room feed';loadBacklog(false);checkVersion();};
+  $('meDot').title='connected to the room feed';loadBacklog(false);checkVersion();vTell();};
  // ONE discriminator (0.2.38). This used to dispatch on which fields happened to
  // be present -- m.ping, m.error, m.deleted, else assume-a-message -- which is four
  // ad-hoc tests and no room for a fifth, and many more room-level events are coming.
@@ -3260,7 +3266,10 @@ function vRecStart(){
   const node=ctx.createScriptProcessor(4096,1,1);
   const rec={ctx,stream,node,chunks:[],rate:ctx.sampleRate,t0:performance.now()};
   node.onaudioprocess=e=>{rec.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));};
-  src.connect(node);node.connect(ctx.destination);
+  // A ScriptProcessor only runs while connected to the destination; a zero-gain
+  // sink keeps the mic OFF the speakers while recording (architect 11124).
+  const sink=ctx.createGain();sink.gain.value=0;
+  src.connect(node);node.connect(sink);sink.connect(ctx.destination);
   vRec=rec;return rec;});
 }
 function vRecStop(){
@@ -3306,6 +3315,9 @@ async function openVoices(){
    'placeholder="persona: how this voice speaks (tone, cadence, attitude)"'+
    (v.editable?'':' readonly')+'>'+esc(v.persona||'')+'</textarea>'+
    (v.editable?'<button data-vsave="'+esc(v.id)+'">save persona</button>':'')+
+   // THE DRAFT BUTTON exists only when a writer is configured (d.llm) -- the
+   // one place writer output becomes text a human edits, behind a click.
+   (v.editable&&d.llm?'<button data-vdraft="'+esc(v.id)+'" title="ask the script writer for a first draft; you edit and save">draft persona</button>':'')+
   '</div>').join('')||'<div class="pDim">the bank is empty</div>';
  panel('voices',
   '<div class="pDim">A bank voice is a clip reveille keeps: PCM WAV, 5 to 30 seconds, one '+
@@ -3364,6 +3376,14 @@ async function openVoices(){
   const f=el.files[0];if(!f)return;
   try{await putVoiceClip(el.dataset.vclip,'',f);toast('clip replaced');openVoices();}
   catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-vdraft]'))b.onclick=async()=>{
+  const ta=document.querySelector('[data-vpersona="'+CSS.escape(b.dataset.vdraft)+'"]');
+  b.disabled=true;b.textContent='drafting\u2026';
+  try{const d=await api('/voices/'+encodeURIComponent(b.dataset.vdraft)+'/persona/draft',
+    {method:'POST',body:JSON.stringify({hint:ta.value.trim()})});
+   ta.value=d.persona;toast('draft ready -- edit, then save persona');}
+  catch(e){toast(e.message);}
+  b.disabled=false;b.textContent='draft persona';};
  for(const b of document.querySelectorAll('[data-vsave]'))b.onclick=async()=>{
   const ta=document.querySelector('[data-vpersona="'+CSS.escape(b.dataset.vsave)+'"]');
   try{await api('/voices/'+encodeURIComponent(b.dataset.vsave),

@@ -26,25 +26,38 @@ def _plant(conn):
     return mid
 
 
-@pytest.mark.parametrize("url,token,refused", [
-    ("", "", False),                                        # voices not configured
-    ("http://127.0.0.1:8100", "", False),                   # loopback, plaintext is fine
-    ("http://localhost:8100", "", False),
-    ("http://reveille-tts:8100", "", False),                # compose name: no dot, not routable
-    ("https://tts.example.com", "sekrit", False),           # off-host, done properly
-    ("http://tts.example.com", "sekrit", True),             # plaintext off this host
-    ("https://tts.example.com", "", True),                  # no token off this host
-    ("http://tts.example.com", "", True),
+@pytest.mark.parametrize("url,token,lan_ok,refused", [
+    ("", "", False, False),                                 # voices not configured
+    ("http://127.0.0.1:8100", "", False, False),            # loopback, plaintext is fine
+    ("http://localhost:8100", "", False, False),
+    ("http://reveille-tts:8100", "", False, False),         # compose name: no dot, not routable
+    ("https://tts.example.com", "sekrit", False, False),    # off-host, done properly
+    ("http://tts.example.com", "sekrit", False, True),      # plaintext off this host
+    ("https://tts.example.com", "", False, True),           # no token off this host
+    ("http://tts.example.com", "", False, True),
+    ("http://192.168.85.7:8004", "", False, True),          # LAN host, flag unset: refused, names the flag
+    ("http://192.168.85.7:8004", "", True, False),          # LAN host, REVEILLE_LAN_PLAINTEXT=1: allowed
+    ("http://10.0.0.5:8004", "", True, False),
+    ("http://tts.example.com", "", True, True),             # the flag never covers a public host
+    ("http://8.8.8.8:8004", "", True, True),
 ])
-def test_the_config_refusal_is_about_leaving_this_host(url, token, refused):
-    why = daemon.tts_config_refusal(url, token)
-    assert bool(why) is refused, f"{url!r} token={bool(token)} -> {why!r}"
+def test_the_config_refusal_is_about_leaving_this_host(url, token, lan_ok, refused):
+    """ONE rule for every upstream URL (ruling 11036): the writer's refusal is
+    the same function under its own name."""
+    why = daemon.tts_config_refusal(url, token, lan_ok)
+    assert bool(why) is refused, f"{url!r} token={bool(token)} lan_ok={lan_ok} -> {why!r}"
     if refused:
         # The refusal has to say what to do, not merely that it happened: a
         # deployment reading "voices are off" with no reason turns it back on by
         # guessing.
         assert "Voices are OFF" in why
         assert "https" in why or "TOKEN" in why
+        if url.startswith("http://192.168."):
+            assert "REVEILLE_LAN_PLAINTEXT=1" in why
+    w2 = daemon.script_config_refusal(url, token, lan_ok)
+    assert bool(w2) is refused
+    if refused:
+        assert "REVEILLE_SCRIPT_URL" in w2 and "Scripts are OFF" in w2
 
 
 def test_the_audio_dies_with_the_message_at_the_single_choke_point(tmp_path):
@@ -477,3 +490,40 @@ def test_the_route_asks_the_registry_before_the_file():
     fn = fn[:fn.index("\n@_guard")]
     assert fn.index("_tts_inflight.get(mid)") < fn.index("path.is_file()"), \
         "the registry must be consulted before the .wav is looked for"
+
+
+def test_nothing_is_made_that_nobody_would_hear(monkeypatch):
+    """DES-013 section 5 (operator): the listener gate. Voices on, but no human
+    in the room has voice on -> the send path enqueues NOTHING; one listener
+    with voice on -> it does. The state lives on the socket: _feed_voice beside
+    _feed, dropped with it."""
+    monkeypatch.setattr(daemon, "_tts_on", True)
+    monkeypatch.setattr(store, "voice_for", lambda *a: None)
+    q1, q2 = asyncio.Queue(), asyncio.Queue()
+    monkeypatch.setattr(daemon, "_feed", {q1: ("r1", "travis"), q2: ("r2", "vyzon")})
+    monkeypatch.setattr(daemon, "_feed_voice", {q1: False, q2: True})
+    while not daemon._tts_q.empty():
+        daemon._tts_q.get_nowait()
+    daemon._tts_enqueue(1, "r1", "alice", "s", "b")          # r1: watched, voice off
+    assert daemon._tts_q.empty()
+    daemon._tts_enqueue(2, "r2", "alice", "s", "b")          # r2: voice on
+    assert daemon._tts_q.get_nowait()[0] == 2
+    daemon._feed_voice[q2] = False
+    daemon._tts_enqueue(3, "r2", "alice", "s", "b")
+    assert daemon._tts_q.empty()
+    assert daemon._room_listening("r2") is False
+
+
+def test_the_browser_tells_the_socket_its_listener_state():
+    """The toggle, the refusal and the (re)connect all send {voice}; the reader
+    stores it per queue."""
+    ui = (pathlib.Path(daemon.__file__).parent / "ui" / "bus" / "index.html").read_text()
+    assert "ws.send(JSON.stringify({voice:voiceOn}))" in ui
+    tog = ui[ui.index("function toggleVoice(){"):]
+    tog = tog[:tog.index("\n}\n")]
+    assert "vTell();" in tog
+    assert "checkVersion();vTell();" in ui
+    src = pathlib.Path(daemon.__file__).read_text()
+    rd = src[src.index("async def _feed_reader("):]
+    rd = rd[:rd.index("\n\n\n")]
+    assert '_feed_voice[q] = bool(d["voice"])' in rd
