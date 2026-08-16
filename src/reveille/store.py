@@ -2103,6 +2103,17 @@ def _holder(conn, room_id, voice_id):
     return r["speaker"] if r else None
 
 
+def speaker_owner(conn, speaker):
+    """users.id that owns this speaker: an agent's owner, or the user themself.
+    None when the key names nothing (unassignable)."""
+    kind, _, sid = speaker.partition(":")
+    if kind == "user":
+        r = conn.execute("SELECT id FROM users WHERE id=?", (sid,)).fetchone()
+        return r["id"] if r else None
+    r = conn.execute("SELECT owner_id FROM agents WHERE id=?", (sid,)).fetchone()
+    return r["owner_id"] if r else None
+
+
 def _speaker_name(conn, speaker):
     kind, _, sid = speaker.partition(":")
     tbl = "agents" if kind == "agent" else "users"
