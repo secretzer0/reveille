@@ -1970,12 +1970,15 @@ def _sweep_abandoned_audio(files_dir):
             log.info("tts: removed abandoned %s", p.name)
 
 
-def _tts_enqueue(mid, room, speaker, subject, body, assigned=None):
+def _tts_enqueue(mid, room, speaker, subject, body, key=None):
     """Queue one message for synthesis, if voices are on. Never blocks the send
     path: the queue is unbounded and the worker is the only thing that waits.
-    `assigned` is the speaker's bank voice id in this room (DES-013 section 4),
-    None until the speaker key exists (slice 3) -- the digest pick meanwhile."""
+    `key` is speaker_key(p); the speaker's bank voice in this room is resolved
+    HERE, on the send path with the store connection, and materialized on first
+    utterance (DES-013 section 4) -- the worker thread never touches _conn.
+    None (unbound token, or no bank voice) means the digest pick."""
     if _tts_on:
+        assigned = store.voice_for(_conn, room, key) if key else None
         _tts_q.put((mid, room, speaker, f"{subject}. {body}" if subject else body, assigned))
 
 
@@ -2077,6 +2080,18 @@ class Principal:
     token_id: str = ""
     is_admin: bool = False
     rooms: dict = field(default_factory=dict)   # room_id -> room_name
+    agent_id: str = ""              # agents.id for a BOUND token; "" unbound / user
+
+
+def speaker_key(p):
+    """THE ONE derivation of who is speaking (DES-013 section 2): 'agent:<id>'
+    for a bound token, 'user:<id>' for a web user, None for an unbound token --
+    from the CREDENTIAL, never from agent_id_for(name), which is ambiguous the
+    moment two owners run one name. Every feature that needs the speaker key
+    calls this; there is no second derivation."""
+    if p.kind == "user":
+        return f"user:{p.user_id}" if p.user_id else None
+    return f"agent:{p.agent_id}" if p.agent_id else None
 
 
 def _bearer(request):
@@ -2133,7 +2148,8 @@ def _agent_principal(request):
             raise store.AuthError(f"token is bound to {bound!r}")
         name = bound
     return Principal(kind="agent", name=name, user_id=tok["owner_id"],
-                     token_id=tok["id"], rooms=store.rooms_for_token(_conn, tok["id"]))
+                     token_id=tok["id"], rooms=store.rooms_for_token(_conn, tok["id"]),
+                     agent_id=tok["agent_id"] or "")
 
 
 def _user_principal(request):
@@ -2494,7 +2510,7 @@ async def send(to: str, body: str, subject: str = "",
                 "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": attachments or [], "ts_ns": time.time_ns()})
-    _tts_enqueue(res["id"], rid, p.name, subject, body)
+    _tts_enqueue(res["id"], rid, p.name, subject, body, key=speaker_key(p))
     log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s woke=%s",
              p.name, to, p.rooms.get(rid), res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
@@ -3016,7 +3032,7 @@ async def send_http(request):
                 "subject": d.get("subject") or "", "body": body,
                 "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
-    _tts_enqueue(res["id"], rid, sender, d.get("subject") or "", body)
+    _tts_enqueue(res["id"], rid, sender, d.get("subject") or "", body, key=speaker_key(p))
     log.info("%s send(web) -> %s room=%s thread=%s id=%s delivered=%s woke=%s",
              sender, to, p.rooms.get(rid), res["thread_id"],
              res["id"], res["wake"], woke)
@@ -3179,6 +3195,84 @@ async def voice_clip_http(request):
     log.info("%s %s bank voice %s (%.1f s, %s bytes)", p.name,
              "replaced" if v else "added", vid, row["seconds"], len(data))
     return JSONResponse(row)
+
+
+def _speaker_editable(conn, p, room, speaker, current):
+    """Would assign_refusal let THIS actor set this speaker's voice? Pure rule,
+    asked with no holder -- collision is per voice, answered at PUT time."""
+    try:
+        store.assign_refusal(p.user_id, p.is_admin, room["owner_id"],
+                             store.speaker_owner(conn, speaker), current, None)
+        return True
+    except (store.AccessError, store.BusError):
+        return False
+
+
+def _room_in_reach(p, rid):
+    if rid not in p.rooms:
+        raise store.AccessError("not your room")
+    room = store.get_room(_conn, rid)
+    if room is None:
+        raise store.BusError("no such room")
+    return room
+
+
+@_guard
+async def room_voices_http(request):
+    """GET /rooms/{rid}/voices -> {speakers, voices, taken} (DES-013 section 4).
+    Anyone in reach of the room reads it. Present keyed members with no
+    assignment get their DEFAULT materialized here, so an owner sees the voice
+    before the first message; the caller's own row is always present so a
+    human can pick their own voice in a room they have not spoken in."""
+    p = _principal(request)
+    rid = request.path_params["rid"]
+    room = _room_in_reach(p, rid)
+    me = speaker_key(p)
+    for sp in store.room_speakers(_conn, rid):
+        if sp["speaker"] and sp["voice_id"] is None:
+            store.voice_for(_conn, rid, sp["speaker"])
+    if me:
+        store.voice_for(_conn, rid, me)
+    speakers = store.room_speakers(_conn, rid)
+    if me and not any(sp["speaker"] == me for sp in speakers):
+        speakers.append({"speaker": me, "name": p.name, "kind": p.kind, "present": True,
+                         "voice_id": None, "set_by": None})
+    for sp in speakers:
+        sp["editable"] = bool(sp["speaker"]) and _speaker_editable(
+            _conn, p, room, sp["speaker"], sp["set_by"])
+        sp["you"] = sp["speaker"] == me
+    taken = {sp["voice_id"]: sp["name"] for sp in speakers if sp["voice_id"]}
+    return JSONResponse({"speakers": speakers, "voices": store.voices(_conn), "taken": taken})
+
+
+@_guard
+async def room_voice_http(request):
+    """PUT {voice_id} / DELETE /rooms/{rid}/voices/{speaker}: the pure rule
+    decides (owner over room over default; collision refused naming the holder;
+    admin has no reach), the store writes."""
+    p = _principal(request)
+    rid, speaker = request.path_params["rid"], request.path_params["speaker"]
+    room = _room_in_reach(p, rid)
+    cur = _conn.execute("SELECT voice_id, set_by FROM voice_assignments WHERE room_id=? "
+                        "AND speaker=?", (rid, speaker)).fetchone()
+    current = cur["set_by"] if cur else None
+    owner = store.speaker_owner(_conn, speaker)
+    if request.method == "DELETE":
+        store.assign_refusal(p.user_id, p.is_admin, room["owner_id"], owner, current, None)
+        n = store.unassign_voice(_conn, rid, speaker)
+        log.info("%s unassigned voice of %s in %s (%s row)", p.name, speaker, rid, n)
+        return JSONResponse({"removed": n})
+    d = await request.json()
+    voice_id = (d.get("voice_id") or "").strip()
+    if not store.voice_get(_conn, voice_id):
+        raise store.BusError(f"no such bank voice: {voice_id}")
+    holder = store._holder(_conn, rid, voice_id)
+    holder_name = store._speaker_name(_conn, holder) if holder and holder != speaker else None
+    set_by = store.assign_refusal(p.user_id, p.is_admin, room["owner_id"], owner, current,
+                                  holder_name)
+    store.assign_voice(_conn, rid, speaker, voice_id, set_by=set_by)
+    log.info("%s assigned %s -> %s in %s (%s)", p.name, speaker, voice_id, rid, set_by)
+    return JSONResponse({"speaker": speaker, "voice_id": voice_id, "set_by": set_by})
 
 
 _files_dir = None  # set in main(): <db dir>/files -- attachments live next to the broker db
@@ -4093,6 +4187,8 @@ def build_app():
             Route("/voices", voices_http),
             Route("/voices/{vid}", voice_http, methods=["PATCH"]),
             Route("/voices/{vid}/clip", voice_clip_http, methods=["PUT"]),
+            Route("/rooms/{rid}/voices", room_voices_http),
+            Route("/rooms/{rid}/voices/{speaker}", room_voice_http, methods=["PUT", "DELETE"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
             Route("/audio/{mid}.wav", audio_http),

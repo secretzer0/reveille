@@ -87,7 +87,8 @@ def test_the_worker_hands_the_assignment_to_the_synthesizer(monkeypatch, tmp_pat
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
     monkeypatch.setattr(daemon, "_tts_on", True)
-    daemon._tts_enqueue(7, "r1", "alice", "s", "b", assigned="quark")
+    monkeypatch.setattr(store, "voice_for", lambda conn, room, key: "quark" if key == "agent:a1" else None)
+    daemon._tts_enqueue(7, "r1", "alice", "s", "b", key="agent:a1")
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert seen == {"speaker": "alice", "assigned": "quark"}

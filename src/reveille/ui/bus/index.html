@@ -506,6 +506,8 @@
   border-radius:6px;color:var(--fg);font:inherit;font-size:.78rem;padding:.3rem .45rem;resize:vertical}
  .pRow input{flex:1;min-width:7rem;background:var(--bg);border:1px solid var(--line);
   border-radius:6px;color:var(--fg);padding:.3rem .5rem;font:inherit;font-size:.78rem}
+ .pRow select{background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  color:var(--fg);padding:.25rem .4rem;font:inherit;font-size:.74rem}
  .pRow button{background:var(--chip);border:1px solid var(--line);border-radius:6px;
   color:var(--fg);padding:.25rem .55rem;font:inherit;font-size:.72rem;cursor:pointer}
  .pRow button:hover{border-color:var(--gold)}
@@ -3158,8 +3160,52 @@ async function putVoiceClip(id,name,file){
  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||e.error||r.status);}
  return r.json();
 }
+// WHO SPEAKS WITH WHAT (DES-013 section 4), per room the viewer can reach. One
+// renderer for every room: a select on the rows the pure rule lets THIS user
+// set (speaker's owner or room owner over a default/room row), the holder's
+// name on voices already taken here, plain text elsewhere. The route
+// materializes defaults, so a room shows its voices before anyone speaks.
+function speakerRows(rid,d){
+ const taken=d.taken||{};
+ return (d.speakers||[]).map(sp=>{
+  const key=sp.speaker||'';
+  const who='<b>'+esc(sp.name)+(sp.you?' <span class="pDim">(you)</span>':'')+
+   ' <span class="pDim">'+esc(sp.kind)+(sp.present?' \u00b7 present':'')+'</span></b>';
+  if(!key)return '<div class="pRow">'+who+'<span class="pDim">unbound token -- not assignable, '+
+   'speaks with the digest pick</span></div>';
+  const lab=sp.voice_id?esc(sp.voice_id)+' <span class="pDim">('+esc(sp.set_by||'')+')</span>'
+   :'<span class="pDim">no bank voice (digest pick)</span>';
+  if(!sp.editable)return '<div class="pRow">'+who+'<span>'+lab+'</span></div>';
+  const opts=['<option value=""'+(sp.voice_id?'':' selected')+'>-- none (digest pick) --</option>']
+   .concat(d.voices.map(v=>{
+    const held=taken[v.id]&&v.id!==sp.voice_id;
+    return '<option value="'+esc(v.id)+'"'+(v.id===sp.voice_id?' selected':'')+
+     (held?' disabled':'')+'>'+esc(v.name)+(held?' -- held by '+esc(taken[v.id]):'')+'</option>';}));
+  return '<div class="pRow">'+who+'<select data-vsel="'+esc(rid)+'" data-vspk="'+esc(key)+'">'+
+   opts.join('')+'</select>'+(sp.set_by?'<span class="pDim">'+esc(sp.set_by)+'</span>':'')+'</div>';
+ }).join('')||'<div class="pDim">nobody keyed here yet</div>';
+}
+function wireSpeakerSelects(refresh){
+ for(const el of document.querySelectorAll('[data-vsel]'))el.onchange=async()=>{
+  const rid=el.dataset.vsel, spk=el.dataset.vspk, v=el.value;
+  const url='/rooms/'+encodeURIComponent(rid)+'/voices/'+encodeURIComponent(spk);
+  try{
+   if(v)await api(url,{method:'PUT',body:JSON.stringify({voice_id:v})});
+   else await api(url,{method:'DELETE'});
+   refresh();
+  }catch(e){toast(e.message);refresh();}};
+}
 async function openVoices(){
+ me=await api('/me');
  const d=await api('/voices');
+ const myRooms=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
+ const per=[];
+ for(const r of myRooms){
+  try{const rv=await api('/rooms/'+encodeURIComponent(r.id)+'/voices');
+   per.push('<div class="pSec">'+esc(r.owner&&r.owner!==myName?r.owner+' \u2192 '+r.name:r.name)+
+    '</div>'+speakerRows(r.id,rv));}
+  catch(e){per.push('<div class="pSec">'+esc(r.name)+'</div><div class="pDim err">'+esc(e.message)+'</div>');}
+ }
  const rows=d.voices.map(v=>
   '<div class="pRow"><b>'+esc(v.name)+' <span class="pDim">'+esc(v.id)+' \u00b7 '+
    (Math.round(v.seconds*10)/10)+' s</span></b>'+
@@ -3182,7 +3228,13 @@ async function openVoices(){
   '<input id="newVoiceName" placeholder="display name (optional)">'+
   '<label class="chip">choose wav <input id="newVoiceFile" type="file" accept="audio/wav,.wav" hidden></label>'+
   '<span class="pDim" id="newVoiceFileName"></span>'+
-  '<button id="addVoice">add</button></div>');
+  '<button id="addVoice">add</button></div>'+
+  '<div class="pSec">WHO SPEAKS WITH WHAT</div>'+
+  '<div class="pDim">One bank voice per speaker per room, and no two speakers share one in a '+
+  'room. A speaker\'s owner may set it anywhere; a room owner may set it in their room until '+
+  'the speaker\'s owner does. A voice held by someone else here is greyed with the holder\'s '+
+  'name.</div>'+per.join(''));
+ wireSpeakerSelects(openVoices);
  $('newVoiceFile').onchange=()=>{const f=$('newVoiceFile').files[0];
   $('newVoiceFileName').textContent=f?f.name:'';};
  $('addVoice').onclick=async()=>{
