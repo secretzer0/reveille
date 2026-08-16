@@ -24,6 +24,20 @@ PINS=(Makefile scripts/reveille_launch.py tests/test_reveille_launch.py)
 # grep consumes the stream; stdout goes to /dev/null instead.
 changed() { git diff --name-only "$base...$head" -- "$@" | grep . >/dev/null; }
 
+# THE TTS IMAGE, same rule, one pin: Dockerfile.tts is its only input and
+# Makefile TTS_IMAGE its only pin. Learned the hard way -- its first CI build
+# failed on an input change nobody had tagged (run 31915896545), and this
+# check said "no agent-image inputs changed" because it only knew one image.
+if changed docker/Dockerfile.tts; then
+  tts_at() { git show "$1:Makefile" 2>/dev/null | grep -m1 '^TTS_IMAGE ?=' | cut -d= -f2- | tr -d ' '; }
+  if [ "$(tts_at "$base")" = "$(tts_at "$head")" ]; then
+    echo "image-pin-check: RED -- docker/Dockerfile.tts changed but TTS_IMAGE" >&2
+    echo "  did not move ($(tts_at "$head") at both ends). Bump TTS_IMAGE." >&2
+    exit 1
+  fi
+  echo "image-pin-check: Dockerfile.tts changed and TTS_IMAGE moved to $(tts_at "$head")"
+fi
+
 if ! changed "${INPUTS[@]}"; then
   echo "image-pin-check: no agent-image build inputs changed"
   exit 0

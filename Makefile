@@ -111,7 +111,7 @@ SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut
 # DES-009: pinned by the model stack in docker/Dockerfile.tts, not by the repo
 # version -- the broker's identity does not depend on it and it must not be
 # rebuilt on every bump.
-TTS_IMAGE ?= reveille-tts:0.1.0
+TTS_IMAGE ?= reveille-tts:0.1.1
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
 # agent reaches the bus at http://reveille-server:8765, and container names only
