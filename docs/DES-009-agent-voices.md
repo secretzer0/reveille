@@ -126,6 +126,18 @@ resolves `voices/<name>.wav` → clone and otherwise bank+knob deterministically
 plaintext remote URL; (4) a down service still leaves messages arriving
 silent; (5) CI builds the image `--no-cache` from the pinned SHA.
 
+**Target device (operator, via devops 11003): an RTX 3060 12 GB passed
+through to the reveille VM.** Build from their `Dockerfile.cu128`; the
+compose service carries the GPU as a device reservation
+(`deploy.resources.reservations.devices`), which DES-010's deployer inherits
+as configuration, not code. Host prerequisites (driver, nvidia-container-
+toolkit) are devops's and are named in the ship message. Our old image had no
+CUDA path at all — 738128e's "CPU fallback that says nothing" existed because
+the GPU path was never real — which is one more reason (a) is the only
+option that meets the target. The canary of 10913.6e stays a CPU box; a GPU
+host is a poor canary. "device reported" above is what proves the 3060 is in
+use: `/health` says cuda, or the log says otherwise.
+
 The "one function, no plugin layer" sentence in §4 is why this is a day's
 slice and not a redesign — it just turned out the function that changes is
 the client, not the engine.
