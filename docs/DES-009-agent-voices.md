@@ -88,6 +88,66 @@ If the cap is ever lifted so whole messages are read, switch to F5-TTS. The
 engine call is one function so that this is a day's work; that is the entire
 reason it is one function, and there is no plugin layer.
 
+### 4.1 RULED (2026-08-16, msg 11004): the engine stays Chatterbox; the SERVER is someone else's
+
+Our own `tts_service.py` + `Dockerfile.tts` failed clean twice on the first
+cold CI build (devops 11002): a floating torchaudio, a stale chatterbox pin,
+numpy downgraded mid-install by a transitive dep. Every prior host had a warm
+cache, so nobody had ever built it. **We own zero torch.** The synthesizer is
+`devnen/Chatterbox-TTS-Server` (MIT, OpenAI-compatible `/v1/audio/speech`,
+predefined voices + cloning, maintained CPU/CUDA/ROCm Dockerfiles), built
+from THEIR Dockerfile at a SHA WE PIN — their resolution, our provenance. The
+pin joins the closed image-pin list (ruling 10877) so a bump without a moved
+pin is red.
+
+What is unchanged, because it was never about the server:
+- **§3 boundary.** Their server is unauthenticated; that is fine exactly where
+  ours already was — one caller, no host port, compose network. The
+  off-network rule stands and gets sharper: a non-loopback, non-compose URL
+  requires https AND an authenticating proxy in front (the bearer the broker
+  already sends is what the proxy checks); the broker's start-time refusal is
+  the same refusal. Voices off beats a transcript in flight.
+- **§5 the directory is the interface.** `voices/` is bind-mounted as their
+  REFERENCE dir: `voices/<name>.wav` is that name's clip, cloned. **The bank
+  is upstream's predefined voice set** (28 shipped in the image; a fresh host
+  speaks with 28 distinct voices before anyone drops a wav) — `voices/bank/`
+  is gone, one less thing we own. The digest-to-bank index and the knob
+  offset live in the broker's `tts_voice()` (pure, sha256 — never Python's
+  salted `hash()`), and the bank is SORTED before indexing so every host,
+  restart and upstream bump agrees on who sounds like what. No new file, no
+  column.
+- **§7 silent-on-failure**, §6 the cap, nobody-hears-themselves, humans are
+  speakers: broker and browser rules, untouched.
+- **Device reported, never inferred**: the broker logs what their
+  `/api/model-info` reports (device, loaded) at worker start, or logs
+  `device: unreported` — a silence that names itself. They have no `/health`;
+  the compose healthcheck asserts `loaded` on the same route, with a
+  `start_period` long enough for the model download.
+
+What is deleted: `src/reveille/tts_service.py`, `Dockerfile.tts`, and their
+tests; the caller is tested against a stub HTTP server. Gates: (1) the
+compose file still publishes no port for the synthesizer; (2) `tts_voice`
+resolves `voices/<name>.wav` → clone and otherwise bank+knob deterministically
+(same name, same voice, across restarts AND with the bank fed in two orders); (3) the §3 refusal still fires on a
+plaintext remote URL; (4) a down service still leaves messages arriving
+silent; (5) CI builds the image `--no-cache` from the pinned SHA.
+
+**Target device (operator, via devops 11003): an RTX 3060 12 GB passed
+through to the reveille VM.** Build from their `Dockerfile.cu128`; the
+compose service carries the GPU as a device reservation
+(`deploy.resources.reservations.devices`), which DES-010's deployer inherits
+as configuration, not code. Host prerequisites (driver, nvidia-container-
+toolkit) are devops's and are named in the ship message. Our old image had no
+CUDA path at all — 738128e's "CPU fallback that says nothing" existed because
+the GPU path was never real — which is one more reason (a) is the only
+option that meets the target. The canary of 10913.6e stays a CPU box; a GPU
+host is a poor canary. "device reported" above is what proves the 3060 is in
+use: `/api/model-info` says cuda, or the log says otherwise.
+
+The "one function, no plugin layer" sentence in §4 is why this is a day's
+slice and not a redesign — it just turned out the function that changes is
+the client, not the engine.
+
 ## 5. RULED: a voice is a clip plus a knob, resolved by name
 
 ```
