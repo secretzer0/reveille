@@ -14,8 +14,34 @@
 # remove the old container first if a fresh database is genuinely intended.
 set -u
 
-data="${1:?usage: deploy-preflight <SERVER_DATA> [broker-container]}"
+data="${1:?usage: deploy-preflight <SERVER_DATA> [broker-container] [proxy-container] [proxy-site]}"
 broker="${2:-reveille-server}"
+proxy="${3:-reveille-proxy}"
+site="${4:-}"
+
+# THE FRONT DOOR FOLLOWS THE SAME RULE. PROXY_SITE defaults to ":80" and only a
+# hostname turns on HTTPS, so a `make up` that forgets it recreates the proxy
+# on plain HTTP and the public URL stops answering TLS -- which happened on the
+# 0.2.97 deploy: nine minutes with every remote agent's bus unreachable, and
+# nothing said why until someone read the caddy log. If the proxy being
+# replaced serves a hostname and this deploy would demote it to a bare port,
+# stop and name the command. A first boot, or a proxy already on a bare port,
+# proceeds.
+serving="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$proxy" 2>/dev/null \
+           | sed -n 's/^PROXY_SITE=//p' || true)"
+case "$serving" in
+  ""|:*) ;;
+  *)
+    case "$site" in
+      ""|:*)
+        echo "REFUSING to deploy: the running $proxy serves $serving over HTTPS, but" >&2
+        echo "this deploy would recreate it on '${site:-:80}' -- plain HTTP, no TLS," >&2
+        echo "and the public URL stops answering." >&2
+        echo "  intended upgrade:  make up PROXY_SITE=$serving" >&2
+        echo "  intended demotion: docker rm -f $proxy, then re-run" >&2
+        exit 1 ;;
+    esac ;;
+esac
 
 current="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' \
            "$broker" 2>/dev/null || true)"

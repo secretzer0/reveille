@@ -60,3 +60,45 @@ def test_it_passes_once_the_names_are_claimed(tmp_path):
 def test_a_database_with_no_history_is_not_a_refusal(tmp_path):
     r = run(data_root(tmp_path))
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def _proxy(tmp_path, serving):
+    """A stand-in for `docker inspect` on the PATH: the preflight only reads the
+    running proxy's PROXY_SITE, so a script that prints that env is the whole
+    container for this purpose. `docker` itself may not exist where the suite
+    runs, which is the point of faking it rather than the point of skipping."""
+    b = tmp_path / "bin"
+    b.mkdir(exist_ok=True)
+    fake = b / "docker"
+    fake.write_text("#!/usr/bin/env bash\n"
+                    "# only the proxy exists; every other container is unknown\n"
+                    "case \"$1 $2 ${@: -1}\" in\n"
+                    f"  'inspect -f reveille-proxy') printf 'PROXY_SITE={serving}\\n' ;;\n"
+                    "  *) exit 1 ;;\n"
+                    "esac\n")
+    fake.chmod(0o755)
+    return str(b)
+
+
+def _run_site(tmp_path, serving, site):
+    root = tmp_path / "data"
+    root.mkdir(exist_ok=True)
+    env = dict(os.environ, PATH=_proxy(tmp_path, serving) + os.pathsep + os.environ["PATH"])
+    return subprocess.run(["bash", SCRIPT, str(root), "no-such-broker", "reveille-proxy", site],
+                          capture_output=True, text=True, env=env, timeout=180)
+
+
+def test_it_refuses_to_demote_a_hostname_proxy_to_a_bare_port(tmp_path):
+    """The 0.2.97 deploy: PROXY_SITE forgotten, caddy recreated on :80, public
+    URL dark for nine minutes. Same shape as the SERVER_DATA guard: refuse and
+    name the command, before anything stops."""
+    r = _run_site(tmp_path, "reveille.mythos.org", ":80")
+    assert r.returncode != 0, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert "reveille.mythos.org" in out and "PROXY_SITE=reveille.mythos.org" in out
+
+
+def test_the_same_hostname_and_a_bare_port_over_a_bare_port_both_pass(tmp_path):
+    assert _run_site(tmp_path, "reveille.mythos.org", "reveille.mythos.org").returncode == 0
+    assert _run_site(tmp_path, ":80", ":80").returncode == 0
+    assert _run_site(tmp_path, ":80", "reveille.mythos.org").returncode == 0
