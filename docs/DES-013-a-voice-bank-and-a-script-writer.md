@@ -215,6 +215,28 @@ fine at 300 rows; said in a comment, and moved on.
   the Voices tab is THE ONE PLACE — `openRooms()` gains no rows; one renderer, one
   place. `toggleVoice` sends `{voice}` on the socket (slice 5).
 
+### 7.2 Operator directive 2026-08-17: every message can be spoken later, on the click; and stop
+
+The listener gate (section 5) still decides what is made AUTOMATICALLY: a live
+send is scripted and spoken only while a human in the room has voice on. The
+voice toggle is exactly that switch -- automatic make-and-play of arrivals.
+The play icon is the MANUAL path, on EVERY message: filled when its audio
+exists (click = play), hollow when it does not (click = `POST /audio/<id>`,
+which queues that message through the same enqueue a live send takes -- the
+script writer first when it is on and the voice has a persona, then the
+synthesizer -- with the room gate passed, because the click IS the listener;
+the `script` / `audio` frames announce the artifacts as for a live send, and
+the tab that asked plays the audio on its frame while other tabs queue it as
+an arrival). Auth is the message's room, `?room=` ignored, as for GET; a
+second ask while queued or in flight is answered ("queued" / "in flight"),
+never queued twice; "ready" when the file exists; 503 by name when voices are
+off. The speaker key of a stored message comes from the row:
+`agent:<sender_agent_id>`, else `user:<id>` by the (unique) username, else the
+digest pick -- so backlog is not scripted retroactively by itself; it is on
+ASK. Section 10's "no script for messages nobody heard" is amended to "nobody
+heard AND nobody asked". A stop button in the header shows while something is
+sounding: stop aborts that utterance and hands the queue on.
+
 ### 7.1 RULED 11211: the wire is WebM/Opus and the player is MediaSource (measured 2026-08-17)
 
 Operator directive: Opus to the browser now, not when bandwidth hurts. Ruling
@@ -299,8 +321,9 @@ Slices 1–4 need no model. The docs PR (this file) lands before slice 1 merges.
 ## 10. Not in this design, deliberately
 
 - **No engine or model loaded by the broker.** It calls; it never loads (G4).
-- **No script for messages nobody heard.** Backlog is not scripted retroactively; a
-  late joiner is not blasted (DES-009 §2, amended above).
+- **No script for messages nobody heard and nobody asked for.** Backlog is not
+  scripted retroactively by itself; a late joiner is not blasted (DES-009 §2,
+  amended above). Asked for -- the hollow play icon, section 7.2 -- it is made then.
 - **No script in search, memory or recall.** Derived text is not the record.
 - **No delete of a bank voice in v1.** Replace covers a bad clip; delete is a later
   admin slice with "refused while assigned".

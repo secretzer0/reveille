@@ -69,6 +69,74 @@ def test_the_script_route_mirrors_audio_http(tmp_path, monkeypatch):
     assert _call(_req("x"))[0] == 404 and _call(_req(mid + 9))[0] == 404
 
 
+def _ask(mid, query=b""):
+    req = Request({"type": "http", "method": "POST", "path": f"/audio/{mid}", "headers": [],
+                   "query_string": query, "path_params": {"mid": str(mid)}})
+    r = asyncio.run(daemon.audio_make_http(req))
+    return r.status_code, json.loads(r.body)
+
+
+def test_audio_is_made_on_demand_for_a_message_that_has_none(tmp_path, monkeypatch):
+    """Operator directive 2026-08-17: every message can be spoken later, on
+    the click -- POST /audio/<id> queues it through the same enqueue a live send
+    takes (script first when the writer is on), the ROOM GATE PASSED because the
+    click is the listener; auth is the message's room; a second ask while it is
+    queued or in flight is answered, not queued twice; existing audio is 'ready';
+    voices off is a 503 by name."""
+    c, r1, r2, mid = _seed(tmp_path, monkeypatch)
+    who = {"p": _P({r1: "bridge"})}
+    who["p"].name = "travis"
+    monkeypatch.setattr(daemon, "_principal", lambda request: who["p"])
+    monkeypatch.setattr(daemon, "_files_dir", tmp_path)
+    monkeypatch.setattr(daemon, "_room_listening", lambda room: False)   # nobody has voice on
+    daemon._tts_requested.clear()
+    queued = []
+    monkeypatch.setattr(daemon, "_tts_enqueue",
+                        lambda *a, **k: queued.append((a, k)))
+    monkeypatch.setattr(daemon, "_tts_on", False)
+    assert _ask(mid) == (503, {"error": "voices are off on this broker"})
+    monkeypatch.setattr(daemon, "_tts_on", True)
+    assert _ask("x")[0] == 404 and _ask(mid + 9)[0] == 404
+    st, out = _ask(mid, f"room={r2}".encode())
+    assert (st, out) == (202, {"state": "queued"}), "?room= is ignored; the message's room rules"
+    (args, kw), = queued
+    assert args[:2] == (mid, r1) and args[2] == "picard" and args[4] == "terse"
+    assert kw["asked"] is True, "the click IS the listener: the room gate is passed"
+    assert kw["key"] is None, "an unbound sender (no sender_agent_id, no such user) = digest pick"
+    assert _ask(mid) == (200, {"state": "queued"}), "a second ask is answered, not queued twice"
+    assert len(queued) == 1
+    # In flight (the registry) and ready (the file) answer without queueing.
+    daemon._tts_requested.discard(mid)
+    daemon._tts_inflight[mid] = object()
+    assert _ask(mid) == (200, {"state": "in flight"})
+    del daemon._tts_inflight[mid]
+    (tmp_path / f"tts-{mid}.webm").write_bytes(b"\x1a\x45\xdf\xa3")
+    assert _ask(mid) == (200, {"state": "ready"})
+    assert len(queued) == 1
+    # A stranger to the room: 404, nothing queued.
+    who["p"] = _P({r2: "ten-forward"})
+    (tmp_path / f"tts-{mid}.webm").unlink()
+    assert _ask(mid)[0] == 404 and len(queued) == 1
+
+
+def test_the_speaker_key_of_a_stored_message_comes_from_the_row(tmp_path, monkeypatch):
+    """No credential is on the wire for backlog: agent:<sender_agent_id> when the
+    send recorded one; user:<id> for a web user by its unique name; None otherwise."""
+    c, r1, r2, mid = _seed(tmp_path, monkeypatch)
+    row = c.execute("SELECT room, sender, subject, body, sender_agent_id FROM messages "
+                    "WHERE id=?", (mid,)).fetchone()
+    assert daemon._speaker_key_of(row) is None, "picard sent with no identity: digest pick"
+    m2 = store.send(c, "travis", "*", "as a human", room=r1)
+    row = c.execute("SELECT room, sender, subject, body, sender_agent_id FROM messages "
+                    "WHERE id=?", (m2["id"],)).fetchone()
+    uid = c.execute("SELECT id FROM users WHERE name='travis'").fetchone()["id"]
+    assert daemon._speaker_key_of(row) == f"user:{uid}"
+    c.execute("UPDATE messages SET sender_agent_id='agent-7' WHERE id=?", (mid,))
+    row = c.execute("SELECT room, sender, subject, body, sender_agent_id FROM messages "
+                    "WHERE id=?", (mid,)).fetchone()
+    assert daemon._speaker_key_of(row) == "agent:agent-7"
+
+
 def test_every_listing_carries_the_artifact_flags(tmp_path, monkeypatch):
     c, r1, r2, mid = _seed(tmp_path, monkeypatch)
     rows = store.tail(c, rooms=[r1])
@@ -108,9 +176,39 @@ def test_the_page_paints_icons_from_the_flags_and_the_frames():
     assert "body.innerHTML=esc(m.body)" in tog and "mdToHtml(m.script)" in tog
     assert "'/script/'+encodeURIComponent(m.id)" in tog
     assert "generated, in character" in tog
-    # Row click ignores the icons (they own their click), like .mid does.
-    assert "if(e.target.closest('.play')){playOne(m.id);return;}" in UI
+    # Row click ignores the icons (they own their click), like .mid does. THE
+    # ICON IS ON EVERY MESSAGE (operator directive 2026-08-17): filled = play,
+    # hollow = generate then play; the voice toggle only rules the AUTOMATIC path.
+    assert "if(e.target.closest('.play')){if(m.has_audio)playOne(m.id);else genOne(m);return;}" in UI
     assert "if(e.target.closest('.scr')){toggleScript(row,m);return;}" in UI
+    assert "(m.has_audio?'&#9654;':'&#9655;')" in UI, "filled when made, hollow when not"
+
+
+def test_generate_on_demand_posts_once_and_plays_on_the_audio_frame():
+    """Operator directive 2026-08-17: a message with no audio is generated on
+    the click (POST /audio/<id>, the same path family, ONE url builder) and the
+    `audio` frame that follows PLAYS it for the one who asked -- and only for
+    them (others' tabs queue it as they would any arrival). A second click while
+    it is being made does nothing. The stop button shows only while something
+    sounds, and stopping hands the queue on."""
+    gen = UI[UI.index("async function genOne(m){"):]
+    gen = gen[:gen.index("\n}\n")]
+    assert "if(m.gen_pending)return;" in gen, "one ask per message while it is being made"
+    assert "api(vBase(m.id)+qs(),{method:'POST'})" in gen
+    assert "vAsked.add(m.id)" in gen and "vCtxUp()" in gen, "the click is the gesture"
+    assert "if(r.state==='ready')" in gen and "playOne(m.id)" in gen, "already made: just play"
+    case = UI[UI.index("case 'audio':"):]
+    case = case[:case.index("\n")]
+    assert "if(vAsked.delete(m.id))playOne(m.id);else vPush(mm);" in case, \
+        "the asker plays it now; everyone else queues it as an arrival"
+    assert "const vBase=id=>'/audio/'+encodeURIComponent(id);" in UI and \
+        "const vUrl=id=>vBase(id)+'.webm'+qs();" in UI
+    # The stop button (operator: a long message must be escapable).
+    assert 'id="vstop" hidden' in UI
+    assert "$('vstop').onclick=()=>{vStop();vDone();};" in UI
+    assert "function paintStop(){const b=$('vstop');if(b)b.hidden=!vCtl;}" in UI
+    assert "function vDone(){vCtl=null;vBusy=false;paintStop();vPump();}" in UI
+    assert " const c=vCtl;vCtl=null;paintStop();" in UI
 
 
 def test_a_continuation_row_carries_its_icons_too():

@@ -204,6 +204,14 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.114 EVERY MESSAGE CAN BE SPOKEN LATER, ON THE CLICK; AND A STOP BUTTON.
+The play icon is on every message: filled = play the audio it has, hollow =
+POST /audio/<id> makes it (script first when the writer is on, then audio,
+through the same queue a live send takes; the click is the listener) and the
+tab that asked plays it when the audio frame lands. The voice toggle now
+only decides whether arrivals are made and played automatically. A stop
+button shows in the header while something sounds and hands the queue on.
+Bus tools unchanged.
 0.2.113 COMPOSE PASSES THE WRITER AND THE LAN FLAG THROUGH. docker/compose.yml
 forwards REVEILLE_SCRIPT_URL / _MODEL / _TIMEOUT / _TOKEN and
 REVEILLE_LAN_PLAINTEXT to the broker like it already forwarded the TTS
@@ -1883,6 +1891,11 @@ _tts_token = ""
 # has been renamed (or abandoned). Never the truth about the bytes -- the file
 # is. Dropped AFTER the rename, so a GET never sees neither.
 _tts_inflight = {}
+# ASKED FOR, NOT YET STARTED: message ids a listener clicked "generate" on
+# (operator directive 2026-08-17) that sit in a queue ahead of the worker. A
+# second click while queued is answered, not queued twice; the worker drops the
+# id the moment it takes the item, and _tts_inflight carries it from there.
+_tts_requested = set()
 
 # ---- the script writer (DES-013 section 5): a second worker, the same shape ----
 # as voices. It CALLS a model behind an opt-in URL (DES-001 G4 as amended: the
@@ -2499,6 +2512,7 @@ def _tts_worker(url, token, timeout):
         if item is None:
             return
         mid, room, speaker, text, assigned = item
+        _tts_requested.discard(mid)
         if first:
             # DEVICE REPORTED, NEVER INFERRED (section 4.1): a container with no
             # GPU reservation synthesizes on the CPU while looking perfectly
@@ -2566,17 +2580,21 @@ def _sweep_abandoned_audio(files_dir):
             log.info("tts: removed abandoned %s", p.name)
 
 
-def _tts_enqueue(mid, room, speaker, subject, body, key=None):
+def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
     """Queue one message for synthesis, if voices are on. Never blocks the send
     path: the queue is unbounded and the worker is the only thing that waits.
     `key` is speaker_key(p); the speaker's bank voice in this room is resolved
     HERE, on the send path with the store connection, and materialized on first
     utterance (DES-013 section 4) -- the worker thread never touches _conn.
-    None (unbound token, or no bank voice) means the digest pick."""
+    None (unbound token, or no bank voice) means the digest pick.
+    `asked`: a listener clicked generate on a message that has no audio (the
+    on-demand route) -- the click IS the listener, so the room gate is passed."""
     # NOTHING IS MADE THAT NOBODY WOULD HEAR (DES-013 section 5, operator's
     # choice): no human with voice on in this room -> no synthesis, no script.
-    # DES-009 section 2's "replayable" is amended: what was heard live is kept.
-    if _tts_on and _room_listening(room):
+    # DES-009 section 2's "replayable" is amended: what was heard live is kept
+    # -- and (operator directive 2026-08-17) what a listener later ASKS for is
+    # made then, through the same queue: script if the writer is on, then audio.
+    if _tts_on and (asked or _room_listening(room)):
         vid = store.voice_for(_conn, room, key) if key else None
         v = store.voice_get(_conn, vid) if vid else None
         assigned = clip_name(v) if v else None
@@ -4279,6 +4297,52 @@ async def script_http(request):
                          "model": sc["model"], "ts_ns": sc["ts_ns"]})
 
 
+def _speaker_key_of(row):
+    """The speaker key of a STORED message (for on-demand synthesis, where no
+    credential is on the wire): agent:<sender_agent_id> when the send recorded
+    one; user:<id> for a web user, resolved by name -- usernames are unique, so
+    this is not the ambiguous agent-name lookup DES-013 section 2 forbids; None
+    (an unbound token's message) means the digest pick, as at send time."""
+    if row["sender_agent_id"]:
+        return f"agent:{row['sender_agent_id']}"
+    u = _conn.execute("SELECT id FROM users WHERE name=?", (row["sender"],)).fetchone()
+    return f"user:{u['id']}" if u else None
+
+
+@_guard
+async def audio_make_http(request):
+    """POST /audio/<msg-id> -> make the spoken form of a message that has none
+    (operator directive 2026-08-17): the same queue as a live send -- the
+    script writer first when it is on and the voice has a persona, then the
+    synthesizer -- so backlog gets the artifacts a live listener would have got,
+    and the `script` / `audio` frames announce them the same way. Auth = the
+    message's room, ?room= ignored (as GET). 200 {state} when it already exists
+    or is in flight or queued (a second click is answered, not queued twice);
+    202 {state: queued} when this call queued it; 503 when voices are off."""
+    p = _principal(request)
+    raw = request.path_params["mid"]
+    if not raw.isdigit():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    mid = int(raw)
+    row = _conn.execute("SELECT room, sender, subject, body, sender_agent_id "
+                        "FROM messages WHERE id=?", (mid,)).fetchone()
+    if row is None or row["room"] not in p.rooms:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not _tts_on:
+        return JSONResponse({"error": "voices are off on this broker"}, status_code=503)
+    if (_files_dir / f"tts-{mid}.webm").is_file():
+        return JSONResponse({"state": "ready"})
+    if mid in _tts_inflight:
+        return JSONResponse({"state": "in flight"})
+    if mid in _tts_requested:
+        return JSONResponse({"state": "queued"})
+    _tts_requested.add(mid)
+    _tts_enqueue(mid, row["room"], row["sender"], row["subject"], row["body"],
+                 key=_speaker_key_of(row), asked=True)
+    log.info("%s asks for audio of %s", p.name, mid)
+    return JSONResponse({"state": "queued"}, status_code=202)
+
+
 @_guard
 async def audio_http(request):
     """GET /audio/<msg-id>.webm -> the spoken form of that message (WebM/Opus,
@@ -5083,6 +5147,7 @@ def build_app():
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
             Route("/audio/{mid}.webm", audio_http),
+            Route("/audio/{mid}", audio_make_http, methods=["POST"]),
             Route("/script/{mid}", script_http),
             WebSocketRoute("/wake", wake_ws),
             WebSocketRoute("/feed", feed_ws),

@@ -367,8 +367,11 @@
  /* DES-013 section 7: the artifacts beside a message. Hover-revealed like .mid;
     .scripted marks a row whose body is showing the character script. */
  .arts .play,.arts .scr{color:var(--faint);font-size:.74rem;opacity:0;cursor:pointer;padding:0 .2rem}
- .row:hover .play,.row:hover .scr,.row.scripted .scr{opacity:1}
- .arts .play:hover,.arts .scr:hover{color:var(--gold)}
+ .row:hover .play,.row:hover .scr,.row.scripted .scr,.arts .play.busy{opacity:1}
+ .arts .play:hover,.arts .scr:hover,.arts .play.busy{color:var(--gold)}
+ #vstop{background:none;border:1px solid var(--gold);color:var(--gold);border-radius:7px;
+  padding:.34rem .7rem;cursor:pointer;font:inherit;font-size:.82rem}
+ #vstop[hidden]{display:none}
  .row.cont .arts{float:right;margin-left:.5rem;line-height:1.2}
  .row.scripted .scr{color:var(--gold)}
  .row.scripted .body{border-left:2px solid var(--gold);padding-left:.5rem}
@@ -724,6 +727,10 @@
        the label alone changes colour and not meaning. -->
   <button type="button" id="voice" aria-pressed="false"
    title="speak new messages aloud, in the order they arrive">voice off</button>
+  <!-- Operator directive 2026-08-17: a long message must be escapable. Shown only
+       while something is sounding; stops it and hands the queue on. -->
+  <button type="button" id="vstop" hidden aria-label="stop speaking"
+   title="stop what is sounding; the next queued message follows">&#9632; stop</button>
   <button id="histBtn" title="search the entire bus log">history</button>
  </div>
  <div id="histBar">
@@ -1146,9 +1153,16 @@ async function hydrateMd(el){
 // explicit gesture: it works with the toggle off, stops what is sounding, and
 // hands the queue back when done. The script view REPLACES the terse body in
 // place and a second click restores it -- the terse text is the record.
+// EVERY message carries the play icon (operator directive 2026-08-17): filled
+// when its audio exists (click = play), hollow when it does not (click = ask the
+// broker to make it -- the script first when the writer is on, then the audio,
+// through the same queue a live send takes -- and the `audio` frame that follows
+// plays it, the click being the gesture). The voice toggle only decides whether
+// arrivals are made and played AUTOMATICALLY; the icon is the manual path.
 function artIcons(m){
- return (m.has_audio?'<span class="play" data-play="'+m.id+'" title="play audio" '+
-   'aria-label="play audio">&#9654;</span>':'')
+ return '<span class="play'+(m.gen_pending?' busy':'')+'" data-play="'+m.id+'" title="'+
+   (m.has_audio?'play audio':m.gen_pending?'generating...':'generate the audio, then play it')+
+   '" aria-label="play audio">'+(m.has_audio?'&#9654;':'&#9655;')+'</span>'
   +(m.has_script?'<span class="scr" data-scr="'+m.id+'" title="view the script" '+
    'aria-label="view the script">&#9998;</span>':'');
 }
@@ -1159,6 +1173,17 @@ function paintIcons(m){
 function playOne(id){
  vStop();vBusy=true;
  vPlay(id,vUrl(id));
+}
+const vAsked=new Set();      // ids this listener asked to generate: play on the audio frame
+async function genOne(m){
+ if(m.gen_pending)return;
+ m.gen_pending=true;paintIcons(m);
+ try{vCtxUp();}catch(e){}                   // this click is the gesture for the play to come
+ try{
+  const r=await api(vBase(m.id)+qs(),{method:'POST'});
+  if(r.state==='ready'){m.gen_pending=false;m.has_audio=true;paintIcons(m);playOne(m.id);return;}
+  vAsked.add(m.id);                          // queued or in flight: the audio frame plays it
+ }catch(e){m.gen_pending=false;paintIcons(m);toast(e.message);}
 }
 async function toggleScript(row,m){
  const body=row.querySelector('.body');
@@ -1208,7 +1233,7 @@ function render(m){
  row.style.display=matches(m)?'':'none';
  row.addEventListener('click',e=>{
   if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click
-  if(e.target.closest('.play')){playOne(m.id);return;}
+  if(e.target.closest('.play')){if(m.has_audio)playOne(m.id);else genOne(m);return;}
   if(e.target.closest('.scr')){toggleScript(row,m);return;}
   selectRow(row,m);
  });
@@ -1297,6 +1322,7 @@ function vRefused(){
 }
 async function vPlay(id,url){
  const ctl=vCtl={srcs:[],el:null,node:null,ms:null,sb:null,ab:new AbortController()};
+ paintStop();
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
  // resume() is async: the first utterance after the click can read "suspended" for
@@ -1352,6 +1378,7 @@ async function vPlayClip(url){
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
  const ctl=vCtl={srcs:[],el:null,node:null,ab:null};
+ paintStop();
  try{
   const res=await fetch(url,{credentials:'same-origin'});
   if(!res.ok){res.json().then(j=>toast(j.error||('clip: '+res.status))).catch(()=>{});return vDone();}
@@ -1363,14 +1390,19 @@ async function vPlayClip(url){
 }
 function vStop(){
  if(!vCtl)return;
- const c=vCtl;vCtl=null;
+ const c=vCtl;vCtl=null;paintStop();
  if(c.ab)try{c.ab.abort();}catch(e){}
  if(c.el){try{c.el.pause();if(c.el.src)URL.revokeObjectURL(c.el.src);c.el.removeAttribute('src');c.el.load();}catch(e){}}
  if(c.node){try{c.node.disconnect();}catch(e){}}
  for(const s of c.srcs)try{s.stop();}catch(e){}
 }
-// ONE place builds the audio URL (a gate counts it): the queue and the play icon.
-const vUrl=id=>'/audio/'+encodeURIComponent(id)+'.webm'+qs();
+// ONE place builds the audio URL (a gate counts it): the queue, the play icon,
+// and the generate click (POST to the same path without the extension).
+const vBase=id=>'/audio/'+encodeURIComponent(id);
+const vUrl=id=>vBase(id)+'.webm'+qs();
+// The stop button shows only while something is sounding (operator directive
+// 2026-08-17: a long message must be escapable); stop = abort this one, next.
+function paintStop(){const b=$('vstop');if(b)b.hidden=!vCtl;}
 function vPump(){
  if(vBusy||!voiceOn)return;
  const t=vTake(vQ,V_MAX);
@@ -1379,7 +1411,7 @@ function vPump(){
  vBusy=true;
  vPlay(t.id,vUrl(t.id));
 }
-function vDone(){vBusy=false;vPump();}
+function vDone(){vCtl=null;vBusy=false;paintStop();vPump();}
 function vPush(m){
  if(!vWant(m,myName,voiceOn))return;
  vQ.push({id:m.id,from:m.from});
@@ -1677,7 +1709,7 @@ function connect(){
   // never heard a live message unless the worker happened to be idle. LIVE arrivals
   // only: msgs holds what add() rendered live, so a late joiner is not blasted with
   // a queue of history nobody is waiting to hear (section 2).
-  case 'audio':{const mm=msgs.get(m.id);if(mm){mm.has_audio=true;paintIcons(mm);vPush(mm);}return;}
+  case 'audio':{const mm=msgs.get(m.id);if(mm){mm.has_audio=true;mm.gen_pending=false;paintIcons(mm);if(vAsked.delete(m.id))playOne(m.id);else vPush(mm);}return;}
   case 'script':{const mm=msgs.get(m.id);if(mm){mm.has_script=true;mm.script=m.text||mm.script;
     mm.script_voice=m.voice_id||mm.script_voice;paintIcons(mm);}return;}
   case 'message':return add(m);
@@ -1713,6 +1745,7 @@ $('histBtn').onclick=()=>{
  $('histBar').classList.toggle('on');
 };
 $('voice').onclick=toggleVoice;
+$('vstop').onclick=()=>{vStop();vDone();};   // abort this utterance, hand the queue on
 $('hGo').onclick=e=>{e.preventDefault();
  const p={limit:500};
  if($('hKw').value.trim())p.keywords=$('hKw').value.trim();
