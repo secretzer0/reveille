@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -350,6 +350,7 @@ CREATE TABLE IF NOT EXISTS voices (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     persona     TEXT NOT NULL DEFAULT '',
+    sample      TEXT NOT NULL DEFAULT '',   -- a line this voice reads on audition
     uploaded_by TEXT NOT NULL REFERENCES users(id),
     seconds     REAL NOT NULL,
     bytes       INTEGER NOT NULL,
@@ -1215,6 +1216,16 @@ def _upgrade_v21(conn, db_path):
         conn.execute("PRAGMA user_version=22")
 
 
+def _upgrade_v23(conn, db_path):
+    """v23 -> v24: voices.sample -- the line a bank voice reads on audition,
+    kept beside the persona (operator, eval box). Additive column."""
+    with tx(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(voices)")}
+        if "sample" not in cols:            # no ADD COLUMN IF NOT EXISTS in sqlite
+            conn.execute("ALTER TABLE voices ADD COLUMN sample TEXT NOT NULL DEFAULT ''")
+        conn.execute("PRAGMA user_version=24")
+
+
 def _upgrade_v22(conn, db_path):
     """v22 -> v23: voices, voice_assignments, scripts (DES-013 slice 1). Additive:
     three empty tables; nothing existing is read or rewritten."""
@@ -1304,7 +1315,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22)}
+              21, 22, 23)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2035,9 +2046,11 @@ def voice_put(conn, voice_id, *, name, uploaded_by, seconds, nbytes):
     return voice_get(conn, voice_id)
 
 
-def voice_patch(conn, voice_id, *, name=None, persona=None):
-    """Edit the label or the persona. Returns rows changed (0 = no such voice)."""
-    fields = {k: v for k, v in (("name", name), ("persona", persona)) if v is not None}
+def voice_patch(conn, voice_id, *, name=None, persona=None, sample=None):
+    """Edit the label, the persona or the sample line. Returns rows changed
+    (0 = no such voice)."""
+    fields = {k: v for k, v in (("name", name), ("persona", persona), ("sample", sample))
+              if v is not None}
     if not fields:
         return 0
     fields["updated_ns"] = time.time_ns()

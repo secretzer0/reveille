@@ -46,18 +46,37 @@ def world(c):
 
 # ---- schema ------------------------------------------------------------------
 
-def test_v23_lays_the_three_tables_and_the_chain_reaches_it(tmp_path):
-    assert store.SCHEMA_VERSION == 23
-    assert 22 in store._UPGRADES and store._UPGRADES[22] == "_upgrade_v22"
+def test_v23_lays_the_three_tables_and_v24_the_sample_and_the_chain_reaches_it(tmp_path):
+    assert store.SCHEMA_VERSION == 24
+    assert store._UPGRADES[22] == "_upgrade_v22" and store._UPGRADES[23] == "_upgrade_v23"
     c = db()
     names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"voices", "voice_assignments", "scripts"} <= names
-    # From a v22 database the step runs and stamps 23.
+    assert "sample" in {r["name"] for r in c.execute("PRAGMA table_info(voices)")}
+    # From a v22 database both steps run and stamp 24; a v23 one that already
+    # has the column (fresh schema stamped back) does not die on the ALTER.
     path = str(tmp_path / "old.db")
     old = store.connect(path)
     store.migrate(old, path)
     old.execute("PRAGMA user_version=22")
-    assert store.migrate(old, path) == 23
+    assert store.migrate(old, path) == 24
+    old.execute("PRAGMA user_version=23")
+    assert store.migrate(old, path) == 24
+    # A real v23 table (no column) grows it.
+    old.execute("ALTER TABLE voices DROP COLUMN sample")
+    old.execute("PRAGMA user_version=23")
+    assert store.migrate(old, path) == 24
+    assert "sample" in {r["name"] for r in old.execute("PRAGMA table_info(voices)")}
+
+
+def test_the_sample_line_is_kept_on_the_voice():
+    c = db()
+    admin, *_ = world(c)
+    assert store.voice_get(c, "picard")["sample"] == ""
+    assert store.voice_patch(c, "picard", sample="Make it so.") == 1
+    assert store.voice_get(c, "picard")["sample"] == "Make it so."
+    store.voice_patch(c, "picard", persona="Measured.")
+    assert store.voice_get(c, "picard")["sample"] == "Make it so."   # a persona edit leaves it
 
 
 def test_one_voice_per_speaker_and_one_speaker_per_voice_in_a_room():
