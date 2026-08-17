@@ -75,6 +75,11 @@ services:
       REVEILLE_SCRIPT_TIMEOUT: ${REVEILLE_SCRIPT_TIMEOUT:-}
       REVEILLE_SCRIPT_TOKEN: ${REVEILLE_SCRIPT_TOKEN:-}
       REVEILLE_LAN_PLAINTEXT: ${REVEILLE_LAN_PLAINTEXT:-}
+      # DES-014: the ear (speech to text), the third upstream, same shape.
+      REVEILLE_STT_URL: ${REVEILLE_STT_URL:-}
+      REVEILLE_STT_TOKEN: ${REVEILLE_STT_TOKEN:-}
+      REVEILLE_STT_MODEL: ${REVEILLE_STT_MODEL:-}
+      REVEILLE_STT_TIMEOUT: ${REVEILLE_STT_TIMEOUT:-}
     # The daemon bounds its own graceful shutdown at 5s (0.2.26); 12 gives it
     # room plus the courtesy-frame delay before docker escalates to SIGKILL.
     # Before 0.2.26 a SIGTERM could wedge the process half-dead forever, and

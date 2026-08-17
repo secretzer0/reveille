@@ -427,6 +427,13 @@
  #replyChip{display:none;color:var(--gold);font-size:.78rem;border:1px solid var(--gold);
   border-radius:1em;padding:.1rem .6rem;cursor:pointer;white-space:nowrap}
  #replyChip.on{display:inline-block}
+ #mic{background:none;border:1px solid var(--line);color:var(--dim);border-radius:2em;
+  padding:.3rem .8rem;cursor:pointer;font:inherit;font-size:.8rem;user-select:none;-webkit-user-select:none;touch-action:none}
+ #mic:hover{color:var(--gold);border-color:var(--gold)}
+ #mic.on{color:#e8555a;border-color:#e8555a;animation:micpulse 1s ease-in-out infinite}
+ #mic.busy{color:var(--gold);border-color:var(--gold)}
+ #mic[hidden]{display:none}
+ @keyframes micpulse{50%{opacity:.45}}
  #attachBtn{background:none;border:1px solid var(--line);color:var(--dim);border-radius:2em;
   padding:.22rem .9rem;cursor:pointer;font:inherit;font-size:.78rem}
  #attachBtn:hover{color:var(--gold);border-color:var(--gold)}
@@ -769,6 +776,12 @@
    </div>
    <textarea id="body" placeholder="Message&hellip;  paste images here"></textarea>
    <div class="cbottom">
+    <!-- DES-014: the ear. Hold to talk (pointer) or tap to start/stop (touch);
+         the words land in the textarea and the human presses Send. Hidden until
+         /me says the broker's ear is on. -->
+    <button type="button" id="mic" hidden aria-pressed="false"
+     title="hold to talk (tap to start/stop on a phone): the words land here, you press Send">&#9679; talk</button>
+    <span id="micState" class="khint"></span>
     <button type="button" id="attachBtn">+ attach</button>
     <span id="attchips"></span>
     <span class="khint">Ctrl+Enter to send</span>
@@ -1008,6 +1021,7 @@ for(const id of ['liName','liPass'])
 // The room name is finally printable: it stopped being the credential, which is the
 // only reason it was ever masked to 'room ....N0w'.
 function paintMe(){
+ if($('mic'))$('mic').hidden=!(me&&me.ear);     // DES-014: the mic exists only where the ear does
  $('meName').textContent=myName;
  $('meName').style.color=color(myName);
  $('meAvatar').textContent=initials(myName);
@@ -3494,6 +3508,64 @@ function wavBlob(pcm,rate){
  new Int16Array(b,44).set(pcm);
  return new Blob([b],{type:'audio/wav'});
 }
+// ---- THE EAR (DES-014 slice 1): talk, and the words land where you would ----
+// have typed them. Hold-to-talk on a pointer (pointer capture, so a drag off the
+// button still stops), tap-to-start / tap-to-stop on touch (a hold on a phone
+// selects text and fights the browser). The recorder is the ONE vRecStart /
+// vRecStop the personal-voice recorder uses; its silence refusal guards the
+// wire; POST /stt returns the words; they are APPENDED to the textarea with the
+// caret at the end and focus in the box. INVARIANT: the human is the author --
+// this code never calls send. The mic gesture doubles as the audio unlock.
+let earBusy=false;
+async function earStart(){
+ if(vRec||earBusy)return;
+ try{vCtxUp();}catch(e){}
+ try{await vRecStart();}
+ catch(e){toast('microphone: '+(e.message||e));return;}
+ $('mic').classList.add('on');$('mic').setAttribute('aria-pressed','true');
+ const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
+  $('micState').textContent='listening '+sec.toFixed(0)+' s'+(sec>1.5&&vRec.peak<0.01?' -- NO SIGNAL':'');
+  if(sec>=60){earStop();return;}          // the ear takes 60 s at a time
+  setTimeout(tick,250);};
+ tick();
+}
+async function earStop(){
+ if(!vRec)return;
+ const r=vRecStop();
+ $('mic').classList.remove('on');$('mic').setAttribute('aria-pressed','false');
+ if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}
+ earBusy=true;$('mic').classList.add('busy');$('micState').textContent='hearing...';
+ try{
+  const res=await fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',
+   headers:{'content-type':'audio/wav'},body:r.blob});
+  const d=await res.json().catch(()=>({}));
+  if(!res.ok){toast(d.error||d.detail||('ear: '+res.status));return;}
+  earLand(d.text||'');
+ }catch(e){toast('ear: '+(e.message||e));}
+ finally{earBusy=false;$('mic').classList.remove('busy');$('micState').textContent='';}
+}
+// The words go INTO the compose box, after what is there, caret at the end.
+function earLand(text){
+ text=(text||'').trim();if(!text)return;
+ const b=$('body');const had=b.value;
+ b.value=had+(had&&!/\s$/.test(had)?' ':'')+text;
+ b.focus();b.setSelectionRange(b.value.length,b.value.length);
+ b.dispatchEvent(new Event('input',{bubbles:true}));
+}
+(function wireMic(){
+ const m=$('mic');if(!m)return;
+ let touchToggle=false;
+ m.addEventListener('pointerdown',e=>{
+  if(e.pointerType==='touch'){touchToggle=true;return;}   // decided on pointerup
+  touchToggle=false;m.setPointerCapture(e.pointerId);earStart();});
+ m.addEventListener('pointerup',e=>{
+  if(touchToggle){if(vRec)earStop();else earStart();return;}
+  earStop();});
+ m.addEventListener('pointercancel',()=>{if(!touchToggle)earStop();});
+ m.addEventListener('lostpointercapture',()=>{if(!touchToggle)earStop();});
+ m.addEventListener('keydown',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();if(vRec)earStop();else earStart();}});
+})();
+
 async function openVoices(){
  me=await api('/me');
  const d=await api('/voices');
