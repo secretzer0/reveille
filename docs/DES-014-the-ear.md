@@ -69,7 +69,7 @@ never the ear's model -- the ear is small and its budget is a person waiting.
 - **ONE route: `POST /stt`.** Body = the WAV the page's recorder already builds
   (PCM s16 mono; the same reader `voice_clip_refusal` uses: WAV only, PCM only,
   no decoder on the broker), `Content-Type: audio/wav`, capped at 60 s and
-  4 MiB (a named refusal each), silence refused before the wire (peak under
+  8 MiB (60 s at 48 kHz s16 mono is ~5.8 MB; a named refusal each), silence refused before the wire (peak under
   -40 dBFS, the recorder's own bar -- the page refuses it first, the broker
   refuses it again). **Signed-in web user only** (`_user_principal`): the ear
   is a human's mouth; a token has no microphone. Bounded like `/say`: one slot
@@ -198,7 +198,7 @@ the sent message is still the signed-in user's.
    plaintext URL without the flag and names `REVEILLE_LAN_PLAINTEXT`; unset
    boots with the ear off and `/version` says so.
 2. **`POST /stt`.** Web-user only (a token gets 401 naming why); WAV-only via
-   the existing reader; > 60 s / > 4 MiB / silent refused by name; one slot,
+   the existing reader; > 60 s / > 8 MiB / silent refused by name; one slot,
    429 for the second caller while the first is in flight; forwards multipart
    to a stub `/v1/audio/transcriptions` and returns `{text}`; upstream down ->
    502 naming it; **nothing under `<files>`, no row, no log line with the
