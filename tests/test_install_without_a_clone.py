@@ -267,9 +267,17 @@ class Minting(http.server.BaseHTTPRequestHandler):
         return self._json(404, {})
 
     def do_GET(self):
+        Minting.calls.append((self.path, None))
         if self.path == "/rooms":
             return self._json(200, {"owned": [{"id": "r1", "name": "Reveille2.0"}],
                                     "member": [], "public": []})
+        if self.path == "/tokens":
+            return self._json(200, {"tokens": [
+                {"id": "t1", "agent_name": "roc-sso-dev", "rooms": [{"id": "r1", "name": "Reveille2.0"}]},
+                {"id": "t2", "agent_name": "reveille-architect", "rooms": [{"id": "r1", "name": "Reveille2.0"}]},
+                {"id": "t3", "agent_name": None, "rooms": []},              # unbound: not an agent
+                {"id": "t4", "agent_name": "roc-sso-dev", "rooms": [{"id": "r2", "name": "OverSiteAI"}]},
+            ]})
         return self._json(200, {"agents": []})
 
     def log_message(self, *a):
@@ -294,12 +302,13 @@ def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
     assert "superseded" in note, "a rotation that supersedes must say so"
     paths = [p for p, _ in Minting.calls]
     # /logout last, and NO second attach call: rooms ride the mint (ruling 9010),
-    # and a session minted for three calls must not outlive them.
-    assert paths == ["/login", "/tokens", "/logout"], paths
+    # and a session minted for its few calls must not outlive them.
+    assert paths == ["/login", "/rooms", "/tokens", "/logout"], paths
     # BOUND, and least privilege by default: an unbound or write-tier token here
     # would hand a fresh machine more than it needs.
-    assert Minting.calls[1][1]["agent_name"] == "dev-agent"
-    assert Minting.calls[1][1]["mem_tier"] == "state"
+    mint = [b for pth, b in Minting.calls if pth == "/tokens" and b is not None][0]
+    assert mint["agent_name"] == "dev-agent"
+    assert mint["mem_tier"] == "state"
 
 
 def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsys):
@@ -316,6 +325,98 @@ def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsy
     assert not log.exists()
     assert not (work / ".claude" / "settings.local.json").exists()
     assert "login failed" in capsys.readouterr().err
+
+
+def test_the_wizard_lists_your_agents_and_a_number_makes_this_directory_one_of_them(
+        tmp_path, minting, monkeypatch, capsys):
+    """Operator ask (2026-08-17): log in, see MY agents, pick one to be its
+    native body -- a number, not a name remembered exactly. One password
+    prompt: the session that listed them is the session that mints."""
+    claude, log = fake_claude(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN", "REVEILLE_USER"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    # url (typed), username, agent pick "2" = the second of the SORTED names,
+    # the explicit yes (ruling 11246), rooms (Enter)
+    answers = iter([minting, "tmelhiser", "2", "y", ""])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr("sys.stdin", FakeTTY([]))
+    rc = cli.main(["init", "--claude", claude, "--dir", str(work)])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    # The menu: unique agent names, sorted, each with its rooms (two tokens for
+    # roc-sso-dev collapse to one line carrying both rooms); the unbound token
+    # is not an agent and is not offered.
+    assert "1. reveille-architect" in out and "2. roc-sso-dev" in out
+    assert "OverSiteAI, Reveille2.0" in out and out.count("roc-sso-dev") >= 1
+    env = json.loads((work / ".claude" / "settings.local.json").read_text())["env"]
+    assert env["REVEILLE_AGENT_ROLE"] == "roc-sso-dev" and env["REVEILLE_TOKEN"] == "minted-secret"
+    paths = [p for p, _ in Minting.calls]
+    assert paths.count("/login") == 1, "one login: the listing session mints"
+    assert paths.index("/tokens") < paths.index("/rooms"), "listed before it minted"
+    mint = [b for p, b in Minting.calls if p == "/tokens" and b is not None][0]
+    assert mint["agent_name"] == "roc-sso-dev" and not mint.get("create"), \
+        "an existing agent is attached to (rotated), never created"
+
+
+def test_a_new_name_at_the_agent_prompt_still_asks_the_type(monkeypatch):
+    """The menu is a shortcut for existing agents; a typed name is a NEW one and
+    goes on to the type menu (which seeds CLAUDE.md), and a bad name is refused
+    at the prompt as before."""
+    agents = [("reveille-architect", ["Reveille2.0"]), ("roc-sso-dev", ["OverSiteAI"])]
+    tty = FakeTTY([])
+
+    def answers(*seq):
+        it = iter(seq)
+        monkeypatch.setattr("builtins.input", lambda *a: next(it))
+    answers("2", "y")
+    assert cli.ask_agent(agents, tty) == ("roc-sso-dev", False)
+    answers("roc-sso-dev", "yes")
+    assert cli.ask_agent(agents, tty) == ("roc-sso-dev", False)
+    answers("brand-new")
+    assert cli.ask_agent(agents, tty) == ("brand-new", True), "a new name needs no takeover"
+    answers("has space", "ok-name")
+    assert cli.ask_agent(agents, tty) == ("ok-name", True)
+    assert cli.ask_agent([], tty) == ("", True), "no agents yet: straight to the type menu"
+    # ONE EXPLICIT YES (ruling 11246): attaching to a LIVE identity kills the
+    # body holding it, so Enter picks nothing, and a pick without a "y" is
+    # declined and asked again -- never taken by default.
+    answers("")
+    with pytest.raises(RuntimeError, match="no agent chosen"):
+        cli.ask_agent(agents, tty)
+    answers("1", "", "1", "n", "brand-new")
+    assert cli.ask_agent(agents, tty) == ("brand-new", True), \
+        "two declined takeovers, then a new name"
+
+
+def test_piped_or_empty_stdin_never_rotates_a_token(tmp_path, minting, monkeypatch, capsys):
+    """Gate from 11246: the picker behind a pipe (or an operator leaning on
+    Enter) mints nothing. `ask` answers its default on a non-tty and the
+    picker's default is NOTHING; the wizard refuses and installs nothing."""
+    claude, log = fake_claude(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    monkeypatch.setenv("REVEILLE_USER", "tmelhiser")
+    answers = iter([minting, "", "", "", ""])       # url, then Enter forever
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr("sys.stdin", FakeTTY([]))
+    rc = cli.main(["init", "--claude", claude, "--dir", str(work)])
+    assert rc == 1
+    assert "no agent chosen" in capsys.readouterr().err
+    assert not (work / ".claude").exists() and not log.exists()
+    posted = [p for p, b in Minting.calls if p == "/tokens" and b is not None]
+    assert posted == [], "Enter at the picker minted (rotated) a token"
 
 
 def test_the_password_never_comes_from_a_flag():
@@ -413,6 +514,7 @@ def test_every_call_the_installer_makes_has_a_route_that_takes_it():
     installer_calls = [                       # what cli.py actually sends
         ("POST", "/login"),
         ("GET", "/rooms"),
+        ("GET", "/tokens"),                   # my_agents(): the picker's menu
         ("POST", "/tokens"),
         ("POST", "/logout"),
         ("GET", "/presence"),                 # verify()

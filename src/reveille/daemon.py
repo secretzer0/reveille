@@ -204,6 +204,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.112 `reveille init` LISTS YOUR AGENTS. The wizard logs you in first,
+shows the agents your account holds (from GET /tokens, with their rooms)
+and takes a number: this directory becomes that agent's native body (the
+token rotates; the old body goes dead). A typed name is a new agent and
+goes on to the type menu as before. One password prompt. Bus tools
+unchanged.
 0.2.111 THE WIRE IS WEBM/OPUS (DES-009 section 2 amended, DES-013 section
 7.1, ruling 11211). The broker transcodes every utterance with ffmpeg
 (libopus 32 kbit/s, 200 ms clusters); GET /audio/<id>.webm and the

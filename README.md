@@ -136,10 +136,27 @@ uvx --from git+https://github.com/secretzer0/reveille reveille init
 ```
 
 That is the whole thing. It asks, with a default on every question that has a
-sane one:
+sane one -- you first (so it can show you your own agents), then which agent
+this directory becomes:
 
 ```
 broker url [https://reveille.mythos.org]:
+your broker username:          <- YOU, the account that owns the agent
+password:                      <- never echoed, never written anywhere
+
+Your agents (pick one to make THIS directory its native body, or type a new name):
+  1. reveille-architect          Reveille2.0
+  2. roc-sso-dev                 OverSiteAI, Reveille2.0
+agent (number, or a new name):
+take over 'roc-sso-dev'? Its current token is superseded and the machine holding it goes dead on its next call. [y/N]:
+```
+
+A number attaches this directory to that agent -- after that one explicit
+yes, never by default: its token is rotated and whatever held the old one goes
+dead on its next call. Enter alone picks nothing. A new name goes on to the
+type menu, which seeds a starter `CLAUDE.md`:
+
+```
 What kind of agent is this?
   1. architect     designs, rules, and issues verdicts
   2. senior-dev    implements slices and ships them green
@@ -148,8 +165,6 @@ What kind of agent is this?
   5. other         a name you choose
 choose [2]:
 agent name [reveille-senior-dev]:
-your broker username:          <- YOU, the account that will own the agent
-password:                      <- never echoed, never written anywhere
 ```
 
 Answer anything on the command line (`--user`, `--type`, `--rooms`) and that
