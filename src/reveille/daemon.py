@@ -209,6 +209,16 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.120 THE SCRIPT BUDGET SCALES WITH THE BODY (DES-013 section 5 amended,
+operator 11343 on the bench 11342). Prefill is the wall on the pinned pair
+(section 8: two RTX 3060, layer split, measured), and most agent messages
+are longer than the 1500 chars the writer was shown, so a flat 1.5 s meant
+terse for most of them. Now the writer sees up to 9000 chars (the live
+db's p99.9) and its time to first sentence is REVEILLE_SCRIPT_TIMEOUT plus
+1.5 ms per char shown; short messages keep the ruled budget. Also: an
+EMPTY REVEILLE_SCRIPT_TIMEOUT / _TTS_TIMEOUT / _STT_TIMEOUT (what compose passes
+when unset) no longer crashes the broker at boot -- it means the default.
+Bus tools unchanged.
 0.2.119 A LOST REACH IS A DEPARTURE; NO GHOST MEMBERS. Revoking a token, or
 taking a room away from it (unassign, a room flipped private, a member
 removed), now marks that agent's membership left in the same transaction,
@@ -1955,7 +1965,16 @@ SCRIPT_MAX = 8                 # queue depth past which a message skips the writ
 SCRIPT_REST_MAX = 2            # scripts finishing concurrently past their first sentence
 _script_rest_slots = threading.BoundedSemaphore(SCRIPT_REST_MAX)
 SCRIPT_MAX_CHARS = 700         # a script longer than this is not a script; terse
-SCRIPT_BODY_CAP = 1500         # what the writer is shown of a long body
+SCRIPT_BODY_CAP = 9000         # what the writer is shown of a long body (p99.9 of the live db)
+SCRIPT_MS_PER_CHAR = 1.5       # first-sentence budget grows this much per body char shown
+
+
+def script_budget(first, body):
+    """Time to first sentence for THIS message: the flat budget plus a per-char
+    allowance for what the writer must read first (0.2.120, agreed 11343).
+    Prefill is the wall on the pinned pair, ~0.5 ms/char cold; 1.5 leaves room
+    for a queue in front. Pure."""
+    return first + SCRIPT_MS_PER_CHAR * min(len(body or ""), SCRIPT_BODY_CAP) / 1000
 _SCRIPT_FRAME = (
     "You write a short spoken script for a text-to-speech voice. Speak in the FIRST "
     "PERSON as the sender, in the character described. Plain prose only: no markdown, "
@@ -2049,6 +2068,7 @@ def _script_one(item, url, model, token, first_timeout, wait=False):
     wait for message N's last. `wait=True` joins that helper (tests)."""
     mid, room, speaker, text, assigned, voice, subject, body = item
     messages = script_prompt(voice["name"], voice.get("persona") or "", speaker, subject, body)
+    first_timeout = script_budget(first_timeout, body)
     t0 = time.monotonic()
     stream = _SentenceStream()
     buf, in_think = "", False
@@ -5422,7 +5442,7 @@ def main():
         # lazy model load -- minutes on a cold cache, seconds after. A short
         # timeout plus a retry queues two of those behind each other on a
         # single-threaded server (senior-ui-ux, msg 8944).
-        timeout = float(os.environ.get("REVEILLE_TTS_TIMEOUT", "600"))
+        timeout = float(os.environ.get("REVEILLE_TTS_TIMEOUT") or "600")
         threading.Thread(target=_tts_worker, args=(tts_url, tts_token, timeout),
                          name="tts", daemon=True).start()
         print(f"voices ON: {tts_url} (first utterance may block on a model load)",
@@ -5436,12 +5456,12 @@ def main():
             _script_on = True
             _script_url, _script_token = s_url, s_token
             _script_model = os.environ.get("REVEILLE_SCRIPT_MODEL", "")
-            first = float(os.environ.get("REVEILLE_SCRIPT_TIMEOUT", "1.5"))
+            first = float(os.environ.get("REVEILLE_SCRIPT_TIMEOUT") or "1.5")
             _plaintext_banner(s_url, lan_ok, "the script writer")
             threading.Thread(target=_script_worker, args=(s_url, _script_model, s_token, first),
                              name="script", daemon=True).start()
             print(f"scripts ON: {s_url} model={_script_model or '(server default)'} "
-                  f"first-sentence budget {first:.1f}s", flush=True)
+                  f"first-sentence budget {first:.1f}s + {SCRIPT_MS_PER_CHAR:g} ms/char", flush=True)
     # THE EAR does not ride on voices: a room can be typed-to by voice without
     # ever speaking back. Same refusal, same banner, request-shaped (no worker).
     stt_url = os.environ.get("REVEILLE_STT_URL", "")
@@ -5452,7 +5472,7 @@ def main():
         _stt_on = True
         _stt_url, _stt_token = stt_url, stt_token
         _stt_model = os.environ.get("REVEILLE_STT_MODEL", "")
-        _stt_timeout = float(os.environ.get("REVEILLE_STT_TIMEOUT", "20"))
+        _stt_timeout = float(os.environ.get("REVEILLE_STT_TIMEOUT") or "20")
         _plaintext_banner(stt_url, lan_ok, "the ear")
         print(f"ear ON: {stt_url} model={_stt_model or '(server default)'}", flush=True)
     host = os.environ.get("REVEILLE_HOST", "0.0.0.0")
