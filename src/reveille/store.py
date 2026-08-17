@@ -1752,10 +1752,34 @@ def revoke_token(conn, token_id, owner_id):
         if r["owner_id"] != owner_id:
             raise AccessError("not your token")
         # members.token_id REFERENCES tokens(id): orphan the memberships first or any
-        # agent still joined under this token turns the delete into a FK violation.
-        conn.execute("UPDATE members SET token_id=NULL WHERE token_id=?", (token_id,))
+        # agent still joined under this token turns the delete into a FK violation --
+        # AND MARK THEM LEFT (operator relay 11337): a revoke that only orphaned the
+        # row left a GHOST MEMBER, listed as joined, deaf, and unable to leave()
+        # because leaving needed the access the revoke had just removed.
+        conn.execute("UPDATE members SET token_id=NULL, left_ns=COALESCE(left_ns, ?) "
+                     "WHERE token_id=?", (time.time_ns(), token_id))
         conn.execute("DELETE FROM token_rooms WHERE token_id=?", (token_id,))
         conn.execute("DELETE FROM tokens WHERE id=?", (token_id,))
+
+
+def reconcile_reach(conn):
+    """A membership whose token no longer reaches its room is a departure
+    (11337): mark it left, wherever the reach went -- a room unassigned from a
+    token, a room flipped private, a member removed, an account deleted. ONE
+    statement, called at every site that deletes token_rooms rows, and
+    idempotent, so it also heals ghosts left before this rule existed."""
+    conn.execute(
+        "UPDATE members SET left_ns=? WHERE left_ns IS NULL AND token_id IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM token_rooms tr WHERE tr.token_id=members.token_id "
+        "AND tr.room_id=members.room_id)", (time.time_ns(),))
+
+
+def leave_listed(conn, name, token_id, room_id):
+    """leave() for a room the caller is LISTED in but no longer reaches (11337):
+    a verb whose only effect is to reduce access must not require access. Marks
+    only this token's own row for that name and room."""
+    conn.execute("UPDATE members SET left_ns=? WHERE name=? AND token_id=? AND room_id=? "
+                 "AND left_ns IS NULL", (time.time_ns(), name, token_id, room_id))
 
 
 def supersede_bound_tokens(conn, owner_id, agent_id):
@@ -1848,7 +1872,9 @@ def unassign_room(conn, token_id, room_id, actor_id):
     tok = conn.execute("SELECT owner_id FROM tokens WHERE id=?", (token_id,)).fetchone()
     if not tok or tok["owner_id"] != actor_id:
         raise AccessError("not your token")
-    conn.execute("DELETE FROM token_rooms WHERE token_id=? AND room_id=?", (token_id, room_id))
+    with tx(conn):
+        conn.execute("DELETE FROM token_rooms WHERE token_id=? AND room_id=?", (token_id, room_id))
+        reconcile_reach(conn)
 
 
 def rooms_for_token(conn, token_id):
@@ -1937,6 +1963,7 @@ def set_public(conn, room_id, owner_id, public):
                 "(SELECT id FROM tokens WHERE owner_id != ? AND owner_id NOT IN "
                 "(SELECT user_id FROM room_members WHERE room_id=?))",
                 (room_id, owner_id, room_id))
+            reconcile_reach(conn)
 
 
 # ---- membership (DES-004: reach, never rule) ---------------------------------
@@ -1993,6 +2020,7 @@ def remove_member(conn, room_id, owner_id, user_name, actor_name):
                      (room_id, u["id"]))
         conn.execute("DELETE FROM token_rooms WHERE room_id=? AND token_id IN "
                      "(SELECT id FROM tokens WHERE owner_id=?)", (room_id, u["id"]))
+        reconcile_reach(conn)
         _audit_room(conn, room_id, "remove", actor_name, u["name"])
     return {"room_id": room_id, "user": u["name"]}
 

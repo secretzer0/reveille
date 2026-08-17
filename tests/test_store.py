@@ -2082,8 +2082,11 @@ def test_revoke_works_while_an_agent_is_joined_under_it():
     store.join(c, "bot", "T", room["id"], tok["id"])
     store.revoke_token(c, tok["id"], admin["id"])
     assert store.list_tokens(c, admin["id"]) == []
-    assert store.presence(c, [room["id"]])[0]["name"] == "bot"   # membership survives
-    assert store.presence(c, [room["id"]])[0]["token_id"] is None
+    # The row is orphaned (the FK) AND marked left (11337): a revoked credential
+    # is not present. It used to "survive" -- that survival was the ghost member.
+    assert store.presence(c, [room["id"]]) == []
+    r = c.execute("SELECT token_id, left_ns FROM members WHERE name='bot'").fetchone()
+    assert r["token_id"] is None and r["left_ns"]
 
 
 def test_revoke_refused_to_non_owner():
@@ -2598,3 +2601,61 @@ def test_prune_with_two_identities_leaves_received_mail_and_counts_it():
     out = store.prune_agent(c, first["id"], room["id"])
     assert out["left_received"] == 1
     assert c.execute("SELECT count(*) FROM messages WHERE id=?", (dm,)).fetchone()[0] == 1
+
+
+# ---- 11337: a lost reach is a departure; a ghost cannot linger ------------------
+
+def _listed(c, room_id):
+    return sorted(a["name"] for a in store.presence(c, [room_id]))
+
+
+def test_a_revoked_token_leaves_no_ghost_member():
+    """The operator's relay (11337): a revoked agent stayed LISTED as joined,
+    deaf, and could not leave() -- leaving needed the access the revoke removed.
+    Now the revoke marks the membership left in the same transaction."""
+    c, admin, room, tok = fixture()
+    b = store.create_token(c, admin["id"], "b", agent_name="scout", rooms=[room["id"]],
+                           create=True)
+    store.join(c, "scout", "boot", room["id"], token_id=b["id"])
+    assert "scout" in _listed(c, room["id"])
+    store.revoke_token(c, b["id"], admin["id"])
+    assert "scout" not in _listed(c, room["id"]), "a revoked credential is not present"
+    r = c.execute("SELECT token_id, left_ns FROM members WHERE name='scout'").fetchone()
+    assert r["token_id"] is None and r["left_ns"], "orphaned AND marked left"
+
+
+def test_a_room_unassigned_from_a_token_is_left_and_the_other_reach_stays():
+    """The same defect through the other door: the room was detached from the
+    token (rooms() shows the rest), the row stayed. And a SECOND live token for
+    the identity keeps its own membership -- only the lost reach departs."""
+    c, admin, room, tok = fixture()
+    r2 = store.create_room(c, admin["id"], "TenForward")
+    b = store.create_token(c, admin["id"], "b", agent_name="scout",
+                           rooms=[room["id"], r2["id"]], create=True)
+    store.join(c, "scout", "boot", room["id"], token_id=b["id"])
+    store.join(c, "scout", "boot", r2["id"], token_id=b["id"])
+    store.unassign_room(c, b["id"], room["id"], admin["id"])
+    assert "scout" not in _listed(c, room["id"]), "reach gone = departed"
+    assert "scout" in _listed(c, r2["id"]), "the room it still reaches keeps it"
+    # A pre-existing ghost (a row from before this rule) heals at the next
+    # reconcile: seed one by hand, then any detach anywhere runs the sweep.
+    c.execute("UPDATE members SET left_ns=NULL WHERE name='scout' AND room_id=?", (room["id"],))
+    assert "scout" in _listed(c, room["id"])
+    store.reconcile_reach(c)
+    assert "scout" not in _listed(c, room["id"])
+
+
+def test_leave_listed_reduces_access_without_needing_it():
+    c, admin, room, tok = fixture()
+    b = store.create_token(c, admin["id"], "b", agent_name="scout", rooms=[room["id"]],
+                           create=True)
+    store.join(c, "scout", "boot", room["id"], token_id=b["id"])
+    # Only THIS token's row for that name and room; another name's row, and a
+    # row this token does not own, are not touched (one row per name per room).
+    other = store.create_token(c, admin["id"], "o", agent_name="ranger", rooms=[room["id"]],
+                               create=True)
+    store.join(c, "ranger", "boot", room["id"], token_id=other["id"])
+    store.leave_listed(c, "scout", other["id"], room["id"])          # wrong token: no-op
+    assert _listed(c, room["id"]) == ["ranger", "scout"]
+    store.leave_listed(c, "scout", b["id"], room["id"])
+    assert _listed(c, room["id"]) == ["ranger"]
