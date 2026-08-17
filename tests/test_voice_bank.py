@@ -258,6 +258,13 @@ def test_the_voices_tab_speaks_the_routes_shape():
     assert "'/voices/'+encodeURIComponent(id)+'/clip?name='" in ui   # PUT raw bytes
     assert "method:'PATCH',body:JSON.stringify({persona:" in ui
     assert "accept=\"audio/wav,.wav\"" in ui
+    # Cards (operator): every control inside the border of its voice; two add
+    # flows; personal decided at creation (the PUT carries it); delete confirms
+    # in place; rename = PATCH name + PUT /rename when the id moved.
+    assert 'class="vCard' in ui and "'&personal=1'" in ui
+    assert "ADD TO THE BANK" in ui and "MY PERSONAL VOICE" in ui
+    assert "confirming={kind:'voice',id:b.dataset.vdel}" in ui
+    assert "'/rename',\n     {method:'PUT',body:JSON.stringify({id:nid})}" in ui
 
 
 def test_the_recorder_builds_a_pcm_wav_in_the_browser_and_uses_the_same_put():
@@ -275,6 +282,8 @@ def test_the_recorder_builds_a_pcm_wav_in_the_browser_and_uses_the_same_put():
     for needle in ("'RIFF'", "'WAVE'", "'fmt '", "d.setUint16(20,1,true)", "d.setUint16(22,1,true)",
                    "d.setUint16(34,16,true)", "'data'"):
         assert needle in w, needle
-    assert "const f=recorded?recorded.blob:$('newVoiceFile').files[0];" in ui
-    assert "$('newVoiceId').value=myName" in ui
+    # One recorder wiring serves BOTH add flows (bank / personal); the recorded
+    # blob is the file the same PUT sends; the length shows while recording.
+    assert "const bankSt=rec('bank',$('bankId')), persSt=rec('pers',$('persId'));" in ui
+    assert "st.file=r.blob" in ui and "putVoiceClip(id,myName,persSt.file,true)" in ui
     assert "'recording '+sec.toFixed(1)+' s'" in ui

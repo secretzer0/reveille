@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -351,6 +351,7 @@ CREATE TABLE IF NOT EXISTS voices (
     name        TEXT NOT NULL,
     persona     TEXT NOT NULL DEFAULT '',
     sample      TEXT NOT NULL DEFAULT '',   -- a line this voice reads on audition
+    personal    INTEGER NOT NULL DEFAULT 0, -- 1: exists only for its uploader (11155)
     uploaded_by TEXT NOT NULL REFERENCES users(id),
     seconds     REAL NOT NULL,
     bytes       INTEGER NOT NULL,
@@ -487,6 +488,11 @@ _SCHEMA += _VOICES_SCHEMA
 
 class BusError(Exception):
     """Caller-facing error (bad name, name collision, unknown agent)."""
+
+
+class NotFound(BusError):
+    """A thing that does not exist FOR THIS CALLER -- the same answer whether it
+    never existed or is out of their reach (a personal voice, 11155). 404."""
 
 
 class AuthError(Exception):
@@ -1216,6 +1222,16 @@ def _upgrade_v21(conn, db_path):
         conn.execute("PRAGMA user_version=22")
 
 
+def _upgrade_v24(conn, db_path):
+    """v24 -> v25: voices.personal -- a voice that exists only for its uploader
+    (ruling 11155). Additive column; existing voices are bank voices."""
+    with tx(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(voices)")}
+        if "personal" not in cols:
+            conn.execute("ALTER TABLE voices ADD COLUMN personal INTEGER NOT NULL DEFAULT 0")
+        conn.execute("PRAGMA user_version=25")
+
+
 def _upgrade_v23(conn, db_path):
     """v23 -> v24: voices.sample -- the line a bank voice reads on audition,
     kept beside the persona (operator, eval box). Additive column."""
@@ -1315,7 +1331,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23)}
+              21, 22, 23, 24)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2028,9 +2044,12 @@ def set_retention(conn, room_id, owner_id, retention_ns):
 VOICE_BANK_MAX = 64   # every distinct clip costs the synthesizer ~175 MB of conds VRAM
 
 
-def voice_put(conn, voice_id, *, name, uploaded_by, seconds, nbytes):
+def voice_put(conn, voice_id, *, name, uploaded_by, seconds, nbytes, personal=False):
     """Create or replace a bank voice's ROW (the caller wrote the clip). Replace
-    keeps created_ns and moves updated_ns; identity is the id, not the bytes."""
+    keeps created_ns, uploaded_by AND personal (immutable after creation, 11155:
+    bank->personal would strip a voice other speakers hold, personal->bank
+    would publish a human's voice on a click; change of mind = delete + re-add)
+    and moves updated_ns; identity is the id, not the bytes."""
     valid_name(voice_id)
     now = time.time_ns()
     with tx(conn):
@@ -2039,11 +2058,46 @@ def voice_put(conn, voice_id, *, name, uploaded_by, seconds, nbytes):
             raise BusError(f"the bank holds VOICE_BANK_MAX={VOICE_BANK_MAX} voices; "
                            f"replace one, or raise the cap (and CONDS_CACHE_MAX on the GPU host)")
         conn.execute(
-            "INSERT INTO voices(id, name, uploaded_by, seconds, bytes, created_ns, updated_ns) "
-            "VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
+            "INSERT INTO voices(id, name, uploaded_by, seconds, bytes, created_ns, updated_ns, "
+            "personal) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, "
             "seconds=excluded.seconds, bytes=excluded.bytes, updated_ns=excluded.updated_ns",
-            (voice_id, name, uploaded_by, float(seconds), int(nbytes), now, now))
+            (voice_id, name, uploaded_by, float(seconds), int(nbytes), now, now, int(bool(personal))))
     return voice_get(conn, voice_id)
+
+
+def voice_delete(conn, voice_id):
+    """Delete a voice and every assignment of it (those speakers re-default on
+    their next voice_for); scripts keep their voice_id label -- a delete is
+    history. Returns rows deleted (0 = no such voice). The caller unlinks the
+    clip AFTER this commits."""
+    with tx(conn):
+        conn.execute("DELETE FROM voice_assignments WHERE voice_id=?", (voice_id,))
+        return conn.execute("DELETE FROM voices WHERE id=?", (voice_id,)).rowcount
+
+
+def voice_rename(conn, old, new):
+    """Move a voice to a new id in ONE transaction: the row (updated_ns now),
+    its assignments, and its scripts label -- a rename is the same voice, so
+    history follows it (11155). Refuses a taken id. The caller has ALREADY
+    moved the clip file (and moves it back if this raises)."""
+    valid_name(new)
+    v = voice_get(conn, old)
+    if v is None:
+        raise BusError(f"no such bank voice: {old}")
+    if old == new:
+        return v
+    with tx(conn):
+        if conn.execute("SELECT 1 FROM voices WHERE id=?", (new,)).fetchone():
+            raise BusError(f"the id {new} is taken")
+        conn.execute(
+            "INSERT INTO voices(id, name, persona, sample, personal, uploaded_by, seconds, bytes, "
+            "created_ns, updated_ns) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (new, v["name"], v["persona"], v["sample"], v["personal"], v["uploaded_by"],
+             v["seconds"], v["bytes"], v["created_ns"], time.time_ns()))
+        conn.execute("UPDATE voice_assignments SET voice_id=? WHERE voice_id=?", (new, old))
+        conn.execute("UPDATE scripts SET voice_id=? WHERE voice_id=?", (new, old))
+        conn.execute("DELETE FROM voices WHERE id=?", (old,))
+    return voice_get(conn, new)
 
 
 def voice_patch(conn, voice_id, *, name=None, persona=None, sample=None):
@@ -2066,8 +2120,28 @@ def voice_get(conn, voice_id):
     return dict(r) if r else None
 
 
-def voices(conn):
+def voices(conn, viewer_uid=None):
+    """The bank as ONE viewer sees it: every bank voice plus the viewer's own
+    personal voices (11155: a personal voice exists only for its uploader).
+    viewer_uid None = bank voices only (a default pick for an agent)."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM voices WHERE personal=0 OR uploaded_by=? ORDER BY id", (viewer_uid,))]
+
+
+def all_voices(conn):
+    """Every row, personal included -- the synthesizer's reconcile (a personal
+    voice is still spoken, by its uploader) and nothing user-facing."""
     return [dict(r) for r in conn.execute("SELECT * FROM voices ORDER BY id")]
+
+
+def voice_reachable(conn, voice_id, viewer_uid):
+    """The row if THIS viewer may know it exists: any bank voice, or a personal
+    voice the viewer uploaded. None otherwise -- the same answer as a
+    nonexistent id, on purpose (11155)."""
+    v = voice_get(conn, voice_id)
+    if v is None or (v["personal"] and v["uploaded_by"] != viewer_uid):
+        return None
+    return v
 
 
 def assign_refusal(actor_uid, is_admin, room_owner_id, speaker_owner_id, current, holder):
@@ -2186,8 +2260,13 @@ def voice_for(conn, room_id, speaker):
         (speaker,))]
     taken = {x["voice_id"] for x in conn.execute(
         "SELECT voice_id FROM voice_assignments WHERE room_id=?", (room_id,))}
+    # The bank the default may pick from (11155): every bank voice, plus the
+    # personal voices of user:<uid> when the speaker IS that user -- so a human
+    # who records "<username>" gets it by rule 2 (name beats derived) and
+    # nobody else ever does.
+    kind, _, key = speaker.partition(":")
     pick = voice_default(elsewhere=elsewhere, taken=taken,
-                         bank=[v["id"] for v in voices(conn)],
+                         bank=[v["id"] for v in voices(conn, key if kind == "user" else None)],
                          name=_speaker_name(conn, speaker))
     if pick:
         try:

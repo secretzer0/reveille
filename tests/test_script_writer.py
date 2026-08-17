@@ -268,7 +268,7 @@ def test_the_persona_draft_is_behind_a_button_and_a_configured_writer(world, lla
     assert asyncio.run(daemon.persona_draft_http(req("nope", ""))).status_code == 404
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "ui", "bus",
                            "index.html")).read()
-    assert "v.editable&&d.llm?'<button data-vdraft=" in ui
+    assert "v.editable&&d.llm?'<button type=\"button\" data-vdraft=" in ui
     assert "'/persona/draft'" in ui and "ta.value=d.persona" in ui
 
 

@@ -47,8 +47,9 @@ def world(c):
 # ---- schema ------------------------------------------------------------------
 
 def test_v23_lays_the_three_tables_and_v24_the_sample_and_the_chain_reaches_it(tmp_path):
-    assert store.SCHEMA_VERSION == 24
+    assert store.SCHEMA_VERSION == 25
     assert store._UPGRADES[22] == "_upgrade_v22" and store._UPGRADES[23] == "_upgrade_v23"
+    assert store._UPGRADES[24] == "_upgrade_v24"
     c = db()
     names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"voices", "voice_assignments", "scripts"} <= names
@@ -59,14 +60,16 @@ def test_v23_lays_the_three_tables_and_v24_the_sample_and_the_chain_reaches_it(t
     old = store.connect(path)
     store.migrate(old, path)
     old.execute("PRAGMA user_version=22")
-    assert store.migrate(old, path) == 24
+    assert store.migrate(old, path) == 25
     old.execute("PRAGMA user_version=23")
-    assert store.migrate(old, path) == 24
-    # A real v23 table (no column) grows it.
+    assert store.migrate(old, path) == 25
+    # Real v23 / v24 tables (no column) grow them.
     old.execute("ALTER TABLE voices DROP COLUMN sample")
+    old.execute("ALTER TABLE voices DROP COLUMN personal")
     old.execute("PRAGMA user_version=23")
-    assert store.migrate(old, path) == 24
-    assert "sample" in {r["name"] for r in old.execute("PRAGMA table_info(voices)")}
+    assert store.migrate(old, path) == 25
+    cols = {r["name"] for r in old.execute("PRAGMA table_info(voices)")}
+    assert {"sample", "personal"} <= cols
 
 
 def test_the_sample_line_is_kept_on_the_voice():

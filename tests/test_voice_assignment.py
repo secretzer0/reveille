@@ -182,7 +182,7 @@ def test_an_unbound_or_unknown_speaker_is_unassignable(world):
     st, out = _put(w, "vyzon", w["r1"]["id"], "agent:nope", "quark")
     assert st == 400 and "unbound" in out["error"]
     st, out = _put(w, "vyzon", w["r1"]["id"], w["ks"], "nope")
-    assert st == 400 and "no such bank voice" in out["error"]
+    assert st == 404 and "no such bank voice" in out["error"]
     w["who"]["p"] = _P("user", "vyzon", w["user"]["id"], {})   # room out of reach
     st, out = _call(daemon.room_voice_http,
                     _req("PUT", "/x", {"rid": w["r1"]["id"], "speaker": w["ks"]}, {"voice_id": "quark"}))

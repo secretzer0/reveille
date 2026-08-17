@@ -2226,7 +2226,7 @@ def _tts_reconcile(url, token, timeout, clips=None):
         return clips                     # no bank on this broker: nothing to push
     have = set(clips)
     pushed = []
-    for v in store.voices(conn):
+    for v in store.all_voices(conn):
         name = clip_name(v)
         if name in have:
             continue
@@ -3410,6 +3410,8 @@ def _guard(fn):
             return JSONResponse({"error": "forbidden", "detail": str(e)}, status_code=403)
         except store.AmbiguousRoom as e:
             return JSONResponse({"error": "room_required", "rooms": e.rooms}, status_code=400)
+        except store.NotFound as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
         except store.BusError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
     wrapped.__name__ = fn.__name__
@@ -3609,6 +3611,17 @@ def _voice_seconds(data):
         return w.getnframes() / w.getframerate()
 
 
+def _voice_in_reach(p, vid):
+    """THE ONE GATE (ruling 11155): the row for a bank voice, or for a personal
+    voice only when the caller uploaded it; anyone else -- admin included --
+    gets the same refusal as a nonexistent id. Every voice route reads through
+    here so no route carries its own personal check."""
+    v = store.voice_reachable(_conn, vid, p.user_id)
+    if v is None:
+        raise store.NotFound("no such bank voice")
+    return v
+
+
 def _voice_editable(p, v):
     """Governance (operator, DES-013 section 3): a NEW voice is anyone's to add;
     REPLACE and persona edits are the uploader's or an admin's."""
@@ -3621,7 +3634,7 @@ async def voices_http(request):
     button has anything behind it -- False until the script writer (slice 5)."""
     p = _principal(request)
     out = []
-    for v in store.voices(_conn):
+    for v in store.voices(_conn, p.user_id):
         v["editable"] = _voice_editable(p, v)
         out.append(v)
     return JSONResponse({"voices": out, "llm": _script_on})
@@ -3633,9 +3646,7 @@ async def voice_http(request):
     sample = the line this voice reads on audition (<= VOICE_SAMPLE_MAX)."""
     p = _principal(request)
     vid = request.path_params["vid"]
-    v = store.voice_get(_conn, vid)
-    if v is None:
-        return JSONResponse({"error": "no such voice"}, status_code=404)
+    v = _voice_in_reach(p, vid)
     if not _voice_editable(p, v):
         raise store.AccessError("only the uploader or an admin edits a bank voice")
     d = await request.json()
@@ -3660,9 +3671,7 @@ async def persona_draft_http(request):
     behind this explicit button. 503 when the writer is off."""
     p = _principal(request)
     vid = request.path_params["vid"]
-    v = store.voice_get(_conn, vid)
-    if v is None:
-        return JSONResponse({"error": "no such voice"}, status_code=404)
+    v = _voice_in_reach(p, vid)
     if not _voice_editable(p, v):
         raise store.AccessError("only the uploader or an admin edits a bank voice")
     if not _script_on:
@@ -3704,9 +3713,7 @@ async def voice_say_http(request):
     is off is a 503, one that cannot answer a 502."""
     p = _principal(request)
     vid = request.path_params["vid"]
-    v = store.voice_get(_conn, vid)
-    if v is None:
-        return JSONResponse({"error": "no such voice"}, status_code=404)
+    v = _voice_in_reach(p, vid)
     text = " ".join((request.query_params.get("text") or "").split())
     if not text:
         return JSONResponse({"error": "text: say what?"}, status_code=400)
@@ -3754,15 +3761,75 @@ async def voice_say_http(request):
 
 
 @_guard
+async def voice_delete_http(request):
+    """DELETE /voices/{vid} -- uploader or admin (a personal voice: its
+    uploader only, by the reach gate). One tx drops its assignments (those
+    speakers re-default on their next voice_for) and the row; the clip is
+    unlinked AFTER the commit; the synthesizer keeps its stale versioned copies
+    (reconcile is superset-only, harmless); scripts keep the voice_id label --
+    a delete is history (11155)."""
+    p = _principal(request)
+    vid = request.path_params["vid"]
+    v = _voice_in_reach(p, vid)
+    if not _voice_editable(p, v):
+        raise store.AccessError("only the uploader or an admin deletes a bank voice")
+    n = store.voice_delete(_conn, vid)
+    try:
+        (_voices_dir / f"bank-{vid}.wav").unlink()
+    except FileNotFoundError:
+        pass
+    log.info("%s deleted %sbank voice %s", p.name, "personal " if v["personal"] else "", vid)
+    return JSONResponse({"deleted": n})
+
+
+@_guard
+async def voice_rename_http(request):
+    """PUT /voices/{vid}/rename {id} -- uploader or admin. A rename is the SAME
+    voice: assignments, the scripts label and the clip follow it (11155). The
+    clip moves FIRST (a file op is not in the transaction; a renamed row with
+    a clip under the old name reconciles to silence), then one tx; if the tx
+    raises the clip moves back. Then the clip is pushed under its new
+    versioned name."""
+    p = _principal(request)
+    vid = request.path_params["vid"]
+    v = _voice_in_reach(p, vid)
+    if not _voice_editable(p, v):
+        raise store.AccessError("only the uploader or an admin renames a bank voice")
+    d = await request.json()
+    new = str(d.get("id") or "").strip().lower()
+    store.valid_name(new)
+    if new == vid:
+        return JSONResponse(v)
+    if store.voice_get(_conn, new):
+        return JSONResponse({"error": f"the id {new} is taken"}, status_code=409)
+    src, dst = _voices_dir / f"bank-{vid}.wav", _voices_dir / f"bank-{new}.wav"
+    moved = src.is_file()
+    if moved:
+        os.replace(src, dst)
+    try:
+        row = store.voice_rename(_conn, vid, new)
+    except BaseException:
+        if moved:
+            os.replace(dst, src)
+        raise
+    log.info("%s renamed bank voice %s -> %s", p.name, vid, new)
+    if _tts_on and moved:
+        row["pushed"] = await asyncio.to_thread(_tts_push, _tts_url, _tts_token,
+                                                clip_name(row), dst.read_bytes(), VOICE_PUSH_TIMEOUT)
+    return JSONResponse(row)
+
+
+@_guard
 async def voice_clip_get_http(request):
     """GET /voices/{vid}/clip -> the bank clip itself, the ORIGINAL the clones
     are measured against (operator: hear original vs clone side by side). Any
     signed-in user; 404 when the row has no clip yet."""
-    _principal(request)
+    p = _principal(request)
     vid = request.path_params["vid"]
     store.valid_name(vid)
+    _voice_in_reach(p, vid)
     path = _voices_dir / f"bank-{vid}.wav"
-    if store.voice_get(_conn, vid) is None or not path.is_file():
+    if not path.is_file():
         return JSONResponse({"error": "no such clip"}, status_code=404)
     return FileResponse(path, media_type="audio/wav",
                         headers={"Content-Disposition": f'inline; filename="bank-{vid}.wav"',
@@ -3781,8 +3848,15 @@ async def voice_clip_http(request):
     vid = request.path_params["vid"]
     store.valid_name(vid)
     v = store.voice_get(_conn, vid)
+    if v is not None and store.voice_reachable(_conn, vid, p.user_id) is None:
+        # Someone else's personal voice: not "yours to replace" (that would name
+        # it) and not free to create over -- the id is simply taken.
+        return JSONResponse({"error": f"the id {vid} is taken"}, status_code=409)
     if not _voice_editable(p, v):
         raise store.AccessError("only the uploader or an admin replaces a bank voice's clip")
+    # PERSONAL is decided at creation and never after (11155): ?personal=1 from
+    # the MY PERSONAL VOICE flow; ignored on a replace.
+    personal = request.query_params.get("personal") == "1"
     if _looks_multipart(request.headers.get("content-type")):
         return JSONResponse({"error": _MULTIPART_HELP}, status_code=400)
     declared = int(request.headers.get("content-length") or 0)
@@ -3805,7 +3879,7 @@ async def voice_clip_http(request):
     # visible in the listing and heals on the next PUT; a clip without a row
     # would be an orphan nothing lists.
     row = store.voice_put(_conn, vid, name=name, uploaded_by=v["uploaded_by"] if v else p.user_id,
-                          seconds=_voice_seconds(data), nbytes=len(data))
+                          seconds=_voice_seconds(data), nbytes=len(data), personal=personal)
     final = _voices_dir / f"bank-{vid}.wav"
     tmp = _voices_dir / f"bank-{vid}.wav.tmp"
     tmp.write_bytes(data)
@@ -3862,12 +3936,19 @@ async def room_voices_http(request):
     if me and not any(sp["speaker"] == me for sp in speakers):
         speakers.append({"speaker": me, "name": p.name, "kind": p.kind, "present": True,
                          "voice_id": None, "set_by": None})
+    bank = store.voices(_conn, p.user_id)
+    reach = {v["id"] for v in bank}
     for sp in speakers:
         sp["editable"] = bool(sp["speaker"]) and _speaker_editable(
             _conn, p, room, sp["speaker"], sp["set_by"])
         sp["you"] = sp["speaker"] == me
+        # A speaker holding someone else's PERSONAL voice: the viewer learns
+        # that much and not the id (11155: it exists only for its uploader).
+        sp["personal"] = bool(sp["voice_id"]) and sp["voice_id"] not in reach
+        if sp["personal"]:
+            sp["voice_id"] = None
     taken = {sp["voice_id"]: sp["name"] for sp in speakers if sp["voice_id"]}
-    return JSONResponse({"speakers": speakers, "voices": store.voices(_conn), "taken": taken})
+    return JSONResponse({"speakers": speakers, "voices": bank, "taken": taken})
 
 
 @_guard
@@ -3889,8 +3970,7 @@ async def room_voice_http(request):
         return JSONResponse({"removed": n})
     d = await request.json()
     voice_id = (d.get("voice_id") or "").strip()
-    if not store.voice_get(_conn, voice_id):
-        raise store.BusError(f"no such bank voice: {voice_id}")
+    _voice_in_reach(p, voice_id)          # a stranger's personal voice does not exist
     holder = store._holder(_conn, rid, voice_id)
     holder_name = store._speaker_name(_conn, holder) if holder and holder != speaker else None
     set_by = store.assign_refusal(p.user_id, p.is_admin, room["owner_id"], owner, current,
@@ -4843,6 +4923,8 @@ def build_app():
             Route("/upload", upload_http, methods=["POST"]),
             Route("/voices", voices_http),
             Route("/voices/{vid}", voice_http, methods=["PATCH"]),
+            Route("/voices/{vid}", voice_delete_http, methods=["DELETE"]),
+            Route("/voices/{vid}/rename", voice_rename_http, methods=["PUT"]),
             Route("/voices/{vid}/clip", voice_clip_http, methods=["PUT"]),
             Route("/voices/{vid}/clip", voice_clip_get_http),
             Route("/voices/{vid}/persona/draft", persona_draft_http, methods=["POST"]),
