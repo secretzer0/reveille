@@ -25,6 +25,10 @@ UI = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "ui",
 
 
 class _P:
+    kind = "user"            # a web user: not a token, so _act passes it
+    agent_id = ""
+    name = "travis"
+
     def __init__(self, rooms):
         self.rooms = rooms
 

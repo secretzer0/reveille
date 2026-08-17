@@ -81,6 +81,11 @@ ENV (set by the launching pane; never hardcode or prompt):
                         is ever in your env: the broker maps your token, server-side,
                         to the set of rooms you may see. Assign/revoke lands on your
                         very next call. An unknown or revoked token is a 401.
+                        A token that is not an agent cannot act as one: an UNBOUND
+                        token (no agent behind it) is READ-ONLY -- inbox/history/
+                        rooms/recall answer, and every act (send, ack, join, leave,
+                        lesson_add, memory_add, presence, upload) is a 401 naming
+                        the remedy: `reveille init` in the agent's directory.
 
 ROOMS: you may be in several. Every message you receive carries `room` (its id) and
 `room_name`. The rules are short:
@@ -204,6 +209,15 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.115 A TOKEN THAT IS NOT AN AGENT CANNOT ACT AS ONE (ruling 11252). An
+unbound token is read-only: reads (inbox, history, rooms, recall, brief,
+GET routes) answer as before and leave no presence; every act -- send, ack,
+join, leave, lesson_add, memory_add, memory_retract, ratify, reject, upload,
+presence, and the mutating HTTP routes -- is a 401 naming the remedy
+(`reveille init` in the agent's directory, or a bound mint in the Tokens
+tab, where bound is now the form and read-only a labelled choice). Bound
+tokens and web users are unchanged. Clean cutover: an agent still running
+on an unbound token stops acting at its next call, loudly.
 0.2.114 EVERY MESSAGE CAN BE SPOKEN LATER, ON THE CLICK; AND A STOP BUTTON.
 The play icon is on every message: filled = play the audio it has, hollow =
 POST /audio/<id> makes it (script first when the writer is on, then audio,
@@ -2804,12 +2818,37 @@ def _principal(request):
 
 
 def _me(request) -> Principal:
-    """An agent that is about to ACT: the name is mandatory here, because everything
-    downstream (send, ack, join, leave) is attributed to it."""
+    """An agent on the MCP plane: the name is mandatory here, because everything
+    downstream is attributed to it. READS come through here; an ACT goes through
+    _acting, which also demands the binding."""
     p = _agent_principal(request)
     if not p.name:
         raise store.AuthError("missing X-Agent header (set it in your MCP registration)")
     return p
+
+
+UNBOUND_ACT = ("token is not bound to an agent, so it can only read -- a token that is "
+               "not an agent cannot act as one. Run `reveille init` in the agent's "
+               "directory (it mints a bound token), or mint one bound to the agent in "
+               "the web UI's Tokens tab.")
+
+
+def _act(p):
+    """A TOKEN THAT IS NOT AN AGENT CANNOT ACT AS ONE (ruling 11252). An unbound
+    token's X-Agent is self-asserted; before this it wrote messages, lessons and
+    presence under any name for as long as it liked, and only the deploy
+    preflight noticed the name had no identity. So: unbound = read-only, full
+    stop -- every act, named or not, is a 401 naming the remedy. Refuse, never
+    bind-on-first-use (that would mint identities from typos, the fork 10896
+    closed at the mint). Web users are not tokens and pass."""
+    if p.kind == "agent" and not p.agent_id:
+        raise store.AuthError(UNBOUND_ACT)
+    return p
+
+
+def _acting(request) -> Principal:
+    """An agent about to ACT: named AND bound."""
+    return _act(_me(request))
 
 
 def _seen(name, rooms, token_id=None):
@@ -2863,7 +2902,7 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
     BROKER's version, reported here because boot is where you already ask -- the
     broker never announces itself on the bus. Differs from the last one you saw?
     Re-read usage(): its CHANGES section says what moved."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     if name and name != p.name:
         raise ValueError(f"join name {name!r} must match your X-Agent header {p.name!r}")
     if room and room not in p.rooms:
@@ -2926,7 +2965,7 @@ async def lesson_add(slug: str, symptom: str, root_cause: str, rule: str,
     room= scopes it to one room (default: your only room). Lessons are a tool call, never
     a message -- they must not become bus traffic. An admin promotes one to global when it
     generalises."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     rid = store.resolve_send_room(p.rooms, room=room or None)
     out = store.add_lesson(_conn, author=p.name, slug=slug, symptom=symptom,
                            root_cause=root_cause, rule=rule, detection=detection,
@@ -2963,7 +3002,7 @@ async def memory_add(fact: str, kind: str, scope: str = "", entities: str = "",
     live). occurred: when the fact became TRUE (ISO/relative), not when recorded.
     Below your tier the write lands as status='draft', invisible until ratified.
     kind='state' needs a BOUND token and is always scoped to yourself."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     bound, tier, adm, owned = _mem_ctx(p)
     out = store.memory_add(
         _conn, author=p.name, token_id=p.token_id, agent_bound=bound, tier=tier,
@@ -3016,7 +3055,7 @@ async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> dic
 async def memory_retract(id: str, reason: str = "", ctx: Context = None) -> dict:
     """Mark a memory retracted (fact dead, record stays -- add-only store). Author or
     admin only. The reason goes to the broker log, not the row."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     _, _, adm, _ = _mem_ctx(p)
     out = store.memory_retract(_conn, id, actor=p.name, is_admin=adm)
     log.info("%s retracted memory %s: %s", p.name, id, reason or "(no reason given)")
@@ -3028,7 +3067,7 @@ async def ratify(id: str, ctx: Context = None) -> dict:
     """draft -> live. Per (token, room): effective only in rooms your token's owner
     OWNS; scope='global' requires an instance admin. Going live also completes any
     pending supersession the draft carried."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     _, tier, adm, owned = _mem_ctx(p)
     out = store.ratify_memory(_conn, id, tier=tier, is_admin=adm,
                               owned_rooms=owned, actor=p.name)
@@ -3043,7 +3082,7 @@ async def reject(id: str, reason: str, ctx: Context = None) -> dict:
     only if the two differ. Same authority as ratify (tier + room ownership;
     global needs an instance admin). Disagree with the wording? Reject and
     write your own draft citing the same source -- there is no edit-then-ratify."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     _, tier, adm, owned = _mem_ctx(p)
     out = store.reject_memory(_conn, id, tier=tier, is_admin=adm,
                               owned_rooms=owned, actor=p.name, reason=reason)
@@ -3117,7 +3156,7 @@ async def send(to: str, body: str, subject: str = "",
     are read on each recipient's next turn (a HUMAN's broadcast from the web does
     ring the room -- a wake is a human gesture). Returns {id, thread_id, parents,
     delivered_to}."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     _seen(p.name, p.rooms, p.token_id)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))
@@ -3152,7 +3191,8 @@ async def inbox(ctx: Context = None) -> dict:
     as {"messages": [...]}. Each carries `room`/`room_name` -- reply in the room it
     came from. Non-destructive: ack(message_ids) when processed."""
     p = _me(ctx.request_context.request)
-    _seen(p.name, p.rooms, p.token_id)
+    if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
+        _seen(p.name, p.rooms, p.token_id)
     # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
     # this one call covers every room, so one ring was the right number.
     _poke_pending.pop((p.token_id, p.name), None)
@@ -3166,7 +3206,7 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
     """Mark messages read so they leave your inbox. Idempotent. Ids outside your rooms
     or not addressed to you are ignored, not fatal -- an ack is a batch and one stale
     id must not fail the rest. Returns {acked, ignored}."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     out = store.ack(_conn, p.name, message_ids, p.rooms)
     log.info("%s ack %s (ignored %s)", p.name, out["acked"], len(out["ignored"]))
     return out
@@ -3195,7 +3235,7 @@ async def upload(name: str, data_b64: str, room: str = "",
     need to think. Over it, this refuses and points at the raw-bytes HTTP route,
     which still takes up to 25MB:
       curl --data-binary @big.zip '<broker>/upload?name=big.zip'"""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     rid = store.resolve_send_room(p.rooms, room=room or None)
     try:
         data = base64.b64decode(data_b64, validate=True)
@@ -3295,7 +3335,8 @@ async def history(keywords: str = "", since: str = "", until: str = "",
     keywords). Each message carries thread_id and parent_id -- pass thread_id to
     graph()/thread() or an id to trace() to expand the reply DAG."""
     p = _me(ctx.request_context.request)
-    _seen(p.name, p.rooms, p.token_id)
+    if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
+        _seen(p.name, p.rooms, p.token_id)
     msgs = store.search(
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
@@ -3320,7 +3361,7 @@ async def presence(ctx: Context = None) -> dict:
     blocking unicast on a peer -- a deaf peer will not answer until something
     revives it. Deaf is NOT quietness: an agent whose heartbeat moves is
     working, and its silence stays a valid turn."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     agents = store.presence(_conn, p.rooms)
     _annotate_deafness(agents, p.rooms)
     _annotate_activity(agents, p.rooms)
@@ -3335,7 +3376,7 @@ async def presence(ctx: Context = None) -> dict:
 async def leave(room: str = "", ctx: Context = None) -> str:
     """Sign off the bus for this session -- every room by default, or just one with
     room=. Membership only: your messages stay, because authorship is history."""
-    p = _me(ctx.request_context.request)
+    p = _acting(ctx.request_context.request)
     targets = [room] if room else list(p.rooms)
     if room and room not in p.rooms:
         raise store.AccessError(f"no access to room {room}")
@@ -3631,7 +3672,7 @@ async def send_http(request):
     Agents get the opposite rule on the MCP tool, which is what keeps broadcast
     storms impossible.
     Unknown senders are auto-joined; an existing agent's name is used as-is."""
-    p = _principal(request)
+    p = _act(_principal(request))
     try:
         d = await request.json()
     except ValueError:
@@ -3810,7 +3851,7 @@ async def voices_http(request):
 async def voice_http(request):
     """PATCH /voices/{vid} {name?, persona?, sample?} -- uploader or admin.
     sample = the line this voice reads on audition (<= VOICE_SAMPLE_MAX)."""
-    p = _principal(request)
+    p = _act(_principal(request))
     vid = request.path_params["vid"]
     v = _voice_in_reach(p, vid)
     if not _voice_editable(p, v):
@@ -3835,7 +3876,7 @@ async def persona_draft_http(request):
     a 2-4 sentence narrator persona for this voice; the user edits and saves.
     THE ONLY place writer output becomes durable text a human edits, and only
     behind this explicit button. 503 when the writer is off."""
-    p = _principal(request)
+    p = _act(_principal(request))
     vid = request.path_params["vid"]
     v = _voice_in_reach(p, vid)
     if not _voice_editable(p, v):
@@ -3935,7 +3976,7 @@ async def voice_delete_http(request):
     unlinked AFTER the commit; the synthesizer keeps its stale versioned copies
     (reconcile is superset-only, harmless); scripts keep the voice_id label --
     a delete is history (11155)."""
-    p = _principal(request)
+    p = _act(_principal(request))
     vid = request.path_params["vid"]
     v = _voice_in_reach(p, vid)
     if not _voice_editable(p, v):
@@ -3957,7 +3998,7 @@ async def voice_rename_http(request):
     a clip under the old name reconciles to silence), then one tx; if the tx
     raises the clip moves back. Then the clip is pushed under its new
     versioned name."""
-    p = _principal(request)
+    p = _act(_principal(request))
     vid = request.path_params["vid"]
     v = _voice_in_reach(p, vid)
     if not _voice_editable(p, v):
@@ -4011,7 +4052,7 @@ async def voice_clip_http(request):
     voice or REPLACES its clip in place: written as bank-<id>.wav.tmp then
     os.replace, so the synthesizer never sees a half file, and its conditioning
     cache keys on mtime so the next utterance re-encodes."""
-    p = _principal(request)
+    p = _act(_principal(request))
     vid = request.path_params["vid"]
     store.valid_name(vid)
     v = store.voice_get(_conn, vid)
@@ -4123,7 +4164,7 @@ async def room_voice_http(request):
     """PUT {voice_id} / DELETE /rooms/{rid}/voices/{speaker}: the pure rule
     decides (owner over room over default; collision refused naming the holder;
     admin has no reach), the store writes."""
-    p = _principal(request)
+    p = _act(_principal(request))
     rid, speaker = request.path_params["rid"], request.path_params["speaker"]
     room = _room_in_reach(p, rid)
     cur = _conn.execute("SELECT voice_id, set_by FROM voice_assignments WHERE room_id=? "
@@ -4209,7 +4250,7 @@ async def upload_http(request):
     the only form -- never write "[file: ...]" markers into a body; they are plain text
     and no consumer parses them.
     Agents ingest on demand: curl -H 'Authorization: Bearer $REVEILLE_TOKEN' <broker><url>"""
-    p = _principal(request)
+    p = _act(_principal(request))
     rid = store.resolve_send_room(p.rooms, room=request.query_params.get("room") or None)
     name = _FNAME_RE.sub("_", request.query_params.get("name") or "file.bin")[-80:]
     used = _files_used() if QUOTA_BYTES else 0
@@ -4319,7 +4360,7 @@ async def audio_make_http(request):
     message's room, ?room= ignored (as GET). 200 {state} when it already exists
     or is in flight or queued (a second click is answered, not queued twice);
     202 {state: queued} when this call queued it; 503 when voices are off."""
-    p = _principal(request)
+    p = _act(_principal(request))
     raw = request.path_params["mid"]
     if not raw.isdigit():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -4438,7 +4479,7 @@ async def search_http(request):
 async def delete_http(request):
     """DELETE /message/<mid>?from=<name> -- retract your own message if NOBODY has
     read or replied to it yet (the mistaken-broadcast eraser). Room-scoped."""
-    p = _principal(request)
+    p = _act(_principal(request))
     sender = request.query_params.get("from") or p.name
     mid = int(request.path_params["mid"])
     try:
