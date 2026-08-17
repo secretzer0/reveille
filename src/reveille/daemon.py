@@ -199,6 +199,10 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.110 A SILENT RECORDING IS REFUSED AT THE MICROPHONE. The recorder shows
+NO SIGNAL while a take is all zeros and discards it at stop, naming the
+cause (no input device or permission in that browser window) -- silence
+is never stored or cloned. Bus tools unchanged.
 0.2.109 YOUR PERSONAL VOICE COMES FIRST. The Voices tab opens with MY
 PERSONAL VOICE (your own cards, then the add flow), then THE BANK; "say
 it" on an empty sample reads a default line naming the voice, so a new
