@@ -3357,7 +3357,7 @@ async function openVoices(){
  // border of the voice it acts on; icons carry title= for the hover.
  const ico=(attr,id,glyph,title,cls)=>'<button type="button" class="ico'+(cls?' '+cls:'')+
   '" '+attr+'="'+esc(id)+'" title="'+esc(title)+'" aria-label="'+esc(title)+'">'+glyph+'</button>';
- const cards=d.voices.map(v=>{
+ const card=v=>{
   const head=confirming&&confirming.kind==='voice'&&confirming.id===v.id
    ?askRow('Delete '+esc(v.name)+'?','Its assignments go with it (those speakers fall back to '+
      'a default); scripts already written keep the label; the clip is gone.','')
@@ -3396,7 +3396,11 @@ async function openVoices(){
     ico('data-vsaybtn',v.id,'&#9654;','say it: hear this voice read the box (Ctrl+Enter)')+
     (v.editable?ico('data-vsamplesave',v.id,'&#10003;','save sample'):'')+
    '</div></div></div>';
- }).join('')||'<div class="pDim">the bank is empty</div>';
+ };
+ // MINE FIRST (operator): a personal voice is the one you are here to judge;
+ // it sits at the top with its own add flow, the bank below.
+ const mine=d.voices.filter(v=>v.personal).map(card).join('');
+ const bank=d.voices.filter(v=>!v.personal).map(card).join('')||'<div class="pDim">the bank is empty</div>';
  // TWO ADD FLOWS (operator; ruling 11155): a BANK voice is everyone's to
  // assign; a PERSONAL voice exists only for you (you may still give it to
  // yourself or your agents) and is decided at creation, never flipped.
@@ -3408,18 +3412,20 @@ async function openVoices(){
   '<div class="pDim">A voice is a clip reveille keeps: PCM WAV, 5 to 30 seconds, one speaker, '+
   'clean room tone. Only its uploader or an admin replaces the clip, edits, renames or deletes '+
   'it. Re-uploading under the same id REPLACES it -- the id is the identity, the bytes are '+
-  'not.</div>'+cards+
-  '<div class="pSec">ADD TO THE BANK</div>'+
-  '<div class="pDim">Available to every signed-in user for any speaker.</div>'+
-  '<div class="pRow"><input id="bankId" placeholder="id (e.g. quark)" maxlength="64">'+
-  '<input id="bankLabel" placeholder="display name (optional)">'+picker('bank','add to bank')+'</div>'+
+  'not.</div>'+
   '<div class="pSec">MY PERSONAL VOICE</div>'+
   '<div class="pDim">Yours alone: nobody else can see or assign it, and you may give it to '+
   'yourself or to your agents. Read 10-20 seconds of anything in your normal voice, one '+
   'speaker, quiet room. id defaults to your username, so it is your voice in every room the '+
-  'moment it lands.</div>'+
+  'moment it lands. AUDITION it on its card: play clip is your recording, say it is the '+
+  'clone reading the sample (a default line when the box is empty).</div>'+mine+
   '<div class="pRow"><input id="persId" placeholder="id" value="'+esc(myName)+'" maxlength="64">'+
-  picker('pers','add personal voice')+'</div>'+
+  picker('pers',mine?'add another personal voice':'add personal voice')+'</div>'+
+  '<div class="pSec">THE BANK</div>'+
+  '<div class="pDim">Available to every signed-in user for any speaker.</div>'+bank+
+  '<div class="pSec">ADD TO THE BANK</div>'+
+  '<div class="pRow"><input id="bankId" placeholder="id (e.g. quark)" maxlength="64">'+
+  '<input id="bankLabel" placeholder="display name (optional)">'+picker('bank','add to bank')+'</div>'+
   '<div class="pSec">WHO SPEAKS WITH WHAT</div>'+
   '<div class="pDim">One voice per speaker per room, and no two speakers share one in a '+
   'room. A speaker\'s owner may set it anywhere; a room owner may set it in their room until '+
@@ -3496,7 +3502,11 @@ async function openVoices(){
   vStop();vBusy=true;vPlayClip('/voices/'+encodeURIComponent(b.dataset.vorig)+'/clip');};
  for(const b of document.querySelectorAll('[data-vsaybtn]')){
   const inp=document.querySelector('[data-vsay="'+CSS.escape(b.dataset.vsaybtn)+'"]');
-  const say=()=>{const t=inp.value.trim();if(!t){toast('type a line first');return;}
+  // An empty box still auditions: a default line naming the voice, so a
+  // freshly added voice is heard on the first click.
+  const vname=(d.voices.find(v=>v.id===b.dataset.vsaybtn)||{}).name||b.dataset.vsaybtn;
+  const say=()=>{const t=inp.value.trim()||('This is '+vname+' speaking on reveille. If this '+
+    'sounds like the clip, the clone is good; if not, record a cleaner sample.');
    vStop();vBusy=true;
    vPlay('say:'+b.dataset.vsaybtn,'/voices/'+encodeURIComponent(b.dataset.vsaybtn)+
     '/say?text='+encodeURIComponent(t));};
