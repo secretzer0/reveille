@@ -26,13 +26,24 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import daemon, store  # noqa: E402
 
 
+def _tone(n, sampwidth=2):
+    """n samples of a 500 Hz square wave at a quarter of full scale (-12 dBFS):
+    a clip that has SIGNAL, which the peak gate demands of every upload."""
+    amp = (1 << (8 * sampwidth - 1)) // 4
+    if sampwidth == 1:
+        pos, neg = bytes([128 + amp]), bytes([128 - amp])
+    else:
+        pos, neg = amp.to_bytes(sampwidth, "little", signed=True), (-amp).to_bytes(sampwidth, "little", signed=True)
+    return ((pos * 24 + neg * 24) * (n // 48 + 1))[:n * sampwidth]
+
+
 def wav(seconds, rate=24000, sampwidth=2):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(sampwidth)
         w.setframerate(rate)
-        w.writeframes(b"\x00" * int(seconds * rate) * sampwidth)
+        w.writeframes(_tone(int(seconds * rate), sampwidth))
     return buf.getvalue()
 
 
@@ -51,6 +62,20 @@ def test_the_clip_refusal_names_the_bound_it_hit():
            + struct.pack("<4sIHHIIHH", b"fmt ", 16, 3, 1, 24000, 96000, 4, 32)
            + struct.pack("<4sI", b"data", 8) + b"\0" * 8)
     assert "not a PCM WAV" in R(flt)
+    # SILENCE (ruling 11213): a peak under -40 dBFS is a recorder that heard
+    # nothing, refused by name; every PCM width the stdlib reads is measured.
+    for sw in (1, 2, 3, 4):
+        assert R(wav(6.0, sampwidth=sw)) is None, sw
+        quiet = io.BytesIO()
+        with wave.open(quiet, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(sw); w.setframerate(24000)  # noqa: E702
+            w.writeframes((b"\x80" if sw == 1 else b"\x00" * sw) * 24000 * 6)
+        assert "silent" in R(quiet.getvalue()) and "-inf dBFS" in R(quiet.getvalue()), sw
+    faint = io.BytesIO()
+    with wave.open(faint, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)  # noqa: E702
+        w.writeframes((b"\x64\x00" + b"\x9c\xff") * 24000 * 3)   # +-100 of 32768 = -50 dBFS
+    assert "silent (peak -50 dBFS" in R(faint.getvalue())
     daemon.VOICE_CLIP_MAX = 100
     try:
         assert "too large" in R(wav(5.0))

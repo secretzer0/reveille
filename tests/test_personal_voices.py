@@ -20,11 +20,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import daemon, store  # noqa: E402
 
 
+def _tone(n, sampwidth=2):
+    """n samples of a 500 Hz square wave at a quarter of full scale (-12 dBFS):
+    a clip that has SIGNAL, which the peak gate demands of every upload."""
+    amp = (1 << (8 * sampwidth - 1)) // 4
+    if sampwidth == 1:
+        pos, neg = bytes([128 + amp]), bytes([128 - amp])
+    else:
+        pos, neg = amp.to_bytes(sampwidth, "little", signed=True), (-amp).to_bytes(sampwidth, "little", signed=True)
+    return ((pos * 24 + neg * 24) * (n // 48 + 1))[:n * sampwidth]
+
+
 def wav(seconds=6.0, rate=24000):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)  # noqa: E702
-        w.writeframes(b"\x00" * int(seconds * rate) * 2)
+        w.writeframes(_tone(int(seconds * rate)))
     return buf.getvalue()
 
 

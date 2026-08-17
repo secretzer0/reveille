@@ -215,6 +215,34 @@ fine at 300 rows; said in a comment, and moved on.
   the Voices tab is THE ONE PLACE — `openRooms()` gains no rows; one renderer, one
   place. `toggleVoice` sends `{voice}` on the socket (slice 5).
 
+### 7.1 RULED 11211: the wire is WebM/Opus and the player is MediaSource (measured 2026-08-17)
+
+Operator directive: Opus to the browser now, not when bandwidth hurts. Ruling
+order: measure a plain `<audio src>` first, MediaSource only if it misses the
+2.0 s gate. Broker side is DES-009 §2 as amended (one ffmpeg per utterance,
+`.webm.part`, `/audio/<mid>.webm`, the audition on the same stream, ffmpeg in
+the image, refusal by name without it, no WAV fallback). Measurements on the
+eval box (Chrome, stub writer at realistic pacing, the PR #21 method: the
+browser's `lastId` arrival to `vLast.firstAt`, an audio frame at 670 ms):
+
+| player | send to first sound | verdict |
+|---|---|---|
+| plain `<audio src=/audio/<mid>.webm>` | 3.6 s, 3.6 s | misses the gate: Chrome prerolls a live, unknown-length stream by media time |
+| PCM WAV scheduler (before this ruling) | 0.76 s | the bar to hold |
+| MediaSource, `audio/webm; codecs=opus`, `play()` at the first buffered range | **0.666 s** | ships |
+
+Bytes per scripted message: about 32 KB (32 kbit/s Opus) where the PCM was
+about 330 KB. On the way to 0.666 s three stalls were found and removed, each
+one a buffer holding a whole sentence: `BufferedReader.read` on ffmpeg's stdout
+(→ `os.read`), ffmpeg's 2 s input probe (→ `-analyzeduration 0 -probesize 32`),
+Python's `BufferedWriter` on ffmpeg's stdin (→ `Popen(bufsize=0)`). Ear test:
+`-application voip` and `-application audio` were indistinguishable on speech
+at 32 kbit/s; voip is kept for its lower algorithmic delay. The MSE element is
+routed through the one AudioContext (`createMediaElementSource`), so the
+toggle's click stays the autoplay gesture and `vStop` rules every source.
+`voice_clip_refusal` refuses a clip whose peak is under -40 dBFS by name (the
+recorder's own bar, ruling 11213). Named gap: Safari's MSE has no Opus/WebM.
+
 ## 8. The model, and how it is chosen (measurement, not preference)
 
 Qwen3.8-27B (dense, 64 layers, hybrid gated-DeltaNet + gated-attention; native 262K;

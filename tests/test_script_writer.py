@@ -15,12 +15,13 @@ Proven RED on main @ 3f1c2c5: none of the names exist.
 """
 import http.server
 import json
+import math
 import os
 import struct
+import subprocess
 import sys
 import threading
 import time
-import wave
 
 import pytest
 
@@ -189,7 +190,8 @@ def test_the_synth_worker_appends_sentences_under_one_header(monkeypatch, tmp_pa
         spoken.append(text)
         if text == "gap.":
             return None
-        return iter([_wav(24000, b"\x01\x01" * 100)[:60], _wav(24000, b"\x01\x01" * 100)[60:]])
+        pcm = b"".join(struct.pack("<h", int(12000 * math.sin(i / 3.8))) for i in range(12000))
+        return iter([_wav(24000, pcm)[:60], _wav(24000, pcm)[60:]])
     monkeypatch.setattr(daemon, "_files_dir", tmp_path)
     monkeypatch.setattr(daemon, "_tts_speak", speak)
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
@@ -202,8 +204,14 @@ def test_the_synth_worker_appends_sentences_under_one_header(monkeypatch, tmp_pa
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert spoken == ["One.", "gap.", "Two."]
-    with wave.open(str(tmp_path / "tts-7.wav")) as w:
-        assert w.getframerate() == 24000 and w.getnframes() == 200, "two sentences, one header"
+    # Two sentences of 0.5 s each, one WebM (ruling 11211: the sentence streams
+    # feed ONE encoder, so the file is one header and a continuous cluster run).
+    out = tmp_path / "tts-7.webm"
+    assert out.read_bytes()[:4] == b"\x1a\x45\xdf\xa3"
+    pts = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time",
+                          "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout
+    times = [float(x) for x in pts.replace(",", " ").split() if x != "N/A"]
+    assert abs(times[-1] + 0.02 - 1.0) < 0.15, "two sentences, one stream"
 
 
 def test_enqueue_routes_to_the_writer_only_with_a_listener_and_a_persona(world, monkeypatch):

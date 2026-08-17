@@ -74,13 +74,13 @@ def test_every_listing_carries_the_artifact_flags(tmp_path, monkeypatch):
     rows = store.tail(c, rooms=[r1])
     assert rows[0]["has_script"] is False and rows[0]["has_audio"] is False
     store.script_put(c, mid, "x", None, "m", 1)
-    (tmp_path / f"tts-{mid}.wav.part").write_bytes(b"RIFF")
+    (tmp_path / f"tts-{mid}.webm.part").write_bytes(b"\x1a\x45\xdf\xa3")
     for fn in (lambda: store.tail(c, rooms=[r1]),
                lambda: store.thread(c, mid, [r1]),
                lambda: store.search(c, keywords=["terse"], rooms=[r1])):
         row = fn()[0]
         assert row["has_script"] is True and row["has_audio"] is True, fn
-    os.rename(tmp_path / f"tts-{mid}.wav.part", tmp_path / f"tts-{mid}.wav")
+    os.rename(tmp_path / f"tts-{mid}.webm.part", tmp_path / f"tts-{mid}.webm")
     assert store.tail(c, rooms=[r1])[0]["has_audio"] is True
     with store.tx(c):
         store._delete_messages(c, [mid])

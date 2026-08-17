@@ -26,8 +26,8 @@ give.
 
 **One file per message, played in id order by each browser; a file may be READ
 while it is still being WRITTEN** (amended 2026-08-16, ruling 11018: the feed's
-`audio` event fires at the first synthesized byte, and `/audio/<msg-id>.wav`
-serves an in-flight message as a progressive WAV -- the human hears the first
+`audio` event fires at the first synthesized byte, and `/audio/<msg-id>.webm`
+serves an in-flight message progressively -- the human hears the first
 chunk while the rest is still being made). Consequences, all in the wanted
 direction:
 
@@ -36,6 +36,18 @@ direction:
 - anything missed is replayable, because the audio is a file and not a moment
 - a synthesizer that is down means silent messages, never a stuck room
 
+**The wire is WebM/Opus, not WAV** (amended 2026-08-17, ruling 11211, operator
+directive). Synthesizer to broker stays the fork's PCM WAV stream; the broker
+runs one ffmpeg per utterance (`libopus`, 32 kbit/s, `-application voip`,
+20 ms frames, 200 ms WebM clusters, `-live 1`, `-flush_packets 1`, stdin and
+stdout unbuffered) and everything downstream -- the `.part` on disk, `/audio/
+<msg-id>.webm`, the audition -- is that stream: about 32 KB per scripted
+message where the PCM was 330 KB. ffmpeg is in the server image; a broker
+without it refuses voices at boot by name (`tts_config_refusal`), never falls
+back to WAV. The bank clip (`/voices/{id}/clip`) stays the WAV it was uploaded
+as -- it is the original, for comparing against the clone. Measured on the eval
+box (DES-013 section 8): send to first sound 0.666 s.
+
 ## 3. RULED: the browser never talks to the synthesizer
 
 The operator's question, answered as a boundary rather than a preference.
@@ -43,7 +55,7 @@ The operator's question, answered as a boundary rather than a preference.
 ```
 browser  --(existing origin, cookie auth)-->  broker  --(server-side)-->  TTS service
    ^                                            |
-   +--------- GET /audio/<msg-id>.wav ----------+
+   +--------- GET /audio/<msg-id>.webm ---------+
 ```
 
 **Its own route, not `/files/` (corrected after review of the serving path).**
@@ -252,17 +264,16 @@ message's room is the authorization (§3), the filename is the record, and a
 missing file means a silent message. Nothing to migrate, nothing to reconcile,
 nothing that can lapse into disagreement with the bytes on disk.
 
-**The `.part` file is the record of in-flight** (ruling 11018). The worker
-writes `tts-<msg-id>.wav.part` as upstream's `stream=true` bytes land and
-announces the id on the feed at the first byte; on completion it patches the
-true RIFF sizes into the header, renames `.part` to `.wav`, and only then drops
-its in-memory registry entry -- so `/audio/<msg-id>.wav` has three states and
-one route: complete serves the file, in flight replays the `.part` so far and
-tails it to the true end, neither is a 404 and a silent message. Only the
-in-flight bytes carry the 0xFFFFFFFF streaming sizes; replay and late listeners
-never depend on them. `_delete_messages` unlinks **both** names, and a rename
-that finds no `.part` is a message deleted mid-flight: fail closed, no `.wav`
-lands, nothing to orphan. A `.part` found at startup is a broker that died
+**The `.part` file is the record of in-flight** (ruling 11018; names amended
+by 11211). The worker writes `tts-<msg-id>.webm.part` as the encoder's clusters
+land and announces the id on the feed at the first byte; on completion it
+renames `.part` to `.webm` and only then drops its in-memory registry entry --
+so `/audio/<msg-id>.webm` has three states and one route: complete serves the
+file, in flight replays the `.part` so far and tails it to the true end,
+neither is a 404 and a silent message. A live WebM carries no length in its
+header, so replay and late listeners never depend on one. `_delete_messages`
+unlinks **both** names, and a rename that finds no `.part` is a message
+deleted mid-flight: fail closed, no `.webm` lands, nothing to orphan. A `.part` found at startup is a broker that died
 mid-synthesis: swept, and the message stays silent. The worker never waits on
 a reader; a slow or departed tail cannot stall the queue. The client is
 unchanged: `ended`, `error` and 404 all still mean "done, next".
@@ -279,8 +290,7 @@ Unversioned branch, three commits, gates named:
    the service with stdlib `urllib` (no new dependency), writes
    `<files>/tts-<msg-id>.wav`, serves it at `/audio/<msg-id>.wav` with the
    room check taken from the message, and announces the id on the existing feed.
-   Serve WAV; add an opus encode only when bandwidth is measured to hurt —
-   browsers play WAV natively and ffmpeg is a dependency nobody has yet needed.
+   (Served WAV until 2026-08-17; the wire is WebM/Opus since -- section 2.)
    Gates: the config refusal in §3 fires on a plaintext remote URL; the unlink
    in §7 is seen red on the commit that carried a per-caller unlink; a service
    that is down leaves messages arriving with no audio.

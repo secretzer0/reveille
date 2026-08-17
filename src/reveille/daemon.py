@@ -26,6 +26,7 @@ a frame the instant a message for that agent is sent; the client exits and the h
 task-completion notification wakes the session to pull its mail over MCP and re-arm.
 No keystroke injection anywhere. One held connection, one wake per gate cycle.
 """
+import array
 import asyncio
 import base64
 import binascii
@@ -36,6 +37,7 @@ import ipaddress
 import io
 import json
 import logging
+import math
 import queue
 import urllib.parse
 import urllib.request
@@ -43,6 +45,7 @@ import os
 import pathlib
 import re
 import secrets
+import sys
 import struct
 import subprocess
 import shutil
@@ -201,6 +204,15 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.111 THE WIRE IS WEBM/OPUS (DES-009 section 2 amended, DES-013 section
+7.1, ruling 11211). The broker transcodes every utterance with ffmpeg
+(libopus 32 kbit/s, 200 ms clusters); GET /audio/<id>.webm and the
+audition stream audio/webm, ~32 KB per scripted message where the WAV
+was ~330 KB; the bank clip stays the WAV it was uploaded as. The page
+plays through MediaSource; measured send to first sound 0.666 s (a plain
+<audio> element was 3.6 s). A broker without ffmpeg refuses voices at boot
+by name. A bank clip whose peak is under -40 dBFS is refused as silent.
+Bus tools unchanged.
 0.2.110 A SILENT RECORDING IS REFUSED AT THE MICROPHONE. The recorder shows
 NO SIGNAL while a take is all zeros and discards it at stop, naming the
 cause (no input device or permission in that browser window) -- silence
@@ -3676,7 +3688,8 @@ def voice_clip_refusal(data):
         return f"too large ({len(data) >> 20}MB, cap {VOICE_CLIP_MAX >> 20}MB)"
     try:
         with wave.open(io.BytesIO(data)) as w:
-            rate, frames = w.getframerate(), w.getnframes()
+            rate, frames, width = w.getframerate(), w.getnframes(), w.getsampwidth()
+            pcm = w.readframes(frames)
     except (wave.Error, EOFError, ValueError) as e:
         return f"not a PCM WAV ({e}) -- the broker has no decoder; convert first"
     if not rate:
@@ -3687,7 +3700,35 @@ def voice_clip_refusal(data):
         return f"too short ({seconds:.1f} s; the synthesizer needs at least {lo:.0f} s)"
     if seconds > hi:
         return f"too long ({seconds:.1f} s; the synthesizer rejects more than {hi:.0f} s)"
+    # SILENCE IS REFUSED (ruling 11213): a clip whose peak is under -40 dBFS is a
+    # recorder that heard nothing (a muted mic, a wrong device) -- the synthesizer
+    # would clone the noise floor and the voice would be a whisper of hiss.
+    peak = _wav_peak(pcm, width)
+    if peak < VOICE_CLIP_PEAK_MIN:
+        db = 20 * math.log10(peak) if peak else float("-inf")
+        return f"silent (peak {db:.0f} dBFS; the recorder heard nothing -- check the microphone)"
     return None
+
+
+VOICE_CLIP_PEAK_MIN = 0.01          # -40 dBFS, the recorder's own bar
+
+
+def _wav_peak(pcm, width):
+    """Peak |sample| as a fraction of full scale, any PCM width the stdlib
+    reads (1 = unsigned 8-bit, 2/4 = signed, 3 = signed 24-bit)."""
+    if not pcm:
+        return 0.0
+    if width == 1:
+        return max(abs(b - 128) for b in pcm) / 128
+    if width == 3:
+        # the top two bytes of every 24-bit sample, read as s16
+        pcm = bytes(b for i in range(0, len(pcm) - 2, 3) for b in (pcm[i + 1], pcm[i + 2]))
+        width = 2
+    arr = array.array("h" if width == 2 else "i")
+    arr.frombytes(pcm[:len(pcm) - len(pcm) % arr.itemsize])
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return max(max(arr), -min(arr)) / (1 << (8 * width - 1))
 
 
 def _voice_seconds(data):
