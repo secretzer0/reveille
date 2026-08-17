@@ -204,6 +204,11 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.113 COMPOSE PASSES THE WRITER AND THE LAN FLAG THROUGH. docker/compose.yml
+forwards REVEILLE_SCRIPT_URL / _MODEL / _TIMEOUT / _TOKEN and
+REVEILLE_LAN_PLAINTEXT to the broker like it already forwarded the TTS
+pair, so a `make up` on the VM can point voices (and the writer) at a host
+on the operator's LAN. Unset = as before. Bus tools unchanged.
 0.2.112 `reveille init` LISTS YOUR AGENTS. The wizard logs you in first,
 shows the agents your account holds (from GET /tokens, with their rooms)
 and takes a number: this directory becomes that agent's native body (the
