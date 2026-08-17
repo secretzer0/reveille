@@ -2410,8 +2410,11 @@ def _transcode(chunks):
     first_pcm = head[44:]
 
     def gen():
+        # bufsize=0: an unbuffered stdin. Python's BufferedWriter held a whole
+        # sentence back until the next one arrived -- measured 1.5 s of first-
+        # sound on the eval box; unbuffered, the encoder sees PCM as it lands.
         proc = subprocess.Popen(_opus_args(rate), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL)
+                                stderr=subprocess.DEVNULL, bufsize=0)
 
         def feed():
             try:
