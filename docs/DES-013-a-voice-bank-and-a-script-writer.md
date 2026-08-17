@@ -304,6 +304,18 @@ TTS image already builds on), `CMAKE_CUDA_ARCHITECTURES=61`, ECC off, persistenc
 Concurrency across rooms, if ever needed, is a second `llama-server` on the second
 card, not `--parallel N` on one.
 
+**Amended 2026-08-17 (ruling 11322): the host is the operator's 2x RTX 3060 (12 GB
+each), not the P40s.** Same decode bandwidth as a P40 (360 vs 347 GB/s) but Ampere:
+tensor cores (prompt processing several times faster -- that IS the
+time-to-first-sentence budget), current driver and CUDA (no R580 / sm_61 pin, no
+CUDA 12.8 ceiling), half the power. Pin: Q4_K_M (Q4_K_XL) across both cards,
+`--split-mode tensor`, KV q8_0, ctx 4K (the writer needs ~2K) -- ~20 GB of the 24.
+Q6 does not fit the pair; the P40s buy only VRAM. If Q4 misses the ear or the
+budget, the fallback is a smaller model on the same cards, not the P40s. Host stack
+for the build: current NVIDIA driver, current CUDA, `CMAKE_CUDA_ARCHITECTURES=86`;
+the Pascal lines above stay as the P40 record. The pair is shared with the ear
+(DES-014, VRAM table there); the writer's quant is the knob when the pair is tight.
+
 ## 9. Slice shape (each its own PR; every gate seen red before green)
 
 1. **Schema + store + choke point.** v23: `voices`, `voice_assignments`, `scripts`;
