@@ -209,6 +209,15 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.116 THE PAGE DECODES OPUS ITSELF (iPhone plays), AND A MESSAGE IS SPOKEN
+ONCE. iOS Safari has no MediaSource, so the page now demuxes the WebM stream
+and decodes the Opus frames with a vendored WASM decoder (/ui/opus-decoder.js,
+opus-decoder 0.7.11 MIT), scheduling PCM on its AudioContext -- one code path
+for every browser with Web Audio; the wire is unchanged (first sound 0.705 s
+on the eval box). Defect fixed: switching rooms leaked a feed socket per switch
+(the closed socket's reconnect fired anyway), so every audio frame arrived N
+times and the message was spoken N times; a deliberate close now detaches the
+reconnect, and the play queue takes each id once. Bus tools unchanged.
 0.2.115 A TOKEN THAT IS NOT AN AGENT CANNOT ACT AS ONE (ruling 11252). An
 unbound token is read-only: reads (inbox, history, rooms, recall, brief,
 GET routes) answer as before and leave no presence; every act -- send, ack,
@@ -4610,7 +4619,7 @@ async def feed_ws(ws: WebSocket):
 #     pinned tag serves is the forward_anthropic defect wearing a UI hat;
 #     chosen AND legible, or not at all.
 _UI_PACKAGED = os.path.join(os.path.dirname(__file__), "ui", "bus")
-_UI_FILES = frozenset({"index.html"})
+_UI_FILES = frozenset({"index.html", "opus-decoder.min.js"})
 
 
 def _ui_override():
@@ -5091,6 +5100,17 @@ def nav_link_html(label, path):
             f'{html.escape(label.strip())}</a>')
 
 
+async def opus_decoder_http(_request):
+    """GET /ui/opus-decoder.js -> the vendored Opus decoder (opus-decoder 0.7.11,
+    MIT, Ethan Halsall; libopus compiled to WASM, inlined). The page decodes the
+    WebM/Opus stream itself and plays PCM through its AudioContext, so every
+    browser with Web Audio hears the same wire -- iPhone Safari included, which
+    has no MediaSource (operator, 2026-08-17). Fixed name from the route table,
+    same serving rules as index.html."""
+    return PlainTextResponse(_ui_read("opus-decoder.min.js"), media_type="application/javascript",
+                             headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def chat_http(_request):
     page = _ui_read("index.html").replace(
         "<!--NAVLINK-->", nav_link_html(os.environ.get("REVEILLE_NAV_LABEL", ""),
@@ -5145,6 +5165,7 @@ def build_app():
             Route("/version", version_http),
             Route("/usage", usage_http),
             Route("/ui", chat_http),
+            Route("/ui/opus-decoder.js", opus_decoder_http),
             Route("/setup", setup_http, methods=["POST"]),
             Route("/login", login_http, methods=["POST"]),
             Route("/logout", logout_http, methods=["POST"]),
