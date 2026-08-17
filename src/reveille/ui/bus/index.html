@@ -521,6 +521,35 @@
   color:var(--fg);padding:.25rem .55rem;font:inherit;font-size:.72rem;cursor:pointer}
  .pRow button:hover{border-color:var(--gold)}
  .pRow button.danger{color:#e8555a;border-color:#5a2b2d}
+ /* ---- voice cards (DES-013): every control inside the border of its voice ---- */
+ .vCard{border:1px solid var(--line);border-radius:10px;padding:.5rem .75rem;margin:.55rem 0;
+  background:var(--bg)}
+ .vCard.personal{border-color:#4a4520}
+ .vHead{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+ .vHead b{font-size:.86rem;font-weight:600}
+ .vId{font-family:ui-monospace,monospace;font-size:.72rem;color:var(--dim)}
+ .vBadge{font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);
+  border:1px solid var(--line);border-radius:4px;padding:.05rem .35rem}
+ .vBadge.personal{color:var(--gold);border-color:#4a4520}
+ .vTools{margin-left:auto;display:flex;gap:.25rem}
+ .ico{background:var(--chip);border:1px solid var(--line);border-radius:6px;color:var(--fg);
+  font:inherit;font-size:.8rem;line-height:1;padding:.25rem .45rem;cursor:pointer}
+ .ico:hover{border-color:var(--gold)}
+ .ico.danger{color:#e8555a;border-color:#5a2b2d}
+ .vEdit{display:flex;gap:.4rem;align-items:center;margin:.4rem 0;flex-wrap:wrap}
+ .vEdit input{flex:1;min-width:8rem;background:var(--card);border:1px solid var(--line);
+  border-radius:6px;color:var(--fg);padding:.3rem .5rem;font:inherit;font-size:.78rem}
+ .vEdit button{background:var(--chip);border:1px solid var(--line);border-radius:6px;
+  color:var(--fg);padding:.25rem .55rem;font:inherit;font-size:.72rem;cursor:pointer}
+ .vField{margin:.45rem 0 .1rem}
+ .vField label{display:block;font-size:.6rem;letter-spacing:.12em;color:var(--faint);
+  margin-bottom:.2rem}
+ .vField label .pDim{letter-spacing:0;text-transform:none;font-size:.62rem}
+ .vRow{display:flex;gap:.4rem;align-items:flex-start}
+ .vRow textarea.vPersona{flex:1;min-width:12rem;background:var(--card);border:1px solid var(--line);
+  border-radius:6px;color:var(--fg);font:inherit;font-size:.78rem;padding:.3rem .45rem;resize:vertical}
+ .vRow button:not(.ico){background:var(--chip);border:1px solid var(--line);border-radius:6px;
+  color:var(--fg);padding:.25rem .55rem;font:inherit;font-size:.72rem;cursor:pointer}
  .pRow button:disabled{opacity:.45;cursor:not-allowed;border-color:var(--line)}
  /* U7: creation is a page-level action, management is row-level (architect
     ruling) -- kept collapsed so it is never visually adjacent to a managed
@@ -3227,9 +3256,11 @@ async function openMemories(){
 // shape, so the same multipart refusal guards it. Assignment (who speaks with
 // what, per room) is a later slice; this tab is the bank only.
 const VOICE_ID_RE=/^[a-z0-9][a-z0-9_-]{0,63}$/;
-async function putVoiceClip(id,name,file){
- const r=await fetch('/voices/'+encodeURIComponent(id)+'/clip?name='+encodeURIComponent(name||''),
-  {method:'PUT',body:file});
+async function putVoiceClip(id,name,file,personal){
+ // personal is decided HERE, at creation, and never after (11155): the server
+ // ignores the flag on a replace.
+ const r=await fetch('/voices/'+encodeURIComponent(id)+'/clip?name='+encodeURIComponent(name||'')+
+  (personal?'&personal=1':''),{method:'PUT',body:file});
  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||e.error||r.status);}
  return r.json();
 }
@@ -3247,6 +3278,7 @@ function speakerRows(rid,d){
   if(!key)return '<div class="pRow">'+who+'<span class="pDim">unbound token -- not assignable, '+
    'speaks with the digest pick</span></div>';
   const lab=sp.voice_id?esc(sp.voice_id)+' <span class="pDim">('+esc(sp.set_by||'')+')</span>'
+   :sp.personal?'<span class="pDim">a personal voice</span>'
    :'<span class="pDim">no bank voice (digest pick)</span>';
   if(!sp.editable)return '<div class="pRow">'+who+'<span>'+lab+'</span></div>';
   const opts=['<option value=""'+(sp.voice_id?'':' selected')+'>-- none (digest pick) --</option>']
@@ -3316,94 +3348,148 @@ async function openVoices(){
  const per=[];
  for(const r of myRooms){
   try{const rv=await api('/rooms/'+encodeURIComponent(r.id)+'/voices');
-   per.push('<div class="pSec">'+esc(r.owner&&r.owner!==myName?r.owner+' \u2192 '+r.name:r.name)+
+   per.push('<div class="pSec">'+esc(r.owner&&r.owner!==myName?r.owner+' → '+r.name:r.name)+
     '</div>'+speakerRows(r.id,rv));}
   catch(e){per.push('<div class="pSec">'+esc(r.name)+'</div><div class="pDim err">'+esc(e.message)+'</div>');}
  }
- const rows=d.voices.map(v=>
-  '<div class="pRow"><b>'+esc(v.name)+' <span class="pDim">'+esc(v.id)+' \u00b7 '+
-   (Math.round(v.seconds*10)/10)+' s</span></b>'+
-   // THE ORIGINAL beside the clone: play the bank clip itself, so a voice can
-   // be judged against what it was cloned from (operator, eval box).
-   '<button type="button" data-vorig="'+esc(v.id)+'" title="play the uploaded clip itself">play clip</button>'+
-   (v.editable
-    ?'<button type="button" data-vpick="'+esc(v.id)+'">replace clip</button>'+
-     '<input type="file" accept="audio/wav,.wav" hidden data-vclip="'+esc(v.id)+'">'
-    :'<span class="pDim">not yours to edit</span>')+
-  '</div>'+
-  '<div class="pRow"><textarea class="vPersona" data-vpersona="'+esc(v.id)+'" rows="2" '+
-   'placeholder="persona: how this voice speaks (tone, cadence, attitude)"'+
-   (v.editable?'':' readonly')+'>'+esc(v.persona||'')+'</textarea>'+
-   (v.editable?'<button data-vsave="'+esc(v.id)+'">save persona</button>':'')+
-   // THE DRAFT BUTTON exists only when a writer is configured (d.llm) -- the
-   // one place writer output becomes text a human edits, behind a click.
-   (v.editable&&d.llm?'<button data-vdraft="'+esc(v.id)+'" title="ask the script writer for a first draft; you edit and save">draft persona</button>':'')+
-  '</div>'+
-  // THE AUDITION: hear this clip say a line of your choosing before anyone is
-  // assigned to it. Nothing is kept server-side; the same player as the feed.
-  // The SAMPLE is kept on the bank voice (v.sample): what this voice reads on
-  // audition, saved beside the persona; anyone may type over it to try a line.
-  '<div class="pRow"><textarea class="vPersona" data-vsay="'+esc(v.id)+'" rows="2" maxlength="2000" '+
-   'placeholder="sample dialog: a line this voice reads -- type and \'say it\'">'+esc(v.sample||'')+'</textarea>'+
-   '<button type="button" data-vsaybtn="'+esc(v.id)+'">say it</button>'+
-   (v.editable?'<button type="button" data-vsamplesave="'+esc(v.id)+'">save sample</button>':'')+
-  '</div>').join('')||'<div class="pDim">the bank is empty</div>';
+ // ONE CARD PER VOICE (operator, eval box): every control sits inside the
+ // border of the voice it acts on; icons carry title= for the hover.
+ const ico=(attr,id,glyph,title,cls)=>'<button type="button" class="ico'+(cls?' '+cls:'')+
+  '" '+attr+'="'+esc(id)+'" title="'+esc(title)+'" aria-label="'+esc(title)+'">'+glyph+'</button>';
+ const cards=d.voices.map(v=>{
+  const head=confirming&&confirming.kind==='voice'&&confirming.id===v.id
+   ?askRow('Delete '+esc(v.name)+'?','Its assignments go with it (those speakers fall back to '+
+     'a default); scripts already written keep the label; the clip is gone.','')
+   :'<div class="vHead"><b>'+esc(v.name)+'</b><span class="vId">'+esc(v.id)+'</span>'+
+     '<span class="pDim">'+(Math.round(v.seconds*10)/10)+' s</span>'+
+     '<span class="vBadge'+(v.personal?' personal':'')+'" title="'+(v.personal
+      ?'personal: exists only for you; you may still assign it to yourself or your agents'
+      :'bank: every signed-in user may assign it')+'">'+(v.personal?'personal':'bank')+'</span>'+
+     '<span class="vTools">'+
+     ico('data-vorig',v.id,'&#9654;','play the uploaded clip itself')+
+     (v.editable?ico('data-vpick',v.id,'&#8635;','replace the clip (same id, new bytes)')+
+       '<input type="file" accept="audio/wav,.wav" hidden data-vclip="'+esc(v.id)+'">'+
+       ico('data-vedit',v.id,'&#9998;','rename: display name and id')+
+       ico('data-vdel',v.id,'&#10005;','delete this voice','danger'):'')+
+     '</span></div>'+
+     (v.editable?'<div class="vEdit" data-vform="'+esc(v.id)+'" hidden>'+
+      '<input data-vnewname="'+esc(v.id)+'" value="'+esc(v.name)+'" placeholder="display name" maxlength="64">'+
+      '<input data-vnewid="'+esc(v.id)+'" value="'+esc(v.id)+'" placeholder="id" maxlength="64">'+
+      '<button type="button" data-vrename="'+esc(v.id)+'">save</button>'+
+      '<button type="button" data-vcancel="'+esc(v.id)+'">cancel</button></div>':'');
+  return '<div class="vCard'+(v.personal?' personal':'')+'">'+head+
+   '<div class="vField"><label>PERSONA <span class="pDim">how this voice speaks; the writer scripts with it</span></label>'+
+    '<div class="vRow"><textarea class="vPersona" data-vpersona="'+esc(v.id)+'" rows="2" '+
+    'placeholder="tone, cadence, vocabulary, attitude"'+(v.editable?'':' readonly')+'>'+esc(v.persona||'')+'</textarea>'+
+    (v.editable?ico('data-vsave',v.id,'&#10003;','save persona'):'')+
+    // THE DRAFT BUTTON exists only when a writer is configured (d.llm) -- the
+    // one place writer output becomes text a human edits, behind a click.
+    (v.editable&&d.llm?'<button type="button" data-vdraft="'+esc(v.id)+'" title="ask the script writer for a first draft; you edit and save">draft</button>':'')+
+   '</div></div>'+
+   // THE SAMPLE is kept on the voice (v.sample): what it reads on audition.
+   // Anyone may type over it to try a line; "say it" streams that line in this
+   // voice and keeps nothing server-side.
+   '<div class="vField"><label>SAMPLE <span class="pDim">a line this voice reads; say it to hear the clone</span></label>'+
+    '<div class="vRow"><textarea class="vPersona" data-vsay="'+esc(v.id)+'" rows="2" maxlength="2000" '+
+    'placeholder="type a line and press say it">'+esc(v.sample||'')+'</textarea>'+
+    ico('data-vsaybtn',v.id,'&#9654;','say it: hear this voice read the box (Ctrl+Enter)')+
+    (v.editable?ico('data-vsamplesave',v.id,'&#10003;','save sample'):'')+
+   '</div></div></div>';
+ }).join('')||'<div class="pDim">the bank is empty</div>';
+ // TWO ADD FLOWS (operator; ruling 11155): a BANK voice is everyone's to
+ // assign; a PERSONAL voice exists only for you (you may still give it to
+ // yourself or your agents) and is decided at creation, never flipped.
+ const picker=(pre,label)=>'<button type="button" id="'+pre+'Pick">choose wav</button>'+
+  '<input id="'+pre+'File" type="file" accept="audio/wav,.wav" hidden>'+
+  '<button type="button" id="'+pre+'Rec" title="record 5 to 30 seconds from your microphone">record</button>'+
+  '<span class="pDim" id="'+pre+'Name"></span><button id="'+pre+'Add">'+label+'</button>';
  panel('voices',
-  '<div class="pDim">A bank voice is a clip reveille keeps: PCM WAV, 5 to 30 seconds, one '+
-  'speaker, clean room tone. Anyone signed in may add one; only its uploader or an admin '+
-  'replaces the clip or edits the persona. Re-uploading under the same id REPLACES it -- '+
-  'the id is the identity, the bytes are not.</div>'+rows+
-  '<div class="pSec">ADD A VOICE</div>'+
-  '<div class="pRow"><input id="newVoiceId" placeholder="id (e.g. quark)" maxlength="64">'+
-  '<input id="newVoiceName" placeholder="display name (optional)">'+
-  // A BUTTON THAT CLICKS THE HIDDEN INPUT -- the pattern #attachBtn already
-  // uses; a <label> around a hidden file input did not open the picker here.
-  '<button type="button" id="newVoicePick">choose wav</button>'+
-  '<input id="newVoiceFile" type="file" accept="audio/wav,.wav" hidden>'+
-  '<button type="button" id="newVoiceRec" title="record 5 to 30 seconds from your microphone">record</button>'+
-  '<span class="pDim" id="newVoiceFileName"></span>'+
-  '<button id="addVoice">add</button></div>'+
-  '<div class="pDim">Or RECORD: id defaults to your username, so the voice is yours in every '+
-  'room the moment it lands (a bank voice named like its speaker is that speaker\'s '+
-  'default). Read 10-20 seconds of anything in your normal voice, one speaker, quiet room.</div>'+
+  '<div class="pDim">A voice is a clip reveille keeps: PCM WAV, 5 to 30 seconds, one speaker, '+
+  'clean room tone. Only its uploader or an admin replaces the clip, edits, renames or deletes '+
+  'it. Re-uploading under the same id REPLACES it -- the id is the identity, the bytes are '+
+  'not.</div>'+cards+
+  '<div class="pSec">ADD TO THE BANK</div>'+
+  '<div class="pDim">Available to every signed-in user for any speaker.</div>'+
+  '<div class="pRow"><input id="bankId" placeholder="id (e.g. quark)" maxlength="64">'+
+  '<input id="bankLabel" placeholder="display name (optional)">'+picker('bank','add to bank')+'</div>'+
+  '<div class="pSec">MY PERSONAL VOICE</div>'+
+  '<div class="pDim">Yours alone: nobody else can see or assign it, and you may give it to '+
+  'yourself or to your agents. Read 10-20 seconds of anything in your normal voice, one '+
+  'speaker, quiet room. id defaults to your username, so it is your voice in every room the '+
+  'moment it lands.</div>'+
+  '<div class="pRow"><input id="persId" placeholder="id" value="'+esc(myName)+'" maxlength="64">'+
+  picker('pers','add personal voice')+'</div>'+
   '<div class="pSec">WHO SPEAKS WITH WHAT</div>'+
-  '<div class="pDim">One bank voice per speaker per room, and no two speakers share one in a '+
+  '<div class="pDim">One voice per speaker per room, and no two speakers share one in a '+
   'room. A speaker\'s owner may set it anywhere; a room owner may set it in their room until '+
   'the speaker\'s owner does. A voice held by someone else here is greyed with the holder\'s '+
   'name.</div>'+per.join(''));
  wireSpeakerSelects(openVoices);
- $('newVoicePick').onclick=()=>$('newVoiceFile').click();
- let recorded=null;                       // {blob,seconds} from the microphone
- $('newVoiceFile').onchange=()=>{const f=$('newVoiceFile').files[0];recorded=null;
-  $('newVoiceFileName').textContent=f?f.name:'';};
- $('newVoiceRec').onclick=async()=>{
-  const b=$('newVoiceRec');
-  if(vRec){const r=vRecStop();recorded=r;b.textContent='record';
-   $('newVoiceFileName').textContent='recorded '+r.seconds.toFixed(1)+' s'+
-    (r.seconds<5?' -- too short, the synthesizer needs 5':r.seconds>30?' -- too long, 30 max':'');
-   if(!$('newVoiceId').value.trim())$('newVoiceId').value=myName;return;}
-  try{await vRecStart();b.textContent='stop';
-   // THE LENGTH IS SHOWN WHILE RECORDING (ruling 11121): the 5-30 s bound is
-   // met before the PUT, not discovered as a refusal after it.
-   const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
-    $('newVoiceFileName').textContent='recording '+sec.toFixed(1)+' s'+
-     (sec<5?' (need 5)':sec>30?' (30 max -- stop)':' (ok)');
-    if(vRec)setTimeout(tick,250);};
-   tick();
-   if(!$('newVoiceId').value.trim())$('newVoiceId').value=myName;}
-  catch(e){toast('microphone refused: '+e.message);}};
+ wireAsk(async()=>{const id=confirming.id;confirming=null;
+  try{await api('/voices/'+encodeURIComponent(id),{method:'DELETE'});toast('deleted '+id);}
+  catch(e){toast(e.message);}
+  openVoices();},openVoices);
+ // ONE recorder wiring for both add flows: choose-or-record, the length shown
+ // WHILE recording (ruling 11121: the 5-30 s bound is met before the PUT).
+ const rec=(pre,idEl)=>{
+  const st={file:null};
+  $(pre+'Pick').onclick=()=>$(pre+'File').click();
+  $(pre+'File').onchange=()=>{const f=$(pre+'File').files[0];st.file=f||null;
+   $(pre+'Name').textContent=f?f.name:'';};
+  $(pre+'Rec').onclick=async()=>{
+   const b=$(pre+'Rec');
+   if(vRec){const r=vRecStop();st.file=r.blob;b.textContent='record';
+    $(pre+'Name').textContent='recorded '+r.seconds.toFixed(1)+' s'+
+     (r.seconds<5?' -- too short, the synthesizer needs 5':r.seconds>30?' -- too long, 30 max':'');
+    return;}
+   for(const other of ['bank','pers'])if(other!==pre&&$(other+'Rec'))$(other+'Rec').disabled=true;
+   try{await vRecStart();b.textContent='stop';
+    const tick=()=>{if(!vRec){for(const o of ['bank','pers'])if($(o+'Rec'))$(o+'Rec').disabled=false;return;}
+     const sec=(performance.now()-vRec.t0)/1000;
+     $(pre+'Name').textContent='recording '+sec.toFixed(1)+' s'+
+      (sec<5?' (need 5)':sec>30?' (30 max -- stop)':' (ok)');
+     setTimeout(tick,250);};
+    tick();
+    if(idEl&&!idEl.value.trim())idEl.value=myName;}
+   catch(e){toast('microphone refused: '+e.message);}};
+  return st;};
+ const bankSt=rec('bank',$('bankId')), persSt=rec('pers',$('persId'));
+ $('bankAdd').onclick=async()=>{
+  const id=$('bankId').value.trim().toLowerCase();
+  if(!VOICE_ID_RE.test(id)){toast('id: lowercase letters, digits, - and _');return;}
+  if(!bankSt.file){toast('choose a wav or record one first');return;}
+  try{await putVoiceClip(id,$('bankLabel').value.trim(),bankSt.file,false);openVoices();}
+  catch(e){toast(e.message);}};
+ $('persAdd').onclick=async()=>{
+  const id=$('persId').value.trim().toLowerCase();
+  if(!VOICE_ID_RE.test(id)){toast('id: lowercase letters, digits, - and _');return;}
+  if(!persSt.file){toast('record your voice or choose a wav first');return;}
+  try{await putVoiceClip(id,myName,persSt.file,true);openVoices();}
+  catch(e){toast(e.message);}};
  for(const b of document.querySelectorAll('[data-vpick]'))b.onclick=()=>
   document.querySelector('[data-vclip="'+CSS.escape(b.dataset.vpick)+'"]').click();
- $('addVoice').onclick=async()=>{
-  const id=$('newVoiceId').value.trim().toLowerCase();
-  const f=recorded?recorded.blob:$('newVoiceFile').files[0];
-  if(!VOICE_ID_RE.test(id)){toast('id: lowercase letters, digits, - and _');return;}
-  if(!f){toast('choose a wav or record one first');return;}
-  try{await putVoiceClip(id,$('newVoiceName').value.trim(),f);openVoices();}
-  catch(e){toast(e.message);}};
  for(const el of document.querySelectorAll('[data-vclip]'))el.onchange=async()=>{
   const f=el.files[0];if(!f)return;
   try{await putVoiceClip(el.dataset.vclip,'',f);toast('clip replaced');openVoices();}
+  catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-vdel]'))b.onclick=()=>{
+  confirming={kind:'voice',id:b.dataset.vdel};openVoices();};
+ for(const b of document.querySelectorAll('[data-vedit]'))b.onclick=()=>{
+  const f=document.querySelector('[data-vform="'+CSS.escape(b.dataset.vedit)+'"]');
+  f.hidden=!f.hidden;if(!f.hidden)f.querySelector('input').focus();};
+ for(const b of document.querySelectorAll('[data-vcancel]'))b.onclick=()=>{
+  document.querySelector('[data-vform="'+CSS.escape(b.dataset.vcancel)+'"]').hidden=true;};
+ for(const b of document.querySelectorAll('[data-vrename]'))b.onclick=async()=>{
+  const id=b.dataset.vrename;
+  const name=document.querySelector('[data-vnewname="'+CSS.escape(id)+'"]').value.trim();
+  const nid=document.querySelector('[data-vnewid="'+CSS.escape(id)+'"]').value.trim().toLowerCase();
+  if(!name){toast('display name cannot be empty');return;}
+  if(!VOICE_ID_RE.test(nid)){toast('id: lowercase letters, digits, - and _');return;}
+  try{
+   await api('/voices/'+encodeURIComponent(id),{method:'PATCH',body:JSON.stringify({name:name})});
+   if(nid!==id)await api('/voices/'+encodeURIComponent(id)+'/rename',
+     {method:'PUT',body:JSON.stringify({id:nid})});
+   toast('saved');openVoices();}
   catch(e){toast(e.message);}};
  for(const b of document.querySelectorAll('[data-vorig]'))b.onclick=()=>{
   vStop();vBusy=true;vPlayClip('/voices/'+encodeURIComponent(b.dataset.vorig)+'/clip');};
@@ -3421,12 +3507,12 @@ async function openVoices(){
   catch(e){toast(e.message);}};
  for(const b of document.querySelectorAll('[data-vdraft]'))b.onclick=async()=>{
   const ta=document.querySelector('[data-vpersona="'+CSS.escape(b.dataset.vdraft)+'"]');
-  b.disabled=true;b.textContent='drafting\u2026';
+  b.disabled=true;b.textContent='drafting…';
   try{const d=await api('/voices/'+encodeURIComponent(b.dataset.vdraft)+'/persona/draft',
     {method:'POST',body:JSON.stringify({hint:ta.value.trim()})});
    ta.value=d.persona;toast('draft ready -- edit, then save persona');}
   catch(e){toast(e.message);}
-  b.disabled=false;b.textContent='draft persona';};
+  b.disabled=false;b.textContent='draft';};
  for(const b of document.querySelectorAll('[data-vsave]'))b.onclick=async()=>{
   const ta=document.querySelector('[data-vpersona="'+CSS.escape(b.dataset.vsave)+'"]');
   try{await api('/voices/'+encodeURIComponent(b.dataset.vsave),
