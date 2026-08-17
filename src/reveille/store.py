@@ -2378,7 +2378,7 @@ def _delete_messages(conn, ids):
             # Both names: the .part is the record of an in-flight synthesis, and
             # a worker whose rename then finds no .part fails closed -- no .wav
             # lands for a deleted message, with no second code path.
-            for name in (f"tts-{mid}.wav", f"tts-{mid}.wav.part"):
+            for name in (f"tts-{mid}.webm", f"tts-{mid}.webm.part"):
                 with contextlib.suppress(OSError):
                     os.unlink(os.path.join(AUDIO_DIR, name))
 
@@ -3092,7 +3092,7 @@ def _with_attachments(conn, msgs):
 
 def _with_artifacts(conn, msgs):
     """Stamp each message dict with has_script / has_audio (DES-013 section 6).
-    has_script is one IN query; has_audio is a per-row os.path.exists on the wav
+    has_script is one IN query; has_audio is a per-row os.path.exists on the webm
     or its .part -- fine at a 300-row backlog, and audio has no row on purpose."""
     if not msgs:
         return msgs
@@ -3102,7 +3102,7 @@ def _with_artifacts(conn, msgs):
     for m in msgs:
         m["has_script"] = m["id"] in scripted
         m["has_audio"] = bool(AUDIO_DIR) and any(
-            os.path.exists(os.path.join(AUDIO_DIR, f"tts-{m['id']}.wav{x}"))
+            os.path.exists(os.path.join(AUDIO_DIR, f"tts-{m['id']}.webm{x}"))
             for x in ("", ".part"))
     return msgs
 

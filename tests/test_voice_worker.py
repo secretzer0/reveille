@@ -74,12 +74,12 @@ def test_the_audio_dies_with_the_message_at_the_single_choke_point(tmp_path):
     conn.execute("INSERT INTO rooms(id, name, owner_id, created_ns) "
                  "VALUES('r1','room','u1',1)")
     mid = _plant(conn)
-    audio = tmp_path / f"tts-{mid}.wav"
-    audio.write_bytes(b"RIFF....")
-    part = tmp_path / f"tts-{mid}.wav.part"
-    part.write_bytes(b"RIFF....")
-    keep = tmp_path / "tts-999999.wav"
-    keep.write_bytes(b"RIFF....")
+    audio = tmp_path / f"tts-{mid}.webm"
+    audio.write_bytes(b"\x1a\x45\xdf\xa3....")
+    part = tmp_path / f"tts-{mid}.webm.part"
+    part.write_bytes(b"\x1a\x45\xdf\xa3....")
+    keep = tmp_path / "tts-999999.webm"
+    keep.write_bytes(b"\x1a\x45\xdf\xa3....")
 
     store.AUDIO_DIR = str(tmp_path)
     try:
@@ -135,16 +135,18 @@ def test_the_worker_writes_the_file_and_announces_it(monkeypatch, tmp_path):
     frame naming it. The stub is the whole point -- nobody in this fleet has a
     synthesizer, so this measures the broker's half and nothing else."""
     monkeypatch.setattr(daemon, "_files_dir", tmp_path)
-    monkeypatch.setattr(daemon, "_tts_speak", lambda *a, **k: iter([b"RIFF-", b"stub"]))
+    monkeypatch.setattr(daemon, "_tts_speak", lambda *a, **k: iter([_wav_header() + _pcm(0.5), _pcm(0.5)]))
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append((room, msg)))
     daemon._tts_q.put((7, "r1", "alice", "hello", None))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
-    assert (tmp_path / "tts-7.wav").read_bytes() == b"RIFF-stub"
+    # THE FILE IS WEBM/OPUS (ruling 11211): the broker transcoded the stub's WAV.
+    out = (tmp_path / "tts-7.webm").read_bytes()
+    assert out[:4] == EBML and abs(_webm_seconds(tmp_path / "tts-7.webm") - 1.0) < 0.15
     assert pushed == [("r1", {"event": "audio", "id": 7})]
-    assert not (tmp_path / "tts-7.wav.part").exists(), "the .part must be renamed, not copied"
+    assert not (tmp_path / "tts-7.webm.part").exists(), "the .part must be renamed, not copied"
     assert 7 not in daemon._tts_inflight, "the registry entry outlived the rename"
 
 
@@ -267,8 +269,10 @@ def test_no_rooms_is_the_one_recoverable_refusal(monkeypatch):
 
 import asyncio  # noqa: E402
 import struct  # noqa: E402
+import math  # noqa: E402
+import subprocess  # noqa: E402
 import threading  # noqa: E402
-import wave  # noqa: E402
+import time  # noqa: E402
 
 from starlette.requests import Request  # noqa: E402
 
@@ -278,6 +282,25 @@ def _wav_header():
     return (struct.pack("<4sI4s", b"RIFF", 0xFFFFFFFF, b"WAVE")
             + struct.pack("<4sIHHIIHH", b"fmt ", 16, 1, 1, 24000, 48000, 2, 16)
             + struct.pack("<4sI", b"data", 0xFFFFFFFF))
+
+
+EBML = b"\x1a\x45\xdf\xa3"     # a WebM file's first four bytes
+
+
+def _pcm(seconds, tone=1000):
+    """seconds of s16 mono at 24 kHz -- a tone, so the encoder has signal."""
+    n = int(seconds * 24000)
+    return b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * tone * i / 24000)))
+                    for i in range(n))
+
+
+def _webm_seconds(path):
+    """A live WebM carries no duration in its header (the broker streams it
+    with -live 1), so measure the packets: the last one's time plus a frame."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=pts_time",
+                          "-of", "csv=p=0", str(path)], capture_output=True, text=True).stdout
+    times = [float(x) for x in out.replace(",", " ").split() if x != "N/A"]
+    return times[-1] + 0.02 if times else 0.0
 
 
 class _Gated:
@@ -318,20 +341,25 @@ def test_the_audio_event_fires_at_the_first_byte_not_at_the_end(monkeypatch, tmp
     """Gate 1. The feed names the id while the synthesizer is still working:
     chunk 1 has landed, chunk 2 has not been released, and the event is already
     on the feed. Red on the whole-file worker, which announced after the write."""
-    speak = _Gated([_wav_header() + b"\x00" * 4800, b"\x01" * 4800])
+    speak = _Gated([_wav_header() + _pcm(0.5), _pcm(0.5)])
     pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
     assert speak.first_out.wait(5)
-    part = tmp_path / "tts-7.wav.part"
-    assert part.exists() and part.stat().st_size == 44 + 4800, "chunk 1 is on disk as .part"
+    part = tmp_path / "tts-7.webm.part"
+    # The encoder emits its header + first cluster (200 ms) from chunk 1's
+    # 500 ms of PCM: the announce is on the feed while chunk 2 is still held.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not pushed:
+        time.sleep(0.02)
+    assert part.exists() and part.stat().st_size > 0, "chunk 1 is on disk as .part"
     assert pushed == [{"event": "audio", "id": 7}], "announced BEFORE the synth returned"
-    assert not (tmp_path / "tts-7.wav").exists()
+    assert not (tmp_path / "tts-7.webm").exists()
     speak.go.set()
     t.join(5)
-    assert (tmp_path / "tts-7.wav").exists() and not part.exists()
+    assert (tmp_path / "tts-7.webm").exists() and not part.exists()
 
 
 def _request(mid):
-    scope = {"type": "http", "method": "GET", "path": f"/audio/{mid}.wav",
+    scope = {"type": "http", "method": "GET", "path": f"/audio/{mid}.webm",
              "headers": [], "query_string": b"", "path_params": {"mid": str(mid)}}
     return Request(scope)
 
@@ -367,16 +395,19 @@ def test_the_route_serves_an_in_flight_message_then_the_file(monkeypatch, tmp_pa
     bytes from the file; a GET between the rename and the registry drop never
     sees neither."""
     mid = _seed_message(monkeypatch, tmp_path)
-    speak = _Gated([_wav_header() + b"\x00" * 4800, b"\x01" * 4800, b"\x02" * 4800])
+    speak = _Gated([_wav_header() + _pcm(0.5), _pcm(0.5), _pcm(0.5)])
     pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(mid, "r1", "alice", "hello", None)])
     assert speak.first_out.wait(5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not pushed:
+        time.sleep(0.02)
 
     async def go():
         resp = await daemon.audio_http(_request(mid))
-        assert resp.status_code == 200 and resp.media_type == "audio/wav"
+        assert resp.status_code == 200 and resp.media_type == "audio/webm"
         it = resp.body_iterator
         first = await it.__anext__()
-        assert first[:4] == b"RIFF" and len(first) == 44 + 4800, "chunk 1 before chunk 2 exists"
+        assert first[:4] == EBML, "the WebM header + first cluster, before chunk 2 exists"
         speak.go.set()
         rest = first
         async for b in it:
@@ -384,45 +415,60 @@ def test_the_route_serves_an_in_flight_message_then_the_file(monkeypatch, tmp_pa
         return rest
     streamed = asyncio.run(go())
     t.join(5)
-    assert len(streamed) == 44 + 3 * 4800, "the tail reached the true end of the file"
-    assert streamed[44:] == b"\x00" * 4800 + b"\x01" * 4800 + b"\x02" * 4800
 
     async def again():
         resp = await daemon.audio_http(_request(mid))
         assert resp.status_code == 200
-        return (tmp_path / f"tts-{mid}.wav").read_bytes()
+        return (tmp_path / f"tts-{mid}.webm").read_bytes()
     complete = asyncio.run(again())
-    # The completed file carries TRUE sizes; only the in-flight bytes carried
-    # 0xFFFFFFFF -- so they differ exactly in the two size fields and nowhere else.
-    assert complete[44:] == streamed[44:]
-    assert struct.unpack_from("<I", complete, 4)[0] == len(complete) - 8
-    assert struct.unpack_from("<I", complete, 40)[0] == len(complete) - 44
+    # The tail reached the true end: the same bytes the file holds, and the
+    # file is a WebM ffprobe reads to its last frame (three half-second chunks).
+    assert streamed == complete
+    assert abs(_webm_seconds(tmp_path / f"tts-{mid}.webm") - 1.5) < 0.15
 
     async def missing():
         return (await daemon.audio_http(_request(mid + 1))).status_code
     assert asyncio.run(missing()) == 404, "neither in flight nor complete = a silent message"
 
 
-def test_the_completed_file_is_a_wav_the_stdlib_reads_to_the_last_frame(monkeypatch, tmp_path):
-    """Gate 4 (amended by 11018): the completed file's RIFF sizes match its
-    data -- `wave` reports the true frame count, never 0xFFFFFFFF."""
-    frames = b"\x00\x01" * 12000
+def test_an_encoder_that_fails_names_its_cause_in_the_abandoned_warning(monkeypatch, tmp_path, caplog):
+    """11215: ffmpeg's stderr is not thrown away -- a nonzero exit carries its
+    first and last lines into the worker's "abandoned" warning, and no file lands."""
+    monkeypatch.setattr(daemon, "_opus_args", lambda rate: [
+        "ffmpeg", "-loglevel", "error", "-nostdin", "-f", "s16le", "-ar", str(rate), "-ac", "1",
+        "-i", "pipe:0", "-c:a", "no_such_codec", "-f", "webm", "pipe:1"])
+    speak = lambda *a, **k: iter([_wav_header() + _pcm(0.5)])  # noqa: E731
+    with caplog.at_level("WARNING"):
+        _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
+        t.join(5)
+    assert "abandoned" in caplog.text and "ffmpeg exited" in caplog.text \
+        and "no_such_codec" in caplog.text, caplog.text
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_the_completed_file_is_a_webm_a_decoder_reads_to_the_last_frame(monkeypatch, tmp_path):
+    """Gate 4 (amended by 11018, then 11211): the completed file is a whole
+    WebM/Opus -- ffprobe reports the true duration, and it is what the stub's
+    PCM measured."""
+    frames = _pcm(0.5)
     speak = lambda *a, **k: iter([_wav_header() + frames[:100], frames[100:]])  # noqa: E731
     _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
     t.join(5)
-    with wave.open(str(tmp_path / "tts-7.wav")) as w:
-        assert w.getnframes() == 12000
-        assert w.getframerate() == 24000 and w.getnchannels() == 1
+    assert (tmp_path / "tts-7.webm").read_bytes()[:4] == EBML
+    assert abs(_webm_seconds(tmp_path / "tts-7.webm") - 0.5) < 0.15
 
 
 def test_a_message_deleted_mid_flight_leaves_no_wav_and_no_part(monkeypatch, tmp_path):
     """Gate 5. The choke point unlinks the .part while the worker writes; the
     worker's rename then finds no .part and fails closed. Nothing lands."""
-    speak = _Gated([_wav_header() + b"\x00" * 480, b"\x01" * 480])
-    _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
+    speak = _Gated([_wav_header() + _pcm(0.5), _pcm(0.5)])
+    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
     assert speak.first_out.wait(5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not pushed:
+        time.sleep(0.02)
     # what _delete_messages does, with the same two names
-    (tmp_path / "tts-7.wav.part").unlink()
+    (tmp_path / "tts-7.webm.part").unlink()
     speak.go.set()
     t.join(5)
     assert sorted(p.name for p in tmp_path.iterdir()) == []
@@ -432,19 +478,19 @@ def test_a_message_deleted_mid_flight_leaves_no_wav_and_no_part(monkeypatch, tmp
 def test_the_startup_sweep_removes_an_orphaned_part(tmp_path):
     """Gate 6. A .part with no worker is a broker that died mid-synthesis:
     swept at startup, the message stays silent. Seen red on a planted file."""
-    (tmp_path / "tts-3.wav.part").write_bytes(b"RIFF")
-    (tmp_path / "tts-4.wav").write_bytes(b"RIFF")
+    (tmp_path / "tts-3.webm.part").write_bytes(EBML)
+    (tmp_path / "tts-4.webm").write_bytes(EBML)
     daemon._sweep_abandoned_audio(tmp_path)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["tts-4.wav"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tts-4.webm"]
 
 
 def test_a_reader_that_leaves_mid_tail_does_not_wedge_the_worker(monkeypatch, tmp_path):
     """Gate 7. A tail that reads one chunk and disconnects costs the worker
     nothing: it completes that message and speaks the next."""
     mid = _seed_message(monkeypatch, tmp_path)
-    speak = _Gated([_wav_header() + b"\x00" * 480, b"\x01" * 480])
+    speak = _Gated([_wav_header() + _pcm(0.5), _pcm(0.5)])
     calls = {"n": 0}
-    plain = lambda *a, **k: iter([_wav_header() + b"\x02" * 480])  # noqa: E731
+    plain = lambda *a, **k: iter([_wav_header() + _pcm(0.5)])  # noqa: E731
 
     def speak_both(*a, **k):
         calls["n"] += 1
@@ -452,6 +498,9 @@ def test_a_reader_that_leaves_mid_tail_does_not_wedge_the_worker(monkeypatch, tm
     pushed, t = _run_worker(monkeypatch, tmp_path, speak_both,
                             [(mid, "r1", "alice", "hello", None), (mid + 100, "r1", "bob", "next", None)])
     assert speak.first_out.wait(5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not pushed:
+        time.sleep(0.02)
 
     async def one_chunk_then_leave():
         resp = await daemon.audio_http(_request(mid))
@@ -462,8 +511,8 @@ def test_a_reader_that_leaves_mid_tail_does_not_wedge_the_worker(monkeypatch, tm
     speak.go.set()
     t.join(5)
     assert not t.is_alive(), "the worker wedged behind a departed reader"
-    assert (tmp_path / f"tts-{mid}.wav").exists()
-    assert (tmp_path / f"tts-{mid + 100}.wav").exists(), "the next message was not spoken"
+    assert (tmp_path / f"tts-{mid}.webm").exists()
+    assert (tmp_path / f"tts-{mid + 100}.webm").exists(), "the next message was not spoken"
     assert [m["id"] for m in pushed] == [mid, mid + 100]
 
 
@@ -489,7 +538,7 @@ def test_the_route_asks_the_registry_before_the_file():
     fn = src[src.index("async def audio_http("):]
     fn = fn[:fn.index("\n@_guard")]
     assert fn.index("_tts_inflight.get(mid)") < fn.index("path.is_file()"), \
-        "the registry must be consulted before the .wav is looked for"
+        "the registry must be consulted before the .webm is looked for"
 
 
 def test_nothing_is_made_that_nobody_would_hear(monkeypatch):

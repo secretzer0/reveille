@@ -1265,22 +1265,23 @@ function vMark(n){
   o.start();o.stop(vCtx.currentTime+0.12);}catch(e){}
  toast(n+' message'+(n>1?'s':'')+' skipped -- audio was falling behind');
 }
-// ---- the player: Web Audio, bytes as they arrive (ruling 11020) ------------------
-// An <audio> element will not start a stream of unknown length before ~230 KB have
-// arrived (Chrome; bytes, not seconds -- measured for PR #21), so a short first chunk
-// from the synthesizer bought the ear nothing there. This player fetches
-// /audio/<id>.wav, decodes the s16 PCM as it lands and schedules every network chunk
-// on ONE AudioContext -- vCtx, the same one vMark rings, resumed on the toggle's click
-// because that click IS the autoplay gesture. Invariants carried unchanged: id order,
-// one at a time, ADVANCED BY EVENTS AND NEVER BY A TIMER (the last scheduled buffer's
-// onended, the fetch ending with nothing scheduled, a fetch or decode error, a 404 --
-// all mean "done, next"; a backgrounded tab throttles timers to a stop, and audio is
-// exactly what people background); toggle off issues no request and aborts the one in
-// flight; a refusal to sound turns the toggle back off and says so; late joiners are
-// not blasted (vPush is fed by the live socket only). Underrun policy: a small lead,
-// and a chunk that arrives late is a GAP in the sound, never a stall of the queue.
-const V_LEAD=0.15;         // seconds between "first bytes" and "first sound"
-let vCtl=null;             // AbortController of the utterance in flight; .srcs = its buffers
+// ---- the player: WebM/Opus through MediaSource (ruling 11211) --------------------
+// The wire is WebM/Opus at 32 kbit/s, transcoded in the broker per utterance (~12x
+// smaller than the s16 WAV it replaced). MEASURED FIRST (the ruling's order): a plain
+// <audio src> on the same stream sounded 3.6 s after send on the eval box (twice) --
+// Chrome prerolls a live, unknown-length stream by media time, not bytes -- which
+// misses the 2.0 s gate (0.76 s with the old PCM scheduler). So: MediaSource. One
+// SourceBuffer ('audio/webm; codecs=opus'), every fetched chunk appended as it lands,
+// play() as soon as the first cluster is buffered; the element is routed through the
+// ONE AudioContext (createMediaElementSource) -- vCtx, the same one vMark rings,
+// resumed on the toggle's click because that click IS the autoplay gesture.
+// Invariants carried unchanged: id order, one at a time, ADVANCED BY EVENTS AND NEVER
+// BY A TIMER (ended, error, a 404, the fetch ending with nothing buffered); toggle off
+// issues no request and aborts the one in flight; a refusal to sound turns the toggle
+// back off and says so; late joiners are not blasted (vPush is fed by the live socket
+// only). Named gap: Safari's MSE has no Opus/WebM (a plain element there would).
+const V_MIME='audio/webm; codecs=opus';
+let vCtl=null;             // the utterance in flight: {el, node, ms, sb, ctl(AbortController), srcs}
 let vLast=null;            // {id, firstAt}: when the utterance first sounded (a gate reads it)
 function vCtxUp(){
  vCtx=vCtx||new (window.AudioContext||window.webkitAudioContext)();
@@ -1295,61 +1296,62 @@ function vRefused(){
  toast('your browser blocked audio -- click voice again to allow it');
 }
 async function vPlay(id,url){
- const ctl=vCtl=new AbortController();ctl.srcs=[];
+ const ctl=vCtl={srcs:[],el:null,node:null,ms:null,sb:null,ab:new AbortController()};
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
- let res;
- try{res=await fetch(url,{credentials:'same-origin',signal:ctl.signal});}
- catch(e){return vCtl===ctl?vDone():undefined;}
- if(!res.ok||!res.body){                     // 404 = a silent message (section 7)
-  if(res.status!==404)res.json().then(j=>toast(j.error||('audio: '+res.status))).catch(()=>{});
-  return vDone();}
  // resume() is async: the first utterance after the click can read "suspended" for
  // a tick. Await it once, so only a browser that still refuses is called a refusal.
  if(ctx.state!=='running'){try{await ctx.resume();}catch(e){}}
  if(ctx.state!=='running')return vRefused();
+ if(!('MediaSource' in window)||!MediaSource.isTypeSupported(V_MIME)){
+  toast('this browser cannot play WebM/Opus streams');return vDone();}
+ let res;
+ try{res=await fetch(url,{credentials:'same-origin',signal:ctl.ab.signal});}
+ catch(e){return vCtl===ctl?vDone():undefined;}
+ if(!res.ok||!res.body){                     // 404 = a silent message (section 7)
+  if(res.status!==404)res.json().then(j=>toast(j.error||('audio: '+res.status))).catch(()=>{});
+  return vDone();}
+ const el=new Audio();ctl.el=el;
+ try{ctl.node=ctx.createMediaElementSource(el);ctl.node.connect(ctx.destination);}catch(e){}
+ const ms=ctl.ms=new MediaSource();
+ el.src=URL.createObjectURL(ms);
+ el.onplaying=()=>{if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};};
+ el.onended=()=>{if(vCtl===ctl)vDone();};
+ el.onerror=()=>{if(vCtl===ctl)vDone();};
+ await new Promise(r=>{ms.addEventListener('sourceopen',r,{once:true});});
+ if(vCtl!==ctl)return;
+ let sb;
+ try{sb=ctl.sb=ms.addSourceBuffer(V_MIME);}catch(e){return vDone();}
+ // Chunks are appended one at a time (a SourceBuffer refuses while updating);
+ // play() at the first append -- the broker's clusters are 200 ms, so the first
+ // buffered range is enough to start and the rest lands ahead of the play head.
+ const q=[];let ended=false,started=false;
+ const pump=()=>{
+  if(vCtl!==ctl||sb.updating)return;
+  if(q.length){try{sb.appendBuffer(q.shift());}catch(e){return vDone();}return;}
+  if(ended&&ms.readyState==='open'){try{ms.endOfStream();}catch(e){}
+   if(!started)vDone();}                        // nothing ever buffered: done, next
+ };
+ sb.addEventListener('updateend',()=>{
+  if(!started&&sb.buffered.length){started=true;
+   el.play().catch(e=>{if(vCtl!==ctl)return;if(e&&e.name==='NotAllowedError')vRefused();else vDone();});}
+  pump();});
  const rd=res.body.getReader();
- let head=new Uint8Array(0),hdr=null,carry=new Uint8Array(0),next=0,pending=0,ended=false;
- const finish=()=>{if(ended&&pending===0&&vCtl===ctl)vDone();};
  try{
   for(;;){
    const {value,done}=await rd.read();
-   if(done||ctl.signal.aborted)break;
-   let bytes=value;
-   if(!hdr){                                   // upstream's 44-byte header, then PCM
-    const h=new Uint8Array(head.length+bytes.length);h.set(head);h.set(bytes,head.length);head=h;
-    if(head.length<44)continue;
-    const dv=new DataView(head.buffer,head.byteOffset,head.byteLength);
-    hdr={ch:dv.getUint16(22,true)||1,sr:dv.getUint32(24,true),bits:dv.getUint16(34,true)};
-    if(String.fromCharCode(...head.subarray(0,4))!=='RIFF'||hdr.bits!==16)throw new Error('not an s16 wav');
-    bytes=head.subarray(44);
-   }
-   let all=bytes;
-   if(carry.length){all=new Uint8Array(carry.length+bytes.length);all.set(carry);all.set(bytes,carry.length);}
-   const frames=Math.floor(all.length/(2*hdr.ch));
-   carry=all.slice(frames*2*hdr.ch);          // a dangling sample waits for the next chunk
-   if(!frames)continue;
-   const dv=new DataView(all.buffer,all.byteOffset,frames*2*hdr.ch);
-   const buf=ctx.createBuffer(hdr.ch,frames,hdr.sr);
-   for(let c=0;c<hdr.ch;c++){const d=buf.getChannelData(c);
-    for(let i=0;i<frames;i++)d[i]=dv.getInt16((i*hdr.ch+c)*2,true)/32768;}
-   const src=ctx.createBufferSource();src.buffer=buf;src.connect(ctx.destination);
-   const now=ctx.currentTime;
-   if(next<now)next=now+V_LEAD;               // first chunk, or a late one: lead, then a gap
-   if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};
-   pending++;src.onended=()=>{pending--;finish();};
-   ctl.srcs.push(src);src.start(next);next+=buf.duration;
+   if(done||ctl.ab.signal.aborted)break;
+   q.push(value);pump();
   }
  }catch(e){}
- ended=true;
- finish();
+ ended=true;pump();
 }
 // A whole file, decoded by the browser (any PCM width, unlike the s16 stream
 // path): the bank clip, played once on the same context so vStop still rules.
 async function vPlayClip(url){
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
- const ctl=vCtl={srcs:[],abort(){}};
+ const ctl=vCtl={srcs:[],el:null,node:null,ab:null};
  try{
   const res=await fetch(url,{credentials:'same-origin'});
   if(!res.ok){res.json().then(j=>toast(j.error||('clip: '+res.status))).catch(()=>{});return vDone();}
@@ -1361,11 +1363,14 @@ async function vPlayClip(url){
 }
 function vStop(){
  if(!vCtl)return;
- const c=vCtl;vCtl=null;c.abort();
+ const c=vCtl;vCtl=null;
+ if(c.ab)try{c.ab.abort();}catch(e){}
+ if(c.el){try{c.el.pause();if(c.el.src)URL.revokeObjectURL(c.el.src);c.el.removeAttribute('src');c.el.load();}catch(e){}}
+ if(c.node){try{c.node.disconnect();}catch(e){}}
  for(const s of c.srcs)try{s.stop();}catch(e){}
 }
 // ONE place builds the audio URL (a gate counts it): the queue and the play icon.
-const vUrl=id=>'/audio/'+encodeURIComponent(id)+'.wav'+qs();
+const vUrl=id=>'/audio/'+encodeURIComponent(id)+'.webm'+qs();
 function vPump(){
  if(vBusy||!voiceOn)return;
  const t=vTake(vQ,V_MAX);

@@ -36,12 +36,27 @@ from reveille import daemon, store  # noqa: E402
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 
 
+def _tone(n, sampwidth=2):
+    """n samples of a 500 Hz square wave at a quarter of full scale (-12 dBFS):
+    a clip that has SIGNAL, which the peak gate demands of every upload."""
+    amp = (1 << (8 * sampwidth - 1)) // 4
+    if sampwidth == 1:
+        pos, neg = bytes([128 + amp]), bytes([128 - amp])
+    else:
+        pos, neg = amp.to_bytes(sampwidth, "little", signed=True), (-amp).to_bytes(sampwidth, "little", signed=True)
+    return ((pos * 24 + neg * 24) * (n // 48 + 1))[:n * sampwidth]
+
+
 def wav(seconds=6.0, rate=24000):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)  # noqa: E702
-        w.writeframes(b"\x00" * int(seconds * rate) * 2)
+        w.writeframes(_tone(int(seconds * rate)))
     return buf.getvalue()
+
+
+SPOKEN = wav(0.5)                    # what the stub synthesizer says for anything
+EBML = b"\x1a\x45\xdf\xa3"           # a WebM file's first four bytes
 
 
 class _Synth(http.server.BaseHTTPRequestHandler):
@@ -93,9 +108,9 @@ class _Synth(http.server.BaseHTTPRequestHandler):
             _Synth.tts.append(json.loads(raw))
             self.send_response(200)
             self.send_header("content-type", "audio/wav")
-            self.send_header("content-length", "8")
+            self.send_header("content-length", str(len(SPOKEN)))
             self.end_headers()
-            self.wfile.write(b"RIFFstub")
+            self.wfile.write(SPOKEN)
             return
         self.send_error(404)
 
@@ -190,7 +205,7 @@ def test_an_assigned_clip_missing_from_the_listing_triggers_a_push_then_clones_i
     name = daemon.clip_name(row)
     # No worker start here: the trigger is the utterance itself.
     chunks = daemon._tts_speak(broker["url"], "", "picard", "hello", 5, assigned=name)
-    assert b"".join(chunks) == b"RIFFstub"
+    assert b"".join(chunks) == SPOKEN
     assert _Synth.uploads == [name]
     assert _Synth.tts[-1] == {"text": "hello", "output_format": "wav", "split_text": True,
                               "stream": True, "voice_mode": "clone",
@@ -205,7 +220,7 @@ def test_a_synthesizer_that_refuses_the_push_leaves_the_message_spoken_not_stall
     _Synth.refuse_upload = True
     with caplog.at_level("WARNING"):
         chunks = daemon._tts_speak(broker["url"], "", "picard", "hello", 5, assigned=name)
-    assert b"".join(chunks) == b"RIFFstub"
+    assert b"".join(chunks) == SPOKEN
     assert _Synth.tts[-1]["voice_mode"] == "predefined", "digest pick, not silence"
     assert "push of " in caplog.text and "not visible" in caplog.text
     # And a PUT while the synthesizer refuses still lands locally, reporting pushed=False.
@@ -292,12 +307,14 @@ def test_the_audition_speaks_a_line_in_that_bank_voice_and_keeps_nothing(broker)
     assert st == 200
     _Synth.tts.clear()
     r = _say("quark", "Rule%20of%20Acquisition%20number%20one.")
-    assert r.status_code == 200 and r.media_type == "audio/wav"
-    assert asyncio.run(_drain(r)) == b"RIFFstub"
+    # THE AUDITION IS ON THE WIRE FORMAT (ruling 11211): WebM/Opus, transcoded
+    # from the synthesizer's WAV like every utterance.
+    assert r.status_code == 200 and r.media_type == "audio/webm"
+    assert asyncio.run(_drain(r))[:4] == EBML
     assert len(_Synth.tts) == 1
     assert _Synth.tts[0]["text"] == "Rule of Acquisition number one."
     assert _Synth.tts[0]["reference_audio_filename"] == daemon.clip_name(row)
-    # NOTHING KEPT: no tts-*.wav in files, no scripts row, no message.
+    # NOTHING KEPT: no tts-*.webm in files, no scripts row, no message.
     assert not [p for p in daemon._files_dir.iterdir() if p.name.startswith("tts-")]
     assert broker["c"].execute("SELECT count(*) FROM messages").fetchone()[0] == 0
     # Refusals are named: no such voice, empty line, too long, voices off.

@@ -16,6 +16,9 @@ jobs:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v7
       - run: uv sync
+      # THE WIRE IS WEBM/OPUS (DES-009 section 2): the worker and audition gates
+      # run the same ffmpeg the server image carries; the runner has none.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
       - run: uv run pytest tests/ -q
       - run: uv run ruff check src tests scripts
       # base...head over the whole PR range: a stacked slice whose parent
