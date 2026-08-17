@@ -862,6 +862,7 @@
   <button id="liGo">Sign in</button>
  </div>
 </div>
+<script src="/ui/opus-decoder.js"></script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
@@ -1290,24 +1291,26 @@ function vMark(n){
   o.start();o.stop(vCtx.currentTime+0.12);}catch(e){}
  toast(n+' message'+(n>1?'s':'')+' skipped -- audio was falling behind');
 }
-// ---- the player: WebM/Opus through MediaSource (ruling 11211) --------------------
+// ---- the player: WebM/Opus DECODED IN THE PAGE (ruling 11211; operator 2026-08-17) --
 // The wire is WebM/Opus at 32 kbit/s, transcoded in the broker per utterance (~12x
-// smaller than the s16 WAV it replaced). MEASURED FIRST (the ruling's order): a plain
-// <audio src> on the same stream sounded 3.6 s after send on the eval box (twice) --
-// Chrome prerolls a live, unknown-length stream by media time, not bytes -- which
-// misses the 2.0 s gate (0.76 s with the old PCM scheduler). So: MediaSource. One
-// SourceBuffer ('audio/webm; codecs=opus'), every fetched chunk appended as it lands,
-// play() as soon as the first cluster is buffered; the element is routed through the
-// ONE AudioContext (createMediaElementSource) -- vCtx, the same one vMark rings,
-// resumed on the toggle's click because that click IS the autoplay gesture.
+// smaller than the s16 WAV it replaced). It was played through MediaSource, and
+// MediaSource is what an iPhone does not have (iOS Safari: none; iPad only), and a
+// plain <audio src> prerolls a live stream by media time (3.6 s measured, twice) --
+// so the page now decodes the stream ITSELF: a ~60-line WebM demuxer pulls the Opus
+// frames out of each fetched chunk as it lands, the vendored decoder (libopus in
+// WASM, /ui/opus-decoder.js) turns them into 48 kHz PCM, and the PCM is scheduled
+// on the ONE AudioContext -- vCtx, the same one vMark rings, resumed on the toggle's
+// click because that click IS the autoplay gesture. One code path for every browser
+// with Web Audio; no MediaSource, no <audio> element, no per-browser branch.
 // Invariants carried unchanged: id order, one at a time, ADVANCED BY EVENTS AND NEVER
-// BY A TIMER (ended, error, a 404, the fetch ending with nothing buffered); toggle off
-// issues no request and aborts the one in flight; a refusal to sound turns the toggle
-// back off and says so; late joiners are not blasted (vPush is fed by the live socket
-// only). Named gap: Safari's MSE has no Opus/WebM (a plain element there would).
-const V_MIME='audio/webm; codecs=opus';
-let vCtl=null;             // the utterance in flight: {el, node, ms, sb, ctl(AbortController), srcs}
+// BY A TIMER (the last scheduled buffer's onended, the fetch ending with nothing
+// scheduled, a fetch/decode error, a 404); toggle off issues no request and aborts
+// the one in flight; a refusal to sound turns the toggle back off and says so; late
+// joiners are not blasted (vPush is fed by the live socket only).
+const V_LEAD=0.05;         // seconds ahead of "now" a late chunk is re-anchored to
+let vCtl=null;             // the utterance in flight: {srcs, ab(AbortController)}
 let vLast=null;            // {id, firstAt}: when the utterance first sounded (a gate reads it)
+let vDec=null;             // the one Opus decoder (WASM), reset per utterance
 function vCtxUp(){
  vCtx=vCtx||new (window.AudioContext||window.webkitAudioContext)();
  if(vCtx.state==='suspended')vCtx.resume();
@@ -1320,8 +1323,56 @@ function vRefused(){
  vBusy=false;voiceOn=false;paintVoice();vTell();
  toast('your browser blocked audio -- click voice again to allow it');
 }
+// THE DEMUXER. Our own muxer's shape (ffmpeg, -f webm -live 1, mono Opus, 20 ms
+// frames in 200 ms clusters): EBML ids and vint sizes; masters are entered, leaves
+// are skipped, SimpleBlock/Block payloads (after the track vint, a 2-byte timecode
+// and a flags byte) are the Opus frames; CodecPrivate is OpusHead, whose pre-skip
+// the decoder is told. Unknown-size masters (the live Segment and Clusters) are
+// simply entered. It is fed arbitrary fetch chunks and returns the frames that
+// completed in them; a leaf split across chunks waits for the rest.
+function vDemuxer(){
+ let buf=new Uint8Array(0),pos=0;const out={preSkip:null,frames:[]};
+ const MASTER=new Set([0x18538067,0x1654AE6B,0xAE,0x1F43B675,0xA0]);   // Segment Tracks TrackEntry Cluster BlockGroup
+ const vint=(at,isId)=>{                     // -> [value, length] or null (need more)
+  if(at>=buf.length)return null;
+  const b=buf[at];let len=1,mask=0x80;
+  while(len<=8&&!(b&mask)){len++;mask>>=1;}
+  if(len>8||at+len>buf.length)return null;
+  let v=isId?b:(b&(mask-1)),all=isId||(b&(mask-1))===mask-1;
+  for(let i=1;i<len;i++){v=v*256+buf[at+i];if(buf[at+i]!==0xFF)all=false;}
+  return [v,len,!isId&&all];                 // all-ones size = unknown
+ };
+ return {
+  push(chunk){
+   const n=new Uint8Array(buf.length-pos+chunk.length);n.set(buf.subarray(pos));n.set(chunk,buf.length-pos);buf=n;pos=0;
+   const frames=[];
+   for(;;){
+    const id=vint(pos,true);if(!id)break;
+    const sz=vint(pos+id[1],false);if(!sz)break;
+    const head=id[1]+sz[1],unknown=sz[2],size=sz[0];
+    if(MASTER.has(id[0])||unknown){pos+=head;continue;}          // enter it
+    if(pos+head+size>buf.length)break;                             // leaf: wait for all of it
+    const body=buf.subarray(pos+head,pos+head+size);
+    if(id[0]===0xA3||id[0]===0xA1){                                // SimpleBlock / Block
+     const t=vint(pos+head,false);if(t)frames.push(body.slice(t[1]+3));
+    }else if(id[0]===0x63A2&&size>=12&&String.fromCharCode(...body.subarray(0,8))==='OpusHead'){
+     out.preSkip=body[10]|(body[11]<<8);
+    }
+    pos+=head+size;
+   }
+   out.frames=frames;return out;
+  }
+ };
+}
+async function vDecoder(preSkip){
+ const lib=window['opus-decoder'];
+ if(!lib)throw new Error('the Opus decoder did not load');
+ if(!vDec){vDec=new lib.OpusDecoder({channels:1,streamCount:1,coupledStreamCount:0,channelMappingTable:[0],preSkip:preSkip||0});await vDec.ready;}
+ else{await vDec.reset();}
+ return vDec;
+}
 async function vPlay(id,url){
- const ctl=vCtl={srcs:[],el:null,node:null,ms:null,sb:null,ab:new AbortController()};
+ const ctl=vCtl={srcs:[],ab:new AbortController()};
  paintStop();
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
@@ -1329,55 +1380,49 @@ async function vPlay(id,url){
  // a tick. Await it once, so only a browser that still refuses is called a refusal.
  if(ctx.state!=='running'){try{await ctx.resume();}catch(e){}}
  if(ctx.state!=='running')return vRefused();
- if(!('MediaSource' in window)||!MediaSource.isTypeSupported(V_MIME)){
-  toast('this browser cannot play WebM/Opus streams');return vDone();}
  let res;
  try{res=await fetch(url,{credentials:'same-origin',signal:ctl.ab.signal});}
  catch(e){return vCtl===ctl?vDone():undefined;}
  if(!res.ok||!res.body){                     // 404 = a silent message (section 7)
   if(res.status!==404)res.json().then(j=>toast(j.error||('audio: '+res.status))).catch(()=>{});
   return vDone();}
- const el=new Audio();ctl.el=el;
- try{ctl.node=ctx.createMediaElementSource(el);ctl.node.connect(ctx.destination);}catch(e){}
- const ms=ctl.ms=new MediaSource();
- el.src=URL.createObjectURL(ms);
- el.onplaying=()=>{if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};};
- el.onended=()=>{if(vCtl===ctl)vDone();};
- el.onerror=()=>{if(vCtl===ctl)vDone();};
- await new Promise(r=>{ms.addEventListener('sourceopen',r,{once:true});});
- if(vCtl!==ctl)return;
- let sb;
- try{sb=ctl.sb=ms.addSourceBuffer(V_MIME);}catch(e){return vDone();}
- // Chunks are appended one at a time (a SourceBuffer refuses while updating);
- // play() at the first append -- the broker's clusters are 200 ms, so the first
- // buffered range is enough to start and the rest lands ahead of the play head.
- const q=[];let ended=false,started=false;
- const pump=()=>{
-  if(vCtl!==ctl||sb.updating)return;
-  if(q.length){try{sb.appendBuffer(q.shift());}catch(e){return vDone();}return;}
-  if(ended&&ms.readyState==='open'){try{ms.endOfStream();}catch(e){}
-   if(!started)vDone();}                        // nothing ever buffered: done, next
- };
- sb.addEventListener('updateend',()=>{
-  if(!started&&sb.buffered.length){started=true;
-   el.play().catch(e=>{if(vCtl!==ctl)return;if(e&&e.name==='NotAllowedError')vRefused();else vDone();});}
-  pump();});
+ // Scheduling: each decoded batch is one AudioBuffer started at `next`; a late
+ // batch (underrun) re-anchors to now + lead -- a GAP, never a stall. Done when the
+ // fetch has ended AND the last scheduled buffer ended; a stream that decoded
+ // nothing is done at once. All events, no timers.
+ const demux=vDemuxer();let dec=null,next=0,pending=0,ended=false,started=false;
+ const finish=()=>{if(vCtl===ctl&&ended&&pending===0)vDone();};
  const rd=res.body.getReader();
  try{
   for(;;){
    const {value,done}=await rd.read();
    if(done||ctl.ab.signal.aborted)break;
-   q.push(value);pump();
+   const got=demux.push(value);
+   if(!got.frames.length)continue;
+   if(!dec)dec=await vDecoder(got.preSkip);
+   if(vCtl!==ctl)return;
+   const {channelData,samplesDecoded,sampleRate}=await dec.decodeFrames(got.frames);
+   if(vCtl!==ctl)return;
+   if(!samplesDecoded)continue;
+   const ab=ctx.createBuffer(1,samplesDecoded,sampleRate);ab.copyToChannel(channelData[0],0);
+   const src=ctx.createBufferSource();src.buffer=ab;src.connect(ctx.destination);
+   const now=ctx.currentTime;
+   if(next<now)next=now+V_LEAD;
+   src.onended=()=>{pending--;finish();};
+   pending++;ctl.srcs.push(src);src.start(next);
+   if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}
+   next+=ab.duration;
   }
- }catch(e){}
- ended=true;pump();
+ }catch(e){if(vCtl===ctl){toast('audio: '+(e.message||e));return vDone();}return;}
+ ended=true;finish();
 }
+
 // A whole file, decoded by the browser (any PCM width, unlike the s16 stream
 // path): the bank clip, played once on the same context so vStop still rules.
 async function vPlayClip(url){
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
- const ctl=vCtl={srcs:[],el:null,node:null,ab:null};
+ const ctl=vCtl={srcs:[],ab:null};
  paintStop();
  try{
   const res=await fetch(url,{credentials:'same-origin'});
@@ -1392,9 +1437,7 @@ function vStop(){
  if(!vCtl)return;
  const c=vCtl;vCtl=null;paintStop();
  if(c.ab)try{c.ab.abort();}catch(e){}
- if(c.el){try{c.el.pause();if(c.el.src)URL.revokeObjectURL(c.el.src);c.el.removeAttribute('src');c.el.load();}catch(e){}}
- if(c.node){try{c.node.disconnect();}catch(e){}}
- for(const s of c.srcs)try{s.stop();}catch(e){}
+ for(const s of c.srcs)try{s.onended=null;s.stop();}catch(e){}
 }
 // ONE place builds the audio URL (a gate counts it): the queue, the play icon,
 // and the generate click (POST to the same path without the extension).
@@ -1412,8 +1455,14 @@ function vPump(){
  vPlay(t.id,vUrl(t.id));
 }
 function vDone(){vCtl=null;vBusy=false;paintStop();vPump();}
+// AND THE QUEUE TAKES EACH ID ONCE: whatever delivers a frame twice (a leaked
+// socket, a broker replay), a message is spoken once. This is the belt; dropFeed
+// is the braces.
+const vHeard=new Set();
 function vPush(m){
  if(!vWant(m,myName,voiceOn))return;
+ if(vHeard.has(m.id))return;
+ vHeard.add(m.id);
  vQ.push({id:m.id,from:m.from});
  vPump();
 }
@@ -2793,9 +2842,16 @@ async function refreshAgents(){
 let polling=false;
 function start(){if(polling)return;polling=true;setInterval(loadPresence,15000);}
 
+// A DELIBERATE CLOSE DETACHES THE RECONNECT FIRST (operator, 2026-08-17: every
+// agent message was read twice). ws.close() here used to leave the old socket's
+// onclose armed, which fired two seconds later and opened a SECOND feed beside
+// the one connect() had just made -- one more leaked socket per room switch,
+// each delivering every frame again; add() deduped messages by id, so the only
+// visible symptom was the audio frame arriving twice and being spoken twice.
+function dropFeed(){if(ws){ws.onclose=null;ws.onmessage=null;ws.close();ws=null;}}
 function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();
  closePanel();clearFeed();lastId=0;loadBacklog(true);loadPresence();
- if(ws)ws.close();connect();start();}
+ dropFeed();connect();start();}
 
 async function openRooms(){
  const d=await api('/me');me=d;paintMe();   // room set may have changed under us

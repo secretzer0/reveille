@@ -688,12 +688,11 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
     assigned = dict()
     for expr in re.findall(r'\.(?:src|href)\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)', PAGE):
         assigned[expr] = assigned.get(expr, 0) + 1
-    assert assigned == {"frameSrc": 1, "URL.createObjectURL": 1}, \
+    assert assigned == {"frameSrc": 1}, \
         f"a URL property assignment appeared: {assigned} -- route it through a check"
-    # The object URL is the player's MediaSource (ruling 11211): a blob: minted
-    # from an object this page built, never from a string anyone sent.
-    assert "const ms=ctl.ms=new MediaSource();\n el.src=URL.createObjectURL(ms);" in PAGE, \
-        "the only object URL is the player's MediaSource"
+    # THE ONE SCRIPT SRC is a fixed path this page ships with (the vendored Opus
+    # decoder, served by the broker from its own route table), never built.
+    assert PAGE.count("<script src=") == 1 and '<script src="/ui/opus-decoder.js"></script>' in PAGE
     assert "const PATH_URL_RE=/^\\/[^/\\\\]/;" in PAGE, \
         "an assigned URL must be site-relative: // leaves the origin, \\ is the same trick"
     assert "function frameSrc(u){return PATH_URL_RE.test(u||'')?u:'about:blank';}" in PAGE, \
@@ -984,31 +983,35 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     assert "localStorage" not in PAGE[PAGE.index("let voiceOn=false;"):
                                       PAGE.index("function clearFeed()")], \
         "a restored 'on' has no user gesture behind it and would queue into silence"
-    # 2. No <audio src=/audio/...> in the markup (ruling 11020, kept by 11211: a
+    # 2. No <audio> element at all, and no MediaSource (ruling 11020, then 11211,
+    #    then the operator's iPhone 2026-08-17: iOS Safari has no MediaSource and a
     #    plain element prerolls a live stream by media time -- 3.6 s measured -- so
-    #    the player is MediaSource, fed chunk by chunk, routed through the one
-    #    AudioContext). Nothing is fetched at load: the only fetch of /audio/ is
-    #    inside vPump's play call.
-    assert 'id="vPlayer"' not in PAGE and "<audio id=" not in PAGE, \
-        "no <audio> element in the markup; the player builds its own MediaSource-fed one"
-    player = PAGE[PAGE.index("const V_MIME="):PAGE.index("function vPush(m)")]
+    #    the page DECODES the WebM/Opus stream itself and schedules PCM on the one
+    #    AudioContext; one code path for every browser with Web Audio). Nothing is
+    #    fetched at load: the only fetch of /audio/ is inside vPump's play call.
+    assert 'id="vPlayer"' not in PAGE and "<audio id=" not in PAGE and "new Audio(" not in PAGE, \
+        "no <audio> element anywhere; the player is Web Audio"
+    assert "new MediaSource(" not in PAGE and "addSourceBuffer(" not in PAGE, \
+        "MediaSource is the iPhone gap; the page decodes the stream itself"
+    player = PAGE[PAGE.index("const V_LEAD="):PAGE.index("function vPush(m)")]
     assert PAGE.count("'/audio/'") == 1 and "'/audio/'" in player, \
         "exactly one place builds an /audio/ URL, and it is the player"
-    assert "MediaSource.isTypeSupported(V_MIME)" in player and \
-        "const V_MIME='audio/webm; codecs=opus';" in player, \
-        "the wire is WebM/Opus and the page says so before it asks for it"
-    assert "ctl.node=ctx.createMediaElementSource(el);ctl.node.connect(ctx.destination);" in player, \
-        "the element plays through the one AudioContext -- vStop and the gesture rule it"
-    # 3. The queue advances on EVENTS: the element's ended/error, the fetch ending
-    #    with nothing buffered, a 404 -- never a timer. A timer-driven queue stops
-    #    draining in a backgrounded tab, which is exactly where audio gets left
-    #    running.
-    assert "el.onended=()=>{if(vCtl===ctl)vDone();};" in player and \
-        "el.onerror=()=>{if(vCtl===ctl)vDone();};" in player, \
-        "the queue must advance from the element's ended/error"
+    assert "function vDemuxer(){" in player and "0xA3||id[0]===0xA1" in player and "'OpusHead'" in player, \
+        "the page carries its own WebM demuxer: SimpleBlock/Block frames, OpusHead pre-skip"
+    assert "new lib.OpusDecoder({channels:1," in player and "await dec.decodeFrames(got.frames)" in player, \
+        "the vendored Opus decoder turns frames into PCM"
+    assert "src.connect(ctx.destination)" in player and "src.start(next)" in player, \
+        "PCM is scheduled on the one AudioContext"
+    # 3. The queue advances on EVENTS: the last scheduled buffer's onended, the
+    #    fetch ending with nothing scheduled, a fetch/decode error, a 404 -- never
+    #    a timer. A timer-driven queue stops draining in a backgrounded tab, which
+    #    is exactly where audio gets left running.
+    assert "src.onended=()=>{pending--;finish();};" in player, \
+        "the queue must advance from the last buffer's onended"
+    assert "const finish=()=>{if(vCtl===ctl&&ended&&pending===0)vDone();};" in player
     assert "if(!res.ok||!res.body){" in player and "res.status!==404" in player and \
         "return vDone();}" in player, "a 404 is a silent message: done, next; any other refusal names itself"
-    assert "if(!started)vDone();}" in player, "a stream that never buffered is done, next"
+    assert "ended=true;finish();" in player, "a stream that decoded nothing is done, next"
     assert "setTimeout" not in player and "setInterval" not in player, \
         "the player advances on a timer -- a backgrounded tab throttles it to a stop"
     # 4. Refusal is NAMED and turns the toggle back off. Without this the queue drains
@@ -1021,10 +1024,10 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     assert "vCtxUp()" in toggle, "the toggle's click must resume the AudioContext -- it is the gesture"
     assert "vStop()" in toggle and "vQ.length=0" in toggle, \
         "toggle off must abort the utterance in flight and empty the queue"
-    # 4b. First sound is the FIRST BUFFERED RANGE, not the whole stream: play() at
-    #     the first append that buffered anything (the broker's clusters are 200 ms).
-    assert "if(!started&&sb.buffered.length){started=true;" in player and \
-        "el.play().catch(" in player
+    # 4b. Underrun is a GAP, not a stall: a late batch re-anchors to now + lead;
+    #     first sound is the first decoded batch, not the whole stream.
+    assert "if(next<now)next=now+V_LEAD;" in player
+    assert "if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}" in player
     # 5. Live arrivals only: the speak call hangs off the socket's AUDIO case (the
     #    frame that says a first byte exists -- DES-009 section 2 as amended, ruling
     #    11018), not off the message case (which lands seconds before there is

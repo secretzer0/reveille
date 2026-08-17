@@ -4610,7 +4610,7 @@ async def feed_ws(ws: WebSocket):
 #     pinned tag serves is the forward_anthropic defect wearing a UI hat;
 #     chosen AND legible, or not at all.
 _UI_PACKAGED = os.path.join(os.path.dirname(__file__), "ui", "bus")
-_UI_FILES = frozenset({"index.html"})
+_UI_FILES = frozenset({"index.html", "opus-decoder.min.js"})
 
 
 def _ui_override():
@@ -5091,6 +5091,17 @@ def nav_link_html(label, path):
             f'{html.escape(label.strip())}</a>')
 
 
+async def opus_decoder_http(_request):
+    """GET /ui/opus-decoder.js -> the vendored Opus decoder (opus-decoder 0.7.11,
+    MIT, Ethan Halsall; libopus compiled to WASM, inlined). The page decodes the
+    WebM/Opus stream itself and plays PCM through its AudioContext, so every
+    browser with Web Audio hears the same wire -- iPhone Safari included, which
+    has no MediaSource (operator, 2026-08-17). Fixed name from the route table,
+    same serving rules as index.html."""
+    return PlainTextResponse(_ui_read("opus-decoder.min.js"), media_type="application/javascript",
+                             headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def chat_http(_request):
     page = _ui_read("index.html").replace(
         "<!--NAVLINK-->", nav_link_html(os.environ.get("REVEILLE_NAV_LABEL", ""),
@@ -5145,6 +5156,7 @@ def build_app():
             Route("/version", version_http),
             Route("/usage", usage_http),
             Route("/ui", chat_http),
+            Route("/ui/opus-decoder.js", opus_decoder_http),
             Route("/setup", setup_http, methods=["POST"]),
             Route("/login", login_http, methods=["POST"]),
             Route("/logout", logout_http, methods=["POST"]),
