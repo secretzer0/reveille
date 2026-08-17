@@ -209,6 +209,15 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.116 THE PAGE DECODES OPUS ITSELF (iPhone plays), AND A MESSAGE IS SPOKEN
+ONCE. iOS Safari has no MediaSource, so the page now demuxes the WebM stream
+and decodes the Opus frames with a vendored WASM decoder (/ui/opus-decoder.js,
+opus-decoder 0.7.11 MIT), scheduling PCM on its AudioContext -- one code path
+for every browser with Web Audio; the wire is unchanged (first sound 0.705 s
+on the eval box). Defect fixed: switching rooms leaked a feed socket per switch
+(the closed socket's reconnect fired anyway), so every audio frame arrived N
+times and the message was spoken N times; a deliberate close now detaches the
+reconnect, and the play queue takes each id once. Bus tools unchanged.
 0.2.115 A TOKEN THAT IS NOT AN AGENT CANNOT ACT AS ONE (ruling 11252). An
 unbound token is read-only: reads (inbox, history, rooms, recall, brief,
 GET routes) answer as before and leave no presence; every act -- send, ack,

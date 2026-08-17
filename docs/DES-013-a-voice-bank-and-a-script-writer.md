@@ -215,6 +215,16 @@ fine at 300 rows; said in a comment, and moved on.
   the Voices tab is THE ONE PLACE — `openRooms()` gains no rows; one renderer, one
   place. `toggleVoice` sends `{voice}` on the socket (slice 5).
 
+### 7.3 Defect 2026-08-17: a room switch leaked a feed socket, and every message was read twice
+
+`pickRoom` closed the feed socket and opened a new one, but the closed socket's
+`onclose` still fired and scheduled the reconnect two seconds later -- one more
+socket per switch, each delivering every frame again. `add()` deduped messages
+by id, so the only visible symptom was the `audio` frame arriving N times and
+the message spoken N times. Fix: a deliberate close detaches the handlers
+first (`dropFeed`), and the play queue takes each id once (`vHeard`) whatever
+delivers a frame twice.
+
 ### 7.2 Operator directive 2026-08-17: every message can be spoken later, on the click; and stop
 
 The listener gate (section 5) still decides what is made AUTOMATICALLY: a live
@@ -263,7 +273,20 @@ at 32 kbit/s; voip is kept for its lower algorithmic delay. The MSE element is
 routed through the one AudioContext (`createMediaElementSource`), so the
 toggle's click stays the autoplay gesture and `vStop` rules every source.
 `voice_clip_refusal` refuses a clip whose peak is under -40 dBFS by name (the
-recorder's own bar, ruling 11213). Named gap: Safari's MSE has no Opus/WebM.
+recorder's own bar, ruling 11213).
+
+**Amended 2026-08-17 (operator's iPhone): the page decodes the stream itself.**
+iOS Safari has no MediaSource at all (iPad only), so the MSE player was the
+gap made real. The wire is unchanged; the page now demuxes the WebM (its own
+~60-line EBML reader: SimpleBlock/Block frames, OpusHead pre-skip), decodes the
+Opus frames with a vendored decoder (`opus-decoder` 0.7.11, MIT, libopus in
+WASM, served as `/ui/opus-decoder.js` from the broker's fixed UI file table)
+and schedules the PCM on the one AudioContext -- the PCM scheduler shape from
+before MSE, fed by decoded batches instead of s16 chunks. ONE code path for
+every browser with Web Audio; no `<audio>` element, no MediaSource, no
+per-browser branch. Measured on the eval box: first sound 0.705 s streaming
+(0.666 s was MSE), 51 ms for a finished file. Same invariants: id order, one
+at a time, advanced by events never timers, toggle off aborts, refusal named.
 
 ## 8. The model, and how it is chosen (measurement, not preference)
 
