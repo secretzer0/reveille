@@ -3074,7 +3074,7 @@ async function openTokens(){
     'secret cannot be recovered.','');
   return '<div class="pRow"><b>'+esc(t.label||t.id.slice(0,8))+'</b>'+
    (t.agent_name?' <span class="pDim">= '+esc(t.agent_name)+' (bound)</span>'
-                :' <span class="pDim">(unbound: any name)</span>')+
+                :' <span class="pDim">(unbound: read-only, cannot act)</span>')+
    // Tier visible AND mutable (DES-001 sec 6); a flip is an authority change,
    // audited server-side (token_audit) -- the select is wired to that PATCH.
    '<select data-tier="'+t.id+'" title="memory tier — every flip is audited">'+
@@ -3088,9 +3088,13 @@ async function openTokens(){
   'mint, so a token either has its rooms or was never created. Ticking a room on an '+
   'existing token lands on the agent\'s very next call. Binding an agent name makes '+
   'the token BE that agent: a different X-Agent gets a 401. Binding is set here, once; '+
-  'rebinding means a new token.</div>'+rows+
+  'rebinding means a new token. A token WITHOUT an agent is READ-ONLY (ruling 11252): '+
+  'it can list, search and read, and every act -- send, lesson, memory, presence, join '+
+  '-- is refused, because a token that is not an agent cannot act as one.</div>'+rows+
   '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)">'+
-  '<input id="newTokName" placeholder="bind to agent (optional)">'+
+  '<input id="newTokName" placeholder="agent name -- this token IS that agent">'+
+  '<label class="chip" title="a credential for scripts and curl: reads only, never acts">'+
+  '<input type="checkbox" id="newTokRO"> read-only (no agent)</label>'+
   '<select id="newTokTier"><option value="state">memory: state (default)</option>'+
   '<option value="write">memory: write</option>'+
   '<option value="ratify">memory: ratify</option></select>'+
@@ -3107,8 +3111,14 @@ async function openTokens(){
  $('mkTok').onclick=async()=>{
   const picked=[...document.querySelectorAll('[data-newroom]:checked')]
     .map(c=>c.dataset.newroom);
+  // BOUND IS THE FORM (ruling 11252): an unbound mint is a deliberate, labelled
+  // choice -- the checkbox says what it gives up -- never the result of leaving
+  // a field blank.
+  const agentName=$('newTokName').value.trim();
+  if(!agentName&&!$('newTokRO').checked){
+   toast('name the agent this token is, or tick read-only (no agent)');return;}
   try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim(),
-    agent_name:$('newTokName').value.trim(),mem_tier:$('newTokTier').value,
+    agent_name:$('newTokRO').checked?'':agentName,mem_tier:$('newTokTier').value,
     rooms:picked})});
    // Shown once, deliberately: only the hash is stored, so there is no second chance.
    panel('tokens',
