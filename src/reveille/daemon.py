@@ -199,6 +199,16 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.108 PERSONAL VOICES, DELETE AND RENAME, AND A VOICES TAB OF CARDS
+(DES-013; schema v25). A voice added as PERSONAL (PUT /voices/<id>/clip
+?personal=1, decided at creation) exists only for its uploader: nobody
+else -- admin included -- lists, hears, edits or assigns it, and its
+uploader may still give it to themselves or their agents; a human who
+records "<username>" is heard in their own voice everywhere. DELETE
+/voices/<id> (uploader or admin) drops the voice and its assignments;
+PUT /voices/<id>/rename {id} moves the voice, its assignments, its
+scripts label and its clip. Voices tab: one card per voice with icon
+tools, and two add flows (bank / personal). Bus tools unchanged.
 0.2.107 THE SUITE RUNS ON EVERY CORE (pytest-xdist, 78 s -> 16 s). No
 broker behavior change; the bump exists because pyproject/uv.lock are
 image inputs and a tag is written once. Bus tools unchanged.
