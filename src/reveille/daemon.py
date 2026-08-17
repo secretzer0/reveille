@@ -44,6 +44,8 @@ import pathlib
 import re
 import secrets
 import struct
+import subprocess
+import shutil
 import sqlite3
 import threading
 import time
@@ -2128,8 +2130,15 @@ def upstream_config_refusal(url, token, lan_ok, *, var, feature):
 
 
 def tts_config_refusal(url, token, lan_ok=False):
-    """The synthesizer's refusal: the shared rule, named for voices."""
-    return upstream_config_refusal(url, token, lan_ok, var="REVEILLE_TTS_URL", feature="Voices")
+    """The synthesizer's refusal: the shared rule, named for voices -- plus the
+    one local requirement: THE WIRE FORMAT IS WEBM/OPUS, transcoded by the
+    broker per utterance (ruling 11211; DES-009 section 2), so a broker that
+    speaks needs ffmpeg on its PATH. No WAV fallback: refuse, do not degrade."""
+    why = upstream_config_refusal(url, token, lan_ok, var="REVEILLE_TTS_URL", feature="Voices")
+    if why is None and url and not shutil.which("ffmpeg"):
+        return ("ffmpeg not on PATH -- the broker transcodes every utterance to WebM/Opus "
+                "(DES-009 section 2); install ffmpeg (with libopus) or unset REVEILLE_TTS_URL")
+    return why
 
 
 def script_config_refusal(url, token, lan_ok=False):
@@ -2365,24 +2374,72 @@ def _sentences_audio(url, token, speaker, sentences, timeout, assigned):
     return it()
 
 
-def _wav_patch_sizes(path):
-    """Write the TRUE RIFF and data sizes into a completed streamed WAV. Only
-    the in-flight bytes carry 0xFFFFFFFF; replay and late listeners get a file
-    the stdlib `wave` module reads with the right frame count."""
-    size = os.path.getsize(path)
-    with open(path, "r+b") as f:
-        head = f.read(44)
-        if len(head) < 44 or head[:4] != b"RIFF" or head[36:40] != b"data":
-            return
-        f.seek(4)
-        f.write(struct.pack("<I", size - 8))
-        f.seek(40)
-        f.write(struct.pack("<I", size - 44))
+OPUS_BITRATE = "32k"        # speech at 24 kHz mono: ~12x smaller than s16 PCM
+OPUS_CLUSTER_MS = 200       # a WebM cluster per 200 ms: first sound waits for one
+
+
+def _opus_args(rate):
+    return ["ffmpeg", "-loglevel", "error", "-nostdin",
+            "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0",
+            "-c:a", "libopus", "-b:a", OPUS_BITRATE, "-application", "voip",
+            "-frame_duration", "20", "-f", "webm", "-live", "1",
+            "-cluster_time_limit", str(OPUS_CLUSTER_MS), "-flush_packets", "1", "pipe:1"]
+
+
+def _transcode(chunks):
+    """WAV bytes in (the fork's stream: one 44-byte header, then PCM), WebM/Opus
+    bytes out, as they land (ruling 11211). ONE ffmpeg per utterance: a feeder
+    thread pours PCM into its stdin, this generator yields its stdout; the
+    sample rate comes from the header. Closing the generator early (a retract,
+    a gone reader) kills ffmpeg. None if the header never arrives -- a silent
+    message, like every other failure here (section 7)."""
+    it = iter(chunks)
+    head = b""
+    while len(head) < 44:
+        try:
+            head += next(it)
+        except StopIteration:
+            return None
+    if head[:4] != b"RIFF":
+        log.warning("tts: upstream stream is not a WAV -- silent")
+        return None
+    rate = struct.unpack_from("<I", head, 24)[0] or 24000
+    first_pcm = head[44:]
+
+    def gen():
+        proc = subprocess.Popen(_opus_args(rate), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+
+        def feed():
+            try:
+                if first_pcm:
+                    proc.stdin.write(first_pcm)
+                for b in it:
+                    proc.stdin.write(b)
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            finally:
+                with contextlib.suppress(OSError, ValueError):
+                    proc.stdin.close()
+        threading.Thread(target=feed, name="opus-feed", daemon=True).start()
+        try:
+            while True:
+                b = proc.stdout.read(4096)
+                if not b:
+                    break
+                yield b
+        finally:
+            with contextlib.suppress(Exception):
+                if proc.poll() is None:
+                    proc.kill()
+                proc.stdout.close()
+                proc.wait(timeout=5)
+    return gen()
 
 
 def _tts_worker(url, token, timeout):
-    """Take message ids IN ORDER, synthesize, write <files>/tts-<id>.wav, and
-    announce the id on the existing feed.
+    """Take message ids IN ORDER, synthesize, transcode to WebM/Opus, write
+    <files>/tts-<id>.webm, and announce the id on the existing feed.
 
     THE TIMEOUT IS GENEROUS ON PURPOSE and there is no retry. The model loads
     at the server's start, so the FIRST request of a container's life may wait
@@ -2419,16 +2476,17 @@ def _tts_worker(url, token, timeout):
             chunks = _tts_speak(url, token, speaker, text, timeout, assigned)
         else:
             chunks = _sentences_audio(url, token, speaker, text, timeout, assigned)
+        chunks = _transcode(chunks) if chunks is not None else None
         if chunks is None:
             continue                      # silent message: the feed already carried it
         # THE FIRST BYTE IS THE ANNOUNCEMENT. The .part fills as upstream
         # synthesizes; the feed names the id as soon as there is something to
-        # play, and /audio/<mid>.wav tails the .part until this loop renames it.
+        # play, and /audio/<mid>.webm tails the .part until this loop renames it.
         # The worker never waits on a reader: a slow or gone tail costs nothing
         # here. Any failure past the first byte abandons the .part -- a silent
         # message, and a tail that ends early, which the client already treats
         # as done (section 7).
-        part = _files_dir / f"tts-{mid}.wav.part"
+        part = _files_dir / f"tts-{mid}.webm.part"
         done = threading.Event()
         _tts_inflight[mid] = done
         announced = False
@@ -2442,10 +2500,9 @@ def _tts_worker(url, token, timeout):
                         announced = True
             if not announced:
                 raise OSError("upstream sent no audio")
-            _wav_patch_sizes(part)
             # A rename that finds no .part is a message deleted mid-flight:
-            # fail closed, no .wav lands, nothing to orphan.
-            os.replace(part, _files_dir / f"tts-{mid}.wav")
+            # fail closed, no .webm lands, nothing to orphan.
+            os.replace(part, _files_dir / f"tts-{mid}.webm")
         except Exception as e:
             log.warning("tts: audio for %s abandoned: %s", mid, e)
             with contextlib.suppress(OSError):
@@ -2459,7 +2516,7 @@ def _sweep_abandoned_audio(files_dir):
     """A .part left on disk is a broker that died mid-synthesis. Nothing will
     finish it and no registry names it, so it is not in flight and not
     complete: remove it, and the message stays silent (section 7)."""
-    for p in pathlib.Path(files_dir).glob("tts-*.wav.part"):
+    for p in pathlib.Path(files_dir).glob("tts-*.webm.part"):
         with contextlib.suppress(OSError):
             p.unlink()
             log.info("tts: removed abandoned %s", p.name)
@@ -3723,7 +3780,7 @@ _say_slot = threading.BoundedSemaphore(1)
 
 @_guard
 async def voice_say_http(request):
-    """GET /voices/{vid}/say?text=<line> -> audio/wav: THAT bank voice speaking
+    """GET /voices/{vid}/say?text=<line> -> audio/webm: THAT bank voice speaking
     THAT line, streamed as the synthesizer yields it. The audition: hear a clip
     you uploaded (or any bank voice) say something before assigning it. Nothing
     is kept -- no file, no row, no frame; the bytes go to the one ear that asked.
@@ -3758,6 +3815,7 @@ async def voice_say_http(request):
         # OFF THE LOOP, like the push: urllib blocks for the whole synthesis.
         chunks = await asyncio.to_thread(_tts_speak, _tts_url, _tts_token, vid, text,
                                          VOICE_SAY_TIMEOUT, name)
+        chunks = await asyncio.to_thread(_transcode, chunks) if chunks is not None else None
         if chunks is None:
             return JSONResponse({"error": "the synthesizer did not answer"}, status_code=502)
         held = False                     # the stream owns the slot from here
@@ -3772,7 +3830,7 @@ async def voice_say_http(request):
                 yield b
         finally:
             _say_slot.release()          # the slot lives as long as the stream
-    return StreamingResponse(body(), media_type="audio/wav",
+    return StreamingResponse(body(), media_type="audio/webm",
                              headers={"Cache-Control": "no-store",
                                       "X-Content-Type-Options": "nosniff",
                                       "Content-Security-Policy": "default-src 'none'; sandbox"})
@@ -4150,8 +4208,8 @@ async def script_http(request):
 
 @_guard
 async def audio_http(request):
-    """GET /audio/<msg-id>.wav -> the spoken form of that message, if you are in
-    its room.
+    """GET /audio/<msg-id>.webm -> the spoken form of that message (WebM/Opus,
+    ruling 11211), if you are in its room.
 
     THE ROOM COMES FROM THE MESSAGE AND THE ?room= QUERY IS IGNORED (architect,
     msg 8922). The client sends one because every other call on that page does;
@@ -4172,8 +4230,8 @@ async def audio_http(request):
     row = _conn.execute("SELECT room FROM messages WHERE id=?", (mid,)).fetchone()
     if row is None or row["room"] not in p.rooms:
         return JSONResponse({"error": "not found"}, status_code=404)
-    path = _files_dir / f"tts-{mid}.wav"
-    headers = {"Content-Disposition": f'inline; filename="tts-{mid}.wav"',
+    path = _files_dir / f"tts-{mid}.webm"
+    headers = {"Content-Disposition": f'inline; filename="tts-{mid}.webm"',
                "X-Content-Type-Options": "nosniff",
                "Content-Security-Policy": "default-src 'none'; sandbox"}
     # THREE STATES, ONE ROUTE (section 7): in flight -> replay the .part so far,
@@ -4186,15 +4244,15 @@ async def audio_http(request):
     done = _tts_inflight.get(mid)
     if done is None:
         if path.is_file():
-            return FileResponse(path, media_type="audio/wav", headers=headers)
+            return FileResponse(path, media_type="audio/webm", headers=headers)
         return JSONResponse({"error": "not found"}, status_code=404)
-    part = _files_dir / f"tts-{mid}.wav.part"
+    part = _files_dir / f"tts-{mid}.webm.part"
     try:
         f = open(part, "rb")
     except OSError:
         # Renamed since the registry check: the file is the answer after all.
         if path.is_file():
-            return FileResponse(path, media_type="audio/wav", headers=headers)
+            return FileResponse(path, media_type="audio/webm", headers=headers)
         return JSONResponse({"error": "not found"}, status_code=404)
 
     async def tail():
@@ -4214,7 +4272,7 @@ async def audio_http(request):
                     draining = True
                     continue
                 await asyncio.sleep(0.05)
-    return StreamingResponse(tail(), media_type="audio/wav", headers=headers)
+    return StreamingResponse(tail(), media_type="audio/webm", headers=headers)
 
 
 @_guard
@@ -4951,7 +5009,7 @@ def build_app():
             Route("/rooms/{rid}/voices/{speaker}", room_voice_http, methods=["PUT", "DELETE"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
-            Route("/audio/{mid}.wav", audio_http),
+            Route("/audio/{mid}.webm", audio_http),
             Route("/script/{mid}", script_http),
             WebSocketRoute("/wake", wake_ws),
             WebSocketRoute("/feed", feed_ws),
