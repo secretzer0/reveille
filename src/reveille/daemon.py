@@ -199,6 +199,10 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.106 A BANK VOICE KEEPS ITS SAMPLE LINE (DES-013; schema v24). PATCH
+/voices/<id> {sample} stores the line a voice reads on audition, beside
+its persona; GET /voices carries it; the Voices tab prefills it, "say it"
+reads the box, "save sample" keeps it. Bus tools unchanged.
 0.2.105 THE AUDITION IS THE RIGHT VOICE OR NONE, AND ONE AT A TIME.
 GET /voices/<id>/say refuses 409 when the clip is not on the synthesizer
 after one reconcile (never the digest voice), and 429 while another
