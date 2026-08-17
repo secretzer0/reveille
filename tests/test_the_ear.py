@@ -207,7 +207,10 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     assert "if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}" in ear, \
         "a silent take is refused before the wire"
     assert "fetch('/stt'+qs(),{method:'POST',credentials:'same-origin'," in ear and \
-        "headers:{'content-type':'audio/wav'},body:r.blob" in ear
+        "headers:{'content-type':'audio/wav'},body:take" in ear
+    # 16 kHz to the ear (ruling 11333): the browser's own resampler, before the wire.
+    assert "take=await earResample(r.blob,rate);" in ear
+    assert "new OfflineAudioContext(1,Math.ceil(n*16000/rate),16000)" in ear and "return wavBlob(pcm,16000);" in ear
     assert "earLand(d.text||'');" in ear
     land = ear[ear.index("function earLand(text){"):]
     land = land[:land.index("\n}\n")]

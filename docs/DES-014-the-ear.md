@@ -181,9 +181,9 @@ the sent message is still the signed-in user's.
 - The pair's VRAM is the shared budget of three upstreams; the table is a
   plan and the bench is the fact. The writer's quant is the knob.
 - The recorder captures at the AudioContext rate (44.1/48 kHz); whisper wants
-  16 kHz. The server resamples; sending 16 kHz from the page would cut the
-  upload 3x -- a page-side resample is cheap and can ride slice 1 if the number
-  says the upload matters (a 10 s take at 48 kHz s16 mono is ~1 MB).
+  16 kHz. RULED 11333: the page resamples to 16 kHz before the wire
+  (OfflineAudioContext, the browser's own resampler; slice 1) -- a third of the
+  bytes, and a phone on LTE is the number.
 - iOS: `getUserMedia` needs a secure origin (we have one) and a gesture (we
   have one); background tabs stop the mic. Hands-free (slice 2) on a phone
   means the screen stays on.
@@ -207,7 +207,7 @@ the sent message is still the signed-in user's.
 3. **The page.** Mic button in the compose row, hidden when the ear is off;
    hold-to-talk / tap-toggle; shared recorder + silence refusal; text lands in
    the textarea, caret at the end, focus in the box; the button never calls
-   send. Page gates: the button's markup and states; the POST goes to `/stt`
+   send; the take goes on the wire at 16 kHz (ruling 11333). Page gates: the button's markup and states; the POST goes to `/stt`
    with `audio/wav`; the handler appends to the textarea and never touches the
    send path; the recorder is the ONE `vRecStart`.
 4. **The host** (when the ssh handle lands): `speaches` container on the 3060

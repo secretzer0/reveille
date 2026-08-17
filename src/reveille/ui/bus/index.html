@@ -3529,15 +3529,34 @@ async function earStart(){
   setTimeout(tick,250);};
  tick();
 }
+// 16 kHz TO THE EAR (ruling 11333): whisper wants 16 k and a phone on LTE is
+// the number -- the take is resampled in the page (OfflineAudioContext, the
+// browser's own resampler) before it goes on the wire: a third of the bytes.
+async function earResample(blob,rate){
+ if(rate===16000)return blob;
+ const ab=await blob.arrayBuffer();
+ const n=(ab.byteLength-44)>>1,src=new Int16Array(ab,44,n);
+ const f=new Float32Array(n);for(let i=0;i<n;i++)f[i]=src[i]/32768;
+ const off=new OfflineAudioContext(1,Math.ceil(n*16000/rate),16000);
+ const buf=off.createBuffer(1,n,rate);buf.copyToChannel(f,0);
+ const s=off.createBufferSource();s.buffer=buf;s.connect(off.destination);s.start();
+ const out=await off.startRendering();const d=out.getChannelData(0);
+ const pcm=new Int16Array(d.length);
+ for(let i=0;i<d.length;i++){const v=Math.max(-1,Math.min(1,d[i]));pcm[i]=v<0?v*32768:v*32767;}
+ return wavBlob(pcm,16000);
+}
 async function earStop(){
  if(!vRec)return;
+ const rate=vRec.rate;
  const r=vRecStop();
  $('mic').classList.remove('on');$('mic').setAttribute('aria-pressed','false');
  if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}
  earBusy=true;$('mic').classList.add('busy');$('micState').textContent='hearing...';
  try{
+  let take=r.blob;
+  try{take=await earResample(r.blob,rate);}catch(e){}   // a browser without OfflineAudioContext sends the take as recorded
   const res=await fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',
-   headers:{'content-type':'audio/wav'},body:r.blob});
+   headers:{'content-type':'audio/wav'},body:take});
   const d=await res.json().catch(()=>({}));
   if(!res.ok){toast(d.error||d.detail||('ear: '+res.status));return;}
   earLand(d.text||'');
