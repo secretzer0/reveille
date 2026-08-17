@@ -199,6 +199,9 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.107 THE SUITE RUNS ON EVERY CORE (pytest-xdist, 78 s -> 16 s). No
+broker behavior change; the bump exists because pyproject/uv.lock are
+image inputs and a tag is written once. Bus tools unchanged.
 0.2.106 A BANK VOICE KEEPS ITS SAMPLE LINE (DES-013; schema v24). PATCH
 /voices/<id> {sample} stores the line a voice reads on audition, beside
 its persona; GET /voices carries it; the Voices tab prefills it, "say it"
