@@ -219,6 +219,25 @@ def test_anyone_adds_only_the_uploader_or_an_admin_replaces_or_edits(monkeypatch
     assert st == 404
 
 
+def test_the_sample_line_travels_with_the_voice_and_has_a_cap(monkeypatch, tmp_path):
+    c, admin, user, other, vd, who = _harness(monkeypatch, tmp_path)
+    P, E = daemon.voice_clip_http, daemon.voice_http
+    st, _ = _call(P, _req("PUT", "/voices/quark/clip", wav(6.0), "name=Quark", {"vid": "quark"}))
+    assert st == 200
+    st, out = _call(E, _req("PATCH", "/voices/quark", json.dumps({"sample": "  Rule one.  "}).encode(),
+                            "", {"vid": "quark"}, ctype="application/json"))
+    assert st == 200 and out["sample"] == "Rule one."
+    st, out = _call(daemon.voices_http, _req("GET", "/voices"))
+    assert out["voices"][0]["sample"] == "Rule one."
+    st, out = _call(E, _req("PATCH", "/voices/quark",
+                            json.dumps({"sample": "x" * (daemon.VOICE_SAMPLE_MAX + 1)}).encode(),
+                            "", {"vid": "quark"}, ctype="application/json"))
+    assert st == 400 and "sample" in out["error"]
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "ui", "bus",
+                           "index.html")).read()
+    assert "JSON.stringify({sample:" in ui and "esc(v.sample||'')" in ui
+
+
 def test_the_bank_cap_is_a_named_refusal_at_the_door(monkeypatch, tmp_path):
     c, admin, user, other, vd, who = _harness(monkeypatch, tmp_path)
     monkeypatch.setattr(store, "VOICE_BANK_MAX", 1)

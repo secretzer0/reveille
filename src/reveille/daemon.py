@@ -3622,7 +3622,8 @@ async def voices_http(request):
 
 @_guard
 async def voice_http(request):
-    """PATCH /voices/{vid} {name?, persona?} -- uploader or admin."""
+    """PATCH /voices/{vid} {name?, persona?, sample?} -- uploader or admin.
+    sample = the line this voice reads on audition (<= VOICE_SAMPLE_MAX)."""
     p = _principal(request)
     vid = request.path_params["vid"]
     v = store.voice_get(_conn, vid)
@@ -3633,9 +3634,14 @@ async def voice_http(request):
     d = await request.json()
     name = d.get("name")
     persona = d.get("persona")
+    sample = d.get("sample")
     if name is not None and not (name := str(name).strip()):
         return JSONResponse({"error": "name cannot be empty"}, status_code=400)
-    store.voice_patch(_conn, vid, name=name, persona=None if persona is None else str(persona))
+    if sample is not None and len(sample := str(sample).strip()) > VOICE_SAMPLE_MAX:
+        return JSONResponse({"error": f"sample: {VOICE_SAMPLE_MAX} characters at most"},
+                            status_code=400)
+    store.voice_patch(_conn, vid, name=name, persona=None if persona is None else str(persona),
+                      sample=sample)
     return JSONResponse(store.voice_get(_conn, vid))
 
 
@@ -3673,7 +3679,8 @@ async def persona_draft_http(request):
     return JSONResponse({"persona": persona[:1000]})
 
 
-VOICE_SAY_MAX = 300                # characters of audition text; a line, not a speech
+VOICE_SAMPLE_MAX = 2000            # the stored sample line (a short script, not a speech)
+VOICE_SAY_MAX = VOICE_SAMPLE_MAX   # the audition speaks at most a stored sample
 VOICE_SAY_TIMEOUT = 120.0          # a warm synthesizer answers in seconds; cold, the worker's 600 is not for a click
 # ONE audition at a time (verdict 11144): the synthesizer is single-threaded and
 # live messages queue behind it; a curl loop must not contend with the room.
