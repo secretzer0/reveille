@@ -201,10 +201,56 @@ def _get(url, path, cookie, timeout=15):
         return json.loads(r.read().decode() or "{}")
 
 
+def login(url, user, password):
+    """One web session for the installer's few calls; the cookie, or a
+    RuntimeError naming why the broker refused."""
+    code, body, cookie = _post(url, "/login", {"name": user, "password": password})
+    if code != 200 or not cookie:
+        raise RuntimeError(f"login failed ({code}): {body.get('error') or body}")
+    return cookie.split(";", 1)[0]
+
+
+def my_agents(url, cookie):
+    """The account's agents that hold a live token, with their rooms, from
+    GET /tokens -- the picker's inventory (operator ask, 2026-08-17: "a list of
+    my agents that exist, so I can pick one and be its native version"). An
+    agent whose every token was revoked is still a live identity the broker
+    will bind to; it just is not offered here, and typing its name still works."""
+    seen = {}
+    for t in _get(url, "/tokens", cookie).get("tokens", []):
+        name = t.get("agent_name")
+        if name:
+            seen.setdefault(name, set()).update(
+                r if isinstance(r, str) else r.get("name", "") for r in t.get("rooms") or [])
+    return sorted((name, sorted(rooms)) for name, rooms in seen.items())
+
+
+def ask_agent(agents, stdin=None):
+    """Which agent this directory becomes: one of yours by number (this machine
+    takes over its identity -- the token is rotated, the old body goes dead), or
+    a NEW name typed in. Returns (name, is_new)."""
+    if not agents:
+        return "", True
+    print("\nYour agents (pick one to make THIS directory its native body, "
+          "or type a new name):")
+    for i, (name, rooms) in enumerate(agents, 1):
+        print(f"  {i}. {name:<28} {', '.join(rooms) or '(no rooms)'}")
+    while True:
+        pick = ask("agent (number, or a new name)", "1", stdin)
+        if pick.isdigit() and 1 <= int(pick) <= len(agents):
+            return agents[int(pick) - 1][0], False
+        if any(pick == n for n, _ in agents):
+            return pick, False
+        if NAME_OK(pick):
+            return pick, True
+        print("  names are letters, digits, _ and -, starting with a letter or digit")
+
+
 def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
-               create=False, confirm_create=None):
-    """Log in, mint a token BOUND to `agent`, attach rooms. Returns
-    (secret, rooms-attached, note) or raises RuntimeError with what to fix.
+               create=False, confirm_create=None, cookie=None):
+    """Log in (unless a session cookie is handed in), mint a token BOUND to
+    `agent`, attach rooms. Returns (secret, rooms-attached, note) or raises
+    RuntimeError with what to fix.
 
     Binding supersedes the account's previous token for that name -- the broker's
     existing one-identity-one-live-credential rule, not something this adds. So
@@ -212,10 +258,7 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
     ones for a single agent, which is a state the operator has found in their
     own Tokens tab before.
     """
-    code, body, cookie = _post(url, "/login", {"name": user, "password": password})
-    if code != 200 or not cookie:
-        raise RuntimeError(f"login failed ({code}): {body.get('error') or body}")
-    cookie = cookie.split(";", 1)[0]
+    cookie = cookie or login(url, user, password)
 
     payload = _get(url, "/rooms", cookie)
     text, ordered, n_mine = room_listing(payload)
@@ -460,17 +503,41 @@ def cmd_init(a):
     # answer supplied as a flag or an env var skips its own prompt and nothing
     # else. --no-prompt is for a script that would rather fail than block.
     wizard = sys.stdin.isatty() and not a.no_prompt
+    cookie = None
     if wizard and not (url and name and (a.token or os.environ.get("REVEILLE_TOKEN"))):
         print("reveille: setting this machine up as an agent.\n")
         url = url or ask("broker url", DEFAULT_URL)
-        if not name:
+        a.login = a.login or not (a.token or os.environ.get("REVEILLE_TOKEN"))
+        if not name and a.login:
+            # LOG IN FIRST, THEN PICK: the account's own agents are the menu, so
+            # becoming the native body of an existing agent is a number, not a
+            # name remembered exactly (operator ask, 2026-08-17). One password
+            # prompt: the session is handed on to the mint below.
+            print("Log in as YOURSELF -- the web account that owns (or will own) "
+                  "the agent.")
+            a.user = a.user or os.environ.get("REVEILLE_USER") or input("your broker username: ")
+            try:
+                cookie = login(url, a.user, read_password(a.user))
+                agents = my_agents(url, cookie)
+            except (RuntimeError, urllib.error.URLError, OSError) as e:
+                print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
+                      file=sys.stderr)
+                return 1
+            name, is_new = ask_agent(agents)
+            if is_new:
+                agent_type, suggested = ask_type()
+                name = ask("agent name", name or suggested)
+                while not NAME_OK(name):
+                    print("  names are letters, digits, _ and -, starting with a "
+                          "letter or digit")
+                    name = ask("agent name", suggested)
+        elif not name:
             agent_type, suggested = ask_type()
             name = ask("agent name", suggested)
             while not NAME_OK(name):
                 print("  names are letters, digits, _ and -, starting with a "
                       "letter or digit")
                 name = ask("agent name", suggested)
-        a.login = a.login or not (a.token or os.environ.get("REVEILLE_TOKEN"))
     minted = ""
     if a.login:
         # MINT FIRST, then fall into exactly the same path as a pasted token.
@@ -483,7 +550,7 @@ def cmd_init(a):
         # apart, and getting it wrong creates an agent named after them that
         # posts in the room under their own name.
         user = a.user or os.environ.get("REVEILLE_USER")
-        if not user:
+        if not user and not cookie:
             print(f"Creating the agent '{name}'.")
             print("Now log in as YOURSELF -- the web account that will OWN it. "
                   "This is not the agent's name.")
@@ -504,7 +571,8 @@ def cmd_init(a):
                   f"on its next call. Two machines means two names.")
         try:
             token, attached, minted = mint_token(
-                url, user, read_password(user), name, a.rooms, a.tier,
+                url, user, None if cookie else read_password(user), name, a.rooms, a.tier,
+                cookie=cookie,
                 pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
                      if wizard else None,
                 create=a.create,
