@@ -990,7 +990,7 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     #    AudioContext; one code path for every browser with Web Audio). Nothing is
     #    fetched at load: the only fetch of /audio/ is inside vPump's play call.
     assert 'id="vPlayer"' not in PAGE and "<audio id=" not in PAGE and "new Audio(" not in PAGE, \
-        "no <audio> element anywhere; the player is Web Audio"
+        "no <audio> element in the markup or as the player; the player is Web Audio"
     assert "new MediaSource(" not in PAGE and "addSourceBuffer(" not in PAGE, \
         "MediaSource is the iPhone gap; the page decodes the stream itself"
     player = PAGE[PAGE.index("const V_LEAD="):PAGE.index("function vPush(m)")]
@@ -1008,7 +1008,13 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     #    is exactly where audio gets left running.
     assert "src.onended=()=>{pending--;finish();};" in player, \
         "the queue must advance from the last buffer's onended"
-    assert "const finish=()=>{if(vCtl===ctl&&ended&&pending===0)vDone();};" in player
+    assert "const finish=()=>{if(vCtl===ctl&&ended&&pending===0){" in player and \
+        "vDiagPaint();vDone();}};" in player, "done = fetch ended AND the last buffer ended"
+    # The only <audio> element is the iOS unlock (a silent data: URI loop played
+    # in the gesture so Web Audio survives the ringer switch) -- never the player,
+    # never a URL anyone sent, iOS only.
+    assert "const el=document.createElement('audio');el.loop=true;" in player and \
+        "el.src='data:audio/wav;base64,'+btoa(bin);" in player and "if(!V_IOS||vUnlocked)return;" in player
     assert "if(!res.ok||!res.body){" in player and "res.status!==404" in player and \
         "return vDone();}" in player, "a 404 is a silent message: done, next; any other refusal names itself"
     assert "ended=true;finish();" in player, "a stream that decoded nothing is done, next"

@@ -209,6 +209,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.117 iOS: THE RINGER-SWITCH UNLOCK, AND NUMBERS ON SCREEN. On an iPhone the
+voice toggle's tap now also plays a silent looping element once so Web Audio
+follows the playback session (iOS mutes Web Audio under the silent switch),
+and each utterance ends with a one-line toast of what it did (frames,
+samples, buffers, decoder errors, context state) -- a phone has no console;
+this line stays until iOS sounds. Bus tools unchanged.
 0.2.116 THE PAGE DECODES OPUS ITSELF (iPhone plays), AND A MESSAGE IS SPOKEN
 ONCE. iOS Safari has no MediaSource, so the page now demuxes the WebM stream
 and decodes the Opus frames with a vendored WASM decoder (/ui/opus-decoder.js,
