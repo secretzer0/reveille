@@ -209,6 +209,16 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.118 THE EAR, SLICE 1 (DES-014). REVEILLE_STT_URL (with _TOKEN, _MODEL,
+_TIMEOUT) points the broker at a speech-to-text server (OpenAI-shaped
+/v1/audio/transcriptions: speaches / faster-whisper-server) -- the third
+upstream, the same refusal and LAN flag as voices and the writer, off when
+unset. ONE route, POST /stt: a signed-in person's WAV take (the page's own
+recorder; <= 60 s, <= 8 MiB, silence refused), one at a time, back as
+{text}; nothing stored, nothing sent -- the words land in the compose box
+and the human presses Send. The page shows a talk button beside attach when
+the ear is on: hold on a mouse, tap to start/stop on a phone. Bus tools
+unchanged.
 0.2.117 iOS: THE RINGER-SWITCH UNLOCK, AND NUMBERS ON SCREEN. On an iPhone the
 voice toggle's tap now also plays a silent looping element once so Web Audio
 follows the playback session (iOS mutes Web Audio under the silent switch),
