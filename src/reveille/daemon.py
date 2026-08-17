@@ -2422,9 +2422,12 @@ def _transcode(chunks):
                 with contextlib.suppress(OSError, ValueError):
                     proc.stdin.close()
         threading.Thread(target=feed, name="opus-feed", daemon=True).start()
+        # os.read, not BufferedReader.read: the latter waits for the whole 4096
+        # bytes -- a second at 4 KB/s -- and first sound is what this is for.
+        fd = proc.stdout.fileno()
         try:
             while True:
-                b = proc.stdout.read(4096)
+                b = os.read(fd, 65536)
                 if not b:
                     break
                 yield b
