@@ -199,6 +199,10 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.109 YOUR PERSONAL VOICE COMES FIRST. The Voices tab opens with MY
+PERSONAL VOICE (your own cards, then the add flow), then THE BANK; "say
+it" on an empty sample reads a default line naming the voice, so a new
+voice is heard on the first click. Bus tools unchanged.
 0.2.108 PERSONAL VOICES, DELETE AND RENAME, AND A VOICES TAB OF CARDS
 (DES-013; schema v25). A voice added as PERSONAL (PUT /voices/<id>/clip
 ?personal=1, decided at creation) exists only for its uploader: nobody
