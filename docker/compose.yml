@@ -66,6 +66,15 @@ services:
       # not built the model image behaves exactly as it did before voices existed.
       REVEILLE_TTS_URL: ${REVEILLE_TTS_URL:-}
       REVEILLE_TTS_TOKEN: ${REVEILLE_TTS_TOKEN:-}
+      # DES-013: the script writer's address, the same shape (unset = no writer),
+      # and the one flag that lets EITHER upstream be a plaintext host on the
+      # operator's own LAN (ruling 11036) -- the daemon refuses without it and
+      # names it; the deploy passes it through or the refusal stands.
+      REVEILLE_SCRIPT_URL: ${REVEILLE_SCRIPT_URL:-}
+      REVEILLE_SCRIPT_MODEL: ${REVEILLE_SCRIPT_MODEL:-}
+      REVEILLE_SCRIPT_TIMEOUT: ${REVEILLE_SCRIPT_TIMEOUT:-}
+      REVEILLE_SCRIPT_TOKEN: ${REVEILLE_SCRIPT_TOKEN:-}
+      REVEILLE_LAN_PLAINTEXT: ${REVEILLE_LAN_PLAINTEXT:-}
     # The daemon bounds its own graceful shutdown at 5s (0.2.26); 12 gives it
     # room plus the courtesy-frame delay before docker escalates to SIGKILL.
     # Before 0.2.26 a SIGTERM could wedge the process half-dead forever, and
