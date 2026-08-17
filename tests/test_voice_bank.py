@@ -291,4 +291,8 @@ def test_the_recorder_builds_a_pcm_wav_in_the_browser_and_uses_the_same_put():
     # blob is the file the same PUT sends; the length shows while recording.
     assert "const bankSt=rec('bank',$('bankId')), persSt=rec('pers',$('persId'));" in ui
     assert "st.file=r.blob" in ui and "putVoiceClip(id,myName,persSt.file,true)" in ui
+    # A silent take (no input device / no permission) is refused at stop and
+    # named while recording -- never stored, never cloned.
+    assert "silent:r.peak<0.01" in ui and "if(r.silent){st.file=null;" in ui
+    assert "NO SIGNAL from the microphone" in ui
     assert "'recording '+sec.toFixed(1)+' s'" in ui
