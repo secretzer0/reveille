@@ -263,6 +263,11 @@ def test_the_voices_tab_speaks_the_routes_shape():
     # in place; rename = PATCH name + PUT /rename when the id moved.
     assert 'class="vCard' in ui and "'&personal=1'" in ui
     assert "ADD TO THE BANK" in ui and "MY PERSONAL VOICE" in ui
+    # Personal voices are listed FIRST with their own add flow; an empty sample
+    # box still auditions with a default line (operator: audition area).
+    assert ui.index('<div class="pSec">MY PERSONAL VOICE</div>') < ui.index('<div class="pSec">THE BANK</div>') \
+        < ui.index('<div class="pSec">ADD TO THE BANK</div>')
+    assert "const t=inp.value.trim()||('This is '+vname+' speaking on reveille." in ui
     assert "confirming={kind:'voice',id:b.dataset.vdel}" in ui
     assert "'/rename',\n     {method:'PUT',body:JSON.stringify({id:nid})}" in ui
 
