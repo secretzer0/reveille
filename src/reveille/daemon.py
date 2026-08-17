@@ -2379,7 +2379,10 @@ OPUS_CLUSTER_MS = 200       # a WebM cluster per 200 ms: first sound waits for o
 
 
 def _opus_args(rate):
-    return ["ffmpeg", "-loglevel", "error", "-nostdin",
+    # -analyzeduration 0 -probesize 32: raw PCM needs no probing, and the
+    # default probe held the first byte back TWO SECONDS (measured; the whole
+    # first-sound budget). Everything after is 20 ms frames into 200 ms clusters.
+    return ["ffmpeg", "-loglevel", "error", "-nostdin", "-analyzeduration", "0", "-probesize", "32",
             "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0",
             "-c:a", "libopus", "-b:a", OPUS_BITRATE, "-application", "voip",
             "-frame_duration", "20", "-f", "webm", "-live", "1",
