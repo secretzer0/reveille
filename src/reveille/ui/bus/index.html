@@ -3341,9 +3341,13 @@ async function openVoices(){
   '</div>'+
   // THE AUDITION: hear this clip say a line of your choosing before anyone is
   // assigned to it. Nothing is kept server-side; the same player as the feed.
-  '<div class="pRow"><input data-vsay="'+esc(v.id)+'" maxlength="300" '+
-   'placeholder="sample dialog: type a line and hear this voice say it">'+
-   '<button type="button" data-vsaybtn="'+esc(v.id)+'">say it</button></div>').join('')||'<div class="pDim">the bank is empty</div>';
+  // The SAMPLE is kept on the bank voice (v.sample): what this voice reads on
+  // audition, saved beside the persona; anyone may type over it to try a line.
+  '<div class="pRow"><textarea class="vPersona" data-vsay="'+esc(v.id)+'" rows="2" maxlength="2000" '+
+   'placeholder="sample dialog: a line this voice reads -- type and \'say it\'">'+esc(v.sample||'')+'</textarea>'+
+   '<button type="button" data-vsaybtn="'+esc(v.id)+'">say it</button>'+
+   (v.editable?'<button type="button" data-vsamplesave="'+esc(v.id)+'">save sample</button>':'')+
+  '</div>').join('')||'<div class="pDim">the bank is empty</div>';
  panel('voices',
   '<div class="pDim">A bank voice is a clip reveille keeps: PCM WAV, 5 to 30 seconds, one '+
   'speaker, clean room tone. Anyone signed in may add one; only its uploader or an admin '+
@@ -3409,7 +3413,12 @@ async function openVoices(){
    vStop();vBusy=true;
    vPlay('say:'+b.dataset.vsaybtn,'/voices/'+encodeURIComponent(b.dataset.vsaybtn)+
     '/say?text='+encodeURIComponent(t));};
-  b.onclick=say;inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();say();}};}
+  b.onclick=say;inp.onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();say();}};}
+ for(const b of document.querySelectorAll('[data-vsamplesave]'))b.onclick=async()=>{
+  const ta=document.querySelector('[data-vsay="'+CSS.escape(b.dataset.vsamplesave)+'"]');
+  try{await api('/voices/'+encodeURIComponent(b.dataset.vsamplesave),
+    {method:'PATCH',body:JSON.stringify({sample:ta.value})});toast('sample saved');}
+  catch(e){toast(e.message);}};
  for(const b of document.querySelectorAll('[data-vdraft]'))b.onclick=async()=>{
   const ta=document.querySelector('[data-vpersona="'+CSS.escape(b.dataset.vdraft)+'"]');
   b.disabled=true;b.textContent='drafting\u2026';
