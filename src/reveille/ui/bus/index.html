@@ -3314,8 +3314,10 @@ function vRecStart(){
   const ctx=new (window.AudioContext||window.webkitAudioContext)();
   const src=ctx.createMediaStreamSource(stream);
   const node=ctx.createScriptProcessor(4096,1,1);
-  const rec={ctx,stream,node,chunks:[],rate:ctx.sampleRate,t0:performance.now()};
-  node.onaudioprocess=e=>{rec.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));};
+  const rec={ctx,stream,node,chunks:[],rate:ctx.sampleRate,t0:performance.now(),peak:0};
+  node.onaudioprocess=e=>{const d=e.inputBuffer.getChannelData(0);
+   for(let i=0;i<d.length;i+=16){const a=Math.abs(d[i]);if(a>rec.peak)rec.peak=a;}
+   rec.chunks.push(new Float32Array(d));};
   // A ScriptProcessor only runs while connected to the destination; a zero-gain
   // sink keeps the mic OFF the speakers while recording (architect 11124).
   const sink=ctx.createGain();sink.gain.value=0;
@@ -3328,8 +3330,14 @@ function vRecStop(){
  const n=r.chunks.reduce((a,c)=>a+c.length,0);
  const pcm=new Int16Array(n);let o=0;
  for(const c of r.chunks)for(let i=0;i<c.length;i++){const v=Math.max(-1,Math.min(1,c[i]));pcm[o++]=v<0?v*32768:v*32767;}
- return {blob:wavBlob(pcm,r.rate),seconds:n/r.rate};
+ // A SILENT TAKE IS REFUSED HERE, not discovered as a chipmunk clone later
+ // (operator, eval box: three takes at -91 dBFS -- a browser with no real
+ // input device records zeros and looks like it worked). -40 dBFS peak is
+ // far below any spoken word at any gain.
+ return {blob:wavBlob(pcm,r.rate),seconds:n/r.rate,peak:r.peak,silent:r.peak<0.01};
 }
+const REC_SILENT_MSG='the microphone recorded silence -- no input device or no permission in this '+
+ 'browser window (check the OS input and the mic permission; a normal Chrome tab works)';
 // A canonical 44-byte RIFF/WAVE header + s16le mono -- what the stdlib `wave`
 // on the broker reads and what voice_clip_refusal measures.
 function wavBlob(pcm,rate){
@@ -3445,7 +3453,9 @@ async function openVoices(){
    $(pre+'Name').textContent=f?f.name:'';};
   $(pre+'Rec').onclick=async()=>{
    const b=$(pre+'Rec');
-   if(vRec){const r=vRecStop();st.file=r.blob;b.textContent='record';
+   if(vRec){const r=vRecStop();b.textContent='record';
+    if(r.silent){st.file=null;$(pre+'Name').textContent='silent take, discarded';toast(REC_SILENT_MSG);return;}
+    st.file=r.blob;
     $(pre+'Name').textContent='recorded '+r.seconds.toFixed(1)+' s'+
      (r.seconds<5?' -- too short, the synthesizer needs 5':r.seconds>30?' -- too long, 30 max':'');
     return;}
@@ -3454,7 +3464,8 @@ async function openVoices(){
     const tick=()=>{if(!vRec){for(const o of ['bank','pers'])if($(o+'Rec'))$(o+'Rec').disabled=false;return;}
      const sec=(performance.now()-vRec.t0)/1000;
      $(pre+'Name').textContent='recording '+sec.toFixed(1)+' s'+
-      (sec<5?' (need 5)':sec>30?' (30 max -- stop)':' (ok)');
+      (sec<5?' (need 5)':sec>30?' (30 max -- stop)':' (ok)')+
+      (sec>1.5&&vRec.peak<0.01?' -- NO SIGNAL from the microphone':'');
      setTimeout(tick,250);};
     tick();
     if(idEl&&!idEl.value.trim())idEl.value=myName;}
