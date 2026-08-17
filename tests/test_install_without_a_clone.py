@@ -341,8 +341,9 @@ def test_the_wizard_lists_your_agents_and_a_number_makes_this_directory_one_of_t
     for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN", "REVEILLE_USER"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
-    # url (typed), username, agent pick "2" = the second of the SORTED names, rooms (Enter)
-    answers = iter([minting, "tmelhiser", "2", ""])
+    # url (typed), username, agent pick "2" = the second of the SORTED names,
+    # the explicit yes (ruling 11246), rooms (Enter)
+    answers = iter([minting, "tmelhiser", "2", "y", ""])
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     monkeypatch.setattr("sys.stdin", FakeTTY([]))
     rc = cli.main(["init", "--claude", claude, "--dir", str(work)])
@@ -373,17 +374,49 @@ def test_a_new_name_at_the_agent_prompt_still_asks_the_type(monkeypatch):
     def answers(*seq):
         it = iter(seq)
         monkeypatch.setattr("builtins.input", lambda *a: next(it))
-    answers("2")
+    answers("2", "y")
     assert cli.ask_agent(agents, tty) == ("roc-sso-dev", False)
-    answers("roc-sso-dev")
+    answers("roc-sso-dev", "yes")
     assert cli.ask_agent(agents, tty) == ("roc-sso-dev", False)
     answers("brand-new")
-    assert cli.ask_agent(agents, tty) == ("brand-new", True)
+    assert cli.ask_agent(agents, tty) == ("brand-new", True), "a new name needs no takeover"
     answers("has space", "ok-name")
     assert cli.ask_agent(agents, tty) == ("ok-name", True)
-    answers("")
-    assert cli.ask_agent(agents, tty) == ("reveille-architect", False), "Enter = the first"
     assert cli.ask_agent([], tty) == ("", True), "no agents yet: straight to the type menu"
+    # ONE EXPLICIT YES (ruling 11246): attaching to a LIVE identity kills the
+    # body holding it, so Enter picks nothing, and a pick without a "y" is
+    # declined and asked again -- never taken by default.
+    answers("")
+    with pytest.raises(RuntimeError, match="no agent chosen"):
+        cli.ask_agent(agents, tty)
+    answers("1", "", "1", "n", "brand-new")
+    assert cli.ask_agent(agents, tty) == ("brand-new", True), \
+        "two declined takeovers, then a new name"
+
+
+def test_piped_or_empty_stdin_never_rotates_a_token(tmp_path, minting, monkeypatch, capsys):
+    """Gate from 11246: the picker behind a pipe (or an operator leaning on
+    Enter) mints nothing. `ask` answers its default on a non-tty and the
+    picker's default is NOTHING; the wizard refuses and installs nothing."""
+    claude, log = fake_claude(tmp_path)
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    monkeypatch.setenv("REVEILLE_USER", "tmelhiser")
+    answers = iter([minting, "", "", "", ""])       # url, then Enter forever
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    monkeypatch.setattr("sys.stdin", FakeTTY([]))
+    rc = cli.main(["init", "--claude", claude, "--dir", str(work)])
+    assert rc == 1
+    assert "no agent chosen" in capsys.readouterr().err
+    assert not (work / ".claude").exists() and not log.exists()
+    posted = [p for p, b in Minting.calls if p == "/tokens" and b is not None]
+    assert posted == [], "Enter at the picker minted (rotated) a token"
 
 
 def test_the_password_never_comes_from_a_flag():

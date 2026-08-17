@@ -228,7 +228,13 @@ def my_agents(url, cookie):
 def ask_agent(agents, stdin=None):
     """Which agent this directory becomes: one of yours by number (this machine
     takes over its identity -- the token is rotated, the old body goes dead), or
-    a NEW name typed in. Returns (name, is_new)."""
+    a NEW name typed in. Returns (name, is_new).
+
+    NO DEFAULT, AND ONE EXPLICIT YES (ruling 11246): attaching a directory to a
+    LIVE identity kills whatever body holds it now, and the password prompt used
+    to be the human stop before that happened; with the session already open,
+    this prompt IS the stop. So Enter picks nothing, and an existing agent is
+    confirmed by name -- piped or empty input never rotates a token."""
     if not agents:
         return "", True
     print("\nYour agents (pick one to make THIS directory its native body, "
@@ -236,11 +242,17 @@ def ask_agent(agents, stdin=None):
     for i, (name, rooms) in enumerate(agents, 1):
         print(f"  {i}. {name:<28} {', '.join(rooms) or '(no rooms)'}")
     while True:
-        pick = ask("agent (number, or a new name)", "1", stdin)
-        if pick.isdigit() and 1 <= int(pick) <= len(agents):
-            return agents[int(pick) - 1][0], False
-        if any(pick == n for n, _ in agents):
-            return pick, False
+        pick = ask("agent (number, or a new name)", "", stdin)
+        if not pick:
+            raise RuntimeError("no agent chosen; nothing was minted")
+        held = agents[int(pick) - 1][0] if pick.isdigit() and 1 <= int(pick) <= len(agents) \
+            else pick if any(pick == n for n, _ in agents) else ""
+        if held:
+            if ask(f"take over {held!r}? Its current token is superseded and the machine "
+                   f"holding it goes dead on its next call. [y/N]", "N", stdin).lower() \
+                    .startswith("y"):
+                return held, False
+            continue
         if NAME_OK(pick):
             return pick, True
         print("  names are letters, digits, _ and -, starting with a letter or digit")
@@ -515,15 +527,14 @@ def cmd_init(a):
             # prompt: the session is handed on to the mint below.
             print("Log in as YOURSELF -- the web account that owns (or will own) "
                   "the agent.")
-            a.user = a.user or os.environ.get("REVEILLE_USER") or input("your broker username: ")
+            a.user = a.user or os.environ.get("REVEILLE_USER") or ask("your broker username")
             try:
                 cookie = login(url, a.user, read_password(a.user))
-                agents = my_agents(url, cookie)
+                name, is_new = ask_agent(my_agents(url, cookie))
             except (RuntimeError, urllib.error.URLError, OSError) as e:
                 print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
                       file=sys.stderr)
                 return 1
-            name, is_new = ask_agent(agents)
             if is_new:
                 agent_type, suggested = ask_type()
                 name = ask("agent name", name or suggested)

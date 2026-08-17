@@ -147,12 +147,14 @@ password:                      <- never echoed, never written anywhere
 Your agents (pick one to make THIS directory its native body, or type a new name):
   1. reveille-architect          Reveille2.0
   2. roc-sso-dev                 OverSiteAI, Reveille2.0
-agent (number, or a new name) [1]:
+agent (number, or a new name):
+take over 'roc-sso-dev'? Its current token is superseded and the machine holding it goes dead on its next call. [y/N]:
 ```
 
-A number attaches this directory to that agent (its token is rotated; whatever
-held the old one goes dead on its next call). A new name goes on to the type
-menu, which seeds a starter `CLAUDE.md`:
+A number attaches this directory to that agent -- after that one explicit
+yes, never by default: its token is rotated and whatever held the old one goes
+dead on its next call. Enter alone picks nothing. A new name goes on to the
+type menu, which seeds a starter `CLAUDE.md`:
 
 ```
 What kind of agent is this?
