@@ -2426,7 +2426,13 @@ def _transcode(chunks):
         # sentence back until the next one arrived -- measured 1.5 s of first-
         # sound on the eval box; unbuffered, the encoder sees PCM as it lands.
         proc = subprocess.Popen(_opus_args(rate), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, bufsize=0)
+                                stderr=subprocess.PIPE, bufsize=0)
+        # -loglevel error: stderr is empty unless the encoder failed, and then
+        # its first and last lines are the cause -- carried into the "abandoned" warning
+        # (11215) so a broken libopus is not a silent message with no reason.
+        err = []
+        threading.Thread(target=lambda: err.append(proc.stderr.read()), name="opus-err",
+                         daemon=True).start()
 
         def feed():
             try:
@@ -2443,18 +2449,24 @@ def _transcode(chunks):
         # os.read, not BufferedReader.read: the latter waits for the whole 4096
         # bytes -- a second at 4 KB/s -- and first sound is what this is for.
         fd = proc.stdout.fileno()
+        drained = False
         try:
             while True:
                 b = os.read(fd, 65536)
                 if not b:
                     break
                 yield b
+            drained = True
         finally:
             with contextlib.suppress(Exception):
                 if proc.poll() is None:
                     proc.kill()
                 proc.stdout.close()
                 proc.wait(timeout=5)
+        if drained and proc.returncode:
+            lines = b"".join(err).decode(errors="replace").strip().splitlines() or ["no output"]
+            cause = lines[0] if len(lines) == 1 else f"{lines[0]} / {lines[-1]}"
+            raise RuntimeError(f"ffmpeg exited {proc.returncode}: {cause}")
     return gen()
 
 

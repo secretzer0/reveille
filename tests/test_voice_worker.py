@@ -431,6 +431,21 @@ def test_the_route_serves_an_in_flight_message_then_the_file(monkeypatch, tmp_pa
     assert asyncio.run(missing()) == 404, "neither in flight nor complete = a silent message"
 
 
+def test_an_encoder_that_fails_names_its_cause_in_the_abandoned_warning(monkeypatch, tmp_path, caplog):
+    """11215: ffmpeg's stderr is not thrown away -- a nonzero exit carries its
+    first and last lines into the worker's "abandoned" warning, and no file lands."""
+    monkeypatch.setattr(daemon, "_opus_args", lambda rate: [
+        "ffmpeg", "-loglevel", "error", "-nostdin", "-f", "s16le", "-ar", str(rate), "-ac", "1",
+        "-i", "pipe:0", "-c:a", "no_such_codec", "-f", "webm", "pipe:1"])
+    speak = lambda *a, **k: iter([_wav_header() + _pcm(0.5)])  # noqa: E731
+    with caplog.at_level("WARNING"):
+        _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
+        t.join(5)
+    assert "abandoned" in caplog.text and "ffmpeg exited" in caplog.text \
+        and "no_such_codec" in caplog.text, caplog.text
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
 def test_the_completed_file_is_a_webm_a_decoder_reads_to_the_last_frame(monkeypatch, tmp_path):
     """Gate 4 (amended by 11018, then 11211): the completed file is a whole
     WebM/Opus -- ffprobe reports the true duration, and it is what the stub's
