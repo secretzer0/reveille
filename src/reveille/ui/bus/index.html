@@ -260,6 +260,15 @@
  #meCard{display:flex;align-items:center;gap:.6rem;padding:.65rem .9rem;
   border-top:1px solid var(--line);cursor:pointer}
  #meCard:hover{background:var(--hover)}
+ /* Playable attachments (DES-017 s4.3 amendment): the media sits in the feed at
+    a size that does not take the room over; the name stays visible because a
+    control alone does not say WHICH file it is. */
+ .attmedia{display:inline-flex;flex-direction:column;gap:.2rem;max-width:100%;
+  vertical-align:top;margin:.15rem .3rem .15rem 0}
+ .attmedia .attname{color:var(--dim);font-size:.72rem;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;max-width:24rem}
+ .attaudio{width:min(22rem,100%);height:2rem}
+ .attvideo{max-width:min(40rem,100%);max-height:30rem;border-radius:8px;background:#000}
  /* EPIC-001 #6: what is waiting elsewhere. Empty = no element to see, so a
     quiet bus looks quiet. */
  .unread{background:var(--gold);color:#14161a;border-radius:999px;font-size:.68rem;
@@ -748,6 +757,11 @@
   #phRooms .phRoom.sel{color:var(--gold);background:var(--hover)}
   #phRooms .phRoom .rDot{width:.5rem;height:.5rem;border-radius:50%;background:currentColor;flex:none}
   #phRooms .phRoom .unread{margin-left:auto}
+  /* A phone gets the media at the column's width, capped so a tall video does
+     not push the composer off the screen (DES-016 s2 block rule). */
+  .attaudio{width:100%}
+  .attvideo{max-width:100%;max-height:60dvh}
+  .attmedia .attname{max-width:100%}
   /* THE HEADER BAR: room name (tap = the sheet), voice, find (filter + history), me. */
   #top{gap:.35rem;padding:.3rem .5rem}
   #top>button.ph{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--line);color:var(--dim);cursor:pointer;font:inherit}
@@ -1079,6 +1093,13 @@ const attachments=[];           // [{name,url}] pending on the composer
 // corrupt upload. SVG is served as a download on purpose -- image to a human,
 // script host to a browser -- so it is not here.
 const IMG_RE=/\.(png|jpe?g|gif|webp)$/i;
+// AN ATTACHMENT YOU CAN PLAY (operator 11798/11800, ruled 11801): media plays
+// where it landed, through the browser's OWN decoders -- no player library,
+// nothing new on the wire. Both lists stay a subset of what /files/* serves
+// inline (file_headers._MEDIA_TYPES), for the same reason IMG_RE does: a
+// player pointed at an octet-stream download is a broken control.
+const AUDIO_RE=/\.(wav|mp3|m4a|aac|flac|ogg|oga|opus)$/i;
+const VIDEO_RE=/\.(mp4|m4v|mov|webm|mkv)$/i;
 // AN ATTACHMENT URL IS FOREIGN INPUT, and it was the last unescaped one on this
 // page -- interpolated raw into href, src and data-src through a variable named
 // `safe`, which was the only thing making it look checked. send() accepts
@@ -1344,6 +1365,16 @@ function attHtml(list){
   if(a.clip)
    return '<span class="attlink clipPlay" data-clip="'+safe+'" title="play the clip">&#9654; '+label
      +' <small>'+clipLabel(a)+'</small></span>';
+  // preload=none on audio and metadata on video: a room with ten clips must
+  // not fetch ten files to render, and a video still needs its first frame and
+  // duration to be a control rather than a black box.
+  if(AUDIO_RE.test(a.url))
+   return '<span class="attmedia"><span class="attname">'+label+'</span>'
+     +'<audio class="attaudio" controls preload="none" src="'+safe+'"></audio></span>';
+  if(VIDEO_RE.test(a.url))
+   return '<span class="attmedia"><span class="attname">'+label+'</span>'
+     +'<video class="attvideo" controls preload="metadata" playsinline '
+     +'src="'+safe+'"></video></span>';
   const link='<a class="attlink" href="'+safe+'" download>'+label+'</a>';
   if(/\.(md|markdown)$/i.test(a.url)&&(a.bytes||0)<300000)
    return link+'<div class="mdview" data-src="'+safe+'">rendering&hellip;</div>';

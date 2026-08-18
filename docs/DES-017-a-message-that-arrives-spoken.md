@@ -146,6 +146,32 @@ selection, and a minute-long take is not a hold.
 Not in this slice: the phone shell's own recorder (DES-015 s5), and STT of
 the clip into the body (slice 3).
 
+## 4.3 An attachment you can play (amendment, as built 0.2.163)
+
+Operator 11798/11800: a .wav or an .mp4 dropped in the room should PLAY
+there. Ruled 11801/11804 and built:
+
+- `file_headers` gains a media table: audio (`wav mp3 m4a aac flac ogg oga
+  opus`) and video (`mp4 m4v mov webm mkv`) are served INLINE with their real
+  media type. Everything else still downloads as `application/octet-stream`;
+  SVG stays a download on purpose.
+- The page renders those two families as native `<audio controls
+  preload=none>` and `<video controls preload=metadata playsinline>`, sized to
+  the column (and to `60dvh` on a phone), with the file's name above the
+  control -- a control alone does not say which file it is. No player library.
+- Same protections as any attachment: the room check on the bytes, `nosniff`,
+  and the `default-src 'none'; sandbox` CSP. Starlette's `FileResponse`
+  answers `Range` with 206, so a video seeks instead of restarting.
+- A converted clip's `.webm` is still inline AUDIO through the page's own
+  decoder; the `.m4a` sibling on disk is what distinguishes it from an
+  uploaded WebM video.
+- The upload cap is `REVEILLE_UPLOAD_MAX_MB` (int, default 25 -- today's
+  number), read at boot, printed in `/version`, feeding every "too large"
+  refusal. Raising it for a big video is one line in the env file.
+
+Slice 2's record button is unaffected: recording is one way to make an audio
+attachment; this is the other.
+
 ## 5. Not in scope
 
 Streaming a live microphone into the room (that is a call, not a message);
@@ -171,7 +197,8 @@ per-listener codecs; keeping originals.
   pair to `tts-<mid>.webm/.m4a`, `keep=True`, no writer, announce as today;
   bind regardless of listeners (a link is free) -- the audio frame is what
   listeners get.
-- At upload: temp file under the byte cap first (25 MB), ffprobe (an audio
+- At upload: temp file under the byte cap first (REVEILLE_UPLOAD_MAX_MB, 25
+  MB by default), ffprobe (an audio
   stream and NO video stream = a clip; else an ordinary attachment), ffmpeg in
   a thread pool; `AUDIO_ATTACH_MAX_S` = 600 bites mostly on compressed input.
 - The MCP `upload()` tool (256 KB base64) is not a path for audio;

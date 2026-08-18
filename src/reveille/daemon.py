@@ -246,6 +246,20 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.163 AN ATTACHMENT YOU CAN PLAY (DES-017 s4.3 amendment; operator
+11798/11800/11803, rulings 11801/11804). An attachment renders by its type,
+the way an image already does: audio (wav, mp3, m4a, aac, flac, ogg, opus)
+gets an inline <audio controls preload=none>, video (mp4, m4v, mov, webm,
+mkv) an inline <video controls preload=metadata playsinline> sized to the
+column -- the browser's own decoders, no player library, nothing new on the
+wire. /files/* serves those types inline with their real media type and the
+SAME nosniff + sandbox CSP and room check every attachment gets; Range is
+honoured, so a video seeks instead of restarting. Everything else still
+downloads as an opaque stream (SVG deliberately included). A converted clip's
+.webm is still inline AUDIO for the page's own decoder -- its .m4a sibling is
+what says so. The upload cap is now REVEILLE_UPLOAD_MAX_MB (int, default 25 =
+today's), read at boot, printed in /version, feeding every "too large"
+refusal: raising it for a video is a line in the env file, not a build.
 0.2.162 WHAT IS WAITING IN THE OTHER ROOMS (EPIC-001 #6; DES-016 s2's
 promise). Schema v32 adds room_seen: ONE high-water mark per (person, room),
 not a receipt per message -- agents ack what was addressed to them, a person
@@ -1955,7 +1969,8 @@ newest provision holds the live credential.
        `attachments` list -- one uniform path, so no agent re-derives an HTTP
        call, its auth header and its room scope. Cap 256KB after decoding, not
        for storage but because base64 rides YOUR context at ~133% of the file;
-       bigger files go over HTTP, which still takes 25MB.
+       bigger files go over HTTP, which takes the broker's upload cap
+       (25MB unless the operator raised REVEILLE_UPLOAD_MAX_MB; /version says).
        POST /upload NOW REFUSES A MULTIPART FORM (400) instead of storing it.
        It always took RAW BYTES -- `curl --data-binary @f.png '.../upload
        ?name=f.png'` -- and a form's envelope stored verbatim is not your file:
@@ -4293,7 +4308,8 @@ async def upload(name: str, data_b64: str, room: str = "",
     CAP: 256KB after decoding. Not a storage limit -- base64 lands in YOUR
     context at ~133% of the file, so a large attachment costs you the room you
     need to think. Over it, this refuses and points at the raw-bytes HTTP route,
-    which still takes up to 25MB:
+    which takes the broker's upload cap -- 25MB unless the operator raised it,
+    and /version prints the number:
       curl --data-binary @big.zip '<broker>/upload?name=big.zip'"""
     p = _acting(ctx.request_context.request)
     rid = store.resolve_send_room(p.rooms, room=room or None)
@@ -4629,10 +4645,12 @@ async def version_http(_request):
     ui = _ui_override()
     lan = (f" (LAN plaintext: {', '.join(_plaintext_hosts)} -- REVEILLE_LAN_PLAINTEXT=1)"
            if _plaintext_hosts else "")
+    cap = f" (uploads up to {MAX_UPLOAD >> 20}MB -- REVEILLE_UPLOAD_MAX_MB)"
     doors = (f" (sign in with: {', '.join(_oidc_doors)}; signup {_signup_policy}; "
              f"password {'closed' if _password_closed() else 'open'})"
              if _oidc_doors else "")
-    return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "") + lan + doors)
+    return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "")
+                             + lan + cap + doors)
 
 
 async def usage_http(_request):
@@ -4816,6 +4834,17 @@ _INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg
                  ".gif": "image/gif", ".webp": "image/webp", ".txt": "text/plain",
                  ".log": "text/plain", ".md": "text/plain", ".json": "application/json",
                  ".csv": "text/plain"}
+# AN ATTACHMENT YOU CAN PLAY (DES-017 s4.3 amendment, operator 11798/11800):
+# media renders where it landed, the way an image already does. These types go
+# to <audio>/<video>, which are the browser's own decoders -- no player
+# library, and the same nosniff + sandbox CSP every attachment gets. A
+# container the browser cannot decode simply shows its controls and says so;
+# that is the browser's answer, not a broken page.
+_MEDIA_TYPES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+                ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
+                ".oga": "audio/ogg", ".opus": "audio/ogg",
+                ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+                ".webm": "video/webm", ".mkv": "video/x-matroska"}
 
 
 def file_headers(fname):
@@ -4826,7 +4855,7 @@ def file_headers(fname):
     never sniffs its way into executing it. SVG is DELIBERATELY not inline: it
     is an image to a user and a script host to a browser."""
     ext = os.path.splitext(fname)[1].lower()
-    inline = _INLINE_TYPES.get(ext)
+    inline = _INLINE_TYPES.get(ext) or _MEDIA_TYPES.get(ext)
     if inline:
         return inline, "inline"
     return "application/octet-stream", "attachment"
@@ -5271,7 +5300,10 @@ async def room_voice_http(request):
 
 _files_dir = None  # set in main(): <db dir>/files -- attachments live next to the broker db
 _FNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
-MAX_UPLOAD = 25 * 1024 * 1024
+# The cap is one number, read at boot and printed in /version (operator
+# 11803: "modifiable via environment variable"), so raising it for a video is
+# one line in the env file rather than a build.
+MAX_UPLOAD = int(os.environ.get("REVEILLE_UPLOAD_MAX_MB", "25")) * 1024 * 1024
 # The upload() TOOL's cap is far tighter than the HTTP route's, and for a
 # different reason: base64 rides the calling agent's context at ~133% of the
 # file, so an uncapped tool spends the caller's room to think rather than the
@@ -5323,7 +5355,8 @@ async def upload_http(request):
     file.bin downloads as octet-stream and never renders.
 
     413 comes in two flavours and they want different reactions: "too large" is this ONE
-    file over the 25MB cap (split it, or link it); "storage full" is the broker's whole
+    file over the upload cap, which the refusal names (split it, or link it -- the
+    operator sets it with REVEILLE_UPLOAD_MAX_MB); "storage full" is the broker's whole
     attachment quota, where retrying achieves nothing. Both refuse before storing, so a
     413 never leaves half a file behind. Unlimited unless the operator sets a quota.
 
@@ -5392,9 +5425,10 @@ async def files_http(request):
     # uploader's script. Allowlist what may render; everything else downloads as
     # an opaque stream, with nosniff so the browser cannot second-guess us.
     media, disp = file_headers(fname)
-    # DES-017: the converted clip's .webm is inline audio for the page's own
-    # decoder -- only when it IS a converted clip (the .m4a sibling exists);
-    # nothing raw is ever inline.
+    # DES-017: the converted clip's .webm is inline AUDIO for the page's own
+    # decoder -- only when it IS a converted clip (the .m4a sibling exists).
+    # A .webm without that sibling is a video file somebody uploaded, and the
+    # media table above already typed it video/webm.
     if fname.endswith(".webm") and (_files_dir / (fname[:-5] + ".m4a")).is_file():
         media, disp = "audio/webm", "inline"
     return FileResponse(path, media_type=media, headers={
