@@ -1704,7 +1704,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.18", (
+    assert tag == "reveille-agent:0.2.19", (
         "the entrypoint changed and the tag did not -- two images, one name")
 
 

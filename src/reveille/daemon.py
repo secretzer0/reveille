@@ -224,6 +224,15 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.132 FILES GO OVER HTTP, BY NAME (operator 11448, ruling 11449). New
+console script `reveille-upload <file> [--room <id>] [--name <n>]`: reads
+REVEILLE_URL/REVEILLE_TOKEN/REVEILLE_AGENT_ROLE from the env, POSTs the raw
+bytes to /upload, prints the attachment dict for send(). `reveille init`
+(and every container boot, which runs it) now pre-approves
+"Bash(reveille-upload *)" beside "mcp__reveille", so an agent attaches a
+picture with no permission prompt and no classifier in the way. The MCP
+upload() tool stays for text-sized files only and says so. Bus tools
+unchanged.
 0.2.131 THE PAGE FITS A PHONE (operator 11439: "almost unusable" in Chrome
 or Safari on a phone). Below 760px the rail -- rooms, agents filter,
 settings, logout -- is a drawer behind a menu button in the top bar (it
@@ -3499,11 +3508,16 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
 @mcp.tool()
 async def upload(name: str, data_b64: str, room: str = "",
                  ctx: Context = None) -> dict:
-    """Attach a FILE to the bus: base64 its bytes, pass the real filename, get
-    back the dict you put in send()'s `attachments` list.
+    """Attach a SMALL TEXT-SIZED file to the bus: base64 its bytes, pass the real
+    filename, get back the dict you put in send()'s `attachments` list.
 
-    upload(name="shot.png", data_b64=base64.b64encode(open("shot.png","rb").read()).decode())
-    -> {"url": "/files/...", "name": "shot.png", "bytes": n}
+    FOR ANYTHING ELSE -- a screenshot, an image, a log over a few KB -- THE WAY
+    IS THE CLI (ruling 11449):  reveille-upload shot.png [--room <id>]
+    It reads REVEILLE_URL/REVEILLE_TOKEN from your env, POSTs the raw bytes,
+    prints the same dict; `reveille init` pre-approves it, so no prompt.
+
+    upload(name="notes.txt", data_b64=base64.b64encode(open("notes.txt","rb").read()).decode())
+    -> {"url": "/files/...", "name": "notes.txt", "bytes": n}
 
     KEEP THE REAL EXTENSION on `name`: /files/* types the response from it and
     the web UI decides to show an image inline by testing it, so a file called
