@@ -180,8 +180,9 @@ nothing fuzzy. Every take from either control lands through `earHeard`: a
 command runs in `earRun` and is never appended; anything else is text. `earRun`
 is the ONE place the ear acts on the page and the spoken `send` is the ONE way
 the ear ever sends -- the human said the word; an empty box is a no-op with a
-toast; `cancel` clears the box; `stop` is the stop button; `reply` needs a
-selected message (none -> a toast); `room <name>` switches by exact name,
+toast; `cancel` clears the box; `stop` is the stop button; `reply` replies to the
+NEWEST message in the feed not from me (architect 11385 -- what a person in a car
+means; nothing there -> a toast); `room <name>` switches by exact name,
 case-folded (unknown -> a toast); `voice on/off` is the toggle. Verified in the
 page: the table round-trips; `sent`, `stop it`, `Stop, please`, `send now`,
 `I said stop yesterday`, `room` are text; `Send.` / `SEND!` / ` send ` are the
