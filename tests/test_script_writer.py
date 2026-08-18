@@ -242,6 +242,13 @@ def test_enqueue_routes_to_the_writer_only_with_a_listener_and_a_persona(world, 
     assert daemon._script_q.qsize() == 1 and daemon._tts_q.empty()
     it = daemon._script_q.get_nowait()
     assert it[:5] == (1, world["room"], "quark", "s. b", world["item"][4]) and it[5]["id"] == "quark"
+    # A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357): the same
+    # persona'd voice on a user:<id> key rides the writer's queue as the
+    # 5-tuple passthrough (message order kept), never as a script item.
+    daemon._tts_enqueue(9, world["room"], "travis", "s", "b", key="user:u1")
+    it = daemon._script_q.get_nowait()
+    assert daemon._tts_q.empty() and it[:4] == (9, world["room"], "travis", "s. b") and len(it) == 5
+    assert it[4] == world["item"][4], "the human keeps their assigned voice, verbatim"
     # No persona -> STILL the writer's queue (the one ordering point), as the
     # 5-tuple the worker passes straight through.
     store.voice_patch(world["c"], "quark", persona="")

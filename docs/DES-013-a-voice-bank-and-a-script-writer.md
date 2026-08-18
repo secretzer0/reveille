@@ -148,6 +148,13 @@ current, holder)`:
 - Enqueue: `_tts_enqueue(mid, room, speaker_key, speaker_name, subject, body)` — no
   listener → drop; listener and the writer on and a persona resolved → the script
   queue; else the synth queue with the terse text.
+- **RULED 11358 (operator 11357, 0.2.122): a PERSON is never paraphrased.** The
+  writer performs agents; a signed-in human's words are their message and the room
+  hears exactly what they typed or said, in the voice assigned to them. The one
+  guard sits at the one enqueue site on the one key derivation (§2): `agent:<id>` →
+  the writer; `user:<id>` (and None) → verbatim, always — live sends and on-demand
+  alike; the human's message still rides the writer's queue as the ordered
+  passthrough. Persona stays a valid field on any voice; it never rewrites a person.
 - The writer worker owns its own sqlite connection (worker threads never touch the
   loop's connection). Depth past `SCRIPT_MAX` (8) hands the item to the synth queue
   untouched and logs `script skipped -- falling behind` (DES-009 §6: falling behind is
