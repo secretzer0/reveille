@@ -59,6 +59,7 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
                                  StreamingResponse)
 from starlette.routing import Mount, Route, WebSocketRoute
@@ -224,6 +225,27 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.139 A MESSAGE THAT ARRIVES SPOKEN -- DES-017 slice 1 (operator 11473/
+11499/11502, rulings 11500/11507). Every AUDIO upload (POST /upload,
+reveille-upload, the MCP tool) is transcoded AT UPLOAD into the wire form:
+<stem>.webm (Opus, loudnorm at CLIP_LUFS -16) + <stem>.m4a; the attachment
+dict comes back {url: /files/<stem>.webm, name, bytes, clip: true,
+duration_s}. Nothing native lives under /files; a lone .webm is not a
+clip (the pair on disk, recorded in files for THIS room, is the proof --
+architect 11539: another room's pair is an ordinary attachment, never this
+room's voice). SEND binds the pair to the message
+as its VOICE: hard links to tts-<mid>.webm/.m4a, no writer, no TTS, the
+same audio/audio_m4a frames, play queue, on-demand, delete (both pairs)
+and sweep. One clip per message; a clip over AUDIO_ATTACH_MAX_S (600 s)
+or one ffmpeg cannot convert is refused by name (415). The chat plays a
+clip through the page's own Opus decoder. THE ORIGINAL waits RAW_HOLD_S
+(600 s) in <files>/raw -- its uploader may fetch it once at GET
+/files/raw/<stored> -- then absoluteZeroStorage.put writes the durable
+raw_archive ledger row (sha256, bytes, mime, message, uploader; S3
+deep-archive later, same call) and the local raw is unlinked; the route
+then answers 410 with the row. Schema v26 (attachments.clip/duration_s,
+raw_archive). Bus tools: upload() unchanged in shape; audio comes back
+converted.
 0.2.138 LIVE BEFORE ASKED, AND A CLICK GETS ITS OWN BUDGET (operator 11523,
 ruling 11528; DES-013 s5 amended). The writer's queue orders (asked, mid):
 a live message's first sentence never waits behind a burst of clicks on
@@ -2887,6 +2909,11 @@ def _tts_worker(url, token, timeout):
                      info.get("loaded", "unreported"))
             _tts_reconcile(url, token, timeout)
             first = False
+        # DES-017: a clip-voiced message -- no synthesis; its converted pair is
+        # linked into place and announced, in its turn.
+        if isinstance(text, _Clip):
+            _clip_bind(mid, room, str(text))
+            continue
         # A SCRIPTED message arrives as a STREAM of sentences (DES-013 section 5):
         # each closed sentence is one /tts stream, appended into the SAME .part
         # under ONE header -- every later WAV header stripped, the same rate
@@ -2958,24 +2985,282 @@ def _unlink_terse(mid, part):
 
 
 def _m4a_from_webm(mid):
-    """tts-<mid>.webm -> tts-<mid>.m4a (AAC-LC, 48 kbit/s mono, moov up front so
-    a player can start before the read ends), written as .m4a.part and renamed,
-    so a reader never sees a half file. True when the file landed."""
-    src = _files_dir / f"tts-{mid}.webm"
-    part = _files_dir / f"tts-{mid}.m4a.part"
+    """tts-<mid>.webm -> tts-<mid>.m4a. True when the file landed."""
+    return _m4a_transcode(_files_dir / f"tts-{mid}.webm", _files_dir / f"tts-{mid}.m4a",
+                          what=f"tts: m4a for {mid}")
+
+
+def _m4a_transcode(src, dst, what="m4a"):
+    """<src>.webm -> <dst>.m4a (AAC-LC, 48 kbit/s mono, moov up front so a
+    player can start before the read ends), written as .part and renamed, so a
+    reader never sees a half file. True when the file landed."""
+    part = pathlib.Path(str(dst) + ".part")
     try:
         r = subprocess.run(["ffmpeg", "-loglevel", "error", "-nostdin", "-y", "-i", str(src),
                             "-c:a", "aac", "-b:a", "48k", "-movflags", "+faststart", "-f", "mp4", str(part)],
                            capture_output=True, timeout=120)
         if r.returncode != 0:
             raise OSError((r.stderr or b"").decode(errors="replace").strip()[-300:] or f"ffmpeg exit {r.returncode}")
-        os.replace(part, _files_dir / f"tts-{mid}.m4a")
+        os.replace(part, dst)
         return True
     except Exception as e:
-        log.warning("tts: m4a for %s not made: %s", mid, e)
+        log.warning("%s not made: %s", what, e)
         with contextlib.suppress(OSError):
             os.unlink(part)
         return False
+
+
+# ---- DES-017: a message that arrives spoken -----------------------------------
+# An AUDIO upload is transcoded ONCE, at upload, into the wire the room already
+# ships for a spoken message -- <stem>.webm (Opus, the synthesizer's bitrate)
+# and <stem>.m4a beside it (the shell's) -- loudness-normalised so a room does
+# not jump in level between a voice and a clip. Nothing under <files> is ever a
+# native audio file (operator 11499). Send then BINDS the pair to the message
+# as its voice: hard links to tts-<mid>.webm/.m4a, no writer, no TTS, the same
+# feed frames, play queue, on-demand, delete and sweep as any utterance.
+CLIP_LUFS = -16              # one-pass loudnorm target; measured against a TTS utterance before the pin
+AUDIO_ATTACH_MAX_S = 600.0   # a clip longer than this is refused by name (the 25 MB cap bites first on WAV)
+RAW_HOLD_S = 600.0           # s7: the original waits this long in <files>/raw, then absoluteZeroStorage.put
+_raw_timers = {}             # stored -> Timer that archives the original
+
+
+def _probe_audio(path):
+    """(duration_s, mime) when ffprobe sees an audio stream and NO video stream
+    -- a clip; None otherwise (an ordinary attachment). Never raises: a probe
+    that fails is "not audio"."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                            "stream=codec_type:format=duration,format_name", "-of", "json", str(path)],
+                           capture_output=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        info = json.loads(r.stdout or b"{}")
+        kinds = [st.get("codec_type") for st in info.get("streams", [])]
+        if "audio" not in kinds or "video" in kinds:
+            return None
+        fmt = info.get("format", {})
+        return float(fmt.get("duration") or 0.0), fmt.get("format_name")
+    except Exception:
+        return None
+
+
+def _transcode_clip(src, stem):
+    """<src> -> <files>/<stem>.webm (Opus, CLIP_LUFS) + <stem>.m4a, each written
+    as .part and renamed. Returns the .webm size; raises OSError with ffmpeg's
+    last line on failure, leaving nothing behind."""
+    webm = _files_dir / f"{stem}.webm"
+    part = _files_dir / f"{stem}.webm.part"
+    try:
+        r = subprocess.run(["ffmpeg", "-loglevel", "error", "-nostdin", "-y", "-i", str(src), "-vn",
+                            "-af", f"loudnorm=I={CLIP_LUFS}:TP=-1.5:LRA=11", "-ar", "48000", "-ac", "1",
+                            "-c:a", "libopus", "-b:a", OPUS_BITRATE, "-application", "voip",
+                            "-f", "webm", str(part)], capture_output=True, timeout=600)
+        if r.returncode != 0:
+            raise OSError((r.stderr or b"").decode(errors="replace").strip().splitlines()[-1:] or
+                          [f"ffmpeg exit {r.returncode}"])[0]
+        os.replace(part, webm)
+        if not _m4a_transcode(webm, _files_dir / f"{stem}.m4a", what=f"clip {stem}: m4a"):
+            raise OSError("the m4a half of the pair was not made")
+        return webm.stat().st_size
+    except Exception:
+        for q in (part, webm, _files_dir / f"{stem}.m4a"):
+            with contextlib.suppress(OSError):
+                q.unlink()
+        raise
+
+
+class absoluteZeroStorage:
+    """s7 (operator 11502): the cold store for ORIGINALS. put() is a STUB today
+    -- it writes the durable ledger row (raw_archive) and returns True, so the
+    broker unlinks the local raw; later it becomes the S3 deep-archive tier with
+    `location` filled -- same call, same row. get() exists from day one and
+    answers "frozen: not retrievable on this broker yet" with the row, so a
+    data-extraction job can list every original ever taken before the bytes
+    have anywhere to thaw from. Nothing is ever deleted from the ledger."""
+
+    @staticmethod
+    def put(conn, key, path, meta):
+        data = pathlib.Path(path).read_bytes()
+        conn.execute(
+            "INSERT OR REPLACE INTO raw_archive(key, sha256, bytes, mime, message_id, uploader, "
+            "archived_ns, tier, location) VALUES(?,?,?,?,?,?,?,?,?)",
+            (key, hashlib.sha256(data).hexdigest(), len(data), meta.get("mime"), meta.get("message_id"),
+             meta.get("uploader"), time.time_ns(), "absolute-zero", None))
+        conn.commit()
+        return True
+
+    @staticmethod
+    def get(conn, key):
+        r = conn.execute("SELECT * FROM raw_archive WHERE key=?", (key,)).fetchone()
+        if r is None:
+            return None
+        return {"state": "frozen: not retrievable on this broker yet", **dict(r)}
+
+
+def _raw_path(stored):
+    return _files_dir / "raw" / stored
+
+
+def _archive_raw(stored, mime=None):
+    """End of the hold (or a failed conversion): ledger row, then the local raw
+    goes. Owns its sqlite connection -- this runs on a Timer thread."""
+    _raw_timers.pop(stored, None)
+    path = _raw_path(stored)
+    if not path.is_file():
+        return
+    try:
+        conn = store.connect(_db_path)
+        try:
+            row = conn.execute("SELECT message_id FROM attachments WHERE url=?",
+                               (f"/files/{stored.rsplit('.', 1)[0]}.webm",)).fetchone()
+            up = conn.execute("SELECT uploaded_by FROM files WHERE stored=?", (stored,)).fetchone()
+            if absoluteZeroStorage.put(conn, stored, path,
+                                       {"mime": mime, "message_id": row["message_id"] if row else None,
+                                        "uploader": up["uploaded_by"] if up else None}):
+                path.unlink()
+                log.info("raw %s archived (absolute-zero ledger) and unlinked", stored)
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("raw %s not archived: %s", stored, e)
+
+
+def _hold_raw(stored, mime=None, seconds=None):
+    t = threading.Timer(RAW_HOLD_S if seconds is None else seconds, _archive_raw, (stored, mime))
+    t.daemon = True
+    _raw_timers[stored] = t
+    t.start()
+
+
+def _sweep_raw(files_dir):
+    """Boot: a .part raw is a broker that died mid-upload (never completed,
+    never counted) -- gone; a raw older than the hold is archived-then-unlinked;
+    a younger one gets the rest of its hold."""
+    raw = pathlib.Path(files_dir) / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for q in raw.iterdir():
+        if q.name.endswith(".part"):
+            with contextlib.suppress(OSError):
+                q.unlink()
+            continue
+        age = now - q.stat().st_mtime
+        _hold_raw(q.name, seconds=max(0.0, RAW_HOLD_S - age))
+
+
+def _convert_upload(name, data):
+    """The disk + ffmpeg half of an upload, safe on a worker thread (no sqlite):
+    the bytes land in the raw pen; audio -> the converted pair; anything else
+    -> moved under <files> as an ordinary attachment. Returns
+    (stored, attachment dict, format_name-or-None); raises store.BusError with
+    the reason (the route makes it a 415)."""
+    stored = f"{time.time_ns() // 1_000_000}-{name}"
+    raw = _raw_path(stored)
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    part = pathlib.Path(str(raw) + ".part")
+    part.write_bytes(data)
+    os.replace(part, raw)
+    probe = _probe_audio(raw)
+    if probe is None:
+        os.replace(raw, _files_dir / stored)                # not audio: as before, no pen
+        return stored, {"url": f"/files/{stored}", "name": name, "bytes": len(data)}, None
+    duration, fmt = probe
+    if duration > AUDIO_ATTACH_MAX_S:
+        raw.unlink()
+        raise store.BusError(f"audio is {duration:.0f} s; the cap is {AUDIO_ATTACH_MAX_S:.0f} s "
+                             f"(send it in parts)")
+    stem = stored.rsplit(".", 1)[0] if "." in stored else stored
+    try:
+        size = _transcode_clip(raw, stem)
+    except OSError as e:
+        _archive_raw(stored, fmt)          # the raw is then the only copy: archived at once (s7)
+        raise store.BusError(f"audio could not be converted to the wire form: {e}") from None
+    return stored, {"url": f"/files/{stem}.webm", "name": name, "bytes": size, "clip": True,
+                    "duration_s": round(duration, 2)}, fmt
+
+
+def _finish_upload(p, rid, converted, via):
+    """The sqlite half, on the loop thread: the files rows (room + uploader),
+    the raw's hold, the log line. Returns the attachment dict."""
+    stored, att, fmt = converted
+    store.record_file(_conn, stored, rid, p.name)
+    if att.get("clip"):
+        stem = att["url"][len("/files/"):-5]
+        store.record_file(_conn, f"{stem}.webm", rid, p.name)
+        store.record_file(_conn, f"{stem}.m4a", rid, p.name)
+        _hold_raw(stored, fmt)
+        log.info("%s upload(%s) %s (%s) -> clip /files/%s.webm (%.1f s, %s bytes)",
+                 p.name, via, att["name"], fmt, stem, att["duration_s"], att["bytes"])
+    else:
+        log.info("%s upload(%s) %s (%s bytes) -> /files/%s", p.name, via, att["name"], att["bytes"], stored)
+    return att
+
+
+def _store_upload(p, rid, name, data, via):
+    """Both halves, in one thread (tests, and any caller not on the loop)."""
+    return _finish_upload(p, rid, _convert_upload(name, data), via)
+
+
+def _clip_of(attachments, room):
+    """The stem of the converted clip among a send's attachments, or None. Trusts
+    nothing in the dict: the proof is the PAIR on disk (only the transcoder
+    writes one; stored names are timestamp-uniqued) AND its `files` row for
+    THIS room (architect 11539: stems are guessable from any feed the sender
+    was once in, and a pair uploaded to room A named in a send to room B
+    would otherwise become B's voice -- someone else's audio in a room that
+    never had it). A mismatch is an ordinary attachment, never a bind. One
+    clip per message."""
+    stems = []
+    for a in attachments or []:
+        url = (a or {}).get("url") or ""
+        if not (url.startswith("/files/") and url.endswith(".webm")):
+            continue
+        stem = url[len("/files/"):-5]
+        if _FNAME_RE.sub("_", stem) != stem:
+            continue
+        if store.file_room(_conn, f"{stem}.webm") != room:
+            continue
+        if (_files_dir / f"{stem}.webm").is_file() and (_files_dir / f"{stem}.m4a").is_file():
+            stems.append(stem)
+    if len(stems) > 1:
+        raise store.BusError("one clip per message: send two messages")
+    return stems[0] if stems else None
+
+
+def _clip_bind(mid, room, stem):
+    """The clip becomes the message's voice: hard links to tts-<mid>.webm/.m4a
+    (two names, one file each), then the same announcement a synthesized
+    utterance gets. keep is implicit -- a clip is the message's own words."""
+    for ext in (".webm", ".m4a"):
+        dst = _files_dir / f"tts-{mid}{ext}"
+        with contextlib.suppress(OSError):
+            dst.unlink()
+        try:
+            os.link(_files_dir / f"{stem}{ext}", dst)
+        except OSError:
+            shutil.copyfile(_files_dir / f"{stem}{ext}", dst)   # a filesystem without links: a copy
+    _feed_push(room, {"event": "audio", "id": mid})
+    _feed_push(room, {"event": "audio_m4a", "id": mid})
+
+
+class _Clip(str):
+    """The synth queue's marker for a clip item: `text` is the stem, the worker
+    binds instead of synthesizing -- so a clip takes its turn in message order
+    behind a script that is still being written (DES-013 s5, one ordering point)."""
+
+
+def _voice_of_send(mid, room, speaker, subject, body, key, attachments):
+    """Every send path ends here: a clip-voiced message binds (regardless of
+    listeners -- a link is free -- through the worker when voices are on, at
+    once when they are off); anything else takes the synth/script route."""
+    stem = _clip_of(attachments, room)
+    if stem is None:
+        _tts_enqueue(mid, room, speaker, subject, body, key=key)
+        return
+    if _tts_on:
+        _tts_q.put((mid, room, speaker, _Clip(stem), None, True))
+    else:
+        _clip_bind(mid, room, stem)
 
 
 def _sweep_abandoned_audio(files_dir):
@@ -3007,6 +3292,9 @@ def _sweep_terse_renditions(conn, files_dir):
                            (int(mid),)).fetchone()
         if row is None or not row["sender_agent_id"] or store.script_get(conn, int(mid)):
             continue
+        if conn.execute("SELECT 1 FROM attachments WHERE message_id=? AND clip=1",
+                        (int(mid),)).fetchone():
+            continue                      # DES-017: a clip is the message's own voice, kept
         # The assignment as it STANDS (no voice_for: that materializes a default,
         # and a sweep must not write): no row = the digest voice = not scriptable.
         a = conn.execute("SELECT voice_id FROM voice_assignments WHERE room_id=? AND speaker=?",
@@ -3628,7 +3916,7 @@ async def send(to: str, body: str, subject: str = "",
                 "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": attachments or [], "ts_ns": time.time_ns()})
-    _tts_enqueue(res["id"], rid, p.name, subject, body, key=speaker_key(p))
+    _voice_of_send(res["id"], rid, p.name, subject, body, speaker_key(p), attachments)
     log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s woke=%s",
              p.name, to, p.rooms.get(rid), res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
@@ -3709,12 +3997,7 @@ async def upload(name: str, data_b64: str, room: str = "",
     if (why := _upload_refusal(used, len(data))):
         raise store.BusError(why)
     fname = _FNAME_RE.sub("_", name or "file.bin")[-80:]
-    stored = f"{time.time_ns() // 1_000_000}-{fname}"
-    (_files_dir / stored).write_bytes(data)
-    store.record_file(_conn, stored, rid, p.name)
-    log.info("%s upload(mcp) %s (%s bytes) -> /files/%s",
-             p.name, fname, len(data), stored)
-    return {"url": f"/files/{stored}", "name": fname, "bytes": len(data)}
+    return _finish_upload(p, rid, await run_in_threadpool(_convert_upload, fname, data), "mcp")
 
 
 @mcp.tool()
@@ -4167,7 +4450,8 @@ async def send_http(request):
                 "subject": d.get("subject") or "", "body": body,
                 "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
-    _tts_enqueue(res["id"], rid, sender, d.get("subject") or "", body, key=speaker_key(p))
+    _voice_of_send(res["id"], rid, sender, d.get("subject") or "", body, speaker_key(p),
+                   d.get("attachments"))
     log.info("%s send(web) -> %s room=%s thread=%s id=%s delivered=%s woke=%s",
              sender, to, p.rooms.get(rid), res["thread_id"],
              res["id"], res["wake"], woke)
@@ -4748,11 +5032,11 @@ async def upload_http(request):
     # never set -- same envelope, same silent corruption, so same refusal.
     if data[:2] == b"--" and b"Content-Disposition: form-data" in data[:4096]:
         return JSONResponse({"error": _MULTIPART_HELP}, status_code=400)
-    stored = f"{time.time_ns() // 1_000_000}-{name}"
-    (_files_dir / stored).write_bytes(data)
-    store.record_file(_conn, stored, rid, p.name)
-    log.info("%s upload %s (%s bytes) -> /files/%s", p.name, name, len(data), stored)
-    return JSONResponse({"url": f"/files/{stored}", "name": name, "bytes": len(data)})
+    try:
+        converted = await run_in_threadpool(_convert_upload, name, data)
+    except store.BusError as e:
+        return JSONResponse({"error": str(e)}, status_code=415)
+    return JSONResponse(_finish_upload(p, rid, converted, "http"))
 
 
 @_guard
@@ -4773,8 +5057,35 @@ async def files_http(request):
     # uploader's script. Allowlist what may render; everything else downloads as
     # an opaque stream, with nosniff so the browser cannot second-guess us.
     media, disp = file_headers(fname)
+    # DES-017: the converted clip's .webm is inline audio for the page's own
+    # decoder -- only when it IS a converted clip (the .m4a sibling exists);
+    # nothing raw is ever inline.
+    if fname.endswith(".webm") and (_files_dir / (fname[:-5] + ".m4a")).is_file():
+        media, disp = "audio/webm", "inline"
     return FileResponse(path, media_type=media, headers={
         "Content-Disposition": f'{disp}; filename="{fname}"',
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
+@_guard
+async def raw_file_http(request):
+    """GET /files/raw/<stored> -> the ORIGINAL of an audio upload, for its
+    uploader only, during the hold (DES-017 s7: "oops, I need that back").
+    After the hold it is frozen: 410 with the ledger row. Never inline."""
+    p = _principal(request)
+    fname = _FNAME_RE.sub("_", request.path_params["fname"])
+    up = _conn.execute("SELECT uploaded_by, room_id FROM files WHERE stored=?", (fname,)).fetchone()
+    if up is None or up["room_id"] not in p.rooms or up["uploaded_by"] != p.name:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = _raw_path(fname)
+    if not path.is_file():
+        frozen = absoluteZeroStorage.get(_conn, fname)
+        if frozen:
+            return JSONResponse(frozen, status_code=410)
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="application/octet-stream", headers={
+        "Content-Disposition": f'attachment; filename="{fname}"',
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox"})
 
@@ -5746,6 +6057,7 @@ def build_app():
             Route("/agents-seen", agents_seen_http),
             Route("/send", send_http, methods=["POST"]),
             Route("/upload", upload_http, methods=["POST"]),
+            Route("/files/raw/{fname}", raw_file_http),
             Route("/voices", voices_http),
             Route("/voices/{vid}", voice_http, methods=["PATCH"]),
             Route("/voices/{vid}", voice_delete_http, methods=["DELETE"]),
@@ -5818,6 +6130,7 @@ def main():
     _files_dir = pathlib.Path(_db_path).parent / "files"
     _files_dir.mkdir(parents=True, exist_ok=True)
     _sweep_abandoned_audio(_files_dir)
+    _sweep_raw(_files_dir)
     _voices_dir = pathlib.Path(_db_path).parent / "voices"   # DES-013 section 3: the bank
     _voices_dir.mkdir(parents=True, exist_ok=True)
     # The audio dies with the message, and store owns that choke point. Told
