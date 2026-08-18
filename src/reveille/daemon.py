@@ -230,9 +230,10 @@ CHANGES = """
 deleted, confirm hit, still listed with make-admin / reset / delete beside
 him). A deleted user is a tombstone by ruling 8938 -- the row stays as the
 referent for the history it owns, credentials wiped -- and list_users now
-returns only rows with deleted_ns NULL. Note: the name stays taken by the
-tombstone (users.name UNIQUE), so "add bill" again refuses "already exists"
-until that is ruled. Bus tools unchanged.
+returns only rows with deleted_ns NULL; delete / role / password reset on
+a tombstone answer 404 "user deleted"; the name stays reserved by the
+tombstone (attribution) and re-adding it says so ("taken by a deleted
+account"), never a bare "already exists". Bus tools unchanged.
 0.2.147 AN AGENT CONTAINER UPGRADES IN PLACE (operator 11594/11599, ruling
 11600; DES-006 s7 "carry, not park"). The launcher carries the bound token
 (and gate secret) from the container it made into a new one on the new
@@ -5653,6 +5654,7 @@ async def users_http(request):
 async def user_http(request):
     p = _admin(request)
     uid = request.path_params["uid"]
+    store.live_user(_conn, uid)                       # a tombstone answers 404 (11607)
     if request.method == "DELETE":
         store.delete_user(_conn, uid)
         log.info("%s deleted user %s", p.name, uid)
@@ -5668,6 +5670,7 @@ async def reset_password_http(request):
     exists precisely because the user cannot supply one."""
     p = _admin(request)
     uid = request.path_params["uid"]
+    store.live_user(_conn, uid)                       # a tombstone answers 404 (11607)
     d = await request.json()
     store.set_password(_conn, uid, d.get("password") or "")
     log.info("%s reset the password for user %s (their sessions dropped)", p.name, uid)

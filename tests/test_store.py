@@ -1971,6 +1971,16 @@ def test_a_deleted_user_leaves_the_users_list_but_stays_as_the_referent():
     assert "bob" not in [u["name"] for u in store.list_users(c)], "a tombstone is not an account"
     assert c.execute("SELECT deleted_ns FROM users WHERE id=?", (bob["id"],)).fetchone()[0], \
         "the row stays: it is the referent for what bob sent and owned"
+    # 11607: the tombstone is not a user anyone acts on, and it keeps its name.
+    with pytest.raises(store.NotFound, match="user deleted"):
+        store.live_user(c, bob["id"])
+    with pytest.raises(store.NotFound, match="no such user"):
+        store.live_user(c, "nobody")
+    assert store.live_user(c, admin["id"])["name"] == "travis"
+    with pytest.raises(store.BusError, match="taken by a deleted account"):
+        store.create_user(c, "bob", "pw2pw2pw2pw2")
+    with pytest.raises(store.BusError, match="already exists"):
+        store.create_user(c, "travis", "pw2pw2pw2pw2")
 
 
 def test_membership_dies_with_user_and_room_audit_survives():
