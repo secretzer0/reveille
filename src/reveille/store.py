@@ -3776,13 +3776,22 @@ def presence(conn, rooms):
         return []
     rooms = list(rooms)
     now = time.time_ns()
+    # 6.1(c): each row carries the ROOM-NAME (`name`, what a human reads and
+    # addresses) and the account behind it (`owner`) -- an alias `bob-architect`
+    # is legible as bob's architect without a second lookup.
     return [
         {"name": r["name"], "tag": r["tag"], "url": r["url"], "room": r["room_id"],
          "room_name": r["room_name"], "token_id": r["token_id"],
-         "principal": r["principal"], "live": _is_live(r["seen_ns"], now),
+         "principal": r["principal"], "owner": r["owner"],
+         "live": _is_live(r["seen_ns"], now),
          "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"]}
         for r in conn.execute(
-            f"SELECT m.*, ro.name AS room_name FROM members m JOIN rooms ro ON ro.id=m.room_id "
+            f"SELECT m.*, ro.name AS room_name, "
+            f"COALESCE(uo.name, up.name) AS owner "
+            f"FROM members m JOIN rooms ro ON ro.id=m.room_id "
+            f"LEFT JOIN agents a ON m.principal = 'agent:' || a.id "
+            f"LEFT JOIN users uo ON uo.id = a.owner_id "
+            f"LEFT JOIN users up ON m.principal = 'user:' || up.id "
             f"WHERE m.room_id IN ({_ph(rooms)}) AND m.left_ns IS NULL "
             f"ORDER BY m.name", rooms)
     ]
@@ -3815,14 +3824,31 @@ def known(conn, principal, rooms):
 # ---- messages ----------------------------------------------------------------
 
 def _wake_targets(conn, principal, recipient, room_id):
-    """Room-names to ring: the one addressed, or every live member but the sender."""
+    """Who to ring, as (room-name, principal) pairs: the one addressed, or every
+    live member but the sender. The room-name is what a human reads
+    (delivered_to); the principal is what the ring is keyed on (DES-011 6.1(c):
+    an aliased agent is rung by its identity, not by the name it wears here)."""
     if recipient != BROADCAST:
-        return [recipient]
+        r = conn.execute("SELECT principal FROM members WHERE room_id=? AND name=? "
+                         "AND left_ns IS NULL", (room_id, recipient)).fetchone()
+        return [(recipient, r["principal"])] if r else []
     now = time.time_ns()
-    return [r["name"] for r in conn.execute(
+    return [(r["name"], r["principal"]) for r in conn.execute(
                 "SELECT name, principal, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL",
                 (room_id,))
             if r["principal"] != principal and _is_live(r["seen_ns"], now)]
+
+
+def wake_tokens(conn, room_id, principals):
+    """The token ids to ring for these identities in this room: each principal's
+    agent's tokens that hold the room (token_rooms is what makes a revoke
+    instant). A person has no token and is not rung here."""
+    ids = [agent_of(p) for p in principals if agent_of(p)]
+    if not ids:
+        return []
+    return [r["id"] for r in conn.execute(
+        f"SELECT t.id FROM tokens t JOIN token_rooms tr ON tr.token_id=t.id "
+        f"WHERE tr.room_id=? AND t.agent_id IN ({_ph(ids)})", [room_id] + ids)]
 
 
 def resolve_send_room(rooms, room=None, parent_room=None):
@@ -3927,8 +3953,10 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
                          "VALUES(?,?,?,?,?,?)",
                          (mid, a["url"], a.get("name"), a.get("bytes"),
                           1 if a.get("clip") else 0, a.get("duration_s")))
+    targets = _wake_targets(conn, principal, recipient, room)
     return {"id": mid, "thread_id": thread_id, "parents": parents, "sender": sender,
-            "wake": _wake_targets(conn, principal, recipient, room)}
+            "owner": _owner_name(conn, principal),
+            "wake": [n for n, _p in targets], "wake_principals": [p for _n, p in targets]}
 
 
 def _msg(r):
@@ -4182,10 +4210,14 @@ def graph(conn, thread_id, rooms):
 
 def readers(conn, message_id, exclude=None):
     """Names of those who have read (acked or auto-caught-up) a message, sorted;
-    rendered from the identity (its CURRENT name, DES-011 s4). exclude drops one
-    principal -- a sender's own read never counts as being seen."""
+    rendered as the ROOM-NAME each reader wears in the message's room (its
+    CURRENT one -- an alias where one is in force, else the identity's own name;
+    DES-011 s4 / 6.1(c)). exclude drops one principal -- a sender's own read
+    never counts as being seen."""
+    room = conn.execute("SELECT room FROM messages WHERE id=?", (message_id,)).fetchone()
+    room = room["room"] if room else None
     return sorted(filter(None, (
-        _identity_name(conn, r["principal"]) for r in conn.execute(
+        room_name(conn, room, r["principal"]) for r in conn.execute(
             "SELECT principal FROM reads WHERE message_id=? AND principal!=?",
             (message_id, exclude or "")))))
 

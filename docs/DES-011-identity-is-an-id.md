@@ -323,6 +323,50 @@ alias refuses naming both. Not in (b): the body's own env (`REVEILLE_AGENT_ROLE`
 `waked --name`, the spool dir) still carries the name the body was minted with
 -- the launcher/native shape half of a rename is 6.1(c)/(later).
 
+#### 6.1(c) as built (no schema change, EPIC-001 S2)
+
+Nothing keys on a name any more; the name is what people READ.
+
+**The waiter registry is the TOKEN.** `_waiters` was `(token_id, name) -> queues`
+and `_poke_pending` the same pair, so an agent aliased `bob-architect` in a room
+registered under its own name and `_wake_targets` returned the alias -- a ring
+that could not land. Both are now keyed on `token_id` alone: one agent = one
+token = one socket = one prompt, whatever each room calls it. `_reachable`,
+the deafness annotation and `info()`'s attached line read the same key.
+
+**Rings are addressed by identity.** `store._wake_targets` returns
+`(room-name, principal)` pairs; `send()` answers `wake` (room-names, what
+`delivered_to` shows a human) beside `wake_principals`. `daemon._notify` takes
+principals and resolves them through `store.wake_tokens(conn, room_id,
+principals)` -- the agent's tokens that hold the room, so a revoke is still
+instant and a person (no token) is never rung.
+
+**What the ring says.** The frame carries `from` (the sender's ROOM-NAME in
+that room), `owner` (the account behind it -- `send()` returns it), `room`,
+`id`, `subject`, plus the `direct` count: the woken agent reads the ring the
+way a human reads the feed, and an alias is legible without a lookup.
+
+**Presence carries the owner.** Each row already had the room-name and the
+principal; `owner` is now beside them (the agent's owner account, or the person
+themself), so `bob-architect` reads as bob's architect in one glance.
+
+**Readers render the room-name.** `store.readers()` rendered the identity's own
+name; it now renders the room-name each reader wears IN THAT MESSAGE'S ROOM.
+
+**usage() teaches it**: a NAMES ARE PER ROOM paragraph (you are addressed by the
+room-name; `join()` answers `as`; presence lists room-name + owner; the identity
+is what is keyed and rung, so an alias changes what people read, never whether
+mail reaches you) and the ring line names `id/from/owner/room/subject`.
+
+Gate (`tests/test_human_surface.py`): the same identity's message renders
+`bob-architect` in the shared room and `architect` at home; presence carries the
+owner for agents and people; a ring for the aliased agent lands on ITS token and
+not the incumbent's, carrying `from`/`owner`/`room`; a broadcast rings every live
+member but the sender, by identity; a person in the room is never rung;
+`_reachable` answers for an aliased row. Still deliberately not moved: the body's
+own env (`REVEILLE_AGENT_ROLE`, `waked --name`, the spool dir) carries the name
+the body was minted with -- a rename of the BODY is its own slice.
+
 ## 7. The one-time merge (executed 2026-08-15)
 
 `scripts/identity-merge` re-points one identity's rows onto another and
