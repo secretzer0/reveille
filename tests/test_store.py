@@ -181,6 +181,62 @@ def test_a_never_used_account_is_removed_and_its_name_freed(tmp_path):
     assert os.path.exists(db)
 
 
+def test_receipts_and_membership_are_not_history(tmp_path):
+    """MEASURED ON LIVE: two accounts that only ever signed in carried 10145
+    read receipts each -- written by join()'s catch-up, not by them -- and
+    were tombstoned for it. What the SYSTEM writes for a person is not a
+    citation OF them."""
+    db = str(tmp_path / "b3.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    room = store.create_room(c, admin["id"], "r")
+    store.join(c, "travis", "web:travis", room["id"], None)
+    for i in range(3):
+        store.send(c, store.user_principal(admin["id"]), "*", f"m{i}", room=room["id"])
+    # older than the 15-minute replay window, so the join stamps catch-up receipts
+    c.execute("UPDATE messages SET ts_ns = ts_ns - ?", (store.CATCHUP_NS * 2,))
+    dm = store.create_user(c, "dmorse", "hunter2hunter2")
+    store.invite_member(c, room["id"], admin["id"], "dmorse", "web:travis")
+    store.join(c, "dmorse", "web:dmorse", room["id"], None)     # catch-up receipts land here
+    assert c.execute("SELECT count(*) FROM reads WHERE principal=?",
+                     (store.user_principal(dm["id"]),)).fetchone()[0] > 0
+    assert not any(store.user_history(c, dm["id"]).values()), "signed in, said nothing"
+    assert store.delete_user(c, dm["id"]) == "removed"
+    assert c.execute("SELECT count(*) FROM reads WHERE principal=?",
+                     (store.user_principal(dm["id"]),)).fetchone()[0] == 0
+    assert store.create_user(c, "dmorse", "hunter2hunter2")["name"] == "dmorse"
+    c.close()
+
+
+def test_an_admin_frees_a_reserved_name_only_when_nothing_cites_it(tmp_path):
+    """Ruling 11611 follow-on: the tombstone of a person nothing cites is a
+    reserved name doing no work. One that IS cited keeps its referent."""
+    db = str(tmp_path / "b4.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    room = store.create_room(c, admin["id"], "r")
+    # a person with a message: tombstoned, and the name stays reserved
+    talker = store.create_user(c, "talker", "hunter2hunter2")
+    store.join(c, "talker", "web:talker", room["id"], None)
+    store.send(c, store.user_principal(talker["id"]), "*", "hello", room=room["id"])
+    assert store.delete_user(c, talker["id"]) == "tombstoned"
+    with pytest.raises(store.BusError, match="cited by"):
+        store.free_tombstone(c, talker["id"])
+    # a tombstone from before the rule (stamped by hand, nothing cites it)
+    quiet = store.create_user(c, "quiet", "hunter2hunter2")
+    c.execute("UPDATE users SET deleted_ns=?, pw_hash='!deleted' WHERE id=?",
+              (1, quiet["id"]))
+    assert [t["name"] for t in store.tombstones(c) if not t["cited"]] == ["quiet"]
+    assert store.free_tombstone(c, quiet["id"]) == "quiet"
+    assert store.create_user(c, "quiet", "hunter2hunter2")["name"] == "quiet"
+    # a live account is not a tombstone
+    with pytest.raises(store.BusError, match="live"):
+        store.free_tombstone(c, admin["id"])
+    c.close()
+
+
 def test_a_token_is_history_but_a_door_is_a_credential(tmp_path):
     db = str(tmp_path / "b2.db")
     c = store.connect(db)
