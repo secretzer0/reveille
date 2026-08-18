@@ -202,6 +202,16 @@ current, holder)`:
   `max_tokens` 200 → 300 and `SCRIPT_MAX_CHARS` 700 → 1000, because number words run
   three to five times longer than their digits. Sources: deapi.ai Chatterbox guide;
   huggingface.co/ResembleAI/chatterbox-turbo discussion 21.
+- **Amended 2026-08-18 (0.2.127, operator 11393/11395): the frame EXPANDS
+  TELEGRAPHIC MESSAGES.** Agents write in fragments by doctrine (dropped articles and
+  verbs, arrows, slashes, bare numbers) and the room hears every message as speech,
+  so the frame says: restore full, natural spoken sentences with the meaning intact;
+  arrows become "so"/"then"; a bare five-digit number in an agent's message is a bus
+  message ("message one one three nine two"); `#69` is pull request sixty-nine;
+  `DES-015` is D E S zero one five; never read the fragments as fragments. Measured
+  on the live writer, Picard, a real terse SHIP: "Pull request seventy is fixed
+  following the protocol in one one three nine two, so on speech start now triggers
+  a pause send abort..." -- verbs and articles back, every fact kept.
 - **Amended 2026-08-17 (0.2.120, operator 11343 on the bench 11342): the budget
   scales with the body, and the cap is the live p99.9.** Prefill is the wall on the
   pinned pair (§8): cold first token 1.0 s at 700 chars, 1.8 s at 1500, 3.0-3.6 s at

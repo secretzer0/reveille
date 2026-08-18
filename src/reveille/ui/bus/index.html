@@ -1334,6 +1334,9 @@ function vMark(n){
 // the one in flight; a refusal to sound turns the toggle back off and says so; late
 // joiners are not blasted (vPush is fed by the live socket only).
 const V_LEAD=0.05;         // seconds ahead of "now" a late chunk is re-anchored to
+const V_LEAD_MAX=2.0;      // a link that keeps arriving late earns a jitter buffer up to this (operator 11408, LTE)
+let vLead=V_LEAD;          // the lead the LINK has earned, carried across utterances (architect 11419): doubles on an
+                           // underrun, halves (floor V_LEAD) after an utterance with none -- a message never re-learns it
 let vCtl=null;             // the utterance in flight: {srcs, ab(AbortController)}
 let vLast=null;            // {id, firstAt}: when the utterance first sounded (a gate reads it)
 let vDec=null;             // the one Opus decoder (WASM), reset per utterance
@@ -1368,12 +1371,11 @@ function vCtxUp(){
 // samples decoded, buffers scheduled, decoder errors. Read it in the voice
 // button's title, or `vDiag` in a console; a stream that decoded nothing says
 // so in a toast rather than ending in silence.
-const vDiag={lib:false,frames:0,decoded:0,scheduled:0,errors:0,ctx:'',rate:0};
+const vDiag={lib:false,frames:0,decoded:0,scheduled:0,errors:0,underruns:0,lead:0,ctx:'',rate:0};
 function vDiagPaint(){const line='last: '+vDiag.frames+' frames, '+vDiag.decoded+
- ' samples, '+vDiag.scheduled+' buffers, '+vDiag.errors+' errors; ctx '+vDiag.ctx+' @'+vDiag.rate+
- (vDiag.lib?'':'; NO DECODER');
- const b=$('voice');if(b)b.title=line;
- if(V_IOS)toast(line,true);   // a phone has no console: the numbers go on screen (2026-08-17, until iOS sounds)
+ ' samples, '+vDiag.scheduled+' buffers, '+vDiag.errors+' errors, '+vDiag.underruns+' underruns (lead '+
+ vDiag.lead.toFixed(2)+' s); ctx '+vDiag.ctx+' @'+vDiag.rate+(vDiag.lib?'':'; NO DECODER');
+ const b=$('voice');if(b)b.title=line;   // iOS sounds since 0.2.117: the on-screen toast is gone (operator 11401)
 }
 // Refusal is the failure mode worth naming: without this the queue drains into
 // silence and looks like a broken synthesizer. The toggle was the gesture; if the
@@ -1449,8 +1451,14 @@ async function vPlay(id,url){
  // batch (underrun) re-anchors to now + lead -- a GAP, never a stall. Done when the
  // fetch has ended AND the last scheduled buffer ended; a stream that decoded
  // nothing is done at once. All events, no timers.
+ // THE LEAD ADAPTS (operator 11408: LTE stuttered on a live, in-flight message):
+ // the page carries vLead across utterances -- a good link sits at V_LEAD and
+ // first sound is not taxed; every underrun AFTER the first buffer doubles it,
+ // up to V_LEAD_MAX; an utterance with no underrun halves it back toward
+ // V_LEAD -- a jitter buffer the link earns once, one gap at a time, and gives
+ // back as it improves (architect 11419).
  const demux=vDemuxer();let dec=null,next=0,pending=0,ended=false,started=false;
- vDiag.lib=!!window['opus-decoder'];vDiag.frames=vDiag.decoded=vDiag.scheduled=vDiag.errors=0;
+ vDiag.lib=!!window['opus-decoder'];vDiag.frames=vDiag.decoded=vDiag.scheduled=vDiag.errors=vDiag.underruns=0;vDiag.lead=vLead;
  vDiag.ctx=ctx.state;vDiag.rate=ctx.sampleRate;
  const finish=()=>{if(vCtl===ctl&&ended&&pending===0){
   if(vDiag.frames&&!vDiag.scheduled)toast('audio: decoded nothing from '+vDiag.frames+' frames');
@@ -1473,13 +1481,14 @@ async function vPlay(id,url){
    const ab=ctx.createBuffer(1,samplesDecoded,sampleRate);ab.copyToChannel(channelData[0],0);
    const src=ctx.createBufferSource();src.buffer=ab;src.connect(ctx.destination);
    const now=ctx.currentTime;
-   if(next<now)next=now+V_LEAD;
+   if(next<now){if(started){vLead=Math.min(V_LEAD_MAX,vLead*2);vDiag.underruns++;vDiag.lead=vLead;}next=now+vLead;}
    src.onended=()=>{pending--;finish();};
    pending++;ctl.srcs.push(src);src.start(next);
    if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}
    next+=ab.duration;
   }
  }catch(e){if(vCtl===ctl){toast('audio: '+(e.message||e));return vDone();}return;}
+ if(started&&!vDiag.underruns){vLead=Math.max(V_LEAD,vLead/2);vDiag.lead=vLead;}   // a clean utterance gives lead back
  ended=true;finish();
 }
 

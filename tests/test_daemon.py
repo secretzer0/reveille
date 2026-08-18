@@ -119,6 +119,26 @@ def test_usage_names_the_hive_in_standing_doctrine():
     assert "brief(" in block and "memory_add(" in block
 
 
+def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
+    """Operator 11397 (ratified doctrine): agents write ULTRA-TERSE on the bus; the
+    writer expands it into persona speech; the raw text stays the record. It must
+    be at the core of how the MCP is explained: the standing USAGE (top), the
+    CLAUDE.md block agents paste, the send tool's own description, join()'s reply,
+    and the starter CLAUDE.md `reveille init` seeds."""
+    import inspect
+    from reveille import cli
+    head = daemon.USAGE.split("ENV (set by the launching pane", 1)[0]
+    assert "BUS DOCTRINE" in head and "ULTRA-TERSE" in head, "the doctrine leads the standing usage"
+    block = daemon.USAGE.split("CLAUDE.md block", 1)[1]
+    assert block.index("BUS DOCTRINE") < block.index("Identity/token from env"), \
+        "in the pasted block the doctrine is the first rule"
+    assert "BUS DOCTRINE" in (daemon.send.__doc__ or "") and "ULTRA-TERSE" in daemon.send.__doc__
+    assert '"doctrine": BUS_DOCTRINE' in inspect.getsource(daemon.join), "join() hands it over on every boot"
+    assert "ULTRA-TERSE" in daemon.BUS_DOCTRINE and "never for the ear" in daemon.BUS_DOCTRINE and "quoted verbatim" in daemon.BUS_DOCTRINE
+    src = inspect.getsource(cli.starter_claude_md)
+    assert "BUS DOCTRINE" in src and "ULTRA-TERSE" in src, "the starter CLAUDE.md carries it"
+
+
 def test_wake_url_from_http():
     assert daemon._wake_url_from("http://bigbox.local:8765") == "ws://bigbox.local:8765/wake"
 
@@ -1013,6 +1033,7 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
         "the queue must advance from the last buffer's onended"
     assert "const finish=()=>{if(vCtl===ctl&&ended&&pending===0){" in player and \
         "vDiagPaint();vDone();}};" in player, "done = fetch ended AND the last buffer ended"
+    assert "toast(line,true)" not in PAGE, "the iOS diagnostic toast is gone (operator 11401): the numbers live in the title"
     # The only <audio> element is the iOS unlock (a silent data: URI loop played
     # in the gesture so Web Audio survives the ringer switch) -- never the player,
     # never a URL anyone sent, iOS only.
@@ -1034,8 +1055,16 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     assert "vStop()" in toggle and "vQ.length=0" in toggle, \
         "toggle off must abort the utterance in flight and empty the queue"
     # 4b. Underrun is a GAP, not a stall: a late batch re-anchors to now + lead;
-    #     first sound is the first decoded batch, not the whole stream.
-    assert "if(next<now)next=now+V_LEAD;" in player
+    #     first sound is the first decoded batch, not the whole stream. The lead
+    #     ADAPTS (operator 11408, LTE): starts at V_LEAD, doubles on every underrun
+    #     after the first buffer, capped at V_LEAD_MAX -- a jitter buffer that grows
+    #     only where the link earns it, and never taxes first sound on a good link.
+    assert "const V_LEAD=0.05;" in player and "const V_LEAD_MAX=2.0;" in player and "let vLead=V_LEAD;" in player
+    assert "if(next<now){if(started){vLead=Math.min(V_LEAD_MAX,vLead*2);vDiag.underruns++;vDiag.lead=vLead;}next=now+vLead;}" in player
+    # Carried across utterances (architect 11419): a bad link earns it once, a
+    # clean utterance halves it back toward V_LEAD -- never re-learned per message.
+    assert "if(started&&!vDiag.underruns){vLead=Math.max(V_LEAD,vLead/2);vDiag.lead=vLead;}" in player
+    assert "lead=V_LEAD;" not in player.replace("let vLead=V_LEAD;", ""), "no per-utterance reset"
     assert "if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}" in player
     # 5. Live arrivals only: the speak call hangs off the socket's AUDIO case (the
     #    frame that says a first byte exists -- DES-009 section 2 as amended, ruling
@@ -1221,3 +1250,17 @@ def test_the_panel_mints_rooms_in_one_call_rather_than_attaching_after():
     # 4. A zero-room mint is legal and nearly always a mistake, so it is NAMED.
     assert "This token carries NO ROOMS" in PAGE, \
         "a token that reaches nothing must say so -- it looks healthy from every angle"
+
+
+def test_the_plaintext_banner_names_a_host_once_and_never_loopback(monkeypatch, capsys):
+    """/version's LAN-plaintext list: one host reached by two upstreams is named
+    once; loopback is this host, no allowance was used, so it is not named."""
+    monkeypatch.setattr(daemon, "_plaintext_hosts", [])
+    daemon._plaintext_banner("http://192.168.85.101:18080", True, "the writer")
+    daemon._plaintext_banner("http://192.168.85.101:18090", True, "the ear")
+    daemon._plaintext_banner("http://127.0.0.1:18004", True, "the synthesizer")
+    daemon._plaintext_banner("http://192.168.90.136:18004", True, "the synthesizer")
+    assert daemon._plaintext_hosts == ["192.168.85.101", "192.168.90.136"]
+    out = capsys.readouterr().out
+    assert out.count("PLAINTEXT ON YOUR LAN") == 3 and "127.0.0.1" not in out
+
