@@ -126,3 +126,25 @@ def test_make_up_runs_the_fix_before_the_check():
     assert "scripts/deploy-launcher" in up, "make up no longer deploys the launcher"
     assert up.index("scripts/deploy-launcher") < up.index("scripts/launcher-pin-check"), \
         "the pin check must run AFTER the fix, as its assertion"
+
+
+def test_the_box_keeps_its_own_deploy_settings():
+    """Operator, 2026-08-18: SERVER_DATA and PROXY_SITE were typed on every
+    deploy and persisted nowhere, so one forgotten flag deploys the broker on
+    :80 with an EMPTY public origin -- the OIDC redirect stops matching what
+    the providers hold and the session cookie loses its __Host- prefix. Same
+    family as the upstreams that lived only in a shell (0.2.167).
+
+    The file is INCLUDED BEFORE the defaults, so it beats them; a command-line
+    override still beats the file; an absent file leaves today's behaviour
+    exactly as it was."""
+    mk = (pathlib.Path(__file__).resolve().parent.parent / "Makefile").read_text()
+    assert "DEPLOY_CONF ?= $(HOME)/.reveille/deploy.env" in mk
+    assert "-include $(DEPLOY_CONF)" in mk, "optional include: a fresh clone has no file"
+    assert mk.index("-include $(DEPLOY_CONF)") < mk.index("SERVER_DATA  ?="), \
+        "included before the defaults or the defaults win"
+    assert mk.index("-include $(DEPLOY_CONF)") < mk.index("PROXY_SITE  ?="), \
+        "same for the one whose default silently breaks the doors"
+    # And the deploy says which it used: a settings file that is not there is
+    # exactly the case a human needs to see printed.
+    assert 'settings: $(DEPLOY_CONF)' in mk and "settings: NONE" in mk

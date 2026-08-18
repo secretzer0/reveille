@@ -268,6 +268,36 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.170 THE BOX KEEPS ITS OWN DEPLOY SETTINGS (operator, 2026-08-18: "these
+are not persisted in an env or other conf file"). SERVER_DATA and PROXY_SITE
+had to be typed on every `make up`, and their defaults are not harmless if one
+is forgotten: PROXY_SITE falls back to :80, which means no hostname, no
+automatic HTTPS and an EMPTY public origin -- so the OIDC redirect URI stops
+matching what Google and GitHub were registered with, and the session cookie
+loses its __Host- prefix. Same family as the upstreams that lived only in a
+shell (0.2.167), one layer up. The Makefile now optionally includes
+$(HOME)/.reveille/deploy.env (override with DEPLOY_CONF), read BEFORE the
+defaults so the file wins over them while `make VAR=x up` still wins over the
+file; an absent file leaves today's behaviour exactly as it was. Every `make
+up` prints which settings file it used, or says NONE -- a deploy running on a
+default it was never told about is the thing that must not be silent.
+0.2.169 A TURN CLEARS THE POKE -- AN AGENT MID-TURN STOPPED GOING DEAF (live
+defect 2026-08-18, read out of this broker's own log). The wake gate allows
+ONE outstanding ring per agent and swallows the rest until inbox() answers it,
+because "the agent has an untyped prompt pending; its next inbox() pulls this
+mail anyway". True of an agent ASLEEP; FALSE of one mid-turn. Measured: devops
+was rung at 21:41:58, sent a message at 21:44:10 (proof it was awake and had
+moved on), and five direct messages -- every one logged `woke=[devops]` at
+send time -- were dropped without a word until the ten-minute TTL expired at
+21:54 and a human typed at its terminal. Now EVERY act clears the poke, not
+only inbox(): a send, an ack, a lesson, a memory -- anything through _acting
+-- is the agent demonstrably taking its turn, which is the exact condition the
+gate was waiting for. The storm the gate prevents is untouched: an agent rung
+and silent since is still gated, still with the TTL as backstop. And a
+suppressed ring is now LOGGED with how long the poke has been outstanding: it
+was a bare `continue`, so a dropped wake left no trace in the log, the spool
+or presence, and the only evidence of this defect was a human noticing an idle
+terminal.
 0.2.168 THE CLIP BUTTON IS GONE (operator 11831, ruled 11832). Recording your
 voice into the composer shipped in 0.2.161 and earned its keep for exactly one
 afternoon: "absolutely worthless -- it serves no purpose at this point". So it
@@ -4013,8 +4043,21 @@ def _act(p):
 
 
 def _acting(request) -> Principal:
-    """An agent about to ACT: named AND bound."""
-    return _act(_me(request))
+    """An agent about to ACT: named AND bound.
+
+    AN ACT IS A TURN, AND A TURN CLEARS THE POKE (defect 2026-08-18, found in
+    the broker's own log). The wake gate swallows a ring while a poke is
+    outstanding, because "the agent has an untyped prompt pending and its next
+    inbox() pulls this mail anyway". That is true of an agent that is ASLEEP.
+    It was false of an agent MID-TURN: devops was rung at 21:41:58, worked for
+    twelve minutes, and five direct messages -- every one of them logged
+    `woke=[devops]` at send time -- were dropped silently by the gate, until
+    the human typed at its terminal. inbox() alone was too narrow a key: an
+    agent that sends, acks or reads has demonstrably taken its turn, so the
+    condition the gate exists for is over and the next message must ring."""
+    p = _act(_me(request))
+    _poke_pending.pop(p.token_id, None)
+    return p
 
 
 def _seen(principal, name, rooms, token_id=None):
@@ -4374,7 +4417,9 @@ async def inbox(ctx: Context = None) -> dict:
     if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
         _seen(speaker_key(p), p.name, p.rooms, p.token_id)
     # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
-    # this one call covers every room, so one ring was the right number.
+    # this one call covers every room, so one ring was the right number. _acting
+    # clears it for every OTHER act; this line covers the read-only callers that
+    # never reach _acting.
     _poke_pending.pop(p.token_id, None)
     msgs = store.inbox(_conn, speaker_key(p), p.rooms)
     log.info("%s inbox -> %s unread across %s room(s)", p.name, len(msgs), len(p.rooms))
@@ -4713,6 +4758,13 @@ async def wake_ws(ws: WebSocket):
                             "waiter; the broker will be back shortly"})
                 break
             if not _poke_ok(key):
+                # SAY SO. This was a silent `continue`, so a suppressed ring left
+                # no trace anywhere and the only evidence of the whole defect was
+                # a human noticing an idle terminal. A dropped wake is exactly the
+                # kind of thing the log must carry.
+                log.info("%s wake ring SUPPRESSED (poke outstanding %.0fs, "
+                         "clears on its next call)", name,
+                         (time.time_ns() - _poke_pending[key]) / 1e9)
                 continue
             _poke_pending[key] = time.time_ns()
             unread = store.inbox(_conn, principal, rooms)
