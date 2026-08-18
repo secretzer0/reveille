@@ -2099,15 +2099,22 @@ def _is_admin(conn, user_id):
 
 
 def user_history(conn, user_id):
-    """What refers to this person. A users row is a REFERENT only while
-    something points at it (ruling 11732), so this is the exact list the
-    delete verb branches on -- counted, never guessed."""
+    """What CITES this person. A users row is a REFERENT only while something
+    points at it (ruling 11732), so this is the exact list the delete verb
+    branches on -- counted, never guessed.
+
+    Deliberately NOT counted, because the SYSTEM wrote them, not the person:
+    read receipts (join() stamps a catch-up receipt for every message older
+    than the join -- two accounts that only ever signed in carried 10145 each,
+    measured on live, and were tombstoned for it), membership and presence rows
+    (derived from the credential, reaped on their own), room invitations, and
+    identities (a door is a credential, the same class as pw_hash). All of
+    those are deleted with the row; none of them is a citation of the person."""
     def q(sql, *args):
         return conn.execute(sql, args or (user_id,)).fetchone()[0]
 
     row = conn.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
     name = row["name"] if row else ""
-    principal = user_principal(user_id)
     return {
         # A person's send writes sender = the ROOM-NAME they wear and leaves
         # sender_agent_id NULL; their agents' sends carry the agent id.
@@ -2115,17 +2122,16 @@ def user_history(conn, user_id):
                       "(SELECT id FROM agents WHERE owner_id=?)")
                   + q("SELECT count(*) FROM messages WHERE sender=? "
                       "AND sender_agent_id IS NULL", name),
+        # BEING ADDRESSED IS A CITATION (11611, architect on #108): a message
+        # that says "to: dmorse" refers to this person as surely as one they
+        # wrote, and freeing the name would re-point it at someone else.
+        "addressed": q("SELECT count(*) FROM messages WHERE recipient_agent_id IN "
+                       "(SELECT id FROM agents WHERE owner_id=?)")
+                   + q("SELECT count(*) FROM messages WHERE recipient=? "
+                       "AND recipient_agent_id IS NULL", name),
         "agents": q("SELECT count(*) FROM agents WHERE owner_id=?"),
         "tokens": q("SELECT count(*) FROM tokens WHERE owner_id=?"),
         "rooms": q("SELECT count(*) FROM rooms WHERE owner_id=?"),
-        "memberships": q("SELECT count(*) FROM members WHERE principal=?", principal),
-        "reads": q("SELECT count(*) FROM reads WHERE principal=?", principal),
-        "room_members": q("SELECT count(*) FROM room_members WHERE user_id=?"),
-        # NOT counted: identities. A door is a CREDENTIAL of the person, not
-        # something that refers to them -- the same class as pw_hash, which
-        # nobody would call history. An account that only ever signed in and
-        # left is still the never-used account whose name should go free
-        # (#106 review); its identity rows are deleted with it.
         "memories": q("SELECT count(*) FROM memories WHERE author=?", name),
     }
 
@@ -2179,8 +2185,12 @@ def delete_user(conn, user_id):
                      "released_ns=?, released_by='account-deletion' "
                      "WHERE owner_id=?", (now, now, user_id))
         if not any(history.values()):
-            # Nothing points here: the row goes, the name is free.
+            # Nothing cites this person: the row goes, the name is free, and
+            # the bookkeeping the system wrote for them goes with it.
+            principal = user_principal(user_id)
             conn.execute("DELETE FROM identities WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM reads WHERE principal=?", (principal,))
+            conn.execute("DELETE FROM members WHERE principal=?", (principal,))
             conn.execute("DELETE FROM users WHERE id=?", (user_id,))
             return "removed"
         # The hash is REPLACED, not emptied: an empty pw_hash is one bad
@@ -2191,6 +2201,40 @@ def delete_user(conn, user_id):
 
 
 # ---- sessions ----------------------------------------------------------------
+
+def free_tombstone(conn, user_id, actor="admin"):
+    """An admin frees a RESERVED name (ruling 11611 follow-on). Only a
+    tombstone with nothing citing it may go -- one that any message, agent,
+    token, room or memory refers to keeps its referent, always."""
+    row = conn.execute("SELECT id, name, deleted_ns FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        raise NotFound("no such user")
+    if not row["deleted_ns"]:
+        raise BusError("that account is live -- delete it first")
+    history = user_history(conn, user_id)
+    if any(history.values()):
+        cited = ", ".join(f"{k}={v}" for k, v in history.items() if v)
+        raise BusError(f"{row['name']} is cited by {cited} -- the name stays reserved")
+    principal = user_principal(user_id)
+    with tx(conn):
+        conn.execute("DELETE FROM identities WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM reads WHERE principal=?", (principal,))
+        conn.execute("DELETE FROM members WHERE principal=?", (principal,))
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+    return row["name"]
+
+
+def tombstones(conn):
+    """Deleted accounts whose names are still reserved, with what cites each --
+    an empty `cited` means an admin may free the name."""
+    out = []
+    for r in conn.execute("SELECT id, name, deleted_ns FROM users WHERE deleted_ns IS NOT NULL "
+                          "ORDER BY deleted_ns DESC"):
+        h = user_history(conn, r["id"])
+        out.append({"id": r["id"], "name": r["name"], "deleted_ns": r["deleted_ns"],
+                    "cited": {k: v for k, v in h.items() if v}})
+    return out
+
 
 def create_session(conn, user_id):
     secret = secrets.token_urlsafe(32)

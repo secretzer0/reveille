@@ -4338,9 +4338,10 @@ async function openUsers(){
  const d=await api('/users');
  // DES-018 s6 amendment: strangers who asked, and the one-time codes that skip
  // the queue. Both are admin-only on the server; a non-admin never gets here.
- let reqs={requests:[]},invs={invites:[]};
+ let reqs={requests:[]},invs={invites:[]},tombs={tombstones:[]};
  try{reqs=await api('/users/requests?state=all');}catch(e){}
  try{invs=await api('/invites');}catch(e){}
+ try{tombs=await api('/users/tombstones');}catch(e){}
  const pend=reqs.requests.filter(r=>r.state==='pending');
  const reqRow=r=>'<div class="pRow"><b>'+esc(r.display_name||r.login||'(no name)')+'</b>'+
   '<span class="pDim">'+esc(r.provider)+(r.email?' -- '+esc(r.email):'')+
@@ -4397,6 +4398,16 @@ async function openUsers(){
    'same page.</div>'+reqs.requests.map(reqRow).join(''):'')+
   '<div class="pSec">USERS</div>'+rows+
   '<div class="pRow"><input id="nuName" placeholder="name"><input id="nuPass" type="password" placeholder="password"><button id="mkUser">add</button></div>'+
+  (tombs.tombstones.length?'<div class="pSec">RESERVED NAMES</div>'+
+   '<div class="pDim">Deleted accounts. A name stays reserved while anything cites '+
+   'the person -- messages, agents, tokens, rooms, memories -- so the citation still '+
+   'resolves. One that nothing cites can be freed for re-use.</div>'+
+   tombs.tombstones.map(t=>'<div class="pRow"><b>'+esc(t.name)+'</b><span class="pDim">'+
+    (Object.keys(t.cited).length
+     ?'cited by '+esc(Object.entries(t.cited).map(([k,v])=>k+' '+v).join(', '))
+     :'nothing cites it')+'</span>'+
+    (Object.keys(t.cited).length?'':'<button data-free="'+t.id+'" data-name="'+esc(t.name)+
+     '">free the name</button>')+'</div>').join(''):'')+
   '<div class="pSec">INVITE CODES</div>'+
   '<div class="pDim">A code works once, for any email, through any door, and skips the '+
   'queue. It is shown ONCE here -- copy it before you leave this screen.</div>'+
@@ -4411,6 +4422,9 @@ async function openUsers(){
     (showUsedInvites?invs.invites.filter(i=>i.used_ns).map(invRow).join(''):'')
    :''));
  if($('ivUsed'))$('ivUsed').onclick=()=>{showUsedInvites=!showUsedInvites;openUsers();};
+ for(const b of document.querySelectorAll('[data-free]'))b.onclick=async()=>{
+  try{await api('/users/tombstones/'+b.dataset.free,{method:'DELETE'});
+   toast(b.dataset.name+' is free again',true);openUsers();}catch(e){toast(e.message);}};
  $('mkInvite').onclick=async()=>{
   try{const r=await api('/invites',{method:'POST',
     body:JSON.stringify({note:$('ivNote').value.trim()})});

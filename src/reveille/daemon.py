@@ -246,13 +246,20 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
-0.2.156 A DOOR IS A CREDENTIAL, NOT HISTORY (#106 review; ruling 11746). An
-identities row no longer counts as history when a user is deleted -- it is
-the same class as pw_hash, so an account that only ever signed in and left is
-REMOVED with its doors and its name goes free; anything that refers to the
-person (messages, agents, tokens, rooms, memberships, receipts, invitations,
-memories) still tombstones. The Users tab lists OPEN invite codes only, with
-"show used (n)" revealing the record of who let whom in.
+0.2.157 WHAT THE SYSTEM WROTE FOR YOU IS NOT YOUR HISTORY (#106 review;
+rulings 11746, 11611 follow-on). MEASURED ON LIVE: two accounts that only
+ever signed in were tombstoned by 0.2.155 because each carried 10145 read
+receipts -- written by join()'s catch-up, not by them. user_history now
+counts only CITATIONS of the person (their messages and their agents',
+mail ADDRESSED to them or their agents, agents, tokens, owned rooms,
+memories); read receipts, membership/presence
+rows, room invitations and identities are bookkeeping or credentials, and are
+deleted with the row. An admin can free a name a tombstone still reserves
+when nothing cites it: GET /users/tombstones lists them with what cites each,
+DELETE /users/tombstones/<id> frees one (refused, naming the citations, when
+anything points there), and the Users tab grows a RESERVED NAMES section. The
+invite list shows OPEN codes with "show used (n)" for the record of who let
+whom in.
 0.2.155 A ROW IS A REFERENT ONLY WHILE SOMETHING REFERS TO IT (ruling 11732).
 Deleting a user has two outcomes and the page says which: an account with NO
 history (no messages, agents, tokens, rooms, memberships, receipts, doors,
@@ -6165,6 +6172,18 @@ async def users_http(request):
 
 
 @_guard
+async def tombstones_http(request):
+    """GET /users/tombstones -> reserved names, each with what cites it.
+    DELETE /users/tombstones/<uid> -> free a name nothing cites (11611)."""
+    p = _admin(request)
+    if request.method == "GET":
+        return JSONResponse({"tombstones": store.tombstones(_conn)})
+    name = store.free_tombstone(_conn, request.path_params["uid"], actor=f"web:{p.name}")
+    log.info("%s freed the reserved name %s", p.name, name)
+    return JSONResponse({"freed": name})
+
+
+@_guard
 async def user_http(request):
     p = _admin(request)
     uid = request.path_params["uid"]
@@ -6681,6 +6700,8 @@ def build_app():
             Route("/auth/{provider}/callback", auth_callback_http),
             Route("/me/identities/{provider}/{subject}", unlink_http, methods=["DELETE"]),
             Route("/users/requests", requests_http),
+            Route("/users/tombstones", tombstones_http),
+            Route("/users/tombstones/{uid}", tombstones_http, methods=["DELETE"]),
             Route("/users/requests/{provider}/{subject}/{verb}", request_decide_http,
                   methods=["POST"]),
             Route("/invites", invites_http, methods=["GET", "POST"]),

@@ -181,9 +181,19 @@ burn one code only.
 
 A `users` row is a REFERENT only while something refers to it. `user_history`
 counts messages (their own and their agents'), agents, tokens, owned rooms,
-memberships, receipts, room invitations and memories -- BEFORE the delete
-wipes any of them. Identities are NOT counted: a door is a CREDENTIAL of the
-person, the same class as `pw_hash`, and it is deleted with the row. Zero across the board: the row is removed and the
+mail ADDRESSED to them or their agents (a line that says "to: dmorse" refers
+to this person as surely as one they wrote), owned rooms and memories --
+BEFORE the delete wipes any of them. NOT counted,
+because the system wrote them rather than the person: read receipts (join()
+stamps one per older message -- two live accounts that had only ever signed
+in carried 10145 each), membership/presence rows, room invitations, and
+identities (a door is a CREDENTIAL, the same class as `pw_hash`). All of
+those are deleted with the row.
+
+An admin frees a name a tombstone still reserves when nothing cites it (11611
+follow-on): `GET /users/tombstones` lists every reserved name with its
+citations, `DELETE /users/tombstones/<id>` frees one and is refused -- naming
+the citations -- when anything points there. Zero across the board: the row is removed and the
 name is free again (the account created and never used; reserving its name
 forever was the bug). Anything at all: tombstone, unchanged (8938 / 11611) --
 the messages still carry the claim, so the referent stays. `DELETE
