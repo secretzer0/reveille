@@ -224,6 +224,9 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.136 THE ABANDONED WARNING NAMES FFMPEG'S CAUSE: the stderr reader is
+joined before its words are read (a slow runner read them early -> "no
+output"). Bus tools unchanged.
 0.2.134 THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended). In
 listen mode the page rings ONE bell when a take's words land in the box --
 ready for a command or more words, the same moment the pause-to-send
