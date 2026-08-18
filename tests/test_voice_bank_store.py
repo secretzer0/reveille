@@ -47,7 +47,7 @@ def world(c):
 # ---- schema ------------------------------------------------------------------
 
 def test_v23_lays_the_three_tables_and_v24_the_sample_and_the_chain_reaches_it(tmp_path):
-    assert store.SCHEMA_VERSION == 26
+    assert store.SCHEMA_VERSION == 27
     assert store._UPGRADES[22] == "_upgrade_v22" and store._UPGRADES[23] == "_upgrade_v23"
     assert store._UPGRADES[24] == "_upgrade_v24"
     c = db()
@@ -60,14 +60,14 @@ def test_v23_lays_the_three_tables_and_v24_the_sample_and_the_chain_reaches_it(t
     old = store.connect(path)
     store.migrate(old, path)
     old.execute("PRAGMA user_version=22")
-    assert store.migrate(old, path) == 26
+    assert store.migrate(old, path) == store.SCHEMA_VERSION
     old.execute("PRAGMA user_version=23")
-    assert store.migrate(old, path) == 26
+    assert store.migrate(old, path) == store.SCHEMA_VERSION
     # Real v23 / v24 tables (no column) grow them.
     old.execute("ALTER TABLE voices DROP COLUMN sample")
     old.execute("ALTER TABLE voices DROP COLUMN personal")
     old.execute("PRAGMA user_version=23")
-    assert store.migrate(old, path) == 26
+    assert store.migrate(old, path) == store.SCHEMA_VERSION
     cols = {r["name"] for r in old.execute("PRAGMA table_info(voices)")}
     assert {"sample", "personal"} <= cols
 

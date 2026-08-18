@@ -35,6 +35,7 @@ the leak.
 """
 import contextlib
 import hashlib
+import json
 import hmac
 import os
 import re
@@ -78,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -248,7 +249,10 @@ CREATE TABLE IF NOT EXISTS agents (
     created_ns  INTEGER NOT NULL,
     retired_ns  INTEGER,
     released_ns INTEGER,
-    released_by TEXT
+    released_by TEXT,
+    -- DES-011 s7/s10: the survivor this identity was FOLDED into (one-time
+    -- merge). The row stays retired-intact; readers follow the chain to its head.
+    merged_into TEXT REFERENCES agents(id)
 );
 -- THIS INDEX IS THE RULE "one live instance per name per user", enforced by the
 -- database rather than by anyone remembering it -- which is this week's whole
@@ -257,6 +261,18 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_live
     ON agents(owner_id, name) WHERE retired_ns IS NULL;
 CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
+-- THE RENAME LOG (DES-011 s6/s10): which label an identity wore, and when. One
+-- open row (to_ns NULL) per agent at any time; a rename closes it and opens the
+-- next. Seeded from agents.name at v27; every INSERT INTO agents writes its row
+-- through record_agent_name(). "Who was `architect` in July" is a query here.
+CREATE TABLE IF NOT EXISTS agent_names (
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    name     TEXT NOT NULL,
+    from_ns  INTEGER NOT NULL,
+    to_ns    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_agent_names_agent ON agent_names(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_names_name  ON agent_names(name);
 CREATE TABLE IF NOT EXISTS messages (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id INTEGER,
@@ -272,6 +288,12 @@ CREATE TABLE IF NOT EXISTS messages (
     -- is the whole reason purge-by-name is unsafe the day a name has two
     -- histories. Neither column replaces the other.
     sender_agent_id TEXT,
+    -- WHICH IDENTITY it was addressed to (DES-011 s3/s10): resolved from the
+    -- room-name at send, backfilled by (room, name, time) at v27. NULL = a
+    -- broadcast, a human, or a historical address nobody could resolve (listed
+    -- by the migration, never silent). `recipient` stays: it is the only record
+    -- of what a message was addressed to before the rename log existed.
+    recipient_agent_id TEXT,
     ts_ns     INTEGER NOT NULL
 );
 -- agent is the NAME (routing reads it); agent_id is the IDENTITY (DES-007 4.3).
@@ -337,6 +359,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_att_message   ON attachments(message_id);
 CREATE INDEX IF NOT EXISTS idx_msg_room      ON messages(room);
 CREATE INDEX IF NOT EXISTS idx_msg_recipient ON messages(recipient);
+CREATE INDEX IF NOT EXISTS idx_msg_recipient_id ON messages(recipient_agent_id);
 CREATE INDEX IF NOT EXISTS idx_msg_thread    ON messages(thread_id);
 CREATE INDEX IF NOT EXISTS idx_msg_sender    ON messages(sender);
 CREATE INDEX IF NOT EXISTS idx_msg_parent    ON messages(parent_id);
@@ -1265,6 +1288,149 @@ def _upgrade_v25(conn, db_path):
         conn.execute("PRAGMA user_version=26")
 
 
+def _lineage_head(merged, aid):
+    """Follow agents.merged_into to the survivor. A fold is a chain, never a cycle
+    (the tool refuses one); the bound is belt against a hand-edited row."""
+    seen = 0
+    while aid in merged and seen < 32:
+        aid = merged[aid]
+        seen += 1
+    return aid
+
+
+def resolve_recipient_ids(conn):
+    """DES-011 s6.1(a): for every direct message, the identity its recipient
+    NAME denoted at that time. Returns a report dict:
+    {"resolved": {mid: aid}, "how": {rule: n}, "humans": n,
+     "unresolvable": [(mid, room, name, ts_ns, why)]}.
+
+    THE SUCCESSION CLOCK. Among the identities that ever wore the name (folded
+    to their lineage heads through merged_into), the one LIVE at ts -- created
+    at or before it, not yet retired -- is the holder; one owner cannot have two
+    (idx_agents_live), and before the room alias existed the members key
+    (room_id, name) forbade two owners' agents from sharing a bare name in a
+    room, so pre-v27 history has at most one. Nobody live at ts: the last one
+    created before ts (mail addressed to a name after its holder retired and
+    before a successor was minted -- the successor did not exist, so it cannot
+    have been meant). Nobody created yet: the earliest ever (the seeded rows
+    were minted after the history they own). Two live at once, or no identity
+    at all: unresolvable, LISTED with (room, name, ts), left NULL. A person is
+    not an identity: a recipient naming a user (tombstones included, their name
+    stays theirs by ruling 11611) is NULL and counted as a human, not a failure.
+
+    Measured against the sender plane on the live database (2026-08-18): every
+    message this clock resolves, the "who spoke as that name in that room around
+    then" evidence resolves to the same id; the clock also settles the 22 the
+    spans left in a gap (later holder not yet minted). One rule, from recorded
+    facts, no nearest-neighbour guess.
+    """
+    merged = {r["id"]: r["merged_into"] for r in
+              conn.execute("SELECT id, merged_into FROM agents WHERE merged_into IS NOT NULL")}
+    heads = {}
+    for r in conn.execute("SELECT * FROM agents"):
+        if _lineage_head(merged, r["id"]) == r["id"]:
+            heads.setdefault(r["name"], []).append(dict(r))
+    people = {r["name"] for r in conn.execute("SELECT name FROM users")}
+    report = {"resolved": {}, "how": {}, "humans": 0, "unresolvable": []}
+    for m in conn.execute("SELECT id, room, recipient, ts_ns FROM messages "
+                          "WHERE recipient != ? ORDER BY id", (BROADCAST,)):
+        name, ts = m["recipient"], m["ts_ns"]
+        rows = heads.get(name, [])
+        if not rows:
+            if name in people:
+                report["humans"] += 1
+            else:
+                report["unresolvable"].append(
+                    (m["id"], m["room"], name, ts, "no identity ever held this name"))
+            continue
+        born = [a for a in rows if a["created_ns"] <= ts]
+        live = [a for a in born if a["retired_ns"] is None or a["retired_ns"] > ts]
+        if len(live) == 1:
+            aid, how = live[0]["id"], "live-at-ts"
+        elif live:
+            report["unresolvable"].append(
+                (m["id"], m["room"], name, ts,
+                 f"{len(live)} identities live under this name at once: "
+                 + ", ".join(a["id"] for a in live)))
+            continue
+        elif born:
+            aid, how = max(born, key=lambda a: a["created_ns"])["id"], "last-holder"
+        else:
+            aid, how = min(rows, key=lambda a: a["created_ns"])["id"], "earliest"
+        report["resolved"][m["id"]] = aid
+        report["how"][how] = report["how"].get(how, 0) + 1
+    return report
+
+
+def record_agent_name(conn, agent_id, name, from_ns):
+    """One line of the rename log: `agent_id` wears `name` from `from_ns`. Every
+    INSERT INTO agents calls this so the log never lags the table (the v18
+    lesson: a column the writer does not fill is a backfill that rots)."""
+    conn.execute("INSERT INTO agent_names(agent_id, name, from_ns) VALUES(?,?,?)",
+                 (agent_id, name, from_ns))
+
+
+def _upgrade_v26(conn, db_path):
+    """v26 -> v27 (DES-011 s6.1(a), ruling 10983): the recipient plane learns
+    the identity; the rename log and the fold record become schema.
+
+    Three additive writes, one transaction, nothing read differently afterwards:
+      - messages.recipient_agent_id, backfilled by (room, name, time) through
+        resolve_recipient_ids(); what cannot be resolved is LISTED here with its
+        (room, name, ts) and left NULL -- printed, never silent, never invented.
+      - agent_names(agent_id, name, from_ns, to_ns) seeded from agents.name.
+      - agents.merged_into set from identity-merges.jsonl beside the database
+        (s7.2: the JSON line is the merge record; this column is its queryable
+        home). No file = no folds = nothing to set.
+    Readers cut over in (b), all in one commit; this step is rehearsed on a
+    copy first: scripts/rehearse_migration.py <db>.
+    """
+    snapshot(conn, f"{db_path}.pre-v27-{time.time_ns()}.bak")
+    with tx(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
+        if "merged_into" not in cols:
+            conn.execute("ALTER TABLE agents ADD COLUMN merged_into TEXT REFERENCES agents(id)")
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+        if "recipient_agent_id" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN recipient_agent_id TEXT")
+        _exec_script(conn, """
+CREATE TABLE IF NOT EXISTS agent_names (
+    agent_id TEXT NOT NULL REFERENCES agents(id),
+    name     TEXT NOT NULL,
+    from_ns  INTEGER NOT NULL,
+    to_ns    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_agent_names_agent ON agent_names(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_names_name  ON agent_names(name);
+CREATE INDEX IF NOT EXISTS idx_msg_recipient_id ON messages(recipient_agent_id);
+""")
+        folds = 0
+        merges = os.path.join(os.path.dirname(os.path.abspath(db_path)), "identity-merges.jsonl")
+        if os.path.exists(merges):
+            with open(merges) as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    for src in rec["from"]:
+                        folds += conn.execute(
+                            "UPDATE agents SET merged_into=? WHERE id=? AND merged_into IS NULL",
+                            (rec["to"]["id"], src["id"])).rowcount
+        conn.execute("DELETE FROM agent_names")
+        conn.execute("INSERT INTO agent_names(agent_id, name, from_ns) "
+                     "SELECT id, name, created_ns FROM agents")
+        rep = resolve_recipient_ids(conn)
+        conn.executemany("UPDATE messages SET recipient_agent_id=? WHERE id=?",
+                         [(aid, mid) for mid, aid in rep["resolved"].items()])
+        print(f"v27 recipient backfill: {len(rep['resolved'])} resolved "
+              f"({', '.join(f'{k} {v}' for k, v in sorted(rep['how'].items()))}); "
+              f"{rep['humans']} addressed to a person; {folds} fold(s) recorded; "
+              f"{len(rep['unresolvable'])} UNRESOLVABLE")
+        for mid, room, name, ts, why in rep["unresolvable"]:
+            print(f"  unresolvable: message {mid} room {room} to {name!r} at {ts}: {why}")
+        conn.execute("PRAGMA user_version=27")
+
+
 def _upgrade_v24(conn, db_path):
     """v24 -> v25: voices.personal -- a voice that exists only for its uploader
     (ruling 11155). Additive column; existing voices are bank voices."""
@@ -1314,6 +1480,11 @@ def _upgrade_v0(conn, db_path):
             # way first -- it is read twice below and dropped, and it must not be
             # mistaken for the new table by anything in between.
             conn.execute("ALTER TABLE agents RENAME TO agents_v0")
+            # _SCHEMA indexes the identity columns of `messages`; the v0 table
+            # predates them, so they are added here (empty) before the replay and
+            # carried by messages_new below.
+            for col in ("sender_agent_id", "recipient_agent_id"):
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
             _exec_script(conn, _SCHEMA)        # adds the new tables; messages untouched
             now = time.time_ns()
             legacy = [r["room"] for r in conn.execute(
@@ -1335,6 +1506,8 @@ def _upgrade_v0(conn, db_path):
                     subject   TEXT NOT NULL DEFAULT '',
                     body      TEXT NOT NULL,
                     room      TEXT NOT NULL REFERENCES rooms(id),
+                    sender_agent_id    TEXT,
+                    recipient_agent_id TEXT,
                     ts_ns     INTEGER NOT NULL
                 );
                 INSERT INTO messages_new(id, thread_id, parent_id, sender, recipient,
@@ -1374,7 +1547,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25)}
+              21, 22, 23, 24, 25, 26)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -1705,6 +1878,7 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
                 conn.execute(
                     "INSERT INTO agents(id, owner_id, name, created_ns) "
                     "VALUES(?,?,?,?)", (agent_id, owner_id, agent_name, now))
+                record_agent_name(conn, agent_id, agent_name, now)
             else:
                 # THE GUARD AGAINST SILENT FORKS (ruling 10896, measured live
                 # 2026-08-15: 'architect' vs 'reveille-architect', mail split
@@ -2556,6 +2730,17 @@ def _present(conn, room_id, name):
         (room_id, name)).fetchone() is not None
 
 
+def recipient_agent_id(conn, room_id, name):
+    """The identity a room-name denotes in this room right now, or None (a
+    broadcast, a human, or a name nobody holds here). Reads the members row,
+    which join() stamps from the token -- the one place a room-name meets an id."""
+    if name == BROADCAST:
+        return None
+    r = conn.execute("SELECT agent_id FROM members WHERE room_id=? AND name=?",
+                     (room_id, name)).fetchone()
+    return r["agent_id"] if r else None
+
+
 def mint_agent(conn, owner_id, name, now=None):
     """Claim the LIVE identity for (owner, name), minting one if there is none.
 
@@ -2579,6 +2764,7 @@ def mint_agent(conn, owner_id, name, now=None):
         conn.execute(
             "INSERT INTO agents(id, owner_id, name, created_ns) VALUES(?,?,?,?)",
             (aid, owner_id, name, now))
+        record_agent_name(conn, aid, name, now)
     return dict(conn.execute("SELECT * FROM agents WHERE id=?", (aid,)).fetchone())
 
 
@@ -3005,10 +3191,11 @@ def claim_unresolved_names(conn, owner_id, now=None):
     now = now or time.time_ns()
     claimed = []
     for e in unresolved_agent_names(conn):
+        aid = str(uuid.uuid4())
         conn.execute(
             "INSERT INTO agents(id, owner_id, name, created_ns, retired_ns) "
-            "VALUES(?,?,?,?,?)",
-            (str(uuid.uuid4()), owner_id, e["name"], e["last_ns"] or now, now))
+            "VALUES(?,?,?,?,?)", (aid, owner_id, e["name"], e["last_ns"] or now, now))
+        record_agent_name(conn, aid, e["name"], e["last_ns"] or now)
         claimed.append(e["name"])
     return claimed
 
@@ -3136,7 +3323,8 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
     with tx(conn):
         cur = conn.execute(
             "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, "
-            "body, room, sender_agent_id, ts_ns) VALUES(?,?,?,?,?,?,?,?,?)",
+            "body, room, sender_agent_id, recipient_agent_id, ts_ns) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (thread_id, parent_id, sender, recipient, subject, body, room,
              # THE WRITER LEARNS THE IDENTITY TOO. The v18 backfill filled this
              # column for all of history and send() went on inserting NULL, so
@@ -3145,7 +3333,11 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
              # column while the write path ignores it is the same defect as a
              # data move whose readers did not move: the two halves of one
              # cutover, shipped apart.
-             agent_id_for(conn, sender), now))
+             agent_id_for(conn, sender),
+             # And the recipient's, resolved from the ROOM-NAME at send (DES-011
+             # s3): the members row that holds this name in this room. A human
+             # member has no identity, so a message to a person stays NULL here.
+             recipient_agent_id(conn, room, recipient), now))
         mid = cur.lastrowid
         # Manual FTS sync (DES-001 S1): external-content tables index nothing on their
         # own; every insert here must be mirrored or the message is unsearchable.

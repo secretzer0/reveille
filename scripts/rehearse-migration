@@ -1,0 +1,60 @@
+#!/usr/bin/env -S uv run --quiet python
+"""rehearse-migration: run this build's schema chain against a COPY of a database
+and print what it did -- the rehearsal DES-011 s6.1(a) demands before the live
+stop-migrate-start (lesson a-fold-is-an-act-on-a-being-not-a-name: the
+rehearsal proves the tool).
+
+    scripts/rehearse-migration /path/to/broker.db [--keep DIR]
+
+Copies the db (sqlite backup API, consistent under a live writer) and every
+sidecar the chain reads (identity-merges.jsonl) into a scratch dir, migrates the
+copy, prints the version reached and a few counts, and deletes the scratch dir
+unless --keep names one. The source database is never opened for writing.
+"""
+import argparse
+import os
+import shutil
+import sqlite3
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from reveille import store  # noqa: E402
+
+SIDECARS = ("identity-merges.jsonl",)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("db")
+    ap.add_argument("--keep", metavar="DIR", help="keep the migrated copy here")
+    a = ap.parse_args()
+    work = a.keep or tempfile.mkdtemp(prefix="rehearse-migration-")
+    os.makedirs(work, exist_ok=True)
+    copy = os.path.join(work, os.path.basename(a.db))
+    src = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True)
+    dst = sqlite3.connect(copy)
+    src.backup(dst)
+    src.close(); dst.close()
+    for name in SIDECARS:
+        side = os.path.join(os.path.dirname(os.path.abspath(a.db)), name)
+        if os.path.exists(side):
+            shutil.copy(side, os.path.join(work, name))
+    conn = store.connect(copy)
+    before = store._version(conn)
+    after = store.migrate(conn, copy)
+    print(f"rehearsal: user_version {before} -> {after} on {copy}")
+    for table in ("messages", "agents", "agent_names", "members"):
+        if store._table_exists(conn, table):
+            n = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            print(f"  {table}: {n} rows")
+    bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+    print(f"  foreign_key_check: {len(bad)} violation(s)")
+    conn.close()
+    if not a.keep:
+        shutil.rmtree(work)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

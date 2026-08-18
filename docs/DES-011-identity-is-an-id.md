@@ -225,6 +225,40 @@ The name column `recipient` stays through all three (§10). No slice
 introduces a dual-read: (a) writes and nobody reads; (b) cuts every reader
 over in one commit; (c) changes what humans see, not what the store keys.
 
+#### 6.1(a) as built (schema v27, EPIC-001 S1)
+
+One migration step, `_upgrade_v26`, additive, one transaction, snapshot first:
+`messages.recipient_agent_id` (+ index), `agent_names(agent_id, name, from_ns,
+to_ns)` seeded one open row per `agents` row, `agents.merged_into` set from
+`identity-merges.jsonl` beside the database (no file = no folds). Backfill =
+`resolve_recipient_ids()`, **the succession clock**: among the identities that
+ever wore the name, folded to their lineage heads, the one LIVE at the
+message's ts holds it; nobody live → the last one created before ts (a
+successor that did not exist yet cannot have been meant); nobody created yet →
+the earliest ever (the seeded rows postdate the history they own). Two live at
+once (two owners; impossible in pre-alias history, the `members` key forbade
+it) or no identity at all → **listed** `message <id> room <room> to <name> at
+<ts>: <why>` and left NULL; the count is printed with the resolved/human/fold
+counts, never silent, and the step never refuses. A recipient that names a
+user is a person: NULL, counted, not a failure.
+
+Why the clock and not membership-at-time: `members` has no history (reap
+deletes, join upserts). The plane that HAS ids over time is the sender's
+(`sender_agent_id`, backfilled v18, folded §7); rehearsed on the live copy
+(2026-08-18, 9980 direct messages) the "who spoke as that name in that room
+around then" spans agree with the clock on every one of the 9684 they resolve,
+and the clock also settles the 22 the spans leave in a gap. Result of the
+rehearsal: 9706 resolved (earliest 8268, last-holder 871, live-at-ts 567),
+274 to a person, 2 folds recorded, 0 unresolvable, FK check clean.
+
+Writers moved with the schema: `send()` stamps `recipient_agent_id` from the
+members row the room-name resolves to (`recipient_agent_id()`; a human member →
+NULL); every `INSERT INTO agents` writes its `agent_names` row through
+`record_agent_name()`; `scripts/identity-merge` re-points the new column and
+sets `merged_into` on the source. Rehearsal tool for this and every later step:
+`scripts/rehearse-migration <db> [--keep DIR]` (copy via the backup API,
+migrate the copy, print). Nothing reads the new column yet -- (b) does.
+
 ## 7. The one-time merge (executed 2026-08-15)
 
 `scripts/identity-merge` re-points one identity's rows onto another and
