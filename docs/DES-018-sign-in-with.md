@@ -203,3 +203,52 @@ verified email the admin typed claims it -- §5.2 rule). `pw_hash` column stays
 Devops guides the operator through the three app registrations (11650/11651):
 redirect `https://reveille.mythos.org/auth/<p>/callback`; Microsoft
 "any org + personal" (11654); secrets by env name only.
+
+## 13. As built (slice 1, 0.2.151)
+
+- Schema v29, additive: `identities(provider, subject) -> user_id, email,
+  email_verified, display_name, avatar_url, raw_profile, created_ns,
+  last_login_ns`; `oidc_state(key, value, expires_ns)`; `identity_audit(action
+  link|unlink|signup, provider, subject, user_id, actor, ts_ns)`.
+- Store: `federated_login()` is the ONE login rule (s5.2/s6): known ->
+  linked (exactly one live user holds a door with that VERIFIED email) ->
+  "use your other door" (any live user holds an identity with that email,
+  or two verified holders) -> signup under `signup_allowed(policy)`.
+  `link_identity()` refuses a door another account holds; `unlink_identity()`
+  refuses the last way in unless `pw_hash` is a real scrypt hash (admin may
+  unlink any). `rotate_session()` on every login. `OIDC_PW = '!oidc'`.
+- Daemon: `PROVIDERS` table (s9); `_oidc_boot(env)` registers one Authlib
+  client per configured `REVEILLE_OIDC_<P>_ID`; `_OidcCache` = Authlib
+  `cache=` over `oidc_state`; the browser marker Authlib wants as
+  `request.session` is a dict loaded from `oidc_state["marker:<id>"]` under
+  cookie `rev_oidc` (Path=/auth, 10 min) and hung on `request.scope` --
+  no SessionMiddleware, nothing signed into a cookie. Redirect URI is
+  `REVEILLE_PUBLIC_URL + /auth/<p>/callback`, never Host; unset -> a named
+  400 on `/auth/<p>/login`. `_cookie_name()` is the ONE reader/writer name:
+  `__Host-rev_session` when the public URL is https, `rev_session` on http.
+  Microsoft: `claims_options={"iss": {"essential": False}}` (the /common
+  metadata issuer is templated) then `iss == https://login.microsoftonline.com/
+  <tid>/v2.0` asserted in `_oidc_profile`; subject `<oid>@<tid>`; email
+  verified only when `xms_edov` says so (needs the optional claim in the
+  registration). GitHub: `/user` + `/user/emails` primary+verified. Provider
+  tokens die inside `_oidc_profile`.
+- Routes: `GET /auth/doors` (public), `GET /auth/<p>/login[?link=1]
+  [&login_hint=]`, `GET /auth/<p>/callback` (303 -> `/ui`, `/ui?welcome=`,
+  `/ui#doors`, or `/ui?auth_error=<why>`), `DELETE /me/identities/<p>/<sub>`;
+  `/me` carries `doors` + `identities`; `/version` names the doors and the
+  signup policy; the hourly sweep drops expired `oidc_state`.
+- Page: doors on the login card (last door used marked, localStorage
+  `revDoor`), `?auth_error` on the card, `?welcome` as a toast, Account
+  tab "SIGN IN WITH" (list, remove, add <door>).
+- Deploy: `docker/compose.yml` reads `env_file: $SERVER_DATA/reveille.env`
+  (`required: false`) -- the six credential lines and an optional
+  `REVEILLE_SIGNUP` live there, mode 600, never in git or the Makefile;
+  `make up` derives `REVEILLE_PUBLIC_URL=https://$(PROXY_SITE)` (override
+  `PUBLIC_URL=` for a plain-http eval).
+- Gates 1-9 in `tests/test_sign_in_with.py` against an in-process stub
+  provider (Authlib's client exercised through httpx's ASGI transport,
+  RS256 id_tokens, PKCE verifier checked by the stub); gate 10's real
+  providers on the eval box are a PR comment.
+- Not in this slice: `login_hint` from a remembered email (the route takes
+  it; the page does not yet remember one), `/` redirect (no `/` route
+  exists), slice 2 (password door closes).

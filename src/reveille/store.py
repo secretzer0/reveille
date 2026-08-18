@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -134,6 +134,40 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id    TEXT NOT NULL REFERENCES users(id),
     created_ns INTEGER NOT NULL,
     expires_ns INTEGER NOT NULL
+);
+-- DES-018: a provider identity is a CREDENTIAL of a person, not a person.
+-- (provider, subject) is the key; email is a hint kept for linking + display.
+CREATE TABLE IF NOT EXISTS identities (
+    provider       TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    user_id        TEXT NOT NULL REFERENCES users(id),
+    email          TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    display_name   TEXT,
+    avatar_url     TEXT,
+    raw_profile    TEXT,
+    created_ns     INTEGER NOT NULL,
+    last_login_ns  INTEGER,
+    PRIMARY KEY (provider, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_identities_user  ON identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_identities_email ON identities(email);
+-- Authlib's state/nonce/code_verifier and our browser marker, server-side,
+-- swept by TTL. Nothing of the login lives in a signed cookie.
+CREATE TABLE IF NOT EXISTS oidc_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    expires_ns INTEGER NOT NULL
+);
+-- Every link / unlink / federated signup, durable (DES-018 s5).
+CREATE TABLE IF NOT EXISTS identity_audit (
+    id       INTEGER PRIMARY KEY,
+    action   TEXT NOT NULL CHECK (action IN ('signup','link','unlink')),
+    provider TEXT NOT NULL,
+    subject  TEXT NOT NULL,
+    user_id  TEXT NOT NULL,
+    actor    TEXT NOT NULL,
+    ts_ns    INTEGER NOT NULL
 );
 -- A room name is unique per owner, not globally: two users may each own a
 -- "Reveille". The UI disambiguates by showing "owner -> room", which is exactly
@@ -1638,6 +1672,44 @@ def _upgrade_v27(conn, db_path):
         conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _upgrade_v28(conn, db_path):
+    """v28 -> v29 (DES-018 slice 1): identities, oidc_state, identity_audit.
+    Additive: three empty tables; nothing existing is read or rewritten."""
+    with tx(conn):
+        _exec_script(conn, """
+CREATE TABLE IF NOT EXISTS identities (
+    provider       TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    user_id        TEXT NOT NULL REFERENCES users(id),
+    email          TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    display_name   TEXT,
+    avatar_url     TEXT,
+    raw_profile    TEXT,
+    created_ns     INTEGER NOT NULL,
+    last_login_ns  INTEGER,
+    PRIMARY KEY (provider, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_identities_user  ON identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_identities_email ON identities(email);
+CREATE TABLE IF NOT EXISTS oidc_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    expires_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS identity_audit (
+    id       INTEGER PRIMARY KEY,
+    action   TEXT NOT NULL CHECK (action IN ('signup','link','unlink')),
+    provider TEXT NOT NULL,
+    subject  TEXT NOT NULL,
+    user_id  TEXT NOT NULL,
+    actor    TEXT NOT NULL,
+    ts_ns    INTEGER NOT NULL
+);
+""")
+        conn.execute("PRAGMA user_version=29")
+
+
 def _upgrade_v24(conn, db_path):
     """v24 -> v25: voices.personal -- a voice that exists only for its uploader
     (ruling 11155). Additive column; existing voices are bank voices."""
@@ -1758,7 +1830,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27)}
+              21, 22, 23, 24, 25, 26, 27, 28)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2011,6 +2083,204 @@ def resolve_session(conn, secret):
 
 def delete_session(conn, secret):
     conn.execute("DELETE FROM sessions WHERE id_hash=?", (_sha(secret),))
+
+
+def rotate_session(conn, old_secret, user_id):
+    """A login issues a FRESH session id and kills the one the browser carried
+    (fixation, DES-018 s7): whatever cookie a page held before authenticating
+    never becomes the authenticated one."""
+    if old_secret:
+        delete_session(conn, old_secret)
+    return create_session(conn, user_id)
+
+
+# ---- DES-018: doors (federated identities) -----------------------------------
+
+OIDC_PW = "!oidc"          # never a valid hash: a federated-only account has no password door
+
+
+def identity_get(conn, provider, subject):
+    r = conn.execute("SELECT * FROM identities WHERE provider=? AND subject=?",
+                     (provider, str(subject))).fetchone()
+    return dict(r) if r else None
+
+
+def identities_of(conn, user_id):
+    return [dict(r) for r in conn.execute(
+        "SELECT provider, subject, email, email_verified, display_name, avatar_url, "
+        "created_ns, last_login_ns FROM identities WHERE user_id=? ORDER BY provider",
+        (user_id,))]
+
+
+def _identity_audit(conn, action, provider, subject, user_id, actor):
+    conn.execute("INSERT INTO identity_audit(action, provider, subject, user_id, actor, ts_ns) "
+                 "VALUES(?,?,?,?,?,?)", (action, provider, str(subject), user_id, actor,
+                                         time.time_ns()))
+
+
+def _identity_upsert(conn, provider, profile, user_id, now):
+    conn.execute(
+        "INSERT INTO identities(provider, subject, user_id, email, email_verified, "
+        "display_name, avatar_url, raw_profile, created_ns, last_login_ns) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(provider, subject) DO UPDATE SET email=excluded.email, "
+        "email_verified=excluded.email_verified, display_name=excluded.display_name, "
+        "avatar_url=excluded.avatar_url, raw_profile=excluded.raw_profile, "
+        "last_login_ns=excluded.last_login_ns",
+        (provider, str(profile["subject"]), user_id, profile.get("email"),
+         1 if profile.get("email_verified") else 0, profile.get("display_name"),
+         profile.get("avatar_url"), json.dumps(profile.get("raw") or {}), now, now))
+
+
+def link_identity(conn, provider, profile, user_id, actor):
+    """s5.1: a SIGNED-IN person adds a door. Both sides proven (session +
+    provider). A door already attached to ANOTHER account is refused: it is
+    that person's credential, and moving it is how one person takes another's
+    login."""
+    cur = identity_get(conn, provider, profile["subject"])
+    if cur and cur["user_id"] != user_id:
+        raise BusError(f"this {provider} account is already the door of another user here")
+    now = time.time_ns()
+    with tx(conn):
+        _identity_upsert(conn, provider, profile, user_id, now)
+        if not cur:
+            _identity_audit(conn, "link", provider, profile["subject"], user_id, actor)
+    return identity_get(conn, provider, profile["subject"])
+
+
+def unlink_identity(conn, user_id, provider, subject, actor, admin=False):
+    """A person may remove a door if another way in remains (another door, or a
+    working password); nobody may lock themselves out. Admin may unlink any."""
+    cur = identity_get(conn, provider, subject)
+    if not cur or (cur["user_id"] != user_id and not admin):
+        raise NotFound("no such door")
+    owner = cur["user_id"]
+    if not admin:
+        others = conn.execute("SELECT count(*) FROM identities WHERE user_id=? "
+                              "AND NOT (provider=? AND subject=?)",
+                              (owner, provider, str(subject))).fetchone()[0]
+        pw = conn.execute("SELECT pw_hash FROM users WHERE id=?", (owner,)).fetchone()["pw_hash"]
+        if not others and not (pw or "").startswith("scrypt$"):
+            raise BusError("this is your only way in -- add another door before removing it")
+    with tx(conn):
+        conn.execute("DELETE FROM identities WHERE provider=? AND subject=?",
+                     (provider, str(subject)))
+        _identity_audit(conn, "unlink", provider, subject, owner, actor)
+
+
+def users_with_verified_email(conn, email):
+    """Live users holding a door whose VERIFIED email is exactly this one -- the
+    only kind of email match that may attach a door at login (s5.2)."""
+    if not email:
+        return []
+    return [r["user_id"] for r in conn.execute(
+        "SELECT DISTINCT i.user_id FROM identities i JOIN users u ON u.id=i.user_id "
+        "WHERE i.email=? AND i.email_verified=1 AND u.deleted_ns IS NULL", (email,))]
+
+
+def derive_user_name(conn, hint):
+    """The zero-screen name (s6): the provider's handle / email local-part,
+    lowercased, mapped through NAME_RE (illegal runs -> '-'), collision -> -2, -3."""
+    base = re.sub(r"[^A-Za-z0-9_-]+", "-", (hint or "").split("@")[0].lower()).strip("-_")[:60]
+    base = base or "user"
+    name, n = base, 1
+    while conn.execute("SELECT 1 FROM users WHERE name=?", (name,)).fetchone():
+        n += 1
+        name = f"{base}-{n}"
+    return name
+
+
+def signup_allowed(policy, email, verified):
+    """REVEILLE_SIGNUP: 'open' | 'closed' | 'dom1,dom2' (only VERIFIED emails in
+    those domains may create accounts). Returns (ok, why)."""
+    policy = (policy or "open").strip().lower()
+    if policy == "open":
+        return True, ""
+    if policy == "closed":
+        return False, "signup is closed on this broker -- ask an admin for an invite"
+    domains = {d.strip().lstrip("@") for d in policy.split(",") if d.strip()}
+    if not verified or not email or email.rsplit("@", 1)[-1].lower() not in domains:
+        return False, ("signup here needs a verified email in: " + ", ".join(sorted(domains)))
+    return True, ""
+
+
+def federated_login(conn, provider, profile, signup_policy="open", actor="web"):
+    """s5/s6, the one rule for a NOT-signed-in callback. Returns
+    {"user": {...}, "how": known|linked|signup, "banner": name-or-None}.
+
+    known: (provider, subject) is a door -> that person (a tombstoned person is
+    refused: their doors do not become someone else's). linked: unknown door,
+    provider asserts a VERIFIED email, exactly ONE live user holds a door with
+    that verified email -> attach + sign in (Ory rule; defeats pre-hijack).
+    Otherwise a NEW account under the signup policy -- unless a user with that
+    (even unverified) email exists, in which case "use your other door" (a link,
+    not a dead end): merging on an unverified or ambiguous email is the hijack.
+    """
+    subject = str(profile["subject"])
+    now = time.time_ns()
+    cur = identity_get(conn, provider, subject)
+    if cur:
+        u = conn.execute("SELECT id, name, role, deleted_ns FROM users WHERE id=?",
+                         (cur["user_id"],)).fetchone()
+        if u["deleted_ns"]:
+            raise AuthError("this account was deleted")
+        with tx(conn):
+            _identity_upsert(conn, provider, profile, u["id"], now)
+        return {"user": {"id": u["id"], "name": u["name"], "role": u["role"]},
+                "how": "known", "banner": None}
+    email, verified = profile.get("email"), bool(profile.get("email_verified"))
+    matches = users_with_verified_email(conn, email) if verified else []
+    if len(matches) == 1:
+        u = conn.execute("SELECT id, name, role FROM users WHERE id=?", (matches[0],)).fetchone()
+        with tx(conn):
+            _identity_upsert(conn, provider, profile, u["id"], now)
+            _identity_audit(conn, "link", provider, subject, u["id"], actor)
+        return {"user": dict(u), "how": "linked", "banner": None}
+    other = conn.execute(
+        "SELECT count(DISTINCT i.user_id) FROM identities i JOIN users u ON u.id=i.user_id "
+        "WHERE i.email=? AND u.deleted_ns IS NULL", (email,)).fetchone()[0] if email else 0
+    if len(matches) > 1 or other:
+        raise AuthError(f"an account with {email} already exists here -- sign in with the "
+                        f"door you used before, then add {provider} in your profile")
+    ok, why = signup_allowed(signup_policy, email, verified)
+    if not ok:
+        raise AuthError(why)
+    hint = profile.get("login") or email or profile.get("display_name") or provider
+    name = derive_user_name(conn, hint)
+    uid = _uuid()
+    first = not any_users(conn)
+    with tx(conn):
+        conn.execute("INSERT INTO users(id, name, pw_hash, role, created_ns) VALUES(?,?,?,?,?)",
+                     (uid, name, OIDC_PW, "admin" if first else "user", now))
+        if first:
+            conn.execute("UPDATE rooms SET owner_id=? WHERE owner_id IS NULL", (uid,))
+        _identity_upsert(conn, provider, profile, uid, now)
+        _identity_audit(conn, "signup", provider, subject, uid, actor)
+    return {"user": {"id": uid, "name": name, "role": "admin" if first else "user"},
+            "how": "signup", "banner": name, "first_admin": first}
+
+
+def oidc_state_get(conn, key):
+    r = conn.execute("SELECT value, expires_ns FROM oidc_state WHERE key=?", (key,)).fetchone()
+    if not r:
+        return None
+    if r["expires_ns"] < time.time_ns():
+        conn.execute("DELETE FROM oidc_state WHERE key=?", (key,))
+        return None
+    return r["value"]
+
+
+def oidc_state_set(conn, key, value, ttl_s):
+    conn.execute("INSERT OR REPLACE INTO oidc_state(key, value, expires_ns) VALUES(?,?,?)",
+                 (key, value, time.time_ns() + int(ttl_s * 1e9)))
+
+
+def oidc_state_delete(conn, key):
+    conn.execute("DELETE FROM oidc_state WHERE key=?", (key,))
+
+
+def sweep_oidc_state(conn):
+    return conn.execute("DELETE FROM oidc_state WHERE expires_ns < ?", (time.time_ns(),)).rowcount
 
 
 # ---- tokens ------------------------------------------------------------------

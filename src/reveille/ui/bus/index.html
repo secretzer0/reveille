@@ -667,6 +667,16 @@
  #loginCard button{width:100%;margin-top:1.3rem;background:var(--gold);color:#14161a;
   border:0;border-radius:8px;padding:.6rem;font:inherit;font-weight:800;cursor:pointer}
  #loginErr{color:#e8555a;font-size:.78rem;min-height:1.1em;margin-top:.5rem}
+ /* DES-018: the doors -- one anchor per configured provider, above the password form */
+ #liDoors:empty,#liOr:empty{display:none}
+ .door{display:block;text-align:center;border:1px solid var(--line);border-radius:8px;
+  padding:.55rem;margin:.45rem 0;color:var(--ink);text-decoration:none;font-size:.85rem;
+  background:var(--rail)}
+ .door:hover{border-color:var(--gold)}
+ .door.last::after{content:" -- last used";color:var(--faint);font-size:.72rem}
+ #liOr{color:var(--faint);font-size:.72rem;text-align:center;margin:.6rem 0 .2rem;
+  letter-spacing:.14em}
+ .doorRow .door{display:inline-block;margin:.2rem .4rem .2rem 0;padding:.3rem .6rem}
 
  /* ---- recipient picker ---- */
  #toWrap{position:relative}
@@ -987,6 +997,8 @@
  <div id="loginCard">
   <h1>REVEILLE</h1>
   <p id="liBlurb"></p>
+  <div id="liDoors"></div>
+  <div id="liOr"></div>
   <label for="liName">USERNAME</label>
   <input id="liName" autocomplete="username" autocapitalize="none" spellcheck="false">
   <label for="liPass">PASSWORD</label>
@@ -1123,12 +1135,34 @@ let setupMode=false;
 // written -- the markup ships it empty rather than carrying a copy that can drift.
 function showLogin(msg){
  $('liBlurb').textContent=setupMode
-  ? 'first run -- create the admin account'
+  ? 'first run -- the first person in is the admin'
   : 'fleet comms';
  $('liGo').textContent=setupMode?'Create admin':'Sign in';
  $('loginErr').textContent=msg||'';
  $('login').classList.add('on');$('liName').focus();
+ paintDoors();   // in setup mode too: the first federated signup is the admin (DES-018 s6)
 }
+// DES-018: the doors beside the password form. /auth/doors is public (the card
+// asks before anyone is signed in); the last door used is remembered in this
+// browser only, and marked -- one glance, no guessing which account was which.
+const DOOR_LABEL={google:'Google',github:'GitHub',microsoft:'Microsoft'};
+async function paintDoors(){
+ let d;try{d=await (await fetch('/auth/doors')).json();}catch(e){return;}
+ const last=localStorage.revDoor||'';
+ $('liDoors').innerHTML=(d.doors||[]).map(x=>'<a class="door'+(x.name===last?' last':'')+
+  '" href="/auth/'+x.name+'/login" data-door="'+x.name+'">Continue with '+
+  esc(x.label||DOOR_LABEL[x.name]||x.name)+'</a>').join('');
+ $('liOr').textContent=(d.doors||[]).length?'OR WITH A PASSWORD':'';
+ for(const a of $('liDoors').querySelectorAll('a'))
+  a.onclick=()=>{localStorage.revDoor=a.dataset.door;};
+}
+// The callback lands the browser on /ui?auth_error=<why> (refused: one line, the
+// buttons again) or /ui?welcome=<name> (first sign-in banner). Read once, then
+// scrub the URL so a reload does not repeat it.
+const authQ=new URLSearchParams(location.search);
+const authErr=authQ.get('auth_error'),authWelcome=authQ.get('welcome');
+if(authErr||authWelcome){authQ.delete('auth_error');authQ.delete('welcome');
+ history.replaceState(null,'',location.pathname+(authQ.toString()?'?'+authQ:'')+location.hash);}
 $('liGo').onclick=async()=>{
  const body={name:$('liName').value.trim(),password:$('liPass').value};
  let r=await fetch(setupMode?'/setup':'/login',
@@ -4337,8 +4371,20 @@ function openAccount(){
  // feature. This modal is core bus UI (the password lives here), so the
  // section FAIL-SOFTS: a dead launcher changes this one div's text and
  // nothing else.
+ const mine=me.identities||[],doors=me.doors||[];
  panel('account',
-  '<div class="pSec">CHANGE YOUR PASSWORD</div>'+
+  (doors.length?
+   '<div class="pSec">SIGN IN WITH</div>'+
+   '<div class="pDim">Each door is one credential of this account; a provider identity that '+
+   'is already another account\'s door cannot be added here. Your last way in cannot be '+
+   'removed unless a password is set.</div>'+
+   mine.map(i=>'<div class="pRow"><span>'+esc(DOOR_LABEL[i.provider]||i.provider)+
+    (i.email?' -- '+esc(i.email):'')+(i.display_name?' ('+esc(i.display_name)+')':'')+
+    '</span><button data-unlink="'+esc(i.provider)+'/'+encodeURIComponent(i.subject)+'">remove</button></div>').join('')+
+   '<div class="pRow doorRow">'+doors.filter(n=>!mine.some(i=>i.provider===n)).map(n=>
+    '<a class="door" href="/auth/'+n+'/login?link=1">add '+esc(DOOR_LABEL[n]||n)+'</a>').join('')+
+   '</div>':'')+
+  '<div class="pSec">'+(mine.length?'PASSWORD':'CHANGE YOUR PASSWORD')+'</div>'+
   '<div class="pDim">Your current password is required -- without it, a borrowed unlocked '+
   'browser could take the account. Changing it signs out every other session.</div>'+
   '<div class="pRow"><input id="pwOld" type="password" placeholder="current password"></div>'+
@@ -4372,6 +4418,9 @@ function openAccount(){
    toast('password changed');openAccount();}catch(e){toast(e.message);}};
  for(const id of ['pwOld','pwNew','pwNew2'])
   $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('pwGo').click();});
+ for(const b of document.querySelectorAll('[data-unlink]'))
+  b.onclick=async()=>{try{await api('/me/identities/'+b.dataset.unlink,{method:'DELETE'});
+   me=await api('/me');toast('door removed');openAccount();}catch(e){toast(e.message);}};
  if(typeof AGBASE!=='undefined'){refreshLoginSection();wireCredentials();}
 }
 // The credentials block, launcher-fed and fail-soft for the same reason the
@@ -4553,8 +4602,9 @@ fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+
 (async function boot(){
  let d;
  try{d=await api('/me');}
- catch(e){setupMode=false;showLogin();return;}
- if(d.setup){setupMode=true;showLogin();return;}   // zero users: bootstrap the first admin
+ catch(e){setupMode=false;showLogin(authErr||'');return;}
+ if(authWelcome)toast(authWelcome,true);
+ if(d.setup){setupMode=true;showLogin(authErr||'');return;}   // zero users: bootstrap the first admin
  me=d;myName=d.name;
  // A brand-new user owns no room and no public one exists yet: that is a first-run state,
  // NOT a failed sign-in. Bouncing them to the login card said "your password is wrong" and
@@ -4564,6 +4614,8 @@ fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+
  if(!room||!d.rooms.some(r=>r.id===room))room=d.rooms[0].id;
  localStorage.revRoom=room;
  paintMe();updateBlast();loadBacklog(true);loadPresence();connect();start();
+ // Back from adding a door (DES-018): land in Account, where the door now shows.
+ if(location.hash==='#doors'){history.replaceState(null,'',location.pathname);openAccount();}
  // First-run directive (ruling 8633): a user whose home-login agents have NO
  // login on file is told at sign-in, ONCE per condition, by being taken to
  // the place that says the one command -- and only when it actually applies
