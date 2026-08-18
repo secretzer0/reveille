@@ -79,6 +79,13 @@ def settings_path():
 
 
 MCP_ALLOW = "mcp__reveille"
+# The upload CLI (ruling 11449): a file's bytes go over plain HTTP, never through
+# the model's context, and the ONLY frictionless way to run that HTTP is a named
+# binary the settings pre-approve -- a narrow Bash rule resolves before any
+# permission prompt or auto-mode classifier. Prefix rule, word boundary: it
+# allows `reveille-upload <anything>` and nothing else.
+UPLOAD_ALLOW = "Bash(reveille-upload *)"
+ALLOW = (MCP_ALLOW, UPLOAD_ALLOW)
 
 
 def ensure_allow(settings):
@@ -88,13 +95,14 @@ def ensure_allow(settings):
     configured -- and the first real bus call still needed an approval nobody
     was there to give. The explicit allow rule is how a user pre-approves a
     tool in settings.json; its scope is the one server this installer itself
-    registers, no wider. Returns a step line, or None when the rule is already
-    present."""
+    registers plus the one binary it ships for files, no wider. Returns a step
+    line, or None when every rule is already present."""
     allow = settings.setdefault("permissions", {}).setdefault("allow", [])
-    if MCP_ALLOW in allow:
+    added = [r for r in ALLOW if r not in allow]
+    if not added:
         return None
-    allow.append(MCP_ALLOW)
-    return f"permissions: {MCP_ALLOW} allowed (the bus tools work on first use)"
+    allow.extend(added)
+    return f"permissions: {', '.join(added)} allowed (the bus tools work on first use)"
 
 
 def main():

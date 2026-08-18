@@ -698,7 +698,7 @@ def _settings_naming(cfg, command):
     (cfg / "settings.json").write_text(json.dumps(
         {"hooks": {"Stop": [{"hooks": [{"type": "command",
                                         "command": command}]}]},
-         "permissions": {"allow": [install.MCP_ALLOW]}},
+         "permissions": {"allow": list(install.ALLOW)}},
         indent=2) + "\n")
     return cfg / "settings.json"
 

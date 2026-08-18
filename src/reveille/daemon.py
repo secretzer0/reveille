@@ -224,6 +224,27 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.133 A TERSE RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE (operator
+11475, ruling 11476/11483; DES-013 s5/s7 amended). tts-<mid>.webm/.m4a is
+kept only when the message is not scriptable (human verbatim, unbound, no
+persona), or was made from a script, or no writer is configured at all. A
+terse fallback -- the configured writer down, past its budget, or skipped
+for depth -- is synthesized, streamed to whoever asked or was
+listening (its .part lingers 60 s for a late fetch), then unlinked; the
+feed's audio frame says `terse: true` and the page keeps the icon hollow.
+The play click always POSTs /audio/<mid> first and follows the state, so
+the next click with the writer up makes the script and THEN the file.
+Boot sweeps terse files that became durable before this rule (agent key +
+assigned persona'd voice + no script row). Bus tools unchanged.
+0.2.132 FILES GO OVER HTTP, BY NAME (operator 11448, ruling 11449). New
+console script `reveille-upload <file> [--room <id>] [--name <n>]`: reads
+REVEILLE_URL/REVEILLE_TOKEN/REVEILLE_AGENT_ROLE from the env, POSTs the raw
+bytes to /upload, prints the attachment dict for send(). `reveille init`
+(and every container boot, which runs it) now pre-approves
+"Bash(reveille-upload *)" beside "mcp__reveille", so an agent attaches a
+picture with no permission prompt and no classifier in the way. The MCP
+upload() tool stays for text-sized files only and says so. Bus tools
+unchanged.
 0.2.131 THE PAGE FITS A PHONE (operator 11439: "almost unusable" in Chrome
 or Safari on a phone). Below 760px the rail -- rooms, agents filter,
 settings, logout -- is a drawer behind a menu button in the top bar (it
@@ -2048,6 +2069,12 @@ _tts_inflight = {}
 # second click while queued is answered, not queued twice; the worker drops the
 # id the moment it takes the item, and _tts_inflight carries it from there.
 _tts_requested = set()
+# A TERSE RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE (ruling 11476): it
+# streams and is heard, then its .part is unlinked after this many seconds --
+# long enough for a listener's fetch, never long enough to become the record.
+# The next click, with the writer up, makes the script and THEN the file.
+TERSE_LINGER_S = 60.0
+_tts_linger = {}               # mid -> Timer that unlinks the lingering terse .part
 
 # ---- the script writer (DES-013 section 5): a second worker, the same shape ----
 # as voices. It CALLS a model behind an opt-in URL (DES-001 G4 as amended: the
@@ -2213,11 +2240,11 @@ def _script_one(item, url, model, token, first_timeout, wait=False):
     except Exception as e:
         log.info("script: %s falls to terse: %s", mid, e)
         stream.q.put(None)
-        _tts_q.put((mid, room, speaker, text, assigned))
+        _tts_q.put((mid, room, speaker, text, assigned, False))   # heard, not kept (11476)
         return False
     # THE FIRST SENTENCE CLOSED INSIDE THE BUDGET: this message holds its place
     # in the synth queue NOW, and the feed learns a script exists.
-    _tts_q.put((mid, room, speaker, stream, assigned))
+    _tts_q.put((mid, room, speaker, stream, assigned, True))
     _feed_push(room, {"event": "script", "id": mid, "text": sentences[0], "voice_id": voice["id"]})
     full = ""
     for x in sentences:
@@ -2295,13 +2322,13 @@ def _script_worker(url, model, token, first_timeout):
         if item is None:
             return
         mid, room, speaker, text, assigned = item[:5]
-        if len(item) == 5:
+        if len(item) == 6:
             _tts_q.put(item)
             continue
         if _script_q.qsize() > SCRIPT_MAX:
             log.warning("script skipped for %s -- falling behind (%d queued)", mid,
                         _script_q.qsize())
-            _tts_q.put((mid, room, speaker, text, assigned))
+            _tts_q.put((mid, room, speaker, text, assigned, False))  # heard, not kept (11476)
             continue
         _script_one(item, url, model, token, first_timeout)
 
@@ -2765,8 +2792,10 @@ def _tts_worker(url, token, timeout):
         item = _tts_q.get()
         if item is None:
             return
-        mid, room, speaker, text, assigned = item
+        mid, room, speaker, text, assigned, keep = item
         _tts_requested.discard(mid)
+        if (t := _tts_linger.pop(mid, None)):
+            t.cancel()                    # a new render for this id: the old terse .part goes now
         if first:
             # DEVICE REPORTED, NEVER INFERRED (section 4.1): a container with no
             # GPU reservation synthesizes on the CPU while looking perfectly
@@ -2808,13 +2837,24 @@ def _tts_worker(url, token, timeout):
                     f.write(b)
                     f.flush()
                     if not announced:
-                        _feed_push(room, {"event": "audio", "id": mid})
+                        # `terse` on the frame: the page keeps the icon hollow --
+                        # what plays now is not the record, a click makes it.
+                        _feed_push(room, {"event": "audio", "id": mid,
+                                          **({} if keep else {"terse": True})})
                         announced = True
             if not announced:
                 raise OSError("upstream sent no audio")
-            # A rename that finds no .part is a message deleted mid-flight:
-            # fail closed, no .webm lands, nothing to orphan.
-            os.replace(part, _files_dir / f"tts-{mid}.webm")
+            if keep:
+                # A rename that finds no .part is a message deleted mid-flight:
+                # fail closed, no .webm lands, nothing to orphan.
+                os.replace(part, _files_dir / f"tts-{mid}.webm")
+            else:
+                # NEVER DURABLE (11476): heard through the tail and by anyone
+                # fetching within the linger, then gone. No .m4a either.
+                t = threading.Timer(TERSE_LINGER_S, _unlink_terse, (mid, part))
+                t.daemon = True
+                _tts_linger[mid] = t
+                t.start()
         except Exception as e:
             log.warning("tts: audio for %s abandoned: %s", mid, e)
             with contextlib.suppress(OSError):
@@ -2831,6 +2871,12 @@ def _tts_worker(url, token, timeout):
         # same sweep. A failed .m4a is logged and the .webm stands.
         if (_files_dir / f"tts-{mid}.webm").is_file() and _m4a_from_webm(mid):
             _feed_push(room, {"event": "audio_m4a", "id": mid})
+
+
+def _unlink_terse(mid, part):
+    _tts_linger.pop(mid, None)
+    with contextlib.suppress(OSError):
+        os.unlink(part)
 
 
 def _m4a_from_webm(mid):
@@ -2865,6 +2911,41 @@ def _sweep_abandoned_audio(files_dir):
                 log.info("tts: removed abandoned %s", p.name)
 
 
+def _sweep_terse_renditions(conn, files_dir):
+    """THE MIGRATION FOR RULING 11476, once per boot: a tts-<mid>.webm made
+    before this rule -- of a SCRIPTABLE message (agent key, assigned voice with a
+    persona) with NO script row -- is a terse rendition that became durable by
+    accident, and would answer "ready" forever. Unlink it (and its .m4a); the
+    next click makes the script and then the file. Human, unbound, no-persona
+    and scripted renditions are untouched. Runs only where a writer is
+    configured (11493): with none, a kept terse file is the right file.
+    Returns how many went."""
+    gone = 0
+    for p in pathlib.Path(files_dir).glob("tts-*.webm"):
+        mid = p.name[4:-5]
+        if not mid.isdigit():
+            continue
+        row = conn.execute("SELECT room, sender_agent_id FROM messages WHERE id=?",
+                           (int(mid),)).fetchone()
+        if row is None or not row["sender_agent_id"] or store.script_get(conn, int(mid)):
+            continue
+        # The assignment as it STANDS (no voice_for: that materializes a default,
+        # and a sweep must not write): no row = the digest voice = not scriptable.
+        a = conn.execute("SELECT voice_id FROM voice_assignments WHERE room_id=? AND speaker=?",
+                         (row["room"], f"agent:{row['sender_agent_id']}")).fetchone()
+        v = store.voice_get(conn, a["voice_id"]) if a else None
+        if not (v and (v.get("persona") or "").strip()):
+            continue
+        for q in (p, p.with_suffix(".m4a")):
+            with contextlib.suppress(OSError):
+                q.unlink()
+        gone += 1
+    if gone:
+        log.info("tts: %d terse rendition(s) of scriptable messages unlinked (11476): "
+                 "the next click scripts them", gone)
+    return gone
+
+
 def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
     """Queue one message for synthesis, if voices are on. Never blocks the send
     path: the queue is unbounded and the worker is the only thing that waits.
@@ -2894,13 +2975,21 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # the one derivation (section 2): user:<id> -> verbatim, agent:<id> ->
         # the writer. Persona stays a field on the voice; it never rewrites a
         # person.
-        scriptable = bool(key) and key.startswith("agent:")
-        if _script_on and scriptable and v and (v.get("persona") or "").strip():
+        scriptable = bool(key) and key.startswith("agent:") and bool(v) \
+            and bool((v.get("persona") or "").strip())
+        # The last field is KEEP (ruling 11476, 11493): a rendition is durable
+        # only when it is the message's own words (human, unbound, no persona),
+        # or made from a script, or no writer is CONFIGURED on this broker (then
+        # there is no later to wait for). A scriptable message spoken terse
+        # because the configured writer is down, past its budget or skipped for
+        # depth is heard and then unlinked, so the next click with the writer up
+        # makes the script and then the file.
+        if _script_on and scriptable:
             _script_q.put((mid, room, speaker, text, assigned, v, subject, body))
         elif _script_on:
-            _script_q.put((mid, room, speaker, text, assigned))
+            _script_q.put((mid, room, speaker, text, assigned, True))
         else:
-            _tts_q.put((mid, room, speaker, text, assigned))
+            _tts_q.put((mid, room, speaker, text, assigned, True))
 
 
 def _push_presence(room):
@@ -3499,11 +3588,16 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
 @mcp.tool()
 async def upload(name: str, data_b64: str, room: str = "",
                  ctx: Context = None) -> dict:
-    """Attach a FILE to the bus: base64 its bytes, pass the real filename, get
-    back the dict you put in send()'s `attachments` list.
+    """Attach a SMALL TEXT-SIZED file to the bus: base64 its bytes, pass the real
+    filename, get back the dict you put in send()'s `attachments` list.
 
-    upload(name="shot.png", data_b64=base64.b64encode(open("shot.png","rb").read()).decode())
-    -> {"url": "/files/...", "name": "shot.png", "bytes": n}
+    FOR ANYTHING ELSE -- a screenshot, an image, a log over a few KB -- THE WAY
+    IS THE CLI (ruling 11449):  reveille-upload shot.png [--room <id>]
+    It reads REVEILLE_URL/REVEILLE_TOKEN from your env, POSTs the raw bytes,
+    prints the same dict; `reveille init` pre-approves it, so no prompt.
+
+    upload(name="notes.txt", data_b64=base64.b64encode(open("notes.txt","rb").read()).decode())
+    -> {"url": "/files/...", "name": "notes.txt", "bytes": n}
 
     KEEP THE REAL EXTENSION on `name`: /files/* types the response from it and
     the web UI decides to show an image inline by testing it, so a file called
@@ -4770,11 +4864,13 @@ async def audio_http(request):
     # .wav is final if it exists at all. Checking the file first left a gap --
     # rename + drop between the two checks -- where a complete message 404s.
     done = _tts_inflight.get(mid)
+    part = _files_dir / f"tts-{mid}.webm.part"
     if done is None:
         if path.is_file():
             return FileResponse(path, media_type="audio/webm", headers=headers)
+        if part.is_file():            # a terse rendition still lingering (11476)
+            return FileResponse(part, media_type="audio/webm", headers=headers)
         return JSONResponse({"error": "not found"}, status_code=404)
-    part = _files_dir / f"tts-{mid}.webm.part"
     try:
         f = open(part, "rb")
     except OSError:
@@ -5677,6 +5773,7 @@ def main():
             _plaintext_banner(s_url, lan_ok, "the script writer")
             threading.Thread(target=_script_worker, args=(s_url, _script_model, s_token, first),
                              name="script", daemon=True).start()
+            _sweep_terse_renditions(_conn, _files_dir)   # 11476: only where a writer can script them
             print(f"scripts ON: {s_url} model={_script_model or '(server default)'} "
                   f"first-sentence budget {first:.1f}s + {SCRIPT_MS_PER_CHAR:g} ms/char", flush=True)
     # THE EAR does not ride on voices: a room can be typed-to by voice without

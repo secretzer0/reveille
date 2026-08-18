@@ -137,8 +137,9 @@ def test_the_first_closed_sentence_reaches_the_synth_queue_before_the_script_end
     t0 = time.monotonic()
     ok = daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5, wait=True)
     assert ok is True
-    mid, room, speaker, stream, assigned = daemon._tts_q.get_nowait()
+    mid, room, speaker, stream, assigned, keep = daemon._tts_q.get_nowait()
     assert isinstance(stream, daemon._SentenceStream) and assigned == world["item"][4]
+    assert keep is True, "a scripted rendition is the durable one (11476)"
     sentences = _drain_stream(stream)
     assert sentences == ["Rule of Acquisition one.", "Once you have their money, never give it back.",
                          "Hew-mons."]
@@ -160,7 +161,7 @@ def test_a_slow_first_sentence_or_a_dead_writer_speaks_the_terse_text_now(llama,
     _Llama.pace = 0.6                                       # 1.8 s to the first sentence
     ok = daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.0)
     assert ok is False
-    assert daemon._tts_q.get_nowait() == world["item"][:5], "terse, now"
+    assert daemon._tts_q.get_nowait() == world["item"][:5] + (False,), "terse, now -- and not kept (11476)"
     assert world["pushed"] == [] and store.script_get(world["c"], world["mid"]) is None
     _Llama.down = True
     ok = daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.0)
@@ -221,7 +222,7 @@ def test_the_synth_worker_appends_sentences_under_one_header(monkeypatch, tmp_pa
     st = daemon._SentenceStream()
     for x in ("One.", "gap.", "Two.", None):
         st.q.put(x)
-    daemon._tts_q.put((7, "r1", "quark", st, None))
+    daemon._tts_q.put((7, "r1", "quark", st, None, True))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert spoken == ["One.", "gap.", "Two."]
@@ -248,17 +249,28 @@ def test_enqueue_routes_to_the_writer_only_with_a_listener_and_a_persona(world, 
     assert it[:5] == (1, world["room"], "quark", "s. b", world["item"][4]) and it[5]["id"] == "quark"
     # A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357): the same
     # persona'd voice on a user:<id> key rides the writer's queue as the
-    # 5-tuple passthrough (message order kept), never as a script item.
+    # unscripted passthrough (message order kept), never as a script item --
+    # and KEPT: a person's own words are the durable rendition (11476).
     daemon._tts_enqueue(9, world["room"], "travis", "s", "b", key="user:u1")
     it = daemon._script_q.get_nowait()
-    assert daemon._tts_q.empty() and it[:4] == (9, world["room"], "travis", "s. b") and len(it) == 5
+    assert daemon._tts_q.empty() and it[:4] == (9, world["room"], "travis", "s. b") and len(it) == 6
     assert it[4] == world["item"][4], "the human keeps their assigned voice, verbatim"
+    assert it[5] is True
+    # NO WRITER CONFIGURED (11493): the same persona'd agent message is KEPT --
+    # there is no later in which a script could be made.
+    monkeypatch.setattr(daemon, "_script_on", False)
+    daemon._tts_enqueue(3, world["room"], "quark", "s", "b", key="agent:x")
+    it = daemon._tts_q.get_nowait()
+    assert it[:4] == (3, world["room"], "quark", "s. b") and it[5] is True
+    monkeypatch.setattr(daemon, "_script_on", True)
     # No persona -> STILL the writer's queue (the one ordering point), as the
-    # 5-tuple the worker passes straight through.
+    # unscripted item the worker passes straight through -- kept, no persona
+    # means nothing would ever script it (11476 (a)).
     store.voice_patch(world["c"], "quark", persona="")
     daemon._tts_enqueue(2, world["room"], "quark", "s", "b", key="agent:x")
     it = daemon._script_q.get_nowait()
-    assert daemon._tts_q.empty() and it[:4] == (2, world["room"], "quark", "s. b") and len(it) == 5
+    assert daemon._tts_q.empty() and it[:4] == (2, world["room"], "quark", "s. b") and len(it) == 6
+    assert it[5] is True
     assert it[4].startswith("bank-quark-")           # the patch moved updated_ns: a new clip name
     # Writer off -> the synth queue directly.
     monkeypatch.setattr(daemon, "_script_on", False)
@@ -316,7 +328,7 @@ def test_a_scripted_message_holds_its_place_ahead_of_the_terse_one_after_it(llam
     _Llama.tokens = ["Slow ", "opening ", "line. ", "Then a long ", "tail. ", "End."]
     _Llama.pace = 0.2                                        # ~0.6 s to the first sentence
     n = world["item"]
-    n1 = (n[0] + 1, n[1], "worf", "terse from worf", None)
+    n1 = (n[0] + 1, n[1], "worf", "terse from worf", None, True)
     daemon._script_q.put(n)
     daemon._script_q.put(n1)
     daemon._script_q.put(None)
