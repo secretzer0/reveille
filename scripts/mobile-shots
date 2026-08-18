@@ -12,7 +12,9 @@ Seeds a throwaway broker (one human, one room, one agent, a handful of
 messages incl. a 200-char unbroken token, a 300-char subject and a code block,
 ear ON so talk/listen/auto-send show), signs the human in, and walks the
 scenes on iPhone 14 and Pixel 7, portrait AND landscape (operator 11456):
-signin, room, drawer (the rail), settings, voices. Then the RANGE (ruling
+signin, room, sheet (rooms/agents/me), find, "+" (the composer's row), a
+tapped row, me, settings, voices -- plus one 1280x800 desktop shot whose
+sha256 must match main's (DES-016 s4: desktop untouched). Then the RANGE (ruling
 11483 B: devices are only names for viewports): the room scene at 320, 360,
 390, 430 wide portrait and 640, 740, 852, 932 landscape. Every shot asserts
 layout width == the glass (visualViewport), document.scrollWidth <= it, AND
@@ -149,30 +151,59 @@ def scenes(ctx, url, out, tag):
     shoot(p, out, f"{tag}-signin")
     login(p)
     shoot(p, out, f"{tag}-room")
-    if p.locator("#railBtn").is_visible():
-        p.locator("#railBtn").tap()
-        p.wait_for_timeout(300)
-        shoot(p, out, f"{tag}-drawer")
-        p.locator("#brand").tap()
-        p.wait_for_timeout(200)
-        p.locator("#railBtn").tap()
-        p.wait_for_timeout(200)
-    if not p.locator("#meCard").is_visible():
-        # No way to reach Settings/logout on this screen: that IS the finding
-        # (DES-016 s1.1), and a gate failure, not a scene to skip quietly.
-        FAILED.append(f"{tag}-settings-unreachable")
-        print(f"   {tag}: Settings/logout UNREACHABLE (no rail, no menu) -- gate red")
-        p.close()
-        return
-    p.locator("#meCard").tap()
-    p.wait_for_timeout(200)
-    p.locator("#miSettings").tap()
-    p.wait_for_timeout(600)
+    phone = p.locator("#roomBtn").is_visible()          # under 640 px: the header bar exists
+    if phone:
+        # THE SHEET: room name -> rooms, agents, me; a tap on the well closes it.
+        p.locator("#roomBtn").tap(); p.wait_for_timeout(300)
+        shoot(p, out, f"{tag}-sheet")
+        p.locator("#brand").tap(); p.wait_for_timeout(200)
+        # FIND: filter + history behind one button.
+        p.locator("#toolsBtn").tap(); p.wait_for_timeout(200)
+        shoot(p, out, f"{tag}-find")
+        p.locator("#toolsBtn").tap(); p.wait_for_timeout(200)
+        # THE "+": to, subject, talk, listen, auto-send, attach.
+        p.locator("#moreBtn").tap(); p.wait_for_timeout(200)
+        shoot(p, out, f"{tag}-plus")
+        p.locator("#moreBtn").tap(); p.wait_for_timeout(200)
+        # A tapped row shows its tools (id, thread, delete, audio) -- no hover on a phone.
+        p.locator("#feed .row").last.tap(); p.wait_for_timeout(200)
+        shoot(p, out, f"{tag}-rowtap")
+        p.locator("#feed .row").last.tap(); p.wait_for_timeout(200)
+        # ME: settings/logout from the header bar.
+        p.locator("#meBtn").tap(); p.wait_for_timeout(200)
+        shoot(p, out, f"{tag}-me")
+        p.locator("#phSettings").tap(); p.wait_for_timeout(600)
+    else:
+        if not p.locator("#meCard").is_visible():
+            # No way to reach Settings/logout on this screen: that IS the finding
+            # (DES-016 s1.1), and a gate failure, not a scene to skip quietly.
+            FAILED.append(f"{tag}-settings-unreachable")
+            print(f"   {tag}: Settings/logout UNREACHABLE (no rail, no menu) -- gate red")
+            p.close()
+            return
+        p.locator("#meCard").tap(); p.wait_for_timeout(200)
+        p.locator("#miSettings").tap(); p.wait_for_timeout(600)
     shoot(p, out, f"{tag}-settings")
     p.locator('#panTabs .tab[data-tab="voices"]').tap(timeout=5000)
     p.wait_for_timeout(600)
     shoot(p, out, f"{tag}-voices")
     p.close()
+
+
+def desktop(browser, url, out):
+    """DES-016 s4: the desktop is untouched above 640 px. One 1280x800 shot of the
+    room, and its sha256 printed -- run on main and on the branch, the two must
+    match byte for byte (fonts and time strings are the same scratch seed)."""
+    import hashlib
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, device_scale_factor=1)
+    p = signin(ctx, url); login(p)
+    p.evaluate("for (const t of document.querySelectorAll('time')) t.textContent = '00:00'")
+    path = out / "desktop-1280x800-room.png"
+    p.screenshot(path=str(path))
+    # The bytes can differ across runs (Chrome's PNG encoder is not stable): when the
+    # sha differs, the pixels decide -- ImageChops.difference(main, branch) must be empty.
+    print(f"{path}  sha256 {hashlib.sha256(path.read_bytes()).hexdigest()[:16]}  (desktop untouched: same as main's, by pixels)")
+    ctx.close()
 
 
 def main():
@@ -187,6 +218,7 @@ def main():
                 browser = pw.chromium.launch(channel="chrome", headless=True)
             except Exception:
                 browser = pw.chromium.launch(headless=True)
+            desktop(browser, url, out)
             for dev in DEVICES:
                 d = pw.devices[dev]
                 for orient in ("portrait", "landscape"):

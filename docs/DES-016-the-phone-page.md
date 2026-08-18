@@ -77,6 +77,37 @@ the header bar + room sheet; the wrap and the 16 px stay.
 2. The layout: header bar + room sheet, composer collapse, feed density, tap
    targets, dvh. One PR, one bump, pictures before/after attached to the bus.
 
+### 3.1 Slice 2 as built (0.2.144)
+
+- One block: `@media(max-width:640px),(max-height:480px)` -- narrow OR short. A
+  phone on its side (664-932 wide, 360-430 tall) is above the width cut and has
+  no room for a rail plus a full composer; both orientations must work (11456),
+  so the same block takes a short viewport. Above it nothing changes: the
+  phone-only controls carry `.ph` and are `display:none` in the base rules; the
+  1280x800 desktop shot is pixel-identical to main's (mobile-shots prints it).
+- Header bar: `#roomBtn` (room name, tap = the sheet), `#voice`, `#toolsBtn`
+  ("find": reveals the filter and the history button), `#meBtn` (settings /
+  logout through the SAME handlers as the me card's menu). The sheet is the
+  rail itself, fixed over the well, with a phone-only `#phRooms` list at the top
+  rendered from the same `/me` rooms as the me card; a pick switches through
+  `pickRoom` and closes the sheet; agents and the me card follow below. Unread
+  counts per room are NOT built: the page has no per-room unread source today
+  (one feed socket, one room) -- a broker-side count is a follow-up if wanted.
+- Composer: box + Send. `#moreBtn` ("+") toggles `#composer.more`, which shows
+  the to/subject row and, in the control row, talk, listen, auto-send, attach --
+  in that order (`order:` on the existing buttons; DES-014 untouched). A reply in
+  flight opens the row so the chip is visible. `#kbdHint` gone under the block.
+- Feed: avatar 1.6rem, gap .5rem, one-line head (who / to ellipsize, time at the
+  right), `#id`/thread/delete/audio shown on the row's tap (`.row.active`,
+  which the reply-select already sets), a hairline where the sender changes.
+- Targets: every phone control `min-height:2.75rem` (44 px at 16px); inputs 16px;
+  `html,body{height:100dvh}`; `#body` min-height 3.2em so the feed keeps room.
+- Both composer rows and `#top` now `flex-wrap:wrap` at EVERY width: nothing wraps
+  where there is room, and a 664-wide well never pushes Send off the glass.
+- Gate: `scripts/mobile-shots` scenes signin / room / sheet / find / plus /
+  rowtap / me / settings / voices on iPhone 14 + Pixel 7 both orientations, the
+  range 320-932, and the desktop shot; tests/test_daemon.py pins the strings.
+
 ## 4. Not in scope
 
 Native app (DES-015), a second HTML, framework, or build step. Desktop layout
