@@ -1074,6 +1074,7 @@ $('meCard').onclick=e=>{e.stopPropagation();$('meMenu').classList.toggle('on');}
 // the main column closes it -- picking a room or a tab lands you back on the page.
 $('railBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('railOpen');};
 $('main').addEventListener('click',e=>{if(!e.target.closest('#railBtn'))document.body.classList.remove('railOpen');},true);
+$('brand').addEventListener('click',()=>document.body.classList.remove('railOpen'));
 $('miSettings').onclick=()=>{$('meMenu').classList.remove('on');openRooms();};
 // Logout is the panel's sign-out, reached without opening the panel: same one call, same
 // reload. The reload is what clears every in-page trace of the session.
