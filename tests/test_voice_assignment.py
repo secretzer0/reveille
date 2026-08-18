@@ -31,7 +31,7 @@ def test_the_speaker_key_comes_from_the_credential_and_nowhere_else():
     assert K(daemon.Principal(kind="user", name="travis", user_id="u1")) == "user:u1"
     # The ONE derivation: the send paths and the routes call this function.
     src = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "daemon.py")).read()
-    assert src.count("key=speaker_key(p)") == 2, "both send paths pass the key"
+    assert src.count(", speaker_key(p)") == 2, "both send paths pass the key (through _voice_of_send)"
 
 
 def test_a_bound_token_carries_its_agent_id_into_the_principal(tmp_path, monkeypatch):

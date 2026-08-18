@@ -391,6 +391,7 @@
   margin:.1rem 0 .3rem}
  .row.bcast{border-left:2px solid var(--gold);border-radius:0 8px 8px 0}
  .atts{display:flex;gap:.5rem;flex-wrap:wrap;margin:.3rem 0 .35rem}
+ .attlink.clipPlay{cursor:pointer;color:var(--gold)}
  .atts img.att{display:block;max-width:min(380px,100%);max-height:260px;width:auto;
   height:auto;border-radius:8px;border:1px solid var(--line);cursor:zoom-in}
  .atts a.attlink{color:var(--gold)}
@@ -1012,10 +1013,14 @@ function frameSrc(u){return PATH_URL_RE.test(u||'')?u:'about:blank';}
 async function uploadFile(f){
  const r=await fetch('/upload'+qs()+'&name='+encodeURIComponent(f.name),
   {method:'POST',body:f});
- if(!r.ok){toast('upload failed: '+(await r.text()));return;}
+ if(!r.ok){const t=await r.text();let m=t;try{m=JSON.parse(t).error||t;}catch(e){}
+  toast('upload failed: '+m);return;}
+ // DES-017: audio comes back CONVERTED (a .webm/.m4a pair, clip:true,
+ // duration_s) -- the original never reaches the room in its native form.
  attachments.push(await r.json());
  renderAttchips();
 }
+function clipLabel(a){const d=Math.round(a.duration_s||0);return Math.floor(d/60)+':'+String(d%60).padStart(2,'0');}
 
 function renderAttchips(){
  const w=$('attchips');w.innerHTML='';
@@ -1024,6 +1029,8 @@ function renderAttchips(){
   const tile=attUrl(a.url);
   if(tile&&IMG_RE.test(a.url)){
    t.innerHTML='<img src="'+tile+'" alt="">';
+  }else if(a.clip){
+   t.innerHTML='<span class="ext">CLIP</span><span class="fn">'+esc(a.name)+' '+clipLabel(a)+'</span>';
   }else{
    const ext=(a.name.includes('.')?a.name.split('.').pop():'').toUpperCase().slice(0,4)||'FILE';
    t.innerHTML='<span class="ext">'+esc(ext)+'</span><span class="fn">'+esc(a.name)+'</span>';
@@ -1147,6 +1154,11 @@ function attHtml(list){
   if(IMG_RE.test(a.url))
    return '<a href="'+safe+'" target="_blank" rel="noopener" title="open full size">'
      +'<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'"></a>';
+  // DES-017: a converted clip plays through the page's own decoder (vPlayClip
+  // -- the same path the bank's "play clip" takes), never a raw <audio>.
+  if(a.clip)
+   return '<span class="attlink clipPlay" data-clip="'+safe+'" title="play the clip">&#9654; '+label
+     +' <small>'+clipLabel(a)+'</small></span>';
   const link='<a class="attlink" href="'+safe+'" download>'+label+'</a>';
   if(/\.(md|markdown)$/i.test(a.url)&&(a.bytes||0)<300000)
    return link+'<div class="mdview" data-src="'+safe+'">rendering&hellip;</div>';
@@ -1305,6 +1317,8 @@ function render(m){
   // file -> play) or queues -- a terse stand-in heard earlier is not a file.
   if(e.target.closest('.play')){genOne(m);return;}
   if(e.target.closest('.scr')){toggleScript(row,m);return;}
+  const cp=e.target.closest('.clipPlay');
+  if(cp){vStop();vBusy=true;vPlayClip(cp.dataset.clip);return;}
   selectRow(row,m);
  });
  frag.appendChild(row);

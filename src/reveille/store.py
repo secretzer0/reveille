@@ -78,7 +78,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -302,7 +302,25 @@ CREATE TABLE IF NOT EXISTS attachments (
     message_id INTEGER NOT NULL REFERENCES messages(id),
     url        TEXT NOT NULL,
     name       TEXT,
-    bytes      INTEGER
+    bytes      INTEGER,
+    -- DES-017: a converted clip (the message's voice), and its length.
+    clip       INTEGER NOT NULL DEFAULT 0,
+    duration_s REAL
+);
+-- DES-017 s7: the ledger of every ORIGINAL audio upload ever taken. The raw
+-- bytes live RAW_HOLD_S in <files>/raw, then absoluteZeroStorage.put records
+-- the intent here and the local raw goes; location fills when a cold tier
+-- exists. Nothing is ever deleted from this table.
+CREATE TABLE IF NOT EXISTS raw_archive (
+    key         TEXT PRIMARY KEY,
+    sha256      TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    mime        TEXT,
+    message_id  INTEGER,
+    uploader    TEXT,
+    archived_ns INTEGER NOT NULL,
+    tier        TEXT NOT NULL DEFAULT 'absolute-zero',
+    location    TEXT
 );
 -- An upload's room, recorded at upload time so GET /files/<stored> can be refused
 -- to a principal outside that room. Without this the blob store is world-readable
@@ -1222,6 +1240,31 @@ def _upgrade_v21(conn, db_path):
         conn.execute("PRAGMA user_version=22")
 
 
+def _upgrade_v25(conn, db_path):
+    """v25 -> v26 (DES-017): attachments.clip / duration_s -- a converted audio
+    clip that is the message's voice; and raw_archive, the durable ledger of
+    every original audio upload (s7). Additive."""
+    with tx(conn):
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(attachments)")}
+        if "clip" not in cols:
+            conn.execute("ALTER TABLE attachments ADD COLUMN clip INTEGER NOT NULL DEFAULT 0")
+        if "duration_s" not in cols:
+            conn.execute("ALTER TABLE attachments ADD COLUMN duration_s REAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS raw_archive (
+                key         TEXT PRIMARY KEY,
+                sha256      TEXT NOT NULL,
+                bytes       INTEGER NOT NULL,
+                mime        TEXT,
+                message_id  INTEGER,
+                uploader    TEXT,
+                archived_ns INTEGER NOT NULL,
+                tier        TEXT NOT NULL DEFAULT 'absolute-zero',
+                location    TEXT
+            )""")
+        conn.execute("PRAGMA user_version=26")
+
+
 def _upgrade_v24(conn, db_path):
     """v24 -> v25: voices.personal -- a voice that exists only for its uploader
     (ruling 11155). Additive column; existing voices are bank voices."""
@@ -1331,7 +1374,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24)}
+              21, 22, 23, 24, 25)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2393,6 +2436,11 @@ def _delete_messages(conn, ids):
         "VALUES('delete',?,?,?)",
         [(r["id"], r["subject"], r["body"]) for r in doomed])
     conn.execute(f"DELETE FROM message_entities WHERE message_id IN ({ph})", ids)
+    # DES-017: a clip's converted pair under <files> dies with its message too
+    # (the tts-<mid> names are hard links to it; both names must go).
+    clips = [r["url"][len("/files/"):] for r in conn.execute(
+        f"SELECT url FROM attachments WHERE clip=1 AND message_id IN ({ph})", ids)
+        if r["url"].startswith("/files/")]
     conn.execute(f"DELETE FROM attachments WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM scripts WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM reads WHERE message_id IN ({ph})", ids)
@@ -2407,6 +2455,12 @@ def _delete_messages(conn, ids):
             # a worker whose rename then finds no .part fails closed -- no .wav
             # lands for a deleted message, with no second code path.
             for name in (f"tts-{mid}.webm", f"tts-{mid}.webm.part", f"tts-{mid}.m4a", f"tts-{mid}.m4a.part"):
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.join(AUDIO_DIR, name))
+        for stored in clips:
+            stem = stored[:-5] if stored.endswith(".webm") else stored
+            conn.execute("DELETE FROM files WHERE stored IN (?,?)", (stem + ".webm", stem + ".m4a"))
+            for name in (stem + ".webm", stem + ".m4a"):
                 with contextlib.suppress(OSError):
                     os.unlink(os.path.join(AUDIO_DIR, name))
 
@@ -3082,8 +3136,10 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
         for p in parents:
             conn.execute("INSERT OR IGNORE INTO links(parent_id, child_id) VALUES(?,?)", (p, mid))
         for a in attachments or []:
-            conn.execute("INSERT INTO attachments(message_id, url, name, bytes) VALUES(?,?,?,?)",
-                         (mid, a["url"], a.get("name"), a.get("bytes")))
+            conn.execute("INSERT INTO attachments(message_id, url, name, bytes, clip, duration_s) "
+                         "VALUES(?,?,?,?,?,?)",
+                         (mid, a["url"], a.get("name"), a.get("bytes"),
+                          1 if a.get("clip") else 0, a.get("duration_s")))
     return {"id": mid, "thread_id": thread_id, "parents": parents,
             "wake": _wake_targets(conn, sender, recipient, room)}
 
@@ -3107,10 +3163,13 @@ def _with_attachments(conn, msgs):
     ids = [m["id"] for m in msgs]
     by = {}
     for r in conn.execute(
-            f"SELECT message_id, url, name, bytes FROM attachments "
+            f"SELECT message_id, url, name, bytes, clip, duration_s FROM attachments "
             f"WHERE message_id IN ({_ph(ids)}) ORDER BY id", ids):
-        by.setdefault(r["message_id"], []).append(
-            {"url": r["url"], "name": r["name"], "bytes": r["bytes"]})
+        a = {"url": r["url"], "name": r["name"], "bytes": r["bytes"]}
+        if r["clip"]:
+            a["clip"] = True
+            a["duration_s"] = r["duration_s"]
+        by.setdefault(r["message_id"], []).append(a)
     for m in msgs:
         m["attachments"] = by.get(m["id"], [])
     # Every listing carries the artifact flags too (DES-013 section 6): one IN

@@ -93,6 +93,35 @@ surprises and no 20 MB WAV crossing LTE three times.
 3. Later, not now: `archive_raw` -> S3 (its own DES); STT of the clip into the
    body via the ear (a human's clip could carry its own transcript).
 
+## 4.1 Slice 1 as built (0.2.138)
+
+`_store_upload` is the ONE upload path (HTTP route + MCP tool, so
+`reveille-upload` too): bytes -> `<files>/raw/<stored>` -> `_probe_audio`
+(ffprobe: an audio stream and no video stream) -> not audio: moved under
+`<files>` as before; audio -> `_transcode_clip` (ffmpeg, `-vn`, one-pass
+`loudnorm=I=CLIP_LUFS`, 48 kHz mono, libopus at OPUS_BITRATE, then the .m4a via
+`_m4a_transcode`, both `.part` + rename) -> `{url: /files/<stem>.webm, name,
+bytes, clip: true, duration_s}`; over `AUDIO_ATTACH_MAX_S` or a failed
+transcode -> `store.BusError` (415 on the route), the raw archived at once on
+failure. `files_http` types `<stem>.webm` inline `audio/webm` ONLY when
+`<stem>.m4a` sits beside it. `_clip_of(attachments)` trusts nothing in the
+dict: `/files/<stem>.webm` with the `.m4a` sibling on disk; two -> refused.
+`_voice_of_send` replaces the send paths' `_tts_enqueue`: a clip binds
+(`_clip_bind`: `os.link` to `tts-<mid>.webm/.m4a`, copy on a filesystem
+without links, then the `audio` + `audio_m4a` frames) through the synth queue as
+a `_Clip` item when voices are on (its turn in message order), at once when
+they are off; anything else takes the writer/synth route as before.
+`_delete_messages` unlinks the attachment pair and its `files` rows beside the
+`tts-<mid>` pair; `_sweep_terse_renditions` skips clip-voiced messages. s7:
+`_hold_raw` (Timer, `RAW_HOLD_S`) -> `_archive_raw` -> `absoluteZeroStorage.put`
+(ledger row in `raw_archive`, returns True) -> raw unlinked; `GET
+/files/raw/<stored>` = uploader-only during the hold, 410 with the ledger row
+after; `_sweep_raw` at boot removes `.part` raws and re-arms the rest of each
+hold. Page: the attach flow is unchanged (the dict comes back converted); a
+clip renders as a play control through `vPlayClip` with its length; the
+composer's chip says CLIP m:ss. Not in slice 1: the "record a clip" control
+(slice 2), transcript into the body (slice 3).
+
 ## 5. Not in scope
 
 Streaming a live microphone into the room (that is a call, not a message);
@@ -111,7 +140,10 @@ per-listener codecs; keeping originals.
 - Send trusts nothing in the client's dict: the proof that an attachment is a
   converted clip is the stored PAIR `<stem>.webm` + `<stem>.m4a` under
   `<files>` (only the transcoder writes a pair; upload names are
-  timestamp-uniqued, so nobody can plant a sibling). Binding = hard-link the
+  timestamp-uniqued, so nobody can plant a sibling) AND that pair's `files`
+  row for THIS room (architect 11539: stems are guessable from any feed the
+  sender was once in; a pair uploaded to room A named in a send to room B is
+  an ordinary attachment there, never B's voice). Binding = hard-link the
   pair to `tts-<mid>.webm/.m4a`, `keep=True`, no writer, announce as today;
   bind regardless of listeners (a link is free) -- the audio frame is what
   listeners get.
