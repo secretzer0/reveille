@@ -38,7 +38,7 @@ Everything below exists today (0.2.123); nothing is added for the app.
 | need | route | note |
 |---|---|---|
 | who am I, is the ear on, my rooms | `GET /me` | `{id, name, rooms, ear, is_admin, ...}` |
-| sign in / out | `POST /login`, `POST /logout` | password -> `Set-Cookie` session (httponly, 14 d). A native client is not a browser: it stores the cookie value in the OS keychain and sends it as a `Cookie:` header. No token path, no second auth. |
+| sign in / out | `POST /login {name, password}`, `POST /logout` | JSON -> `Set-Cookie rev_session` (httponly, samesite=lax, Secure under https, path=/, **fixed 14 d from login, no sliding**; devops 11377). A native client is not a browser: it keeps the cookie in the OS keychain and sends it as a `Cookie:` header on `/feed`, `/stt`, `/send`, `/me`, `/audio`, `/files`. On 401 the shell signs in again with the keychain-held name+password (that is what the keychain is for) -- zero broker change. A sliding session is the ONE API change in sight; if wanted it is DES-numbered and shared with the web, not an app-private path. |
 | the room, live | `WS /feed?room=<rid>` | events `message`, `audio`, `script`, `presence`, `deleted`, `ping`, `error` -- the app paints from these exactly as the page does |
 | the room, back | `GET /messages`, `GET /search` | scrollback |
 | say something | `POST /send {room, to, body, reply_to}` | a human's message: spoken verbatim in their voice (ruling 11358) |
@@ -47,8 +47,10 @@ Everything below exists today (0.2.123); nothing is added for the app.
 | voices | `GET /voices`, `GET /rooms/{rid}/voices` | read only in the shell; the bank is edited on the web |
 | the box | `GET /version`, `GET /health` | pin: the app names the broker version it was built against and refuses a lower one by name |
 
-The app never calls MCP; the app never uses a bearer token; a token has no
-microphone and no screen (DES-014 s3, unchanged).
+The app never calls MCP; the app never uses a bearer token: `_principal` reads
+bearer -> agent, cookie -> user, and `/stt` refuses agents by design -- the
+shell is a COOKIE client (devops 11377). A token has no microphone and no
+screen (DES-014 s3, unchanged).
 
 ## 3. Shape
 
@@ -70,7 +72,9 @@ microphone and no screen (DES-014 s3, unchanged).
   version chain (no bump for app-only PRs; the image gate ignores the path). A
   separate CI job builds the app on its own path filter.
 - **Entitlement is Apple-approved per app and takes weeks: apply the day the
-  developer account exists (11373), before slice 3 starts.**
+  developer account exists (11373), before slice 3 starts.** Account, team id,
+  signing and the Mac are the operator's (devops 11377: none on the fleet's
+  side); slices 1-2 build and run on a device from the operator's laptop.
 
 ## 4. What the shell NEVER does
 
