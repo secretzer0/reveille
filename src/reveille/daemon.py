@@ -2743,8 +2743,13 @@ def _transcode(chunks):
         # its first and last lines are the cause -- carried into the "abandoned" warning
         # (11215) so a broken libopus is not a silent message with no reason.
         err = []
-        threading.Thread(target=lambda: err.append(proc.stderr.read()), name="opus-err",
-                         daemon=True).start()
+        # The stderr reader must be JOINED before its words are read: wait()
+        # returns when ffmpeg exits, and on a slow runner the reader was still
+        # between read() and append -- the warning then said "no output" for
+        # a failure whose cause was right there (CI 32099758989, static 8.1).
+        err_t = threading.Thread(target=lambda: err.append(proc.stderr.read()), name="opus-err",
+                                 daemon=True)
+        err_t.start()
 
         def feed():
             try:
@@ -2776,6 +2781,7 @@ def _transcode(chunks):
                 proc.stdout.close()
                 proc.wait(timeout=5)
         if drained and proc.returncode:
+            err_t.join(timeout=2)
             lines = b"".join(err).decode(errors="replace").strip().splitlines() or ["no output"]
             cause = lines[0] if len(lines) == 1 else f"{lines[0]} / {lines[-1]}"
             raise RuntimeError(f"ffmpeg exited {proc.returncode}: {cause}")
