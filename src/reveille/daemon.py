@@ -246,6 +246,31 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.164 A VISIT IS A BODY SWAP (DES-012 s7-s9 + s11, EPIC-001 item 8). An
+agent can now work on ANOTHER human's machine, and the only thing that makes
+that safe is that both humans consent, once, per visit. Ask with POST /visits
+{agent, owner, host, rooms, host_machine, coordinate}: your own agent is a
+PUSH, someone else's a PULL, and the OTHER human decides -- the asker's own
+accept is a 403. The ask mints nothing; the accept mints EXACTLY ONE
+credential (create_token create=false, the ordinary bare attach) in the same
+transaction, so the home body goes dark as the visiting one is authorised and
+a second accept is refused as consumed. A visit may hold ONLY rooms both
+humans are already in -- checked at ask time and named on refusal -- because
+a visit carrying a room the host is not in would be the DES-011 s2 hive bleed
+one layer down. Recall (owner), evict (host) and depart (the agent's own
+token) are one route: whoever calls it, the visiting credential is revoked, so
+reach ends with the visit; the owner comes home with an ordinary re-mint. The
+REQUEST expires (48 h); the VISIT has no lease -- a timer is how bodies get
+killed mid-task. Arrival is stamped by the body's first join(), not by
+delivery. Every transition writes one root message in the visit's first room:
+a human's broadcast rings the room, so the record IS the notification. Schema
+v33 = the `visits` table; it holds names, ids and decisions, never a secret.
+The Visits tab is the accept screen, and it consents to a SENTENCE: whose
+agent, that ownership does not move, the rooms and nothing else, that it runs
+on the HOST's user, Claude account and bill, that the owner's state notes are
+readable there, and that either side ends it. The harbor is the host's own:
+the container path POSTs the minted token to their launcher (the P1 route,
+unchanged), the native path SHOWS `reveille init` once and never runs it.
 0.2.163 AN ATTACHMENT YOU CAN PLAY (DES-017 s4.3 amendment; operator
 11798/11800/11803, rulings 11801/11804). An attachment renders by its type,
 the way an image already does: audio (wav, mp3, m4a, aac, flac, ogg, opus)
@@ -6417,6 +6442,63 @@ async def room_owner_http(request):
     return JSONResponse(out)
 
 
+# ---- DES-012: a visit is a body swap (EPIC-001 #8) -----------------------
+# The bus carries the REQUEST and the DECISION; it never carries the credential
+# (s11.1). The accept answers the secret to the accepting SCREEN once -- from
+# there the host hands it on the way DES-005 already provisions any body: to
+# their own launcher for a container, or by pasting the shown `reveille init`
+# for a native one. No new listener holds a token, and nothing parks one.
+@_guard
+async def visits_http(request):
+    """GET -> every visit this person is a party to. POST {agent, owner, host,
+    rooms, host_machine, coordinate} -> ask for one. Direction is derived from
+    WHO is asking: your own agent is a push (you offer it), someone else's is a
+    pull (you ask for it). The other human decides either way."""
+    p = _user_principal(request)
+    if request.method == "GET":
+        return JSONResponse({"visits": store.visits_for(_conn, p.user_id)})
+    d = await request.json()
+    owner = (d.get("owner") or "").strip() or p.user_id
+    a = store.live_agent(_conn, owner, (d.get("agent") or "").strip())
+    push = a["owner_id"] == p.user_id
+    out = store.visit_request(
+        _conn, agent_id=a["id"], host=(d.get("host") or "").strip() or p.user_id,
+        actor_id=p.user_id, rooms=list(d.get("rooms") or []),
+        direction="push" if push else "pull",
+        host_machine=(d.get("host_machine") or "").strip(),
+        coordinate=(d.get("coordinate") or "").strip())
+    log.info("%s asked for visit %s (%s %s)", p.name, out["id"], out["direction"], out["agent"])
+    return JSONResponse(out)
+
+
+@_guard
+async def visit_http(request):
+    """POST /visits/<id>/<verb>: accept | reject | end.
+
+    accept {body: container|native} answers the minted secret ONCE, to this
+    screen. It is not stored on the visit row and this route will never answer
+    it twice -- a second accept is refused as consumed (gate 1). `end` is
+    recall (owner), evict (host) or depart (the visiting agent's own token):
+    stop needs one, so whichever party calls it, it ends."""
+    verb = request.path_params["verb"]
+    p = _principal(request)
+    vid = request.path_params["vid"]
+    if verb == "end":
+        out = store.visit_end(_conn, vid, p.user_id if p.kind == "user" else "",
+                              agent_token_id=p.token_id if p.kind == "agent" else None)
+        log.info("visit %s ended by %s", vid, out["ended_by"])
+        return JSONResponse(out)
+    if p.kind != "user":
+        raise store.AccessError("a visit is decided by a human, on their own screen")
+    if verb not in ("accept", "reject"):
+        raise store.NotFound(f"no such verb {verb!r}")
+    d = await request.json() if await request.body() else {}
+    out = store.visit_decide(_conn, vid, p.user_id, verb,
+                             body=(d.get("body") or "container"))
+    log.info("%s %sed visit %s", p.name, verb, vid)
+    return JSONResponse(out)
+
+
 @_guard
 async def room_members_http(request):
     """GET = the member list (owner's eyes only, store-gated); POST {name} =
@@ -6873,6 +6955,8 @@ def build_app():
             Route("/rooms", rooms_http, methods=["GET", "POST"]),
             Route("/rooms/ownerless", rooms_ownerless_http),
             Route("/rooms/{rid}/owner", room_owner_http, methods=["PATCH"]),
+            Route("/visits", visits_http, methods=["GET", "POST"]),
+            Route("/visits/{vid}/{verb:str}", visit_http, methods=["POST"]),
             Route("/rooms/{rid}", room_http, methods=["PATCH"]),
             Route("/rooms/{rid}", purge_room_http, methods=["DELETE"]),
             Route("/rooms/{rid}/members", room_members_http,

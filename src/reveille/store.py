@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -210,6 +210,30 @@ CREATE TABLE IF NOT EXISTS room_seen (
     last_msg_id INTEGER NOT NULL,
     ts_ns       INTEGER NOT NULL,
     PRIMARY KEY (principal, room_id)
+);
+-- DES-012: A VISIT IS A BODY SWAP. One row per visit, from the ask to the end
+-- (s8): a visit is a feature, and a feature earns its schema. Nothing here is
+-- a credential -- `token_id` names the mint the accept authorised, and the
+-- secret it minted was answered to the host's screen once and never stored.
+CREATE TABLE IF NOT EXISTS visits (
+    id           TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,          -- the agent's owner; NEVER moves (s4)
+    host_id      TEXT NOT NULL,          -- the harbor: a host, not an owner
+    host_machine TEXT NOT NULL DEFAULT '',
+    rooms        TEXT NOT NULL,          -- json list of room ids: the visit's whole reach
+    direction    TEXT NOT NULL CHECK (direction IN ('pull','push')),
+    coordinate   TEXT NOT NULL DEFAULT '',   -- repo (+ SHA) the body checks out
+    requested_by TEXT NOT NULL,          -- the human who asked; the OTHER one decides
+    requested_ns INTEGER NOT NULL,
+    expires_ns   INTEGER NOT NULL,       -- the REQUEST expires; the visit does not (s11.2)
+    decided_ns   INTEGER,
+    decision     TEXT CHECK (decision IN ('accept','reject')),
+    body         TEXT CHECK (body IN ('container','native')),
+    token_id     TEXT,                   -- the one mint this accept authorises
+    arrived_ns   INTEGER,                -- stamped by the visiting body's first join()
+    ended_ns     INTEGER,
+    ended_by     TEXT CHECK (ended_by IN ('owner','host','agent'))
 );
 -- A room name is unique per owner, not globally: two users may each own a
 -- "Reveille". The UI disambiguates by showing "owner -> room", which is exactly
@@ -1832,6 +1856,39 @@ CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
         conn.execute("PRAGMA user_version=31")
 
 
+def _upgrade_v32(conn, db_path):
+    """v32 -> v33 (DES-012 item 8): visits. Additive: one empty table, nothing
+    existing is read or rewritten. No broker has ever held a visit, so there is
+    nothing to backfill -- the first row is written by the first request."""
+    with tx(conn):
+        _exec_script(conn, """-- DES-012: A VISIT IS A BODY SWAP. One row per visit, from the ask to the end
+-- (s8): a visit is a feature, and a feature earns its schema. Nothing here is
+-- a credential -- `token_id` names the mint the accept authorised, and the
+-- secret it minted was answered to the host's screen once and never stored.
+CREATE TABLE IF NOT EXISTS visits (
+    id           TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,          -- the agent's owner; NEVER moves (s4)
+    host_id      TEXT NOT NULL,          -- the harbor: a host, not an owner
+    host_machine TEXT NOT NULL DEFAULT '',
+    rooms        TEXT NOT NULL,          -- json list of room ids: the visit's whole reach
+    direction    TEXT NOT NULL CHECK (direction IN ('pull','push')),
+    coordinate   TEXT NOT NULL DEFAULT '',   -- repo (+ SHA) the body checks out
+    requested_by TEXT NOT NULL,          -- the human who asked; the OTHER one decides
+    requested_ns INTEGER NOT NULL,
+    expires_ns   INTEGER NOT NULL,       -- the REQUEST expires; the visit does not (s11.2)
+    decided_ns   INTEGER,
+    decision     TEXT CHECK (decision IN ('accept','reject')),
+    body         TEXT CHECK (body IN ('container','native')),
+    token_id     TEXT,                   -- the one mint this accept authorises
+    arrived_ns   INTEGER,                -- stamped by the visiting body's first join()
+    ended_ns     INTEGER,
+    ended_by     TEXT CHECK (ended_by IN ('owner','host','agent'))
+);
+""")
+        conn.execute("PRAGMA user_version=33")
+
+
 def _upgrade_v31(conn, db_path):
     """v31 -> v32 (EPIC-001 #6): room_seen, one high-water mark per person and
     room. Additive: one empty table, nothing existing is read or rewritten. An
@@ -1974,7 +2031,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -3903,6 +3960,283 @@ def left_rooms(conn, principal, rooms):
         f"AND room_id IN ({_ph(rooms)})", [principal] + rooms)}
 
 
+# ---- DES-012: a visit is a body swap -------------------------------------
+# A visit is the migration chain with a SECOND HUMAN in the consent path
+# (s2): the owner's accept mints a bare attach (create=False) for the same
+# agent_id, so the visiting body wakes holding that credential and the home
+# body goes dark in the same transaction. Nothing here invents a credential
+# path -- create_token is the one mint, as it is for every other body.
+VISIT_HOURS = 48                  # a REQUEST stops asking; the VISIT has no lease (s11.2)
+VISIT_MACHINE_MAX = 64
+
+
+def _visit_row(conn, visit_id):
+    r = conn.execute("SELECT * FROM visits WHERE id=?", (visit_id,)).fetchone()
+    if not r:
+        raise NotFound(f"no such visit {visit_id!r}")
+    return dict(r)
+
+
+def _live_user(conn, ident, what):
+    """A live user, by id or by name. `what` names the role in the refusal, so
+    "no such host" and "no such owner" read as different mistakes."""
+    r = conn.execute("SELECT id, name FROM users WHERE (id=? OR name=?) "
+                     "AND deleted_ns IS NULL", (ident, ident)).fetchone()
+    if not r:
+        raise NotFound(f"no such {what}: {ident!r}")
+    return dict(r)
+
+
+def holds_room(conn, room_id, user_id):
+    """Can this PERSON reach that room -- owner, public, or invited member. The
+    same three-way check assign_room applies to a token, asked of a human: the
+    visit's reach may never exceed what the token could be given anyway."""
+    r = conn.execute("SELECT owner_id, public FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise NotFound("no such room")
+    return bool(r["owner_id"] == user_id or r["public"] or is_member(conn, room_id, user_id))
+
+
+def _visit_open(conn, agent_id):
+    """The agent's live visit: asked-and-undecided (not expired) or accepted and
+    not ended. One body, one visit -- a second ask while one is open would be a
+    second credential for the same identity."""
+    now = time.time_ns()
+    return conn.execute(
+        "SELECT * FROM visits WHERE agent_id=? AND ended_ns IS NULL "
+        "AND (decision='accept' OR (decided_ns IS NULL AND expires_ns > ?)) "
+        "ORDER BY requested_ns DESC", (agent_id, now)).fetchone()
+
+
+def _visit_say(conn, visit, actor_id, body, subject):
+    """THE RECORD IS A ROOM MESSAGE (s8, gate 6). One root message per
+    transition, in the visit's first room, broadcast: a HUMAN's broadcast rings
+    the room, so the other human is rung by the record itself rather than by a
+    second copy addressed to them."""
+    rooms = json.loads(visit["rooms"])
+    return send(conn, user_principal(actor_id), BROADCAST, body,
+                subject=subject, room=rooms[0])
+
+
+def live_agent(conn, owner_ident, name):
+    """That owner's live agent by name -- the pair a visit is asked about. Two
+    owners may run one name (DES-011 s2), so the OWNER is half the key and
+    there is no lookup by name alone."""
+    o = _live_user(conn, owner_ident, "owner")
+    r = conn.execute("SELECT * FROM agents WHERE owner_id=? AND name=? AND retired_ns IS NULL",
+                     (o["id"], name)).fetchone()
+    if not r:
+        raise NotFound(f"{o['name']} has no live agent named {name!r}")
+    return dict(r)
+
+
+def visit_request(conn, *, agent_id, host, actor_id, rooms, direction,
+                  host_machine="", coordinate="", hours=VISIT_HOURS):
+    """Ask for a visit. Pull: the HOST asks for someone's agent. Push: the OWNER
+    offers theirs. Either way the OTHER human decides (s3) -- this writes the
+    row and says so in the room; it mints nothing.
+
+    REACH IS THE INTERSECTION (s5, gate 3): every named room must already be
+    held by BOTH humans, checked HERE and named on refusal, because a visit that
+    carried a room the host is not in would be the exact hive bleed DES-011 s2
+    exists to prevent, moved one layer down.
+    """
+    if direction not in ("pull", "push"):
+        raise BusError("direction is 'pull' (the host asks) or 'push' (the owner offers)")
+    a = conn.execute("SELECT id, owner_id, name FROM agents WHERE id=? AND retired_ns IS NULL",
+                     (agent_id,)).fetchone()
+    if not a:
+        raise NotFound(f"no live agent {agent_id!r}")
+    owner = _live_user(conn, a["owner_id"], "owner")
+    hostu = _live_user(conn, host, "host")
+    if owner["id"] == hostu["id"]:
+        # s10: two machines of the SAME human is plain body migration -- it needs
+        # no second consent and must not be routed through this handshake.
+        raise BusError(f"{owner['name']} owns {a['name']!r} already -- moving your own "
+                       f"agent between your own machines is a re-mint, not a visit")
+    asker = owner["id"] if direction == "push" else hostu["id"]
+    if actor_id != asker:
+        raise AccessError("a pull is asked by the host and a push by the owner")
+    rooms = [r for r in (rooms or []) if r]
+    if not rooms:
+        raise BusError("a visit names the rooms it may act in -- at least one")
+    for rid in rooms:
+        r = conn.execute("SELECT name FROM rooms WHERE id=?", (rid,)).fetchone()
+        if not r:
+            raise NotFound(f"no such room {rid!r}")
+        for u in (owner, hostu):
+            if not holds_room(conn, rid, u["id"]):
+                raise BusError(f"{u['name']} is not in {r['name']!r}: a visit may hold "
+                               f"only rooms BOTH humans are already in")
+    if len(host_machine) > VISIT_MACHINE_MAX:
+        raise BusError(f"host machine name over {VISIT_MACHINE_MAX} characters")
+    open_v = _visit_open(conn, agent_id)
+    if open_v:
+        state = "already visiting" if open_v["decision"] == "accept" else "already asked for"
+        raise BusError(f"{a['name']!r} is {state} -- one identity, one live body; "
+                       f"end visit {open_v['id']} first")
+    now = time.time_ns()
+    vid = uuid.uuid4().hex
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO visits(id, agent_id, owner_id, host_id, host_machine, rooms, "
+            "direction, coordinate, requested_by, requested_ns, expires_ns) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (vid, agent_id, owner["id"], hostu["id"], host_machine, json.dumps(rooms),
+             direction, coordinate, actor_id, now, now + int(hours * 3600 * 1e9)))
+        v = _visit_row(conn, vid)
+        decider = hostu["name"] if direction == "push" else owner["name"]
+        _visit_say(conn, v, actor_id,
+                   f"VISIT {vid}: {owner['name']}'s agent {a['name']!r} to "
+                   f"{hostu['name']}'s machine{' ' + host_machine if host_machine else ''}. "
+                   f"Rooms: {', '.join(room_names(conn, rooms))}. "
+                   f"{decider} decides -- accept or reject in the Visits panel. "
+                   f"Nothing is minted until then.",
+                   subject=f"visit asked: {a['name']}")
+    return visit_get(conn, vid)
+
+
+def visit_decide(conn, visit_id, actor_id, decision, body="container"):
+    """The OTHER human answers. An accept mints EXACTLY ONE credential inside
+    this transaction (gate 1) -- bare attach on the same identity, so
+    create_token supersedes the home body's token and there is never a moment
+    with two live bodies (gate 4). The secret is returned ONCE, to the accepting
+    screen, and is not stored anywhere on this row."""
+    if decision not in ("accept", "reject"):
+        raise BusError("decision is 'accept' or 'reject'")
+    if body not in ("container", "native"):
+        raise BusError("body is 'container' (recommended) or 'native'")
+    v = _visit_row(conn, visit_id)
+    if v["decided_ns"]:
+        raise BusError(f"visit {visit_id} was already {v['decision']}ed -- an accept "
+                       f"authorises one mint and is consumed by it")
+    if time.time_ns() > v["expires_ns"]:
+        raise BusError(f"visit {visit_id} expired unanswered -- ask again")
+    decider = v["host_id"] if v["requested_by"] == v["owner_id"] else v["owner_id"]
+    if actor_id != decider:
+        raise AccessError("the human who asked does not decide; the other one does")
+    a = conn.execute("SELECT name FROM agents WHERE id=?", (v["agent_id"],)).fetchone()
+    now = time.time_ns()
+    if decision == "reject":
+        with tx(conn):
+            conn.execute("UPDATE visits SET decided_ns=?, decision='reject' WHERE id=?",
+                         (now, visit_id))
+            _visit_say(conn, v, actor_id, f"VISIT {visit_id}: rejected. Nothing was minted.",
+                       subject=f"visit rejected: {a['name']}")
+        return visit_get(conn, visit_id)
+    with tx(conn):
+        tok = create_token(conn, v["owner_id"], label=f"visit {visit_id}",
+                           agent_name=a["name"], rooms=json.loads(v["rooms"]),
+                           create=False)
+        conn.execute("UPDATE visits SET decided_ns=?, decision='accept', body=?, "
+                     "token_id=? WHERE id=?", (now, body, tok["id"], visit_id))
+        _visit_say(conn, v, actor_id,
+                   f"VISIT {visit_id}: accepted, {body} body. {a['name']!r} now answers "
+                   f"on the host's machine; its home credential is superseded. Recall "
+                   f"(owner) or evict (host) ends it.",
+                   subject=f"visit accepted: {a['name']}")
+    out = visit_get(conn, visit_id)
+    out["secret"] = tok["secret"]          # shown once, to the screen that consented
+    out["agent"] = a["name"]
+    return out
+
+
+def visit_arrive(conn, token_id):
+    """Stamped by the visiting body's FIRST join(), never by delivery (s11.1):
+    what proves a visit landed is the agent on the bus, not a token handed over.
+    Returns the visit id it stamped, or None -- every other join passes through."""
+    if not token_id:
+        return None
+    v = conn.execute("SELECT * FROM visits WHERE token_id=? AND arrived_ns IS NULL "
+                     "AND ended_ns IS NULL", (token_id,)).fetchone()
+    if not v:
+        return None
+    a = conn.execute("SELECT name FROM agents WHERE id=?", (v["agent_id"],)).fetchone()
+    host = conn.execute("SELECT name FROM users WHERE id=?", (v["host_id"],)).fetchone()
+    conn.execute("UPDATE visits SET arrived_ns=? WHERE id=?", (time.time_ns(), v["id"]))
+    _visit_say(conn, dict(v), v["owner_id"],
+               f"VISIT {v['id']}: {a['name']!r} arrived on {host['name']}'s machine"
+               f"{' ' + v['host_machine'] if v['host_machine'] else ''}.",
+               subject=f"visit arrived: {a['name']}")
+    return v["id"]
+
+
+def visit_end(conn, visit_id, actor_id, *, agent_token_id=None):
+    """RECALL (owner), EVICT (host), DEPART (the agent itself) -- one verb, and
+    who called it is what it is called (s7). STOP NEEDS ONE (s3): nobody is
+    trapped on either side. The visiting credential is revoked here, so reach
+    ends with the visit rather than outliving it; the owner's recovery is an
+    ordinary re-mint at home, which needs no credential from the host."""
+    v = _visit_row(conn, visit_id)
+    if v["decision"] != "accept" or v["ended_ns"]:
+        raise BusError(f"visit {visit_id} is not live")
+    if actor_id == v["owner_id"]:
+        by, word = "owner", "recalled"
+    elif actor_id == v["host_id"]:
+        by, word = "host", "evicted"
+    elif agent_token_id and agent_token_id == v["token_id"]:
+        by, word = "agent", "departed"
+    else:
+        raise AccessError("only the owner, the host, or the visiting agent ends a visit")
+    a = conn.execute("SELECT name FROM agents WHERE id=?", (v["agent_id"],)).fetchone()
+    now = time.time_ns()
+    with tx(conn):
+        conn.execute("UPDATE visits SET ended_ns=?, ended_by=? WHERE id=?", (now, by, visit_id))
+        if v["token_id"]:
+            conn.execute("UPDATE members SET token_id=NULL WHERE token_id=?", (v["token_id"],))
+            conn.execute("DELETE FROM token_rooms WHERE token_id=?", (v["token_id"],))
+            conn.execute("DELETE FROM tokens WHERE id=?", (v["token_id"],))
+        _visit_say(conn, v, v["owner_id"] if by == "agent" else actor_id,
+                   f"VISIT {visit_id}: {word} by the {by}. The visiting credential is "
+                   f"revoked; {a['name']!r} comes home on the owner's next mint.",
+                   subject=f"visit {word}: {a['name']}")
+    return visit_get(conn, visit_id)
+
+
+def visit_get(conn, visit_id):
+    return _visit_render(conn, _visit_row(conn, visit_id))
+
+
+def _visit_render(conn, v):
+    """The row as a human reads it: names, not ids, and the room NAMES the visit
+    holds -- an accept screen consents to a sentence (s7), which it cannot do
+    while the reach is a list of uuids."""
+    names = {r["id"]: r["name"] for r in conn.execute(
+        "SELECT id, name FROM users WHERE id IN (?,?)", (v["owner_id"], v["host_id"]))}
+    a = conn.execute("SELECT name FROM agents WHERE id=?", (v["agent_id"],)).fetchone()
+    rooms = json.loads(v["rooms"])
+    # Names, and no user ids: this dict is what the accept screen renders, and a
+    # screen that consents to a sentence cannot be built out of uuids.
+    out = {k: v[k] for k in v.keys()
+           if k not in ("rooms", "owner_id", "host_id", "requested_by")}
+    out["agent"] = a["name"] if a else ""
+    out["owner"] = names.get(v["owner_id"], "")
+    out["host"] = names.get(v["host_id"], "")
+    out["asked_by"] = names.get(v["requested_by"], "")
+    out["decider"] = names.get(v["host_id"] if v["requested_by"] == v["owner_id"]
+                               else v["owner_id"], "")
+    out["rooms"] = [{"id": r, "name": n} for r, n in zip(rooms, room_names(conn, rooms))]
+    out["state"] = ("ended" if v["ended_ns"] else
+                    "visiting" if v["arrived_ns"] else
+                    "accepted" if v["decision"] == "accept" else
+                    v["decision"] or ("expired" if time.time_ns() > v["expires_ns"]
+                                      else "asked"))
+    return out
+
+
+def room_names(conn, room_ids):
+    return [(conn.execute("SELECT name FROM rooms WHERE id=?", (r,)).fetchone()
+             or {"name": r})["name"] for r in room_ids]
+
+
+def visits_for(conn, user_id, *, live_only=False):
+    """Every visit this person is a party to, either side, newest first."""
+    q = ("SELECT * FROM visits WHERE (owner_id=? OR host_id=?)"
+         + (" AND ended_ns IS NULL" if live_only else "")
+         + " ORDER BY requested_ns DESC")
+    return [_visit_render(conn, r) for r in conn.execute(q, (user_id, user_id))]
+
+
 def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
          clear_leave=True):
     """Sign up in one room. WHO joins comes from the credential (a bound token's
@@ -3940,6 +4274,10 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
         "INSERT OR IGNORE INTO reads(message_id, principal, read_ns) "
         "SELECT id, ?, ? FROM messages WHERE ts_ns < ? AND room = ?",
         (principal, now, cutoff, room_id))
+    # DES-012 s11.1: a visit ARRIVES when its body reaches the bus, not when
+    # the credential was handed over -- so the stamp lives here, on the first
+    # join the visiting token makes. Every other join passes straight through.
+    visit_arrive(conn, token_id)
     return rname
 
 

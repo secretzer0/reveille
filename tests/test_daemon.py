@@ -1172,13 +1172,17 @@ def test_nothing_that_sends_can_ever_take_the_install_command():
     #    consumer that has to be justified deliberately rather than merely counted.
     assert PAGE.count("function installCmds(") == 1
     sites = [m.start() for m in re.finditer(r"(?<!function )installCmds\(", PAGE)]
-    assert len(sites) == 2, f"installCmds has {len(sites)} call sites, want 2"
+    #    The THIRD site is DES-012's native harbor: the same command, shown to
+    #    the host who accepted a visit, in the same <pre> and with no run
+    #    affordance -- a consumer justified deliberately, which is exactly what
+    #    this assertion asks for.
+    assert len(sites) == 3, f"installCmds has {len(sites)} call sites, want 3"
     consumers = []
     for i in sites:
         line = PAGE[:i].rsplit("\n", 1)[-1] + PAGE[i:].split("\n", 1)[0]
         consumers.append("clipboard" if "clipboard" in line else
                          "dom" if "<pre" in line or "esc(" in line else "unknown")
-    assert sorted(consumers) == ["clipboard", "dom"], consumers
+    assert sorted(consumers) == ["clipboard", "dom", "dom"], consumers
     # 4. The token never rides a url or an anchor: those land in history, in a
     #    referer and in an access log. Checked over the whole helper region, where
     #    the command and the secret are in scope together.

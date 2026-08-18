@@ -176,3 +176,72 @@ two ends; a timer is how bodies get killed mid-task. The REQUEST still expires
 Build order (EPIC-001 S3): item 8 = §7 request/decide/notify + §8 record +
 container harbor through /agents; native harbor = the shown command, no code
 beyond the screen; §9 gates as written.
+
+## 12. AS BUILT (0.2.164, EPIC-001 item 8)
+
+Schema v33 adds one table, `visits` (§8): the ask, the decision, the body
+kind, the mint it authorised, the arrival and the end -- names and ids, never
+a secret. `token_id` names the mint; the secret it produced was answered to
+the accepting screen once and is on no row.
+
+**The handshake** (`store.visit_request / visit_decide / visit_arrive /
+visit_end`, routes `POST|GET /visits` and `POST /visits/<id>/{accept,reject,
+end}`):
+
+- Direction is derived from who asks: your own agent is a PUSH, someone
+  else's is a PULL. Either way the OTHER human decides -- the asker's own
+  accept is a 403 (gate 1).
+- The ask mints nothing. The accept mints EXACTLY ONE credential, through
+  `create_token(create=False)` inside the same transaction -- the ordinary
+  bare attach, which supersedes the home body's token as it does for any
+  other body swap. There is never a moment with two live bodies (gate 4), and
+  a second accept is refused as consumed (gate 1).
+- Reach is checked at REQUEST time and named on refusal (gate 3): every room
+  must be held by both humans, by the same owner-or-public-or-member rule
+  `assign_room` applies to a token. `holds_room` is that rule asked of a
+  person.
+- A visit to your own machine is refused by name (§10): that is a re-mint.
+- One identity, one open visit: a second ask while one is asked-or-visiting
+  is refused with the open visit's id.
+- The REQUEST expires (48 h default); the VISIT does not (§11.2). Expired
+  blocks nothing -- asking again is the remedy.
+- `end` is recall (owner), evict (host) or depart (the visiting agent's own
+  token). Whoever calls it, the visiting credential is revoked in the same
+  transaction, so reach ends with the visit. The owner's recovery is an
+  ordinary re-mint at home, which needs nothing from the host.
+- Arrival is stamped by the visiting body's FIRST `join()` (§11.1), not by
+  delivery: what proves a visit landed is the agent on the bus.
+
+**The record** (gate 6): every transition writes one root message in the
+visit's first room, sent by the acting human. A human's broadcast rings the
+room, so the record IS the notification -- there is no second copy addressed
+to the other party. Arrival is posted under the owner's principal (the body
+is theirs); everything else under the actor's.
+
+**The accept screen** (Visits tab) renders §7's sentence: whose agent it is
+and that ownership does not move, that the home body goes dark, the rooms and
+nothing else, the coordinate, that it runs on the HOST's user, Claude account
+and bill, that the owner's state notes will be readable here, the container
+recommendation, and that either side ends it with no timer.
+
+**The harbor** (§11.1). Container: the accept screen POSTs the minted token
+to the host's own launcher, the P1 path `POST /agents {agent, token}` that
+already exists -- no launcher change. Native: the screen SHOWS `reveille
+init` with the token once, in the same `<pre>` and under the same gate as
+DES-008 item D, and never runs it.
+
+**Deviation, deliberate.** §6 says the visiting directory is
+`~/agents/<owner>/<name>`. The launcher namespaces per HOST user
+(`<data>/<user>/<agent>`, container `rev-<user>-<agent>`), so the visiting
+body is provisioned under the label `<owner>-<name>` -- DES-011's own alias.
+That achieves what §6 asks (a visiting `architect` cannot collide with the
+host's own) with no launcher change at all. If the literal path is wanted, it
+is a launcher change and its own slice.
+
+**Not in this slice, and why.** There is no state BUNDLE and no dirty-tree
+refusal (gates 2 and 5 in their file-moving form): an agent's state notes are
+in the hive, keyed to the identity, so the visiting body reads them by being
+that identity -- nothing of the owner's is copied to the host's disk, which is
+what gate 2 is actually protecting. A bundle would create the very
+file-of-secrets the design forbids. Departure hygiene (push before you leave)
+is the agent's and the host's, and there is no broker-side tree to inspect.
