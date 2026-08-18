@@ -3674,9 +3674,14 @@ function earRun(c){
    $('body').value='';$('body').dispatchEvent(new Event('input',{bubbles:true}));toast('cleared');return;}
   case 'stop':{vStop();vDone();return;}
   case 'reply':{
-   const row=document.querySelector('.row.active');
-   if(!row){toast('select a message to reply to');return;}
-   toast('replying');$('body').focus();return;}
+   // Reply to the NEWEST message in this room's feed that is not mine (architect
+   // 11385: what a person in a car means) -- the click handler's own path.
+   const rows=[...document.querySelectorAll('#inner .row[data-id]')].reverse();
+   const row=rows.find(r=>{const mm=msgs.get(+r.dataset.id);return mm&&mm.from!==myName;});
+   if(!row){toast('nothing to reply to');return;}
+   const mm=msgs.get(+row.dataset.id);
+   if(!row.classList.contains('active'))selectRow(row,mm);
+   toast('replying to '+mm.from);return;}
   case 'room':{
    const r=((me&&me.rooms)||[]).find(x=>(x.name||'').toLowerCase()===c.arg);
    if(!r){toast('no room named "'+c.arg+'"');return;}

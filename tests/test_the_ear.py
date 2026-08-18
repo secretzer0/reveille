@@ -302,7 +302,9 @@ def test_voice_commands_are_a_fixed_grammar_on_the_whole_final_transcript():
                 "case 'room':", "case 'voice on':{if(!voiceOn)toggleVoice();return;}",
                 "case 'voice off':{if(voiceOn)toggleVoice();return;}"):
         assert row in run, row
-    assert "toast('select a message to reply to')" in run and "toast('no room named" in run
+    assert "toast('nothing to reply to')" in run and "toast('no room named" in run
+    assert "return mm&&mm.from!==myName;" in run and "selectRow(row,mm)" in run, \
+        "reply = the newest message here that is not mine, through the click handler's own path"
     assert "pickRoom(r.id)" in run and "(x.name||'').toLowerCase()===c.arg" in run, "room by exact name"
     # A dead mic ends the take / turns listening off.
     whole = UI[UI.index("let talkBusy=false;"):UI.index("async function openVoices(){")]
