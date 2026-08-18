@@ -207,6 +207,19 @@ stays; on -> the countdown shows, a keystroke returns the state to `listening`
 with the text kept; a full countdown posted the message and emptied the box; a
 spoken `cancel` mid-count aborted and cleared.
 
+**The earcon (0.2.134; operator 11464, ruling 11465).** In listen mode the page
+plays ONE bell at the moment a take's words LAND in the box -- not at silence,
+not at speech end: landing is when the ear is ready for the next thing, a
+command or more words -- and that is the same moment the pause-to-send countdown
+starts. The sound is a small WAV shipped with the page (`/ui/earcon.wav`, no CDN;
+the operator's pick from four synthesized samples, 11471: 44.1 kHz mono,
+-12 dBFS peak, faded, under a second), decoded once through the same unlocked
+AudioContext at constant volume; it never sounds over an utterance being spoken
+(it rings when that one ends, `vDone`); no bell in push-to-talk (`talk` lands
+without it); off with listen off. One sound only -- a second "start" tick is
+what people turn off. Gate: `earconRing()` is called only from the listen chain,
+after `earHeard` returned true; `talkStop`'s path never calls it.
+
 **Slice 5 -- wake word.** "reveille" (openWakeWord, on-device: in the page via
 ONNX Runtime Web, or on the STT host if the page cannot carry it). Without the
 word the room is not listening to the human; the word arms slice 2's

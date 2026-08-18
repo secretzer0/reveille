@@ -383,6 +383,7 @@
   margin:.1rem 0 .3rem}
  .row.bcast{border-left:2px solid var(--gold);border-radius:0 8px 8px 0}
  .atts{display:flex;gap:.5rem;flex-wrap:wrap;margin:.3rem 0 .35rem}
+ .atts audio.att{display:block;max-width:min(380px,100%);height:32px;margin:.15rem 0}
  .atts img.att{display:block;max-width:min(380px,100%);max-height:260px;width:auto;
   height:auto;border-radius:8px;border:1px solid var(--line);cursor:zoom-in}
  .atts a.attlink{color:var(--gold)}
@@ -958,6 +959,7 @@ const attachments=[];           // [{name,url}] pending on the composer
 // corrupt upload. SVG is served as a download on purpose -- image to a human,
 // script host to a browser -- so it is not here.
 const IMG_RE=/\.(png|jpe?g|gif|webp)$/i;
+const AUD_RE=/\.(wav|mp3|m4a|ogg|opus|flac)$/i;   // served inline (0.2.134): a player, not a download
 // AN ATTACHMENT URL IS FOREIGN INPUT, and it was the last unescaped one on this
 // page -- interpolated raw into href, src and data-src through a variable named
 // `safe`, which was the only thing making it look checked. send() accepts
@@ -1132,6 +1134,8 @@ function attHtml(list){
    return '<a href="'+safe+'" target="_blank" rel="noopener" title="open full size">'
      +'<img class="att" src="'+safe+'" alt="'+esc(a.name||'image')+'"></a>';
   const link='<a class="attlink" href="'+safe+'" download>'+label+'</a>';
+  if(AUD_RE.test(a.url))
+   return link+'<audio class="att" controls preload="none" src="'+safe+'"></audio>';
   if(/\.(md|markdown)$/i.test(a.url)&&(a.bytes||0)<300000)
    return link+'<div class="mdview" data-src="'+safe+'">rendering&hellip;</div>';
   return link;
@@ -1556,7 +1560,7 @@ function vPump(){
  vBusy=true;
  vPlay(t.id,vUrl(t.id));
 }
-function vDone(){vCtl=null;vBusy=false;paintStop();vPump();}
+function vDone(){vCtl=null;vBusy=false;paintStop();if(earconPending)earconRing();vPump();}
 // AND THE QUEUE TAKES EACH ID ONCE: whatever delivers a frame twice (a leaked
 // socket, a broker replay), a message is spoken once. This is the belt; dropFeed
 // is the braces.
@@ -3639,7 +3643,7 @@ function listenPaint(state){
 }
 async function listenStart(){
  if(listenVad||vRec)return;                       // not while a talk take is open
- try{vCtxUp();}catch(e){}                        // the mic gesture doubles as the audio unlock
+ try{vCtxUp();earconLoad();}catch(e){}           // the mic gesture doubles as the audio unlock; the bell decodes now
  if(!window.vad||!window.vad.MicVAD){toast('ear: the listener did not load');return;}
  listenPaint('loading the listener...');
  let v;
@@ -3688,9 +3692,34 @@ function listenTake(f32){
     headers:{'content-type':'audio/wav'},body:take});
    const d=await res.json().catch(()=>({}));
    if(!res.ok){toast(d.error||d.detail||('ear: '+res.status));return;}
-   if(earHeard(d.text||'')&&listenVad&&pauseSendOn())pauseSendArm();   // B: the pause sends, hands-free only
+   if(earHeard(d.text||'')){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}   // the bell = the words landed; B: the pause sends, hands-free only
   }catch(e){toast('ear: '+(e.message||e));}
  });
+}
+// ---- THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended): in listen
+// mode ONE bell, at the moment a take's words LAND in the box -- not at silence,
+// not at speech end: landing is when the ear is ready for the next thing, a
+// command or more words. Same moment the pause-to-send countdown starts. A small
+// WAV shipped with the page (/ui/earcon.wav, no CDN), decoded once through the
+// same unlocked AudioContext, constant volume; never over an utterance being
+// spoken (it rings when that one ends); no bell in push-to-talk; off with listen
+// off. One sound only: a second "start" tick is what people turn off.
+let earconBuf=null,earconPending=false;
+function earconLoad(){
+ if(earconBuf)return Promise.resolve(earconBuf);
+ return fetch('/ui/earcon.wav',{credentials:'same-origin'}).then(r=>r.arrayBuffer())
+  .then(ab=>new Promise((res,rej)=>vCtxUp().decodeAudioData(ab,res,rej)))
+  .then(b=>(earconBuf=b));
+}
+function earconRing(){
+ if(!listenVad)return;
+ if(vBusy){earconPending=true;return;}
+ earconPending=false;
+ earconLoad().then(buf=>{
+  if(!listenVad)return;
+  const c=vCtxUp(),src=c.createBufferSource();
+  src.buffer=buf;src.connect(c.destination);src.start();
+ }).catch(()=>{});
 }
 // ---- PAUSE-TO-SEND (operator 11389 "A+B", numbers ruled 11385): hands-free ----
 // ONLY; a deliberate SETTING, off by default, persisted per browser (unlike the

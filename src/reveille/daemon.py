@@ -224,6 +224,16 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.134 AUDIO ATTACHMENTS PLAY IN THE ROOM (operator 11495): .wav/.mp3/
+.m4a/.ogg/.opus/.flac are served inline (audio types carry no script) and
+the page renders them as a player beside the download link.
+THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended). In
+listen mode the page rings ONE bell when a take's words land in the box --
+ready for a command or more words, the same moment the pause-to-send
+countdown starts. /ui/earcon.wav ships with the page (the operator's pick
+of four synthesized samples), decoded once through the unlocked
+AudioContext; never over an utterance being spoken (rings when it ends);
+no bell in push-to-talk; off with listen off. Bus tools unchanged.
 0.2.133 A TERSE RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE (operator
 11475, ruling 11476/11483; DES-013 s5/s7 amended). tts-<mid>.webm/.m4a is
 kept only when the message is not scriptable (human verbatim, unbound, no
@@ -4118,14 +4128,19 @@ def _looks_multipart(content_type):
 _INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".gif": "image/gif", ".webp": "image/webp", ".txt": "text/plain",
                  ".log": "text/plain", ".md": "text/plain", ".json": "application/json",
-                 ".csv": "text/plain"}
+                 ".csv": "text/plain",
+                 # Audio (operator 11495): a browser plays these and never
+                 # executes them; typed inline so <audio> can stream them.
+                 ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+                 ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac"}
 
 
 def file_headers(fname):
     """(media_type, content_disposition) for a stored attachment. Pure.
 
-    Images and plain text render inline -- that is what makes a screenshot show
-    up in the room. Everything else downloads, typed as a stream so the browser
+    Images, plain text and audio render inline -- that is what makes a
+    screenshot show up in the room and a clip play there. Everything else
+    downloads, typed as a stream so the browser
     never sniffs its way into executing it. SVG is DELIBERATELY not inline: it
     is an image to a user and a script host to a browser."""
     ext = os.path.splitext(fname)[1].lower()
@@ -5563,6 +5578,14 @@ _VAD_FILES = {
 }
 
 
+async def earcon_http(_request):
+    """GET /ui/earcon.wav -> the listen-mode bell (ruling 11465): the operator's
+    pick from four synthesized samples (11471), 44.1 kHz mono, -12 dBFS, faded.
+    Ships with the page like the VAD assets; the page decodes it once."""
+    data = pathlib.Path(_ui_override() or _UI_PACKAGED, "earcon.wav").read_bytes()
+    return Response(data, media_type="audio/wav", headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def vad_asset_http(request):
     """GET /ui/vad/<name> -> one of the six vendored VAD files, by table."""
     name = request.path_params["name"]
@@ -5629,6 +5652,7 @@ def build_app():
             Route("/ui", chat_http),
             Route("/ui/opus-decoder.js", opus_decoder_http),
             Route("/ui/vad/{name}", vad_asset_http),
+            Route("/ui/earcon.wav", earcon_http),
             Route("/setup", setup_http, methods=["POST"]),
             Route("/login", login_http, methods=["POST"]),
             Route("/logout", logout_http, methods=["POST"]),
