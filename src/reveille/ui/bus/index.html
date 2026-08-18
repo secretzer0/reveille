@@ -3533,6 +3533,7 @@ async function talkStart(){
  try{vCtxUp();}catch(e){}
  try{await vRecStart();}
  catch(e){toast('microphone: '+(e.message||e));return;}
+ for(const t of vRec.stream.getAudioTracks())t.addEventListener('ended',()=>talkStop());   // a dead mic ends the take
  $('mic').classList.add('on');$('mic').setAttribute('aria-pressed','true');
  const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
   $('micState').textContent='listening '+sec.toFixed(0)+' s'+(sec>1.5&&vRec.peak<0.01?' -- NO SIGNAL':'');
@@ -3570,7 +3571,7 @@ async function talkStop(){
    headers:{'content-type':'audio/wav'},body:take});
   const d=await res.json().catch(()=>({}));
   if(!res.ok){toast(d.error||d.detail||('ear: '+res.status));return;}
-  earLand(d.text||'');
+  earHeard(d.text||'');
  }catch(e){toast('ear: '+(e.message||e));}
  finally{talkBusy=false;$('mic').classList.remove('busy');$('micState').textContent='';}
 }
@@ -3612,6 +3613,11 @@ async function listenStart(){
     clearTimeout(listenCapTimer);listenCapTimer=setTimeout(listenCap,EAR_TAKE_CAP_MS);},
    onSpeechEnd:audio=>{clearTimeout(listenCapTimer);listenPaint('listening');listenTake(audio);},
    onVADMisfire:()=>{clearTimeout(listenCapTimer);listenPaint('listening');},
+   // A mic that DIES mid-listen (unplugged, revoked) turns listening off
+   // (architect 11374): the track says `ended`, the toggle follows.
+   getStream:async()=>{const st=await navigator.mediaDevices.getUserMedia(
+     {audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    for(const t of st.getAudioTracks())t.addEventListener('ended',listenStop);return st;},
   });
   await v.start();
  }catch(e){listenPaint('');toast('microphone: '+(e.message||e));return;}
@@ -3639,9 +3645,56 @@ function listenTake(f32){
     headers:{'content-type':'audio/wav'},body:take});
    const d=await res.json().catch(()=>({}));
    if(!res.ok){toast(d.error||d.detail||('ear: '+res.status));return;}
-   earLand(d.text||'');
+   earHeard(d.text||'');
   }catch(e){toast('ear: '+(e.message||e));}
  });
+}
+// ---- VOICE COMMANDS (DES-014 slice 4, pre-ruled 11355 s5): a SMALL FIXED ----
+// GRAMMAR matched on the WHOLE final transcript of ONE take -- case-folded,
+// trailing punctuation dropped, exact words, nothing fuzzy. A take that IS a
+// command is consumed and never appended; anything else is text ("I said stop
+// yesterday" is a sentence; "sent" and "stop it" are text). earRun is the ONE
+// place the ear may act on the page, and "send" is the ONE way it ever sends
+// -- the human said the word; an empty box is a no-op with a toast.
+const EAR_COMMANDS=['send','cancel','stop','reply','voice on','voice off'];
+function earCommand(text){
+ const t=(text||'').toLowerCase().replace(/[\s.!?,;:]+$/,'').replace(/^[\s.!?,;:]+/,'').replace(/\s+/g,' ').trim();
+ if(!t)return null;
+ if(EAR_COMMANDS.includes(t))return {cmd:t};
+ const m=/^room (.+)$/.exec(t);
+ if(m)return {cmd:'room',arg:m[1]};
+ return null;
+}
+function earRun(c){
+ switch(c.cmd){
+  case 'send':{
+   if(!$('body').value.trim()){toast('nothing to send');return;}
+   $('composer').requestSubmit();return;}
+  case 'cancel':{
+   $('body').value='';$('body').dispatchEvent(new Event('input',{bubbles:true}));toast('cleared');return;}
+  case 'stop':{vStop();vDone();return;}
+  case 'reply':{
+   // Reply to the NEWEST message in this room's feed that is not mine (architect
+   // 11385: what a person in a car means) -- the click handler's own path.
+   const rows=[...document.querySelectorAll('#inner .row[data-id]')].reverse();
+   const row=rows.find(r=>{const mm=msgs.get(+r.dataset.id);return mm&&mm.from!==myName;});
+   if(!row){toast('nothing to reply to');return;}
+   const mm=msgs.get(+row.dataset.id);
+   if(!row.classList.contains('active'))selectRow(row,mm);
+   toast('replying to '+mm.from);return;}
+  case 'room':{
+   const r=((me&&me.rooms)||[]).find(x=>(x.name||'').toLowerCase()===c.arg);
+   if(!r){toast('no room named "'+c.arg+'"');return;}
+   pickRoom(r.id);toast('room: '+r.name);return;}
+  case 'voice on':{if(!voiceOn)toggleVoice();return;}
+  case 'voice off':{if(voiceOn)toggleVoice();return;}
+ }
+}
+// Every take lands here: a command runs, anything else is text.
+function earHeard(text){
+ const c=earCommand(text);
+ if(c){earRun(c);return;}
+ earLand(text);
 }
 // The words go INTO the compose box, after what is there, caret at the end.
 function earLand(text){

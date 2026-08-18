@@ -209,6 +209,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.124 THE EAR, SLICE 4: VOICE COMMANDS (DES-014, pre-ruled 11355 s5). A
+take that IS one of `send`, `cancel`, `stop`, `reply`, `voice on`, `voice
+off` or `room <name>` -- the whole final transcript, case-folded, trailing
+punctuation dropped, exact words -- runs and is not typed; anything else is
+text. The spoken `send` is the one way the ear ever sends (an empty box is a
+no-op). A microphone that dies mid-take ends it. Bus tools unchanged.
 0.2.123 THE EAR, SLICE 2: HANDS-FREE (DES-014, ruling 11355). A `listen`
 toggle beside `talk`: while it is on, a page-side voice-activity detector
 (Silero VAD v5 in WASM, shipped with the page under /ui/vad/ -- no CDN)
