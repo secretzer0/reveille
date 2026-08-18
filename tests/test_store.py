@@ -152,6 +152,53 @@ def test_last_admin_protected():
             pass
 
 
+def test_a_never_used_account_is_removed_and_its_name_freed(tmp_path):
+    """Ruling 11732: a users row is a REFERENT only while something refers to
+    it. Nothing does for an account that was created and never used, so
+    reserving its name forever is the bug -- that one is removed outright."""
+    import os
+    db = str(tmp_path / "b.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    store.setup_first_admin(c, "travis", "hunter2hunter2")
+    dm = store.create_user(c, "dmorse", "hunter2hunter2")
+    assert store.delete_user(c, dm["id"]) == "removed"
+    assert c.execute("SELECT count(*) FROM users WHERE name='dmorse'").fetchone()[0] == 0
+    # the name is free: the same person walks back in and is dmorse again
+    again = store.create_user(c, "dmorse", "hunter2hunter2")
+    assert again["name"] == "dmorse"
+    # one message and the same delete becomes a tombstone
+    room = store.create_room(c, again["id"], "r")
+    store.join(c, "dmorse", "web:dmorse", room["id"], None)
+    store.send(c, store.user_principal(again["id"]), "*", "here", room=room["id"])
+    assert store.user_history(c, again["id"])["messages"] == 1
+    assert store.delete_user(c, again["id"]) == "tombstoned"
+    row = c.execute("SELECT deleted_ns, pw_hash FROM users WHERE name='dmorse'").fetchone()
+    assert row["deleted_ns"] and row["pw_hash"] == "!deleted"
+    with pytest.raises(store.BusError):
+        store.create_user(c, "dmorse", "hunter2hunter2")     # the name stays reserved
+    c.close()
+    assert os.path.exists(db)
+
+
+def test_a_door_or_a_token_is_history_too(tmp_path):
+    db = str(tmp_path / "b2.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    store.setup_first_admin(c, "travis", "hunter2hunter2")
+    u = store.create_user(c, "bob", "hunter2hunter2")
+    store.link_identity(c, "google", {"subject": "s1", "email": "bob@example.com",
+                                      "email_verified": True, "display_name": "Bob",
+                                      "avatar_url": None, "login": "bob", "raw": {}},
+                        u["id"], actor="test")
+    assert store.user_history(c, u["id"])["identities"] == 1
+    assert store.delete_user(c, u["id"]) == "tombstoned"
+    v = store.create_user(c, "carol", "hunter2hunter2")
+    store.create_token(c, v["id"], "carol-laptop")
+    assert store.delete_user(c, v["id"]) == "tombstoned"
+    c.close()
+
+
 def test_delete_user_keeps_rooms_ownerless_not_deleted():
     c, admin, room, tok = fixture()
     store.create_user(c, "second", "hunter2hunter2", role="admin")
