@@ -209,6 +209,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.122 A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357; DES-013
+section 5 amended). The writer performs AGENTS -- text-first speakers that
+need a mouth. A signed-in human's message is spoken exactly as typed or
+said, in the voice assigned to them; it rides the writer's queue only as
+the ordered passthrough, never as a script. On-demand play of a human's
+message likewise. Persona stays a field on the voice. Bus tools unchanged.
 0.2.121 THE WRITER WRITES FOR THE MOUTH (DES-013 section 5 amended, operator,
 the first live evening). The synthesizer reads what it is given, so the
 frame now makes the writer the text normaliser: abbreviations, units and
@@ -2765,7 +2771,15 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # WHILE THE WRITER IS ON, EVERYTHING GOES THROUGH ITS QUEUE (the one
         # ordering point): scripted as an 8-tuple, unscripted as the 5-tuple
         # the writer passes straight through, in message order.
-        if _script_on and v and (v.get("persona") or "").strip():
+        # A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357): the
+        # writer performs AGENTS -- text-first speakers that need a mouth; a
+        # human's own words are their message and the room hears exactly what
+        # they typed or said, in the voice assigned to them. speaker_key is
+        # the one derivation (section 2): user:<id> -> verbatim, agent:<id> ->
+        # the writer. Persona stays a field on the voice; it never rewrites a
+        # person.
+        scriptable = bool(key) and key.startswith("agent:")
+        if _script_on and scriptable and v and (v.get("persona") or "").strip():
             _script_q.put((mid, room, speaker, text, assigned, v, subject, body))
         elif _script_on:
             _script_q.put((mid, room, speaker, text, assigned))
