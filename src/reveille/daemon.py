@@ -209,6 +209,16 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.118 THE EAR, SLICE 1 (DES-014). REVEILLE_STT_URL (with _TOKEN, _MODEL,
+_TIMEOUT) points the broker at a speech-to-text server (OpenAI-shaped
+/v1/audio/transcriptions: speaches / faster-whisper-server) -- the third
+upstream, the same refusal and LAN flag as voices and the writer, off when
+unset. ONE route, POST /stt: a signed-in person's WAV take (the page's own
+recorder; <= 60 s, <= 8 MiB, silence refused), one at a time, back as
+{text}; nothing stored, nothing sent -- the words land in the compose box
+and the human presses Send. The page shows a talk button beside attach when
+the ear is on: hold on a mouse, tap to start/stop on a phone. Bus tools
+unchanged.
 0.2.117 iOS: THE RINGER-SWITCH UNLOCK, AND NUMBERS ON SCREEN. On an iPhone the
 voice toggle's tap now also plays a silent looping element once so Web Audio
 follows the playback session (iOS mutes Web Audio under the silent switch),
@@ -2210,6 +2220,75 @@ def script_config_refusal(url, token, lan_ok=False):
     """The writer's refusal: the same rule, named for scripts."""
     return upstream_config_refusal(url, token, lan_ok, var="REVEILLE_SCRIPT_URL",
                                    feature="Scripts")
+
+
+def stt_config_refusal(url, token, lan_ok=False):
+    """The ear's refusal (DES-014 section 3): the third upstream, the same rule."""
+    return upstream_config_refusal(url, token, lan_ok, var="REVEILLE_STT_URL",
+                                   feature="The ear")
+
+
+# ---- the ear (DES-014): a human talks, the words land in the compose box ----
+# The third upstream, the same shape as voices and the writer: off unless
+# REVEILLE_STT_URL is set and passes the one refusal. ONE route (POST /stt),
+# request-shaped -- no queue, no worker, no file, no row, no frame: the audio
+# lives in the request and dies with it. Bounded like /say: one take in flight.
+_stt_on = False
+_stt_url = ""
+_stt_token = ""
+_stt_model = ""
+_stt_timeout = 20.0
+_stt_slot = threading.BoundedSemaphore(1)
+STT_TAKE_MAX = 8 * 1024 * 1024        # bytes: 60 s at 48 kHz s16 mono is ~5.8 MB, so 8 MiB is the cap
+STT_SECONDS_MAX = 60.0
+
+
+def stt_take_refusal(data):
+    """Why these bytes cannot be a take for the ear, or None. Pure. The same
+    reader as the bank clip (WAV, PCM, the stdlib), different bounds: any
+    length up to 60 s, at most 8 MiB, and not silent (peak under -40 dBFS is a
+    recorder that heard nothing -- refused before the wire, DES-014 s3)."""
+    if len(data) > STT_TAKE_MAX:
+        return f"too large ({len(data) >> 20}MB, cap {STT_TAKE_MAX >> 20}MB)"
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            rate, frames, width = w.getframerate(), w.getnframes(), w.getsampwidth()
+            pcm = w.readframes(frames)
+    except (wave.Error, EOFError, ValueError) as e:
+        return f"not a PCM WAV ({e}); the page's recorder sends s16 mono WAV"
+    if not rate or not frames:
+        return "empty take"
+    seconds = frames / rate
+    if seconds > STT_SECONDS_MAX:
+        return f"too long ({seconds:.1f} s; the ear takes at most {STT_SECONDS_MAX:.0f} s at a time)"
+    if _wav_peak(pcm, width) < VOICE_CLIP_PEAK_MIN:
+        return "silent (the microphone heard nothing -- check the input device and permission)"
+    return None
+
+
+def _stt_transcribe(url, token, model, data, timeout, language=""):
+    """POST the take to the OpenAI-shaped /v1/audio/transcriptions (speaches,
+    faster-whisper-server) as multipart; return the text. Stdlib, like every
+    other upstream call here."""
+    boundary = "----reveille-ear-" + secrets.token_hex(8)
+    parts = [("model", model or "")]
+    if language:
+        parts.append(("language", language))
+    parts.append(("response_format", "json"))
+    body = b""
+    for name, value in parts:
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                 f"{value}\r\n").encode()
+    body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+             f"filename=\"take.wav\"\r\nContent-Type: audio/wav\r\n\r\n").encode()
+    body += data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(url.rstrip("/") + "/v1/audio/transcriptions", data=body,
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        out = json.loads(r.read().decode() or "{}")
+    return (out.get("text") or "").strip()
 
 
 _plaintext_hosts = []   # hosts reached in the clear under REVEILLE_LAN_PLAINTEXT=1
@@ -4366,6 +4445,42 @@ def _speaker_key_of(row):
 
 
 @_guard
+async def stt_http(request):
+    """POST /stt (DES-014 s3): the take the page recorded, in; the words, out.
+    Signed-in WEB USER only -- the ear is a human's mouth, a token has no
+    microphone. WAV via the same reader as the bank clip; 60 s / 8 MiB /
+    silence refused by name; one take in flight (429 for the next); the
+    upstream is called off the event loop; NOTHING is stored -- no file, no
+    row, no frame, and the log carries the length, never the words. Nothing
+    is sent either: the page puts the text in the compose box and the human
+    presses send."""
+    if _bearer(request):
+        raise store.AuthError("the ear is for a signed-in person -- a token has no microphone")
+    p = _user_principal(request)
+    if not _stt_on:
+        return JSONResponse({"error": "the ear is off on this broker"}, status_code=503)
+    data = await request.body()
+    if (why := stt_take_refusal(data)):
+        return JSONResponse({"error": why}, status_code=400)
+    if not _stt_slot.acquire(blocking=False):
+        return JSONResponse({"error": "the ear is busy -- one utterance at a time"},
+                            status_code=429)
+    lang = (request.query_params.get("lang") or "")[:8]
+    t0 = time.monotonic()
+    try:
+        text = await asyncio.to_thread(_stt_transcribe, _stt_url, _stt_token, _stt_model,
+                                       data, _stt_timeout, lang)
+    except Exception as e:
+        log.warning("%s ear: upstream failed: %s", p.name, e)
+        return JSONResponse({"error": f"the ear did not answer ({e})"}, status_code=502)
+    finally:
+        _stt_slot.release()
+    log.info("%s ear: %.1fs take -> %d chars in %d ms", p.name, _voice_seconds(data),
+             len(text), int((time.monotonic() - t0) * 1000))
+    return JSONResponse({"text": text})
+
+
+@_guard
 async def audio_make_http(request):
     """POST /audio/<msg-id> -> make the spoken form of a message that has none
     (operator directive 2026-08-17): the same queue as a live send -- the
@@ -4706,6 +4821,7 @@ async def me_http(request):
     p = _user_principal(request)
     return JSONResponse({
         "name": p.name, "is_admin": p.is_admin,
+        "ear": _stt_on,           # DES-014: the page shows the mic only when the ear is on
         "rooms": [{"id": r, "name": n} for r, n in p.rooms.items()],
         "owned": [dict(r, members=store.member_count(_conn, r["id"]))
                   for r in store.list_rooms(_conn, p.user_id)],
@@ -5216,6 +5332,7 @@ def build_app():
             Route("/files/{fname}", files_http),
             Route("/audio/{mid}.webm", audio_http),
             Route("/audio/{mid}", audio_make_http, methods=["POST"]),
+            Route("/stt", stt_http, methods=["POST"]),
             Route("/script/{mid}", script_http),
             WebSocketRoute("/wake", wake_ws),
             WebSocketRoute("/feed", feed_ws),
@@ -5258,6 +5375,7 @@ def _plaintext_banner(url, lan_ok, what):
 def main():
     global _conn, _files_dir, _voices_dir, _db_path, _tts_on, _tts_url, _tts_token
     global _script_on, _script_url, _script_model, _script_token
+    global _stt_on, _stt_url, _stt_token, _stt_model, _stt_timeout
     import uvicorn
     _setup_logging()
     root = os.environ.get("CLAUDE_AGENT_BUS") or os.path.expanduser("~/.claude/agent-bus")
@@ -5311,6 +5429,19 @@ def main():
                              name="script", daemon=True).start()
             print(f"scripts ON: {s_url} model={_script_model or '(server default)'} "
                   f"first-sentence budget {first:.1f}s", flush=True)
+    # THE EAR does not ride on voices: a room can be typed-to by voice without
+    # ever speaking back. Same refusal, same banner, request-shaped (no worker).
+    stt_url = os.environ.get("REVEILLE_STT_URL", "")
+    stt_token = os.environ.get("REVEILLE_STT_TOKEN", "")
+    if (why := stt_config_refusal(stt_url, stt_token, lan_ok)):
+        print(f"THE EAR REFUSED: {why}", flush=True)
+    elif stt_url:
+        _stt_on = True
+        _stt_url, _stt_token = stt_url, stt_token
+        _stt_model = os.environ.get("REVEILLE_STT_MODEL", "")
+        _stt_timeout = float(os.environ.get("REVEILLE_STT_TIMEOUT", "20"))
+        _plaintext_banner(stt_url, lan_ok, "the ear")
+        print(f"ear ON: {stt_url} model={_stt_model or '(server default)'}", flush=True)
     host = os.environ.get("REVEILLE_HOST", "0.0.0.0")
     port = int(os.environ.get("REVEILLE_PORT", "8765"))
     # REVEILLE_UDS binds a unix socket instead of a TCP port. One broker per tenant means
