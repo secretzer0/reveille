@@ -55,22 +55,35 @@ surprises and no 20 MB WAV crossing LTE three times.
   offers its recorder). Recording IN the page is the ear's recorder already
   (`vRecStart`/`vRecStop`, DES-013 s3): a "record a clip" control beside talk
   is slice 2, not slice 1.
-- `POST /upload` stays byte-agnostic (it is what agents use). The decision is
-  made at SEND: `send()` / `POST /send` sees an attachment whose stored bytes
-  ffprobe reads as audio -> the message is enqueued to the voice worker with
-  `clip=<stored path>` instead of text; the worker's job for that item is the
-  transcode + `archive_raw` + unlink of the raw, then the same announcement it
-  makes for a synthesized file. The worker is already the one ordering point
+- **Amended (operator 11499): no audio ever crosses the wire in its native
+  format.** The transcode happens at UPLOAD, not at send: `POST /upload` (and
+  the MCP tool, and `reveille-upload`) ffprobes the bytes; audio -> converted
+  right there to the wire form (`<stored>.webm` Opus + `<stored>.m4a`),
+  `archive_raw` stub, raw discarded, and the returned attachment dict already
+  points at the converted file (`/files/<stored>.webm`, name kept, `bytes` =
+  converted, `duration_s`). Nothing under `<files>` is ever a WAV/MP3/OGG. The
+  chat window renders any such attachment with an inline player (the same
+  Opus path the page already has, `<audio>` for the m4a on Safari) -- so a
+  clip posted as a plain attachment is playable on every device without a
+  second decoder. The SEND-time step below is then only the binding of that
+  already-converted clip to the message as its voice.
+- The decision to make it the message's VOICE is made at SEND: `send()` / `POST /send` sees an attachment whose stored bytes
+  ffprobe read as audio at upload -> the message is enqueued to the voice worker
+  with `clip=<stored path>` instead of text; the worker's job for that item is
+  a hard link / rename of the converted pair into `tts-<mid>.webm` + `.m4a`
+  (no second transcode), then the same announcement it makes for a synthesized
+  file. The worker is already the one ordering point
   (DES-013 s5); a clip takes its turn like a script.
 - Agents: `send(attachments=[{url, name, bytes}])` unchanged; an agent that
   uploads a `.wav`/`.mp3`/`.ogg`/`.m4a`/`.webm` and sends it is heard.
 
 ## 4. Slices
 
-1. Broker: detection at send, worker transcode to `tts-<mid>.webm` + `.m4a`,
-   `archive_raw` stub, raw unlink, refusals, `duration_s` on the attachment;
-   page: attach accepts audio, the attachment chip shows a clip icon and the
-   message plays through the existing player. Gate: a 20 s WAV sent from the
+1. Broker: transcode at upload (all three upload paths), `archive_raw` stub,
+   raw unlink, refusals, `duration_s`; page: audio attachments render an inline
+   player; send binds the clip as the message's voice (worker link + announce).
+   Gate adds: a `.wav` uploaded by an agent is stored only as `.webm`+`.m4a`
+   and plays inline in the chat on iPhone and Chrome. Gate: a 20 s WAV sent from the
    page is heard by a second listening client as WebM/Opus in message order,
    the WAV is gone from disk, `archive_raw` was called once, delete removes the
    pair; a non-audio file is untouched; a 601 s clip is refused by name.
