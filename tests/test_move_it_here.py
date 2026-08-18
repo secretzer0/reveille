@@ -120,3 +120,59 @@ def test_the_move_names_every_room_that_will_not_travel():
     assert "WILL NOT TRAVEL" in dlg
     assert "unreachable" in dlg, "rooms the mover cannot hold are counted too"
     assert "addEventListener('change',lost)" in dlg, "it answers per tick, not once"
+
+
+def test_the_mint_is_the_last_irreversible_act(tmp_path, monkeypatch):
+    """LIVE INCIDENT (architect 11911): POST /agents minted the bound token
+    BEFORE provision_agent validated. The mint supersedes the identity's
+    previous credential the instant it lands, so the refusal that followed --
+    correct in itself -- left reveille-red-shirt with NO live credential: both
+    bodies dark, gone from presence, nothing said. Every refusal must therefore
+    be answerable with nothing minted."""
+    conn = sqlite3.connect(str(tmp_path / "l.db"))
+    conn.row_factory = sqlite3.Row
+    rl._launcher_tables(conn)
+    monkeypatch.setattr(rl, "_exists", lambda n: False)
+    monkeypatch.setattr(rl, "load_profile", lambda u, base=None: {})
+    # No claude credential: a precondition that used to run POST-mint.
+    monkeypatch.setattr(rl, "credential_env", lambda c: ((), {}, "none"))
+    assert "no claude credential" in rl.provision_refusal(
+        conn, "tmel", "red-shirt", "", role_prompt="you are a devops agent")
+    # No role prompt: the exact refusal the operator's click hit, once the
+    # credential is in place.
+    monkeypatch.setattr(rl, "credential_env", lambda c: ((), {}, "token"))
+    why = rl.provision_refusal(conn, "tmel", "red-shirt", "", role_prompt="")
+    assert why and "no role prompt" in why
+    # A clean case answers None, so the route reaches the mint exactly when the
+    # provision can actually proceed.
+    assert rl.provision_refusal(conn, "tmel", "red-shirt", "",
+                                role_prompt="you are a devops agent") is None
+    # The route checks BEFORE minting, and provision_agent still runs the same
+    # function, so the CLI path and the invariant cannot drift apart.
+    src = pathlib.Path(rl.__file__).read_text()
+    route = src[src.index("d = await request.json()"):src.index("token, minted_id =")]
+    assert "provision_refusal(" in route, "the route pre-validates"
+    assert "mint_bound_token" not in route, "nothing is minted before that check"
+    body = src[src.index("def provision_agent("):src.index("def destroy_agent(")]
+    assert "provision_refusal(" in body
+
+
+def test_a_failure_after_the_swap_mint_says_what_state_it_left(tmp_path):
+    src = pathlib.Path(rl.__file__).read_text()
+    # the ROUTE's handler, not the roll loop's: search inside the route body
+    route = src[src.index("d = await request.json()"):]
+    i = route.index("except (LaunchError, subprocess.CalledProcessError) as e:")
+    window = route[i:i + 2000]
+    assert "revoke_minted_token" in window
+    assert "NO LIVE BODY" in window and "Retry the move" in window, \
+        "a silent revoke is how an agent vanished from presence with no reason"
+
+
+def test_the_move_offers_only_rooms_you_and_it_share():
+    """Operator 11913: the dialog listed every room the MOVER holds. A body
+    swap is not the place to hand an agent reach it never had -- that is the
+    Tokens tab, where granting reach is the whole point of the screen."""
+    dlg = PAGE[PAGE.index("async function openMaterialize"):PAGE.index("async function openCreate")]
+    assert "const offer=rooms.filter(r=>has.has(r.id))" in dlg
+    assert "id=\"agmRooms\">'+(offer.length?offer.map" in dlg, "the chips come from the intersection"
+    assert "share no room" in dlg, "and the empty case says why there is nothing to move"

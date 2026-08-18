@@ -268,6 +268,26 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.174 THE MINT IS THE LAST IRREVERSIBLE ACT (live incident on
+reveille-red-shirt; ruled 11911). POST /agents minted the bound token BEFORE
+provision_agent validated. A mint supersedes the identity's previous
+credential the instant it lands, so the refusal that followed -- correct in
+itself, a missing role prompt -- left that identity with NO live credential at
+all: both bodies dark, gone from presence, and the cleanup revoked the new
+token so nothing remained to say why. The operator asked "what happened?" and
+the system could not answer. Now every refusal is answerable BEFORE anything
+is minted: provision_refusal() holds the name, re-provision, cap, claude
+credential and role-prompt checks with no side effects, the route calls it
+first, and provision_agent calls the same function -- so the CLI path and the
+invariant cannot drift apart. A failure AFTER a swap-mint (docker itself
+failing) still revokes, but says what state that leaves behind: "<agent> now
+has NO LIVE BODY: its previous one was superseded when this mint landed. Its
+identity, history and memories are untouched. Retry the move, or mint it a
+credential in the Tokens tab." A silent revoke is how an agent vanished from
+presence with no reason. Also, per the operator (11913), the move dialog now
+offers only the rooms the mover and the agent SHARE, never the mover's whole
+list: a body swap is not the place to hand an agent reach it never had -- that
+is the Tokens tab, where granting reach is the point of the screen.
 0.2.173 THE MOVE ASKS FOR WHAT IT NEEDS, AND NAMES WHAT IT COSTS (operator's
 first real click on 0.2.172; ruling 11902). Two things the move dialog got
 wrong. (1) It sent no role, and the launcher refuses a container with none --

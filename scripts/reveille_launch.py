@@ -1093,6 +1093,49 @@ def _ensure_network(net, broker_url):
 
 # ---- subcommands -------------------------------------------------------------------
 
+def provision_refusal(conn, user, agent, repo_url, *, boot_cmd=None,
+                      role_prompt=None, replace=False):
+    """Why this provision cannot happen, or None. NO SIDE EFFECTS.
+
+    THE MINT IS THE LAST IRREVERSIBLE ACT (architect 11911, from a live
+    incident). POST /agents minted the bound token FIRST -- which supersedes
+    the identity's previous credential the moment it lands -- and only then
+    called provision_agent, which refused on a missing role prompt. The refusal
+    was correct and the cleanup revoked the new token, and the two together
+    left reveille-red-shirt with NO live credential at all: identity fine, both
+    bodies dark, gone from presence, and nothing said why. Every check that can
+    refuse must therefore be answerable BEFORE anything is minted, which is
+    what this function is for. provision_agent still calls it, so the CLI path
+    and the invariant cannot drift apart."""
+    for label, val in (("user", user), ("agent", agent)):
+        if not ROLE_RE.match(val or ""):
+            return f"bad {label} {val!r}: lowercase alnum + dash, 2-64 chars"
+    name = container_name(user, agent)
+    if _exists(name) and not replace:
+        return (f"{name} already exists -- destroy first, or pass replace to "
+                f"re-provision (its data root is kept)")
+    quotas = _quotas_for(conn, user)
+    others = conn.execute(
+        "SELECT count(*) FROM containers WHERE user=? AND agent!=?",
+        (user, agent)).fetchone()[0]
+    if others >= quotas["max_containers"]:
+        return (f"{user} is at their container cap ({quotas['max_containers']}); "
+                f"destroy one or raise it with `quota {user} --max-containers N`")
+    _, _, kind = credential_env(resolve_credentials(load_profile(user), agent, repo_url))
+    if kind == "none" and not boot_cmd:
+        return (f"no claude credential for {user}/{agent}: save one in the profile "
+                f"(claude setup-token output), or choose claude_mode=home-login "
+                f"and log in once (reveille-launch login {user}) -- an agent must "
+                f"never inherit whatever credential is lying around in the "
+                f"launcher's environment")
+    if not (role_prompt or "").strip() and not boot_cmd:
+        return (f"no role prompt for {user}/{agent}: pass one with --role-prompt (or "
+                f"pick a role in the Agents form) -- an agent provisioned without one "
+                f"boots with no CLAUDE.md role block and knows what it is only from "
+                f"its bus name")
+    return None
+
+
 def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                     network=DEFAULT_NETWORK, broker=DEFAULT_BROKER,
                     boot_cmd=None, replace=False, role_prompt=None, model=None):
@@ -1100,27 +1143,14 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     the per-user cap, lays the per-agent data root, runs the container. The
     token exists only in this frame and the docker-run child's env -- never
     argv, never any store. Raises LaunchError; returns the container name."""
-    for label, val in (("user", user), ("agent", agent)):
-        if not ROLE_RE.match(val or ""):
-            raise LaunchError(f"bad {label} {val!r}: lowercase alnum + dash, "
-                              f"2-64 chars")
+    why = provision_refusal(conn, user, agent, repo_url, boot_cmd=boot_cmd,
+                            role_prompt=role_prompt, replace=replace)
+    if why:
+        raise LaunchError(why)
     name = container_name(user, agent)
-    # Re-provision is routine (3.5) but must never be UNPROMPTED: an accidental
-    # re-provision of a live agent would destroy its session mid-conversation.
-    # Refuse unless replace is explicit; the data root survives either way.
-    if _exists(name) and not replace:
-        raise LaunchError(f"{name} already exists -- destroy first, or pass "
-                          f"replace to re-provision (its data root is kept)")
+    # Re-provision, the cap, the credential and the role prompt are all decided
+    # by provision_refusal above -- BEFORE a caller mints anything (11911).
     quotas = _quotas_for(conn, user)
-    # The per-user container cap (sec 6). The one being replaced does not count
-    # against itself.
-    others = conn.execute(
-        "SELECT count(*) FROM containers WHERE user=? AND agent!=?",
-        (user, agent)).fetchone()[0]
-    if others >= quotas["max_containers"]:
-        raise LaunchError(
-            f"{user} is at their container cap ({quotas['max_containers']}); "
-            f"destroy one or raise it with `quota {user} --max-containers N`")
     if not token:
         raise LaunchError("no token given")
 
@@ -1135,27 +1165,6 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     # the same requirement one level up: its credential is the file in the
     # USER's login home, checkable right here -- refuse-not-create, with the
     # one command that fixes it named.
-    if kind == "none" and not boot_cmd:
-        raise LaunchError(
-            f"no claude credential for {user}/{agent}: save one in the profile "
-            f"(claude setup-token output), or choose claude_mode=home-login "
-            f"and log in once (reveille-launch login {user}) -- an agent must "
-            f"never inherit whatever credential is lying around in the "
-            f"launcher's environment")
-    # A ROLE-LESS AGENT IS AS BROKEN AS A CREDENTIAL-LESS ONE, just quieter about
-    # it (architect ruling 8691). The entrypoint's CLAUDE.md rewrite is guarded on
-    # the prompt being non-empty, so an empty one correctly does nothing and the
-    # agent boots knowing what it is only from its bus name -- no refusal, no
-    # error, an agent that reads as provisioned and is not. Same shape as the
-    # credential refusal above: the requirement follows the thing that consumes
-    # it, so a boot_cmd that runs no claude does not need one. A deliberately
-    # role-less agent is an explicit flag, never an empty string.
-    if not (role_prompt or "").strip() and not boot_cmd:
-        raise LaunchError(
-            f"no role prompt for {user}/{agent}: pass one with --role-prompt (or "
-            f"pick a role in the Agents form) -- an agent provisioned without one "
-            f"boots with no CLAUDE.md role block and knows what it is only from "
-            f"its bus name")
     auth_mount = None
     if kind == "home-login":
         auth_mount = user_auth_root(user)
@@ -2732,6 +2741,25 @@ def build_api(auth_url):
         # request's forwarded cookie. The secret exists in this frame and the
         # docker-run child env only -- the browser never sees it at all. A
         # token in the body (the P1/CLI path) is still honored.
+        role = (d.get("role") or "").strip()
+        if role and role not in ROLE_PROMPTS:
+            raise LaunchError(f"unknown role {role!r}")
+        prompt = ROLE_PROMPTS.get(role, "")
+        if d.get("append"):
+            prompt = (prompt + "\n\n" + str(d["append"])).strip()
+        # EVERY REFUSAL IS ANSWERED BEFORE ANYTHING IS MINTED (11911). A mint
+        # supersedes the identity's previous credential the instant it lands, so
+        # a mint followed by a refusal leaves that identity with NO live body --
+        # measured, on reveille-red-shirt: minted, refused on the missing role
+        # prompt, revoked, and the agent vanished from presence with nothing
+        # said. The checks are the same ones provision_agent runs; asking them
+        # here first costs one function call and cannot strand anybody.
+        why = provision_refusal(conn, p["user"], (d.get("agent") or "").strip(),
+                                (d.get("repo_url") or "").strip(),
+                                boot_cmd=d.get("boot_cmd"), role_prompt=prompt,
+                                replace=bool(d.get("replace")))
+        if why:
+            raise LaunchError(why)
         token, minted_id = d.get("token") or "", None
         if not token and d.get("rooms"):
             # CREATE IS THE CALLER'S WORD, NEVER THIS ROUTE'S (10919). The
@@ -2746,13 +2774,7 @@ def build_api(auth_url):
                 auth_url, request.headers.get("cookie"),
                 (d.get("agent") or "").strip(), list(d["rooms"]),
                 create=bool(d.get("create")))
-        role = (d.get("role") or "").strip()
         try:
-            if role and role not in ROLE_PROMPTS:
-                raise LaunchError(f"unknown role {role!r}")
-            prompt = ROLE_PROMPTS.get(role, "")
-            if d.get("append"):
-                prompt = (prompt + "\n\n" + str(d["append"])).strip()
             name, kind = provision_agent(
                 conn, p["user"], (d.get("agent") or "").strip(),
                 (d.get("repo_url") or "").strip(), token,
@@ -2762,11 +2784,22 @@ def build_api(auth_url):
                 boot_cmd=d.get("boot_cmd"), replace=bool(d.get("replace")),
                 role_prompt=prompt or None,
                 model=(d.get("model") or "").strip() or None)
-        except (LaunchError, subprocess.CalledProcessError):
+        except (LaunchError, subprocess.CalledProcessError) as e:
             if minted_id:
-                # A failed provision must not leave a live orphaned credential.
+                # A failed provision must not leave a live orphaned credential --
+                # and must not leave the human guessing either (11911). Revoking
+                # is right; revoking SILENTLY is how an agent disappeared from
+                # presence with no explanation. Every precondition ran before the
+                # mint, so reaching here means docker itself failed: say what
+                # state that leaves the identity in, and what fixes it.
                 revoke_minted_token(auth_url, request.headers.get("cookie"),
                                     minted_id)
+                raise LaunchError(
+                    f"{e} -- the new credential was revoked, so "
+                    f"{(d.get('agent') or '').strip()} now has NO LIVE BODY: its "
+                    f"previous one was superseded when this mint landed. Its "
+                    f"identity, history and memories are untouched. "
+                    f"Retry the move, or mint it a credential in the Tokens tab.")
             raise
         return JSONResponse({"container": name, "agent": d.get("agent"),
                              "credential": kind})
