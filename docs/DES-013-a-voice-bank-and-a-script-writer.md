@@ -147,8 +147,10 @@ current, holder)`:
   what nobody heard was never made.** RULED 11476/11483 (operator 11475), 0.2.133:
   **a terse rendition of a scriptable message is never durable.** `tts-<mid>.webm`
   /`.m4a` is kept only when the message is not scriptable (human verbatim, unbound
-  token, no persona on the assigned voice) or was made from a script. A terse
-  fallback -- writer off, down, or past its first-sentence budget -- is synthesized,
+  token, no persona on the assigned voice), or was made from a script, or no writer
+  is configured on this broker at all (11493: no later to wait for). A terse
+  fallback -- the configured writer down, past its first-sentence budget, or skipped
+  for depth -- is synthesized,
   streamed to whoever asked or was listening (its `.part` lingers `TERSE_LINGER_S`
   = 60 s for a late fetch, served by GET /audio), then unlinked; the `audio` frame
   carries `terse: true` and the page keeps the icon hollow. The play click always

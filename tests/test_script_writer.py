@@ -256,6 +256,13 @@ def test_enqueue_routes_to_the_writer_only_with_a_listener_and_a_persona(world, 
     assert daemon._tts_q.empty() and it[:4] == (9, world["room"], "travis", "s. b") and len(it) == 6
     assert it[4] == world["item"][4], "the human keeps their assigned voice, verbatim"
     assert it[5] is True
+    # NO WRITER CONFIGURED (11493): the same persona'd agent message is KEPT --
+    # there is no later in which a script could be made.
+    monkeypatch.setattr(daemon, "_script_on", False)
+    daemon._tts_enqueue(3, world["room"], "quark", "s", "b", key="agent:x")
+    it = daemon._tts_q.get_nowait()
+    assert it[:4] == (3, world["room"], "quark", "s. b") and it[5] is True
+    monkeypatch.setattr(daemon, "_script_on", True)
     # No persona -> STILL the writer's queue (the one ordering point), as the
     # unscripted item the worker passes straight through -- kept, no persona
     # means nothing would ever script it (11476 (a)).

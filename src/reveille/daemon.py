@@ -227,8 +227,9 @@ CHANGES = """
 0.2.133 A TERSE RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE (operator
 11475, ruling 11476/11483; DES-013 s5/s7 amended). tts-<mid>.webm/.m4a is
 kept only when the message is not scriptable (human verbatim, unbound, no
-persona) or was made from a script. A terse fallback -- writer off, down,
-or past its budget -- is synthesized, streamed to whoever asked or was
+persona), or was made from a script, or no writer is configured at all. A
+terse fallback -- the configured writer down, past its budget, or skipped
+for depth -- is synthesized, streamed to whoever asked or was
 listening (its .part lingers 60 s for a late fetch), then unlinked; the
 feed's audio frame says `terse: true` and the page keeps the icon hollow.
 The play click always POSTs /audio/<mid> first and follows the state, so
@@ -2916,7 +2917,9 @@ def _sweep_terse_renditions(conn, files_dir):
     persona) with NO script row -- is a terse rendition that became durable by
     accident, and would answer "ready" forever. Unlink it (and its .m4a); the
     next click makes the script and then the file. Human, unbound, no-persona
-    and scripted renditions are untouched. Returns how many went."""
+    and scripted renditions are untouched. Runs only where a writer is
+    configured (11493): with none, a kept terse file is the right file.
+    Returns how many went."""
     gone = 0
     for p in pathlib.Path(files_dir).glob("tts-*.webm"):
         mid = p.name[4:-5]
@@ -2974,17 +2977,19 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # person.
         scriptable = bool(key) and key.startswith("agent:") and bool(v) \
             and bool((v.get("persona") or "").strip())
-        # The last field is KEEP (ruling 11476): a rendition is durable only when
-        # it is the message's own words (human, unbound, no persona) or made from
-        # a script; a scriptable message spoken terse -- writer off here, down or
-        # past its budget in the writer -- is heard and then unlinked, so the
-        # next click with the writer up makes the script and then the file.
+        # The last field is KEEP (ruling 11476, 11493): a rendition is durable
+        # only when it is the message's own words (human, unbound, no persona),
+        # or made from a script, or no writer is CONFIGURED on this broker (then
+        # there is no later to wait for). A scriptable message spoken terse
+        # because the configured writer is down, past its budget or skipped for
+        # depth is heard and then unlinked, so the next click with the writer up
+        # makes the script and then the file.
         if _script_on and scriptable:
             _script_q.put((mid, room, speaker, text, assigned, v, subject, body))
         elif _script_on:
             _script_q.put((mid, room, speaker, text, assigned, True))
         else:
-            _tts_q.put((mid, room, speaker, text, assigned, not scriptable))
+            _tts_q.put((mid, room, speaker, text, assigned, True))
 
 
 def _push_presence(room):
@@ -5726,7 +5731,6 @@ def main():
     _files_dir = pathlib.Path(_db_path).parent / "files"
     _files_dir.mkdir(parents=True, exist_ok=True)
     _sweep_abandoned_audio(_files_dir)
-    _sweep_terse_renditions(_conn, _files_dir)
     _voices_dir = pathlib.Path(_db_path).parent / "voices"   # DES-013 section 3: the bank
     _voices_dir.mkdir(parents=True, exist_ok=True)
     # The audio dies with the message, and store owns that choke point. Told
@@ -5769,6 +5773,7 @@ def main():
             _plaintext_banner(s_url, lan_ok, "the script writer")
             threading.Thread(target=_script_worker, args=(s_url, _script_model, s_token, first),
                              name="script", daemon=True).start()
+            _sweep_terse_renditions(_conn, _files_dir)   # 11476: only where a writer can script them
             print(f"scripts ON: {s_url} model={_script_model or '(server default)'} "
                   f"first-sentence budget {first:.1f}s + {SCRIPT_MS_PER_CHAR:g} ms/char", flush=True)
     # THE EAR does not ride on voices: a room can be typed-to by voice without
