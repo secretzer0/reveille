@@ -1344,7 +1344,14 @@ function add(m){
 // Everyone in a room hears the same voices in the same ORDER. The order is the
 // message id, which the log already provides -- that is the whole reason there is
 // no audio stream to synchronise (DES-009 section 2).
-let voiceOn=false;         // default OFF, and deliberately not persisted: see the button
+let voiceOn=false;         // default OFF on every load: no browser plays without a gesture
+// REMEMBERED, per browser (ruling 11444, amending DES-009 s8.3): the human who
+// turned voice on yesterday wants it on today. But a remembered "on" has no
+// gesture behind it, so it comes back ARMED, not playing -- the button reads
+// "voice: tap to resume" and the first pointerdown/keydown anywhere flips it on
+// through toggleVoice (the unlock gesture, so iOS is covered). Nothing plays by
+// itself. Listening is NOT remembered (11355 #2): a hot mic is not a preference.
+let voiceWanted=!!localStorage.revVoice;
 const vQ=[];               // pending [{id,from}], drained in id order
 let vBusy=false;           // one utterance at a time -- overlapping voices are noise
 const V_MAX=8;             // queue depth past which we skip to the newest
@@ -1443,7 +1450,7 @@ function vDiagPaint(){const line='last: '+vDiag.frames+' frames, '+vDiag.decoded
 // silence and looks like a broken synthesizer. The toggle was the gesture; if the
 // browser still refused, say so and turn it back off rather than pretending.
 function vRefused(){
- vBusy=false;voiceOn=false;paintVoice();vTell();
+ vBusy=false;voiceOn=false;voiceWanted=false;paintVoice();vTell();   // wanted drops for THIS load: no retry storm on every tap; the stored preference stays
  toast('your browser blocked audio -- click voice again to allow it');
 }
 // THE DEMUXER. Our own muxer's shape (ffmpeg, -f webm -live 1, mono Opus, 20 ms
@@ -1607,8 +1614,17 @@ function paintVoice(){
  const b=$('voice');
  b.className=voiceOn?'armed':'';
  b.setAttribute('aria-pressed',voiceOn?'true':'false');
- b.textContent=voiceOn?'voice on':'voice off';
+ b.textContent=voiceOn?'voice on':(voiceWanted?'voice: tap to resume':'voice off');
 }
+// The first gesture after load resumes a remembered voice. Not a tap on the
+// button itself: that one is the toggle's own click, and taking it here too would
+// turn voice on and straight back off.
+function vResumeOnGesture(e){
+ if(!voiceWanted||voiceOn||(e.target&&e.target.closest&&e.target.closest('#voice')))return;
+ toggleVoice();
+}
+document.addEventListener('pointerdown',vResumeOnGesture,true);
+document.addEventListener('keydown',vResumeOnGesture,true);
 // THE LISTENER STATE LIVES ON THE SOCKET (DES-013 section 5): the broker
 // scripts and speaks a room's messages only while a human here has voice on,
 // so the toggle is told to the feed socket -- at every flip and once after
@@ -1617,8 +1633,9 @@ function paintVoice(){
 function vTell(){try{if(ws&&ws.readyState===1)ws.send(JSON.stringify({voice:voiceOn}));}catch(e){}}
 function toggleVoice(){
  voiceOn=!voiceOn;
- if(voiceOn){try{vCtxUp();}catch(e){}}      // the click is the gesture: resume here
- else{vStop();vQ.length=0;vBusy=false;}
+ voiceWanted=voiceOn;
+ if(voiceOn){localStorage.revVoice='1';try{vCtxUp();}catch(e){}}      // the click is the gesture: resume here
+ else{delete localStorage.revVoice;vStop();vQ.length=0;vBusy=false;}
  paintVoice();vTell();
 }
 
@@ -1934,6 +1951,7 @@ $('histBtn').onclick=()=>{
  $('histBar').classList.toggle('on');
 };
 $('voice').onclick=toggleVoice;
+paintVoice();                                 // a remembered voice paints "tap to resume" before any socket
 $('vstop').onclick=()=>{vStop();vDone();};   // abort this utterance, hand the queue on
 $('hGo').onclick=e=>{e.preventDefault();
  const p={limit:500};

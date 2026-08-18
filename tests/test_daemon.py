@@ -1008,9 +1008,25 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     assert 'id="voice" aria-pressed="false"' in PAGE, \
         "the toggle must ship pressed=false -- it is also the autoplay gesture"
     assert "let voiceOn=false;" in PAGE, "voiceOn must default to off"
-    assert "localStorage" not in PAGE[PAGE.index("let voiceOn=false;"):
-                                      PAGE.index("function clearFeed()")], \
-        "a restored 'on' has no user gesture behind it and would queue into silence"
+    # REMEMBERED, NOT RESTORED (ruling 11444): the preference lives in
+    # localStorage.revVoice, but a load only ARMS it -- voiceOn stays false, the
+    # button reads "tap to resume", and the first gesture anywhere goes through
+    # toggleVoice (the unlock gesture). A restored 'on' with no gesture behind it
+    # would queue into silence. Listening is never remembered (11355 #2).
+    region = PAGE[PAGE.index("let voiceOn=false;"):PAGE.index("function clearFeed()")]
+    assert "let voiceWanted=!!localStorage.revVoice;" in region
+    assert "(voiceWanted?'voice: tap to resume':'voice off')" in region
+    assert "function vResumeOnGesture(e){" in region and \
+        "if(!voiceWanted||voiceOn||(e.target&&e.target.closest&&e.target.closest('#voice')))return;" in region and \
+        "document.addEventListener('pointerdown',vResumeOnGesture,true);" in region and \
+        "document.addEventListener('keydown',vResumeOnGesture,true);" in region, \
+        "a remembered voice resumes on the first gesture, not on load, and not on the toggle's own tap"
+    load = PAGE[:PAGE.index("let voiceOn=false;")] + PAGE[PAGE.index("function clearFeed()"):]
+    assert "voiceOn=true" not in load and "toggleVoice()" not in load.replace("$('voice').onclick=toggleVoice;", "") \
+        .replace("case 'voice on':{if(!voiceOn)toggleVoice();return;}", "") \
+        .replace("case 'voice off':{if(voiceOn)toggleVoice();return;}", ""), \
+        "nothing outside the gesture path turns voice on"
+    assert "localStorage.revListen" not in PAGE and "localStorage.revEar" not in PAGE, "listening is per tab, never remembered"
     # 2. No <audio> element at all, and no MediaSource (ruling 11020, then 11211,
     #    then the operator's iPhone 2026-08-17: iOS Safari has no MediaSource and a
     #    plain element prerolls a live stream by media time -- 3.6 s measured -- so

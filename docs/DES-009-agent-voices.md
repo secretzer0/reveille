@@ -297,6 +297,18 @@ Unversioned branch, three commits, gates named:
 3. **The client.** A play queue ordered by message id, behind a toggle that
    defaults **off**. Gate: the queue plays in id order given out-of-order
    arrival, and the toggle's off state issues no requests.
+   *Amended by ruling 11444 (operator 11442):* the toggle is **remembered per
+   browser** (`localStorage.revVoice`), but a load never turns it on -- no
+   browser plays sound without a gesture, and "a toggle that plays on load
+   surprises" was the reason it was not persisted before. A remembered voice
+   comes back **armed**: the button reads "voice: tap to resume" and the first
+   pointerdown or keydown anywhere on the page flips it on through the same
+   toggle path (which is the unlock gesture, so iOS is covered); a tap on the
+   button itself is just the toggle. Turning it off forgets it; a browser
+   refusal drops the arm for that load and says so. Listening is **not**
+   remembered (DES-014, 11355 #2): a hot mic is not a preference. Gate: the
+   page reads the memory into `voiceWanted`, `voiceOn` starts false, and
+   nothing outside the gesture path turns it on.
 
 ## 9. Not in this design, deliberately
 
