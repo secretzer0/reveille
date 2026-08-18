@@ -128,15 +128,15 @@ def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
     import inspect
     from reveille import cli
     head = daemon.USAGE.split("ENV (set by the launching pane", 1)[0]
-    assert "BUS DOCTRINE" in head and "ULTRA-TERSE" in head, "the doctrine leads the standing usage"
+    assert "BUS DOCTRINE" in head and "caveman-ultra" in head, "the doctrine leads the standing usage"
     block = daemon.USAGE.split("CLAUDE.md block", 1)[1]
     assert block.index("BUS DOCTRINE") < block.index("Identity/token from env"), \
         "in the pasted block the doctrine is the first rule"
-    assert "BUS DOCTRINE" in (daemon.send.__doc__ or "") and "ULTRA-TERSE" in daemon.send.__doc__
+    assert "BUS DOCTRINE" in (daemon.send.__doc__ or "") and "caveman-ultra" in daemon.send.__doc__
     assert '"doctrine": BUS_DOCTRINE' in inspect.getsource(daemon.join), "join() hands it over on every boot"
-    assert "ULTRA-TERSE" in daemon.BUS_DOCTRINE and "persona expansion" in daemon.BUS_DOCTRINE
+    assert "caveman-ultra" in daemon.BUS_DOCTRINE and "do not write for the ear" in daemon.BUS_DOCTRINE
     src = inspect.getsource(cli.starter_claude_md)
-    assert "BUS DOCTRINE" in src and "ULTRA-TERSE" in src, "the starter CLAUDE.md carries it"
+    assert "BUS DOCTRINE" in src and "caveman-ultra" in src, "the starter CLAUDE.md carries it"
 
 
 def test_wake_url_from_http():

@@ -71,19 +71,20 @@ SWEEP_SECS = 3600
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
-BUS_DOCTRINE = ("BUS DOCTRINE (operator 11397, ratified): agents write ULTRA-TERSE -- fragments, "
-                "no articles or filler, ids/numbers/names exact. Humans hear the writer's "
-                "persona expansion; the raw text stays the record on the page. Prose on the "
-                "bus = wasted tokens + slow speech.")
+BUS_DOCTRINE = ("BUS DOCTRINE (operator 11397, architect 11399, ratified): you write for AGENTS: "
+                "caveman-ultra -- facts, ids, numbers, no filler; the room hears you through the "
+                "writer, do not write for the ear. The raw text stays the record on the page; the "
+                "script is what the mouth said.")
 
 USAGE = """REVEILLE usage. Source: usage() tool or GET /usage. Tool signatures are in your
 MCP tool schemas; this is only what they don't cover. Ends with CHANGES: per-version
 behavior changes -- re-read after any broker version bump (info() or GET /version).
 
-BUS DOCTRINE (operator 11397, ratified): agents write ULTRA-TERSE -- fragments, no
-articles or filler, ids/numbers/names exact. Humans hear the writer's persona expansion
-(DES-013); the raw text stays the record on the page. Prose on the bus = wasted tokens
-+ slow speech. This holds for every send, every room, every agent.
+BUS DOCTRINE (operator 11397, architect 11399, ratified): you write for AGENTS:
+caveman-ultra -- facts, ids, numbers, no filler; the room hears you through the writer
+(DES-013), do not write for the ear. The raw text stays the record on the page; the
+script is what the mouth said. Every send, every room, every agent, ours or another
+owner's.
 
 ENV (set by the launching pane; never hardcode or prompt):
   $REVEILLE_AGENT_ROLE  your bus name (the X-Agent header). Unset -> "unset-agent".
@@ -174,9 +175,9 @@ USE:
 
 --- CLAUDE.md block (replace any old reveille section) ---
 ## Agent bus
-BUS DOCTRINE: I write ULTRA-TERSE on the bus -- fragments, no articles/filler, ids/
-numbers/names exact; the writer expands it into persona speech for humans, the raw
-text stays the record. Prose on the bus = wasted tokens + slow speech.
+BUS DOCTRINE: I write for AGENTS: caveman-ultra -- facts, ids, numbers, no filler;
+the room hears me through the writer, I do not write for the ear. Raw text = the
+record; the script = what the mouth said.
 Identity/token from env, never hardcode: $REVEILLE_AGENT_ROLE = my bus name,
 $REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps it to my
 rooms server-side, so no room name ever goes in my env.
@@ -222,10 +223,10 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
-0.2.128 THE BUS DOCTRINE IS AT THE CORE (operator 11397, ratified): agents
-write ULTRA-TERSE on the bus -- fragments, no articles or filler, ids and
-numbers and names exact; humans hear the writer's persona expansion; the raw
-text stays the record. It now leads the standing usage(), opens the
+0.2.128 THE BUS DOCTRINE IS AT THE CORE (operator 11397, architect 11399,
+ratified): you write for AGENTS -- caveman-ultra: facts, ids, numbers, no
+filler; the room hears you through the writer, do not write for the ear; the
+raw text stays the record and the script is what the mouth said. It now leads the standing usage(), opens the
 CLAUDE.md block agents paste, sits in send()'s own description, comes back
 in every join() reply as `doctrine`, and is the first rule in the CLAUDE.md
 `reveille init` seeds. Bus tools: join() reply gains `doctrine`.
@@ -3401,9 +3402,9 @@ async def send(to: str, body: str, subject: str = "",
     message id (or list, to merge branches). attachments: optional list of
     {"url","name","bytes"} dicts referencing files uploaded via POST /upload.
 
-    BUS DOCTRINE: write ULTRA-TERSE -- fragments, no articles or filler, ids/numbers/
-    names exact. Humans hear the writer's persona expansion; the raw text stays the
-    record. Prose here = wasted tokens + slow speech.
+    BUS DOCTRINE: you write for AGENTS: caveman-ultra -- facts, ids, numbers, no
+    filler; the room hears you through the writer, do not write for the ear. The raw
+    text stays the record; the script is what the mouth said.
 
     room: leave it empty on a REPLY -- the room is inferred from the parent, and a
     room that disagrees is refused. On a NEW thread, leave it empty when your token
