@@ -246,6 +246,17 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.161 RECORD A CLIP (DES-017 slice 2, EPIC-001 #5). A clip button beside
+talk and listen: it records with the EAR'S OWN recorder (one capture path on
+the page, one silence refusal), caps at 60 s by CLOSING the take rather than
+dropping it, and uploads through the ORDINARY upload -- so the broker
+transcodes it exactly as it does a dropped .wav (slice 1: nothing crosses the
+wire in its native format) and hands back the same {url, name, bytes, clip,
+duration_s}. From there it is a normal attachment: the composer shows CLIP
+m:ss and send() binds it as the message's voice. It NEVER sends -- the human
+presses Send, as with any attachment. A take under half a second or with no
+signal is refused by name; talk and clip never steal each other's recorder;
+the button exists only where the ear does.
 0.2.160 AN ADMIN ADOPTS AN OWNERLESS ROOM (EPIC-001 #4, ruling 11604 gap).
 Deleting a person leaves their rooms standing -- the history is not theirs to
 take -- and until one has an owner again nobody can change its name,

@@ -242,8 +242,11 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     for forbidden in ("send(", "$('send')", "sendMsg", "requestSubmit", ".submit("):
         assert forbidden not in rest, f"the ear must never send outside earRun ({forbidden})"
     assert run.count("requestSubmit") == 1 and "if(!$('body').value.trim()){toast('nothing to send');return;}" in run
-    assert ear.count("try{vCtxUp();}catch(e){}") == 1 and \
-        ear.count("try{vCtxUp();earconLoad();}catch(e){}") == 1, "either mic gesture doubles as the audio unlock"
+    # EVERY mic gesture doubles as the audio unlock: talk, record-a-clip
+    # (DES-017 s2, which lives in this region too) and listen -- the last one
+    # also decodes the bell it is about to ring.
+    assert ear.count("try{vCtxUp();}catch(e){}") == 2 and \
+        ear.count("try{vCtxUp();earconLoad();}catch(e){}") == 1
 
 
 def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
