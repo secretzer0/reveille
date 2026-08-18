@@ -1233,6 +1233,201 @@ def destroy_agent(conn, user, agent, purge=False):
     conn.commit()
 
 
+# ---- UPGRADE IN PLACE (ruling 11600, proposal 11599) --------------------------------
+# A bound token exists in exactly two places: the broker's store and the env of a
+# container the launcher provisioned. The launcher may CARRY it between those --
+# in this frame, into the docker-run child's env -- and never PARK it: no db, no
+# log, no file, no HTTP body. That is not an amendment of the never-at-rest rule;
+# provision already holds the token in-process, and read_container_config already
+# reads Config.Env. Same reach against a same-host reader, nothing new. So an
+# image bump is one call: read the token (and the gate secret, so grants signed
+# against it survive) from the container we created, run the new image with the
+# same everything, prove it is up, and only then throw the old one away.
+
+def env_of(env_lines):
+    """docker's Config.Env (a list of "K=V") as a dict. Pure."""
+    env = {}
+    for line in env_lines or ():
+        k, sep, v = str(line).partition("=")
+        if sep:
+            env[k] = v
+    return env
+
+
+CARRIED_PREFIXES = ("REVEILLE_",)
+CARRIED_NAMES = ("ANTHROPIC_MODEL",)
+
+
+def carried_env_diff(old_env, new_env):
+    """The names whose value the upgrade was supposed to carry and did not:
+    every REVEILLE_* variable (token, gate secret, role, url, repo, role prompt)
+    and ANTHROPIC_MODEL -- set-equality on names AND values, both directions.
+    Image-derived variables (PATH, HOME, the image's own) are not compared: they
+    are what an upgrade is allowed to change. Pure; empty list = carried."""
+    def keep(k):
+        return k.startswith(CARRIED_PREFIXES) or k in CARRIED_NAMES
+    a = {k: v for k, v in (old_env or {}).items() if keep(k)}
+    b = {k: v for k, v in (new_env or {}).items() if keep(k)}
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def boot_cmd_of(container_cmd, image_cmd):
+    """The boot_cmd provision was given, recovered from the container: None when
+    the container runs its image's own command, else the container's command as
+    one shell string (docker_run_argv splits it again). Pure."""
+    if not container_cmd or list(container_cmd) == list(image_cmd or []):
+        return None
+    import shlex
+    return " ".join(shlex.quote(str(x)) for x in container_cmd)
+
+
+def _inspect_container(name):
+    """Config.Env, image, cmd, network, running -- or None when there is no such
+    container (which is the prompt path, not an error)."""
+    res = _docker("inspect", "-f",
+                  "{{json .Config.Env}}\t{{.Config.Image}}\t{{json .Config.Cmd}}"
+                  "\t{{.HostConfig.NetworkMode}}\t{{.State.Running}}",
+                  name, check=False, capture=True)
+    if res.returncode != 0:
+        return None
+    try:
+        env_json, image, cmd_json, network, running = (res.stdout or "").strip().split("\t")
+        return {"env": env_of(json.loads(env_json)), "image": image.strip(),
+                "cmd": json.loads(cmd_json) or [], "network": network.strip(),
+                "running": running.strip() == "true"}
+    except ValueError:
+        return None
+
+
+def _image_cmd(image):
+    res = _docker("image", "inspect", "-f", "{{json .Config.Cmd}}", image,
+                  check=False, capture=True)
+    if res.returncode != 0:
+        return []
+    try:
+        return json.loads((res.stdout or "").strip() or "[]") or []
+    except ValueError:
+        return []
+
+
+def _token_alive(health_url, agent, token):
+    """The carried token still opens the broker: presence answers. A 401/403 is
+    a dead token (revoked, rotated) and must not be rolled forward; any other
+    failure is the broker not answering, which is also not a time to upgrade."""
+    try:
+        _presence(health_url, agent, token)
+        return None
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return f"its bound token is dead (broker said {e.code}) -- re-provision it"
+        return f"broker answered {e.code} on presence -- not upgrading"
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        return f"broker unreachable at {health_url} ({e}) -- not upgrading"
+
+
+def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH,
+                  timeout=120):
+    """Re-provision an agent's container on `image`, carrying the bound token
+    (and gate secret) from the container the launcher created. Same repo, boot
+    command, network, role, model, quotas; same data root. The old container is
+    renamed aside, stopped, and destroyed only after the new one is running,
+    has written its boot report, and shows in the broker's presence -- else the
+    new one is destroyed and the old one put back (and started again if it was
+    running). Never two containers holding driver state: OLD is stopped before
+    NEW starts. Refuses a name launcher.db does not record (the launcher never
+    adopts a container it did not create), a container with no token to carry
+    (that is today's prompt path, verbatim), and a dead token.
+
+    The token exists here, in the docker-run child's env, and in the old
+    container's env -- never in argv, launcher.db, the audit line, the log or
+    the HTTP answer. Raises LaunchError; returns {"from", "to", "was_running"}."""
+    _known_agent(conn, user, agent)
+    name = container_name(user, agent)
+    old = _inspect_container(name)
+    if old is None or not old["env"].get("REVEILLE_TOKEN"):
+        raise LaunchError(
+            f"{user}/{agent} has no container to carry a token from -- re-provision it "
+            f"(reveille-launch new {user} {agent} <repo_url> --replace, or the Agents "
+            f"form), which asks for the token")
+    if old["image"] == image:
+        raise LaunchError(f"{user}/{agent} is already on {image}")
+    token = old["env"]["REVEILLE_TOKEN"]
+    why = _token_alive(health_url, agent, token)
+    if why:
+        raise LaunchError(f"not upgrading {user}/{agent}: {why}")
+    broker = old["env"].get("REVEILLE_URL") or DEFAULT_BROKER
+    repo_url = old["env"].get("REVEILLE_REPO_URL", "")
+    creds = resolve_credentials(load_profile(user), agent, repo_url)
+    cred_names, cred_env, kind = credential_env(creds)
+    boot_cmd = boot_cmd_of(old["cmd"], _image_cmd(old["image"]))
+    if kind == "none" and not boot_cmd:
+        raise LaunchError(
+            f"no claude credential for {user}/{agent} in the profile -- the upgraded "
+            f"container would boot to a login prompt nobody is watching; save one first")
+    auth_mount = user_auth_root(user) if kind == "home-login" else None
+    env = dict(os.environ, REVEILLE_AGENT_ROLE=agent, REVEILLE_URL=broker,
+               REVEILLE_REPO_URL=repo_url, REVEILLE_TOKEN=token,
+               REVEILLE_GATE_SECRET=old["env"].get("REVEILLE_GATE_SECRET") or secrets.token_hex(32),
+               **cred_env)
+    extra_env = list(cred_names)
+    for k in ("REVEILLE_ROLE_PROMPT", "ANTHROPIC_MODEL"):
+        if old["env"].get(k):
+            extra_env.append(k)
+            env[k] = old["env"][k]
+    root = data_root(user, agent)
+    ino_before = os.stat(root).st_ino if os.path.isdir(root) else None
+    quotas = _quotas_for(conn, user)
+    argv = docker_run_argv(user, agent, image, old["network"] or DEFAULT_NETWORK, quotas,
+                           boot_cmd=boot_cmd, extra_env=extra_env, auth_mount=auth_mount)
+    prev = f"{name}.prev"
+    _docker("rm", "-f", prev, check=False, capture=True)      # a leftover from a crashed upgrade
+    if old["running"]:
+        _docker("stop", name, check=False, capture=True)         # never two containers with driver state
+    _docker("rename", name, prev, check=True, capture=True)
+
+    def rollback(reason):
+        _docker("rm", "-f", name, check=False, capture=True)
+        _docker("rename", prev, name, check=False, capture=True)
+        if old["running"]:
+            _docker("start", name, check=False, capture=True)
+        _audit("UPGRADE-ROLLBACK", user=user, agent=agent, image=image, reason=reason)
+        raise LaunchError(f"upgrade of {user}/{agent} to {image} failed: {reason} -- "
+                          f"the old container ({old['image']}) is back"
+                          + (" and running" if old["running"] else ""))
+
+    try:
+        subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, OSError) as e:
+        rollback(f"docker run refused ({e})")
+    # HEALTH BEFORE DESTROY (11600 s3): running, boot report written, presence shows it.
+    if not wait_healthy(health_url, agent, token, timeout):
+        rollback(f"not present on the broker within {timeout}s")
+    if read_boot_report(user, agent) is None:
+        rollback("no boot report")
+    new = _inspect_container(name)
+    if new is None or not new["running"]:
+        rollback("new container not running")
+    # THE SAME AGENT (11600 s4): carried env set-equal, same data root.
+    diff = carried_env_diff(old["env"], new["env"])
+    if diff:
+        rollback("carried env differs: " + ", ".join(diff))
+    if ino_before is not None and os.stat(root).st_ino != ino_before:
+        rollback("data root moved")
+    _docker("rm", "-f", prev, check=False, capture=True)
+    conn.execute("UPDATE containers SET image=? WHERE user=? AND agent=?", (image, user, agent))
+    conn.commit()
+    _audit("UPGRADE", user=user, agent=agent, image_from=old["image"], image_to=image)
+    return {"from": old["image"], "to": image, "was_running": old["running"]}
+
+
+def behind_image(conn, image=DEFAULT_IMAGE):
+    """Records whose image is not `image` -- what `make up` prints and `upgrade
+    --all` walks. launcher.db only: never `docker ps`."""
+    return [dict(r) for r in conn.execute(
+        "SELECT user, agent, image FROM containers WHERE image IS NOT ? ORDER BY user, agent",
+        (image,)).fetchall()]
+
+
 def mint_grant(conn, user, agent, grantee, mode, ttl):
     """Shared grant-mint path. The token is RETURNED once, never stored
     (4.5.2): re-issue is re-mint, never retrieval."""
@@ -1337,6 +1532,50 @@ def cmd_new(a):
     print(f"UNHEALTHY: {a.agent} never reached live+connected. Inspect:\n"
           f"  docker logs --tail 20 {name}", file=sys.stderr)
     return 1
+
+
+def cmd_upgrade(a):
+    conn = _db()
+    try:
+        if a.all:
+            todo = [(r["user"], r["agent"]) for r in behind_image(conn, a.image)]
+            if not todo:
+                print(f"nothing behind {a.image}")
+                return
+        elif a.user and a.agent:
+            todo = [(a.user, a.agent)]
+        else:
+            die("usage: reveille-launch upgrade USER AGENT [--image X] | upgrade --all [--image X]")
+        failed = 0
+        for user, agent in todo:
+            try:
+                out = upgrade_agent(conn, user, agent, a.image, health_url=a.health_url,
+                                    timeout=a.timeout)
+                print(f"upgraded {user}/{agent}: {out['from']} -> {out['to']}"
+                      + ("" if out["was_running"] else " (was stopped; now running)"))
+            except LaunchError as e:
+                failed += 1
+                print(f"FAILED {user}/{agent}: {e}", file=sys.stderr)
+        if failed:
+            sys.exit(1)
+    finally:
+        conn.close()
+
+
+def cmd_behind(a):
+    conn = _db()
+    try:
+        rows = behind_image(conn, a.image)
+    finally:
+        conn.close()
+    if not rows:
+        print(f"agent containers: all on {a.image}")
+        return
+    print(f"agent containers BEHIND {a.image}:")
+    for r in rows:
+        print(f"  {r['user']}/{r['agent']}  {r['image']}")
+    print("upgrade in place (token carried from the container, data kept):")
+    print(f"  reveille-launch upgrade --all --image {a.image}")
 
 
 def cmd_ls(a):
@@ -2424,6 +2663,22 @@ def build_api(auth_url):
     async def agent_lifecycle(request, p, conn):
         name = request.path_params["agent"]
         verb = request.path_params["verb"]
+        if verb == "upgrade":
+            # Ruling 11600: the OWNER's session (guarded; _known_agent inside)
+            # upgrades to the launcher's default image, token carried from the
+            # container -- the answer names images only, never the credential.
+            # OFF THE LOOP (review 11609): docker stop + wait_healthy is up to
+            # two minutes, and provision deliberately never blocks the loop that
+            # serves every user's /agents poll -- so this runs in a thread with
+            # its OWN connection (sqlite is per-thread); the answer still waits.
+            def _upgrade_owned(user, agent):
+                c = _db()
+                try:
+                    return upgrade_agent(c, user, agent, DEFAULT_IMAGE)
+                finally:
+                    c.close()
+            out = await asyncio.to_thread(_upgrade_owned, p["user"], name)
+            return JSONResponse({"upgraded": name, "from": out["from"], "to": out["to"]})
         if verb not in ("start", "stop"):
             raise LaunchError(f"unknown verb {verb!r}")
         _known_agent(conn, p["user"], name)
@@ -3039,6 +3294,21 @@ def build_parser():
     n.set_defaults(fn=cmd_new)
 
     sub.add_parser("ls", help="list provisioned containers").set_defaults(fn=cmd_ls)
+
+    up = sub.add_parser("upgrade", help="re-provision an agent on a new image, carrying "
+                        "its bound token from the container it has (ruling 11600); "
+                        "the old container comes back if the new one is not healthy")
+    up.add_argument("user", nargs="?")
+    up.add_argument("agent", nargs="?")
+    up.add_argument("--all", action="store_true", help="every record behind --image")
+    up.add_argument("--image", default=DEFAULT_IMAGE)
+    up.add_argument("--health-url", default=DEFAULT_HEALTH)
+    up.add_argument("--timeout", type=int, default=120)
+    up.set_defaults(fn=cmd_upgrade)
+    be = sub.add_parser("behind", help="list provisioned containers whose recorded image "
+                        "is not --image, with the upgrade command")
+    be.add_argument("--image", default=DEFAULT_IMAGE)
+    be.set_defaults(fn=cmd_behind)
 
     for name, fn in (("stop", cmd_stop), ("start", cmd_start)):
         s = sub.add_parser(name)

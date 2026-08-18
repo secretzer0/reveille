@@ -226,6 +226,18 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.147 AN AGENT CONTAINER UPGRADES IN PLACE (operator 11594/11599, ruling
+11600; DES-006 s7 "carry, not park"). The launcher carries the bound token
+(and gate secret) from the container it made into a new one on the new
+image -- same repo, boot command, network, role, model, quotas, data root;
+never parked in db, log, file or HTTP body. OLD stops and is renamed aside;
+NEW must be running, have its boot report and show in the broker's presence
+before OLD is removed, else NEW is destroyed and OLD comes back (started
+again if it was). Refuses a name launcher.db does not record, a dead token,
+a purged container (that is the prompt path). `reveille-launch upgrade USER
+AGENT | --all`, `reveille-launch behind` (make up prints it), and an
+"upgrade" button on /agents for a container behind the default image. Bus
+tools unchanged; agent image unchanged.
 0.2.146 EVERY COMMAND HAS A SOUND (operator 11576/11578, architect 11577;
 DES-014 s5 amended, supersedes 11465 "one bell only"). One table, one earcon(name),
 one "sounds" setting per browser (me menu, default ON), synthesized in the
