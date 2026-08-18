@@ -1285,7 +1285,9 @@ function render(m){
  row.style.display=matches(m)?'':'none';
  row.addEventListener('click',e=>{
   if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click
-  if(e.target.closest('.play')){if(m.has_audio)playOne(m.id);else genOne(m);return;}
+  // The click always ASKS first (ruling 11483): the broker says ready (durable
+  // file -> play) or queues -- a terse stand-in heard earlier is not a file.
+  if(e.target.closest('.play')){genOne(m);return;}
   if(e.target.closest('.scr')){toggleScript(row,m);return;}
   selectRow(row,m);
  });
@@ -1858,7 +1860,10 @@ function connect(){
   // never heard a live message unless the worker happened to be idle. LIVE arrivals
   // only: msgs holds what add() rendered live, so a late joiner is not blasted with
   // a queue of history nobody is waiting to hear (section 2).
-  case 'audio':{const mm=msgs.get(m.id);if(mm){mm.has_audio=true;mm.gen_pending=false;paintIcons(mm);if(vAsked.delete(m.id))playOne(m.id);else vPush(mm);}return;}
+  // `terse` (ruling 11476): what plays is a stand-in for a message the writer
+  // never scripted -- heard, not kept -- so the icon stays hollow and the next
+  // click asks again (script first, then the durable file).
+  case 'audio':{const mm=msgs.get(m.id);if(mm){if(!m.terse)mm.has_audio=true;mm.gen_pending=false;paintIcons(mm);if(vAsked.delete(m.id))playOne(m.id);else vPush(mm);}return;}
   case 'script':{const mm=msgs.get(m.id);if(mm){mm.has_script=true;mm.script=m.text||mm.script;
     mm.script_voice=m.voice_id||mm.script_voice;paintIcons(mm);}return;}
   case 'message':return add(m);

@@ -144,7 +144,19 @@ current, holder)`:
   listener can keep a GPU warm. The broker keeps `_feed_voice[q]` beside `_feed[q]`
   (the `(room, name)` tuple is not widened) and asks `_room_listening(room)` at
   enqueue time. DES-009 §2's "replayable" is amended: **what was heard live is kept;
-  what nobody heard was never made.**
+  what nobody heard was never made.** RULED 11476/11483 (operator 11475), 0.2.133:
+  **a terse rendition of a scriptable message is never durable.** `tts-<mid>.webm`
+  /`.m4a` is kept only when the message is not scriptable (human verbatim, unbound
+  token, no persona on the assigned voice), or was made from a script, or no writer
+  is configured on this broker at all (11493: no later to wait for). A terse
+  fallback -- the configured writer down, past its first-sentence budget, or skipped
+  for depth -- is synthesized,
+  streamed to whoever asked or was listening (its `.part` lingers `TERSE_LINGER_S`
+  = 60 s for a late fetch, served by GET /audio), then unlinked; the `audio` frame
+  carries `terse: true` and the page keeps the icon hollow. The play click always
+  POSTs `/audio/<mid>` first and follows the state, so the next click with the
+  writer up makes the script and THEN the durable file. Boot runs
+  `_sweep_terse_renditions` once for files that became durable before the rule.
 - Enqueue: `_tts_enqueue(mid, room, speaker_key, speaker_name, subject, body)` — no
   listener → drop; listener and the writer on and a persona resolved → the script
   queue; else the synth queue with the terse text.

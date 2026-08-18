@@ -143,7 +143,7 @@ def test_the_worker_writes_the_file_and_announces_it(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append((room, msg)))
-    daemon._tts_q.put((7, "r1", "alice", "hello", None))
+    daemon._tts_q.put((7, "r1", "alice", "hello", None, True))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     # THE FILE IS WEBM/OPUS (ruling 11211): the broker transcoded the stub's WAV.
@@ -178,8 +178,8 @@ def test_the_worker_logs_the_device_the_server_reports(monkeypatch, tmp_path, ca
     asked = []
     monkeypatch.setattr(daemon, "_tts_get",
                         lambda url, token, path, timeout: asked.append(path) or info)
-    daemon._tts_q.put((1, "r1", "a", "x", None))
-    daemon._tts_q.put((2, "r1", "a", "y", None))
+    daemon._tts_q.put((1, "r1", "a", "x", None, True))
+    daemon._tts_q.put((2, "r1", "a", "y", None, True))
     daemon._tts_q.put(None)
     with caplog.at_level("INFO"):
         daemon._tts_worker("http://tts:8004/", "", 1)
@@ -201,7 +201,7 @@ def test_a_service_that_is_down_leaves_a_silent_message(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     pushed = []
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: pushed.append(msg))
-    daemon._tts_q.put((7, "r1", "alice", "hello", None))
+    daemon._tts_q.put((7, "r1", "alice", "hello", None, True))
     daemon._tts_q.put(None)
     daemon._tts_worker("http://x", "", 1)
     assert list(tmp_path.iterdir()) == []
@@ -283,6 +283,7 @@ import math  # noqa: E402
 import subprocess  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+import json  # noqa: E402
 
 from starlette.requests import Request  # noqa: E402
 
@@ -352,7 +353,7 @@ def test_the_audio_event_fires_at_the_first_byte_not_at_the_end(monkeypatch, tmp
     chunk 1 has landed, chunk 2 has not been released, and the event is already
     on the feed. Red on the whole-file worker, which announced after the write."""
     speak = _Gated([_wav_header() + _pcm(0.5), _pcm(0.5)])
-    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
+    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None, True)])
     assert speak.first_out.wait(5)
     part = tmp_path / "tts-7.webm.part"
     # The encoder emits its header + first cluster (200 ms) from chunk 1's
@@ -406,7 +407,7 @@ def test_the_route_serves_an_in_flight_message_then_the_file(monkeypatch, tmp_pa
     sees neither."""
     mid = _seed_message(monkeypatch, tmp_path)
     speak = _Gated([_wav_header() + _pcm(0.5), _pcm(0.5), _pcm(0.5)])
-    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(mid, "r1", "alice", "hello", None)])
+    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(mid, "r1", "alice", "hello", None, True)])
     assert speak.first_out.wait(5)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not pushed:
@@ -449,7 +450,7 @@ def test_an_encoder_that_fails_names_its_cause_in_the_abandoned_warning(monkeypa
         "-i", "pipe:0", "-c:a", "no_such_codec", "-f", "webm", "pipe:1"])
     speak = lambda *a, **k: iter([_wav_header() + _pcm(0.5)])  # noqa: E731
     with caplog.at_level("WARNING"):
-        _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
+        _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None, True)])
         t.join(5)
     assert "abandoned" in caplog.text and "ffmpeg exited" in caplog.text \
         and "no_such_codec" in caplog.text, caplog.text
@@ -462,7 +463,7 @@ def test_the_completed_file_is_a_webm_a_decoder_reads_to_the_last_frame(monkeypa
     PCM measured."""
     frames = _pcm(0.5)
     speak = lambda *a, **k: iter([_wav_header() + frames[:100], frames[100:]])  # noqa: E731
-    _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
+    _, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None, True)])
     t.join(5)
     assert (tmp_path / "tts-7.webm").read_bytes()[:4] == EBML
     assert abs(_webm_seconds(tmp_path / "tts-7.webm") - 0.5) < 0.15
@@ -472,7 +473,7 @@ def test_a_message_deleted_mid_flight_leaves_no_wav_and_no_part(monkeypatch, tmp
     """Gate 5. The choke point unlinks the .part while the worker writes; the
     worker's rename then finds no .part and fails closed. Nothing lands."""
     speak = _Gated([_wav_header() + _pcm(0.5), _pcm(0.5)])
-    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None)])
+    pushed, t = _run_worker(monkeypatch, tmp_path, speak, [(7, "r1", "alice", "hello", None, True)])
     assert speak.first_out.wait(5)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not pushed:
@@ -547,7 +548,7 @@ def test_a_reader_that_leaves_mid_tail_does_not_wedge_the_worker(monkeypatch, tm
         calls["n"] += 1
         return speak(*a, **k) if calls["n"] == 1 else plain(*a, **k)
     pushed, t = _run_worker(monkeypatch, tmp_path, speak_both,
-                            [(mid, "r1", "alice", "hello", None), (mid + 100, "r1", "bob", "next", None)])
+                            [(mid, "r1", "alice", "hello", None, True), (mid + 100, "r1", "bob", "next", None, True)])
     assert speak.first_out.wait(5)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and not pushed:
@@ -627,3 +628,99 @@ def test_the_browser_tells_the_socket_its_listener_state():
     rd = src[src.index("async def _feed_reader("):]
     rd = rd[:rd.index("\n\n\n")]
     assert '_feed_voice[q] = bool(d["voice"])' in rd
+
+
+# ---- ruling 11476: a terse rendition of a scriptable message is never durable ----
+
+def test_a_terse_rendition_of_a_scriptable_message_is_heard_and_not_kept(monkeypatch, tmp_path):
+    """The gate from 11476: writer off (or down, or past its budget) + a
+    scriptable message -> the audio plays through the tail and a late fetch
+    within the linger still gets it, the frame says `terse`, and after the
+    linger NO file remains -- no .webm, no .m4a, no .part -- so the next click
+    with the writer up makes the script and then the durable file. Kept
+    renditions (human verbatim, no persona, scripted) rename as before."""
+    mid = _seed_message(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "TERSE_LINGER_S", 0.3)
+    speak = lambda *a, **k: iter([_wav_header() + _pcm(0.5), _pcm(0.5)])  # noqa: E731
+    pushed, t = _run_worker(monkeypatch, tmp_path, speak,
+                            [(mid, "r1", "alice", "hello", None, False),
+                             (mid + 100, "r1", "bob", "next", None, True)])
+    t.join(10)
+    assert not t.is_alive()
+    frames = [m for m in pushed if m["event"] == "audio"]
+    assert frames[0] == {"event": "audio", "id": mid, "terse": True}, "the page keeps the icon hollow"
+    assert frames[1] == {"event": "audio", "id": mid + 100}, "a kept rendition carries no flag"
+    part = tmp_path / f"tts-{mid}.webm.part"
+    assert part.is_file() and not (tmp_path / f"tts-{mid}.webm").exists(), "lingering, not durable"
+
+    async def late():
+        resp = await daemon.audio_http(_request(mid))
+        return resp.status_code, resp.media_type
+    assert asyncio.run(late()) == (200, "audio/webm"), "a listener's fetch inside the linger is served"
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and part.exists():
+        time.sleep(0.05)
+    assert not any(tmp_path.glob(f"tts-{mid}.*")), "after the linger, nothing of the terse rendition remains"
+    assert (tmp_path / f"tts-{mid + 100}.webm").is_file(), "the kept one is the record"
+
+    async def gone():
+        return (await daemon.audio_http(_request(mid))).status_code
+    assert asyncio.run(gone()) == 404
+
+
+def test_the_on_demand_route_never_calls_a_lingering_terse_rendition_ready(monkeypatch, tmp_path):
+    """audio_make_http says "ready" only for the durable file: a terse .part in
+    its linger is not it, so the click re-enqueues (script first when the writer
+    is on) instead of replaying the stand-in."""
+    mid = _seed_message(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon, "_tts_on", True)
+    monkeypatch.setattr(daemon, "_files_dir", tmp_path)
+    (tmp_path / f"tts-{mid}.webm.part").write_bytes(b"x")
+    asked = []
+    monkeypatch.setattr(daemon, "_tts_enqueue", lambda *a, **k: asked.append((a, k)))
+    monkeypatch.setattr(daemon, "_speaker_key_of", lambda row: "agent:1")
+    monkeypatch.setattr(daemon, "_act", lambda p: p)       # a web user; the auth is the room
+    monkeypatch.setattr(_P, "name", "t", raising=False)
+
+    async def go():
+        resp = await daemon.audio_make_http(_request(mid))
+        return resp.status_code, json.loads(resp.body)
+    assert asyncio.run(go()) == (202, {"state": "queued"})
+    assert asked and asked[0][1]["asked"] is True
+    daemon._tts_requested.discard(mid)
+
+
+def test_the_boot_sweep_unlinks_terse_renditions_that_became_durable_before_11476(tmp_path):
+    """The migration for the rule: an agent message with an assigned persona'd
+    voice and NO script row loses its .webm/.m4a at boot (the next click scripts
+    it); a scripted one, a human's, and an agent with no persona keep theirs."""
+    path = str(tmp_path / "b.db")
+    conn = store.connect(path)
+    store.migrate(conn, path)
+    conn.execute("INSERT INTO users(id, name, pw_hash, role, created_ns) VALUES('u1','t','x','admin',1)")
+    conn.execute("INSERT INTO rooms(id, name, owner_id, created_ns) VALUES('r1','room','u1',1)")
+    conn.execute("INSERT INTO agents(id, name, owner_id, created_ns) VALUES('a1','worf','u1',1)")
+    conn.execute("INSERT INTO agents(id, name, owner_id, created_ns) VALUES('a2','data','u1',1)")
+    conn.execute("INSERT INTO voices(id, name, persona, uploaded_by, seconds, bytes, created_ns, updated_ns) "
+                 "VALUES('worf','Worf','Klingon honour','u1',6,1,1,1)")
+    conn.execute("INSERT INTO voices(id, name, persona, uploaded_by, seconds, bytes, created_ns, updated_ns) "
+                 "VALUES('data','Data','','u1',6,1,1,1)")
+    conn.execute("INSERT INTO voice_assignments(room_id, speaker, voice_id, set_by, ts_ns) "
+                 "VALUES('r1','agent:a1','worf','room',1),('r1','agent:a2','data','room',1)")
+    ids = []
+    for sender, aid in (("worf", "a1"), ("worf", "a1"), ("t", None), ("data", "a2")):
+        r = store.send(conn, sender, "*", "hello", room="r1")
+        mid = r["id"] if isinstance(r, dict) else r
+        conn.execute("UPDATE messages SET sender_agent_id=? WHERE id=?", (aid, mid))
+        ids.append(mid)
+    conn.commit()
+    terse, scripted, human, nopersona = ids
+    store.script_put(conn, scripted, "A script.", "worf", "qwen", 10)
+    for mid in ids:
+        (tmp_path / f"tts-{mid}.webm").write_bytes(b"x")
+        (tmp_path / f"tts-{mid}.m4a").write_bytes(b"x")
+    assert daemon._sweep_terse_renditions(conn, tmp_path) == 1
+    assert not (tmp_path / f"tts-{terse}.webm").exists() and not (tmp_path / f"tts-{terse}.m4a").exists()
+    for mid in (scripted, human, nopersona):
+        assert (tmp_path / f"tts-{mid}.webm").exists() and (tmp_path / f"tts-{mid}.m4a").exists()
+    assert daemon._sweep_terse_renditions(conn, tmp_path) == 0, "idempotent"
