@@ -1,6 +1,6 @@
 [project]
 name = "reveille"
-version = "0.2.129"
+version = "0.2.130"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.14"
