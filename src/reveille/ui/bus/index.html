@@ -1014,6 +1014,7 @@
    <button class="tab" data-tab="rooms">Rooms</button>
    <button class="tab" data-tab="memory">Memory</button>
    <button class="tab" data-tab="tokens">Tokens</button>
+   <button class="tab" data-tab="visits">Visits</button>
    <button class="tab" data-tab="voices">Voices</button>
    <button class="tab" data-tab="users">Users</button>
    <button class="tab" data-tab="account">Account</button>
@@ -2311,7 +2312,8 @@ $('panX').onclick=closePanel;
 $('pan').onclick=e=>{if(e.target.id==='pan')closePanel();};
 $('panOut').onclick=async()=>{await fetch('/logout',{method:'POST'});location.reload();};
 const TABS={rooms:()=>openRooms(),memory:()=>openMemories(),tokens:()=>openTokens(),
- voices:()=>openVoices(),users:()=>openUsers(),account:()=>openAccount()};
+ visits:()=>openVisits(),voices:()=>openVoices(),users:()=>openUsers(),
+ account:()=>openAccount()};
 for(const b of $('panTabs').querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.tab]();
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closePanel();});
 async function api(path,opts){
@@ -3528,6 +3530,140 @@ function newRoomChips(rooms){
     'will reach nothing</div>';
 }
 
+// ---- DES-012: a visit is a body swap (EPIC-001 #8) -----------------------
+// The accept screen. A visit is the one act on this page where a HUMAN grants
+// another human's agent a body on their own machine, so the consent is to a
+// SENTENCE (DES-012 §7), never to a button: what arrives, where it may act,
+// whose account pays, what the owner will be able to read, and how each side
+// ends it. The minted secret is answered to this screen ONCE and is never
+// stored on the visit row -- so the harbor step below is the only place it
+// exists, and leaving the screen loses it (ask again, which mints again).
+let visitMinted=null;   // {id, agent, owner, body, secret} -- this screen's lifetime only
+function visitLine(v){
+ const who=v.owner+'’s '+v.agent+' → '+v.host+(v.host_machine?' ('+v.host_machine+')':'');
+ return '<div class="pRow"><b>'+esc(who)+'</b> <span class="pDim">'+esc(v.state)+
+  ' · '+esc(v.direction)+' · rooms: '+esc(v.rooms.map(r=>r.name).join(', '))+
+  '</span>'+
+  (v.state==='asked'&&v.decider===myName
+    ? '<button data-vacc="'+esc(v.id)+'">accept</button>'+
+      '<button data-vrej="'+esc(v.id)+'">reject</button>'
+    : '')+
+  ((v.state==='accepted'||v.state==='visiting')
+    ? '<button class="danger" data-vend="'+esc(v.id)+'">'+
+      (v.owner===myName?'recall':'evict')+'</button>':'')+
+  '</div>'+
+  (v.state==='asked'&&v.decider===myName?visitConsent(v):'');
+}
+// What the decider is agreeing to, in the order DES-012 §7 lists it.
+function visitConsent(v){
+ return '<div class="pAsk">'+
+  '<b>'+esc(v.agent)+'</b> belongs to <b>'+esc(v.owner)+'</b> and stays theirs: they keep '+
+  'its name, its revoke and its recall. Accepting mints ONE credential for that same '+
+  'identity, so its body at home goes dark the moment this one is minted.<br>'+
+  'It may act in '+esc(v.rooms.map(r=>r.name).join(', '))+' and in nothing else — '+
+  'rooms you are both already in.<br>'+
+  (v.coordinate?'It checks out <b>'+esc(v.coordinate)+'</b>.<br>':'')+
+  'It runs as YOUR user, on YOUR Claude account and bill, and reaches exactly the repos '+
+  'and files you can reach. It reads this directory’s CLAUDE.md and MCP config — '+
+  'that is the point of the visit.<br>'+
+  '<b>'+esc(v.owner)+'’s own state notes travel with the identity</b> and will be '+
+  'readable here. Nothing else of theirs does: not their token, not their Claude account, '+
+  'not their git credentials.<br>'+
+  'A container harbor is recommended over a native one — it is your call, below.<br>'+
+  'You can evict it at any time; '+esc(v.owner)+' can recall it at any time. There is no '+
+  'timer on either.</div>'+
+  '<div class="pRow"><label class="chip"><input type="radio" name="vbody" value="container" '+
+  'checked> container body (recommended)</label>'+
+  '<label class="chip"><input type="radio" name="vbody" value="native"> native body '+
+  '(a shell on this machine)</label></div>';
+}
+// The harbor (DES-012 §11.1): nothing new listens, so the credential goes from
+// THIS screen to the host's own launcher, or is shown once for the host to
+// paste. The launcher label is <owner>-<name>: names are unique per owner, and
+// the host may already run an agent of that name.
+function visitHarbor(){
+ const v=visitMinted;
+ if(!v)return '';
+ const label=v.owner+'-'+v.agent;
+ if(v.body==='container')
+  return '<div class="pSec">HARBOR '+esc(v.agent)+'</div>'+
+   '<div class="pDim">The credential exists in this page and nowhere else. Provision '+
+   'sends it to YOUR launcher, which starts the container as <b>'+esc(label)+'</b> '+
+   '— namespaced by owner so it cannot collide with an agent of yours.</div>'+
+   '<div class="pRow"><button id="vProv">provision the container</button>'+
+   '<span id="vProvSt" class="pDim"></span></div>';
+ return '<div class="pSec">HARBOR '+esc(v.agent)+' (native)</div>'+
+  '<div class="pDim">Paste this on this machine, in <code>~/agents/'+esc(v.owner)+'/'+
+  esc(v.agent)+'</code>. This panel does not run it and never will — installing a '+
+  'native agent gives it the whole machine, and that is a grant a shell makes, not a '+
+  'browser. The token is shown once, here.</div>'+
+  '<pre class="tokOut" id="vInit">'+
+  esc(installCmds({agent_name:v.agent,secret:v.secret},location.origin))+'</pre>';
+}
+async function openVisits(){
+ me=await api('/me');
+ const d=await api('/visits');
+ const rooms=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
+ const rows=d.visits.map(visitLine).join('')||
+  '<div class="pDim">no visits — yours or anyone’s to you</div>';
+ panel('visits',
+  '<div class="pDim">A visit is a BODY SWAP: an agent works on another human’s '+
+  'machine for a while. Both humans consent, once, per visit — you offer yours '+
+  '(a push) or ask for theirs (a pull), and the other one decides. Ownership never '+
+  'moves; the host is a harbor. Either side ends it at any time, and there is no '+
+  'timer.</div>'+
+  rows+visitHarbor()+
+  '<div class="pSec">ASK FOR ONE</div>'+
+  '<div class="pRow"><input id="vAgent" placeholder="agent name">'+
+  '<input id="vOwner" placeholder="its owner (blank = yours)">'+
+  '<input id="vHost" placeholder="host person (blank = you)"></div>'+
+  '<div class="pRow"><input id="vMachine" placeholder="which machine (optional)">'+
+  '<input id="vCoord" placeholder="repo + SHA it should check out (optional)"></div>'+
+  '<div class="pChips" id="vRooms">'+(rooms.length?rooms.map(r=>
+   '<label class="chip"><input type="checkbox" data-vroom="'+esc(r.id)+'"> '+
+   esc(r.owner&&r.owner!==myName?r.owner+' → '+r.name:r.name)+'</label>').join('')
+   :'<span class="pDim">you hold no rooms yet</span>')+'</div>'+
+  '<div class="pRow"><button id="vAsk">ask</button>'+
+  '<span class="pDim">a visit may hold only rooms you are BOTH in</span></div>');
+ for(const b of document.querySelectorAll('[data-vacc]'))b.onclick=async()=>{
+  const body=(document.querySelector('input[name=vbody]:checked')||{}).value||'container';
+  try{const out=await api('/visits/'+b.dataset.vacc+'/accept',
+       {method:'POST',body:JSON.stringify({body:body})});
+   visitMinted={id:out.id,agent:out.agent,owner:out.owner,body:out.body,secret:out.secret};
+   await openVisits();
+   toast('accepted -- the credential is on this screen once, in the harbor step below',true);
+  }catch(e){toast(e.message);}
+ };
+ for(const b of document.querySelectorAll('[data-vrej]'))b.onclick=async()=>{
+  try{await api('/visits/'+b.dataset.vrej+'/reject',{method:'POST',body:'{}'});
+   openVisits();}catch(e){toast(e.message);}
+ };
+ for(const b of document.querySelectorAll('[data-vend]'))b.onclick=async()=>{
+  try{await api('/visits/'+b.dataset.vend+'/end',{method:'POST',body:'{}'});
+   visitMinted=null;openVisits();}catch(e){toast(e.message);}
+ };
+ const prov=$('vProv');
+ if(prov)prov.onclick=async()=>{
+  const v=visitMinted, st=$('vProvSt');
+  st.textContent='provisioning...';
+  try{await lapi('/agents',{method:'POST',body:JSON.stringify({
+    agent:v.owner+'-'+v.agent,token:v.secret,repo_url:''})});
+   visitMinted=null;
+   toast('container up -- the visit stamps ARRIVED when the agent reaches the bus',true);
+   openVisits();
+  }catch(e){st.textContent='';toast(e.message);}
+ };
+ $('vAsk').onclick=async()=>{
+  const picked=[...document.querySelectorAll('#vRooms input:checked')]
+   .map(c=>c.dataset.vroom);
+  try{await api('/visits',{method:'POST',body:JSON.stringify({
+    agent:$('vAgent').value.trim(),owner:$('vOwner').value.trim(),
+    host:$('vHost').value.trim(),rooms:picked,
+    host_machine:$('vMachine').value.trim(),coordinate:$('vCoord').value.trim()})});
+   openVisits();
+  }catch(e){toast(e.message);}
+ };
+}
 async function openTokens(){
  // Refresh /me rather than trusting the copy cached at boot: another user can make a room
  // public at any moment, and a stale cache would silently hide it from the checkboxes.
