@@ -28,7 +28,8 @@ jobs:
         with:
           path: ~/ffmpeg
           key: ffmpeg-autobuild-2026-08-17-13-05-linux64
-      - run: |
+      - timeout-minutes: 3
+        run: |
           [ -x ~/ffmpeg/ffmpeg ] || { mkdir -p ~/ffmpeg && curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-17-13-05/ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1.tar.xz | tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'; }
           echo "$HOME/ffmpeg" >> "$GITHUB_PATH"
           ~/ffmpeg/ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
