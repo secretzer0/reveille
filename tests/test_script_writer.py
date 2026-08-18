@@ -38,6 +38,10 @@ def test_the_prompt_frames_the_body_as_data_in_the_user_turn():
     # letter by letter; a catchphrase-only script dropped the message).
     assert "WRITE FOR THE MOUTH" in m[0]["content"] and "mebibytes" in m[0]["content"]
     assert "catchphrase or reaction alone is NOT a script" in m[0]["content"]
+    # 0.2.127 (operator 11393/11395): agents write telegraphic; the writer restores
+    # full spoken sentences and names what a bare number is.
+    assert "THE MESSAGE MAY BE TELEGRAPHIC" in m[0]["content"] and "never read the fragments as fragments" in m[0]["content"]
+    assert "a bare five-digit number in an agent's message is a bus message" in m[0]["content"]
     assert len(daemon.script_prompt("v", "", "s", "", "x" * 20000)[1]["content"]) == daemon.SCRIPT_BODY_CAP
 
 
