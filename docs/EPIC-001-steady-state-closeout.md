@@ -77,5 +77,7 @@ Numbers keep their original rank for cross-reference; none is scheduled. DES-015
 | 20 | Ops: TTS box on laptop = critical infra; mask suspend or move TTS to the server | 11389.5 / 11563 | Reliability, not a DES slice. | (i) mask sleep on WorldBuilder; (ii) move TTS to /home/vyzon server; (iii) both | (ii) then (i) as belt | ops |
 | 21 | minimal-mobile-dev container upgrade 0.2.16 -> 0.2.19 | post-11600 | One click on /agents; starts that agent. | click / leave stopped | operator's call | click |
 | 22 | Chime pick | 11589 | bell-1 default stands. | pick / keep | keep bell-1 | none |
+| 23 | DES-018 slice 2: close the password door + invite flow | DES-018 §10, operator 11695 | Operator keeps passwords "for now"; existing users must link a door first. | close / keep | keep until operator word | S |
+| 24 | Microsoft door (registration + 2 env lines) | DES-018 §4 | Portal was down at slice 1; env-only, no code. | -- | operator, when portal is up | ops |
 
 Status: OPEN -- S1 GO 2026-08-18 (11636).

@@ -1,6 +1,9 @@
 # DES-018 -- Sign in with: passwordless federated login (OIDC / OAuth 2.0)
 
 Status: RULED 2026-08-18 (operator directive 11648/11650/11654; architect).
+Slice 1 LIVE 0.2.152, gate 10 passed on live (Google + GitHub; Microsoft door
+pending the operator's registration). **Slice 2 (password door closes) DEFERRED
+by operator 11695 -- the password stays beside the doors for now; backlog.**
 Builds on DES-005 (web provisioning, users/sessions), DES-011 (identity is an
 id; a person is `user:<id>`), ruling 8938 (a user row is never deleted),
 ruling 11611 (a tombstone keeps its name). Sources fetched today: Authlib
