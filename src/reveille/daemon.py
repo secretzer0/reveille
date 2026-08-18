@@ -246,6 +246,23 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.165 A DEPLOY ROLLS WHAT IS IDLE (DES-006 s7.2, EPIC-001 #10, ruling
+11807). An image bump only ever reached NEW containers, and the roll was left
+to a human who never performs it; the opposite fix -- restart everything on
+deploy -- kills work in progress. So `make up` now runs `reveille-launch
+upgrade --all --idle`, and a behind container rolls only when four things are
+READ and quiet: no live attach grant (grants rows, not revoked, not expired),
+its spool's new/ empty, nothing unread for it, and no bus send by it inside
+REVEILLE_ROLL_IDLE_MIN (default 10) minutes. The last two come from this
+broker: GET /agent/activity answers {last_send_ns, unread} to the AGENT's own
+bearer token -- the credential the upgrade already carries, so nothing new is
+parked (DES-006 s7 carry-not-park unchanged). It answers WORK, never
+transport: a heartbeat says "up", which a container about to be replaced also
+is. AN UNKNOWN IS NEVER AN IDLE -- a stale record, no token to carry, an
+unreadable spool or a silent broker all read BUSY. Busy is skipped and LISTED
+("behind, busy: <why>"), retried next deploy, never killed mid-task, and
+never a deploy failure. Force one by name with `reveille-launch upgrade <user>
+<agent>`, unchanged.
 0.2.164 A VISIT IS A BODY SWAP (DES-012 s7-s9 + s11, EPIC-001 item 8). An
 agent can now work on ANOTHER human's machine, and the only thing that makes
 that safe is that both humans consent, once, per visit. Ask with POST /visits
@@ -6442,6 +6459,23 @@ async def room_owner_http(request):
     return JSONResponse(out)
 
 
+# ---- DES-006 s7.2: what the auto-roll decision reads (ruling 11807) ------
+@_guard
+async def activity_http(request):
+    """GET /agent/activity (the AGENT's own bearer token) -> {last_send_ns,
+    unread}. The launcher asks this before rolling a behind container onto a
+    new image: a container is IDLE only if nothing is waiting for it and it has
+    not spoken recently. It is deliberately about the identity's WORK -- a
+    heartbeat would say "up", which every container about to be replaced also
+    is -- and it answers about the CALLER only, so the credential the launcher
+    already carries for the upgrade is the whole authorisation."""
+    p = _me(request)
+    out = store.agent_activity(_conn, store.agent_principal(p.agent_id) if p.agent_id
+                               else "", p.rooms)
+    out["name"] = p.name
+    return JSONResponse(out)
+
+
 # ---- DES-012: a visit is a body swap (EPIC-001 #8) -----------------------
 # The bus carries the REQUEST and the DECISION; it never carries the credential
 # (s11.1). The accept answers the secret to the accepting SCREEN once -- from
@@ -6955,6 +6989,7 @@ def build_app():
             Route("/rooms", rooms_http, methods=["GET", "POST"]),
             Route("/rooms/ownerless", rooms_ownerless_http),
             Route("/rooms/{rid}/owner", room_owner_http, methods=["PATCH"]),
+            Route("/agent/activity", activity_http),
             Route("/visits", visits_http, methods=["GET", "POST"]),
             Route("/visits/{vid}/{verb:str}", visit_http, methods=["POST"]),
             Route("/rooms/{rid}", room_http, methods=["PATCH"]),

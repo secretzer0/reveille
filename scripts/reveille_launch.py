@@ -1428,6 +1428,126 @@ def behind_image(conn, image=DEFAULT_IMAGE):
         (image,)).fetchall()]
 
 
+# ---- DES-006 s7.2: auto-roll on deploy, under an idle rule (ruling 11807) ---
+# A bumped image reaches a RUNNING container only through a re-provision that
+# nobody schedules (lesson image-fix-never-reaches-a-running-container), and
+# the fix for that must never become "restart whatever is working". So a
+# behind container rolls only when it is IDLE, and idle is READ -- from the
+# grants table, from its spool, and from the broker -- never guessed from a
+# heartbeat, which every container about to be replaced also has.
+ROLL_IDLE_MIN = float(os.environ.get("REVEILLE_ROLL_IDLE_MIN", "10"))
+
+
+def roll_block(*, grants, spool, unread, last_send_ns, now_ns, window_ns):
+    """Why this container must not be rolled right now, or "" if it may be.
+    Pure. Order is worst-first, so the sentence a human reads names the most
+    telling reason rather than the first one checked."""
+    if grants:
+        return f"{grants} live attach grant" + ("s" if grants > 1 else "")
+    if spool:
+        return f"{spool} unprocessed ring" + ("s" if spool > 1 else "") + " in its spool"
+    if unread:
+        return f"{unread} unread message" + ("s" if unread > 1 else "") + " waiting"
+    if last_send_ns and now_ns - last_send_ns < window_ns:
+        return f"sent to the bus {max(1, (now_ns - last_send_ns) // (60 * 10**9))} min ago"
+    return ""
+
+
+def live_grants(conn, user, agent, now_ns):
+    """Attach grants still good: not revoked, not expired. A live grant means a
+    human may be at that terminal RIGHT NOW -- the sweep is what expires them,
+    so this reads the same rows the sweep would act on."""
+    return conn.execute(
+        "SELECT count(*) FROM grants WHERE user=? AND agent=? AND revoked_ns IS NULL "
+        "AND expiry_ns > ?", (user, agent, now_ns)).fetchone()[0]
+
+
+def _spool_pending(user, agent):
+    """Rings DELIVERED and not yet processed, counted inside the container.
+    None = could not look, which the caller treats as busy: an unknown is not
+    an idle."""
+    res = _docker("exec", container_name(user, agent), "sh", "-c",
+                  "find ~/.reveille/spool -path '*/new/*' -name '*.ring' 2>/dev/null | wc -l",
+                  check=False, capture=True)
+    if res.returncode != 0:
+        return None
+    txt = (res.stdout or "").strip()
+    return int(txt) if txt.isdigit() else None
+
+
+def _broker_activity(broker_url, role, token):
+    """{last_send_ns, unread} for the agent, read with its OWN carried token --
+    the same credential upgrade_agent carries and the same never-at-rest rule
+    (11600). None = the broker did not answer, which is never a time to roll."""
+    req = urllib.request.Request(
+        broker_url.rstrip("/") + "/agent/activity",
+        headers={"Authorization": f"Bearer {token}", "X-Agent": role})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return json.load(r)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+
+
+def roll_reason(conn, user, agent, *, health_url=DEFAULT_HEALTH, now_ns=None,
+                window_ns=None):
+    """Why NOT to roll this behind container, or "" if it is idle. Every input
+    is read: grants from launcher.db, rings from the container's spool, unread
+    and last-send from the broker. A container that is not running is idle by
+    construction -- nothing is at its keyboard and nothing is mid-task."""
+    now_ns = now_ns or time.time_ns()
+    window_ns = int(ROLL_IDLE_MIN * 60 * 10**9) if window_ns is None else window_ns
+    g = live_grants(conn, user, agent, now_ns)
+    if g:
+        return roll_block(grants=g, spool=0, unread=0, last_send_ns=0,
+                          now_ns=now_ns, window_ns=window_ns)
+    c = _inspect_container(container_name(user, agent))
+    if c is None:
+        return "no container (the record is stale -- re-provision it)"
+    if not c["running"]:
+        return ""
+    token = c["env"].get("REVEILLE_TOKEN")
+    if not token:
+        return "no token to carry (re-provision it instead)"
+    spool = _spool_pending(user, agent)
+    if spool is None:
+        return "could not read its spool"
+    act = _broker_activity(c["env"].get("REVEILLE_URL") or DEFAULT_BROKER, agent, token)
+    if act is None:
+        act = _broker_activity(health_url, agent, token)
+    if act is None:
+        return "the broker did not answer for it"
+    return roll_block(grants=0, spool=spool, unread=act.get("unread") or 0,
+                      last_send_ns=act.get("last_send_ns") or 0,
+                      now_ns=now_ns, window_ns=window_ns)
+
+
+def roll_idle(conn, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH, timeout=120,
+              window_ns=None, out=print):
+    """Roll every BEHIND container that is idle; skip the rest and LIST them.
+    A skipped container is retried on the next `make up` -- the deploy never
+    kills work in progress to make a version number tidy. Returns
+    (rolled, busy)."""
+    rolled, busy = [], []
+    for r in behind_image(conn, image):
+        user, agent = r["user"], r["agent"]
+        why = roll_reason(conn, user, agent, health_url=health_url, window_ns=window_ns)
+        if why:
+            busy.append((user, agent, why))
+            out(f"  {user}/{agent}: behind, busy: {why}")
+            continue
+        try:
+            res = upgrade_agent(conn, user, agent, image, health_url=health_url,
+                                timeout=timeout)
+            rolled.append((user, agent))
+            out(f"  {user}/{agent}: rolled {res['from']} -> {res['to']}"
+                + ("" if res["was_running"] else " (was stopped; now running)"))
+        except (LaunchError, subprocess.CalledProcessError) as e:
+            busy.append((user, agent, str(e)))
+            out(f"  {user}/{agent}: behind, busy: {e}")
+    return rolled, busy
+
+
 def mint_grant(conn, user, agent, grantee, mode, ttl):
     """Shared grant-mint path. The token is RETURNED once, never stored
     (4.5.2): re-issue is re-mint, never retrieval."""
@@ -1537,6 +1657,19 @@ def cmd_new(a):
 def cmd_upgrade(a):
     conn = _db()
     try:
+        if a.all and getattr(a, "idle", False):
+            # THE DEPLOY'S OWN VERB (DES-006 s7.2): roll what is idle, say what
+            # is busy, exit 0 either way -- a busy agent is not a deploy failure.
+            print(f"rolling agent containers behind {a.image} (idle rule: "
+                  f"{ROLL_IDLE_MIN:g} min)")
+            rolled, busy = roll_idle(conn, a.image, health_url=a.health_url,
+                                     timeout=a.timeout)
+            if not rolled and not busy:
+                print(f"  nothing behind {a.image}")
+            elif busy:
+                print(f"  {len(busy)} left for the next deploy; force one now with "
+                      f"`reveille-launch upgrade <user> <agent>`")
+            return
         if a.all:
             todo = [(r["user"], r["agent"]) for r in behind_image(conn, a.image)]
             if not todo:
@@ -3301,6 +3434,11 @@ def build_parser():
     up.add_argument("user", nargs="?")
     up.add_argument("agent", nargs="?")
     up.add_argument("--all", action="store_true", help="every record behind --image")
+    up.add_argument("--idle", action="store_true",
+                    help="with --all: roll only the ones that are IDLE (no live attach "
+                         "grant, empty spool, nothing unread, no bus send in "
+                         "REVEILLE_ROLL_IDLE_MIN minutes); the busy ones are LISTED and "
+                         "retried on the next deploy, never killed mid-task")
     up.add_argument("--image", default=DEFAULT_IMAGE)
     up.add_argument("--health-url", default=DEFAULT_HEALTH)
     up.add_argument("--timeout", type=int, default=120)

@@ -235,11 +235,16 @@ up:
 	@# The check stays, now as the assertion that the fix above worked rather
 	@# than as the thing that tells someone to go and do it.
 	@bash scripts/launcher-pin-check || exit 1
-	@# AGENT CONTAINERS BEHIND THE IMAGE ARE NAMED, NOT ROLLED (ruling 11600): an
-	@# image bump used to mean a per-agent recreate with a pasted token; upgrade
-	@# carries the token from the container the launcher made. Auto-roll on deploy
-	@# is a separate ruling (it needs an idle rule), so this prints and stops.
-	@REVEILLE_AGENT_IMAGE=$(AGENT_IMAGE) uv run --quiet python scripts/reveille_launch.py behind || true
+	@# AGENT CONTAINERS BEHIND THE IMAGE ROLL HERE (DES-006 s7.2, ruling 11807),
+	@# and only the IDLE ones: no live attach grant, empty spool, nothing unread,
+	@# no bus send in REVEILLE_ROLL_IDLE_MIN (default 10) minutes -- each read,
+	@# never guessed. A busy agent is LISTED with why and retried on the next
+	@# deploy; nothing is ever killed mid-task, so this never fails the deploy.
+	@# THIS IS THE SCHEDULER for the roll: an image bump that reaches no running
+	@# container is the defect the lesson image-fix-never-reaches-a-running-
+	@# container is about, and a verb nobody invokes is how it happens again.
+	@REVEILLE_AGENT_IMAGE=$(AGENT_IMAGE) uv run --quiet python scripts/reveille_launch.py \
+		upgrade --all --idle --image $(AGENT_IMAGE) || true
 	@echo "reveille up: proxy $(PROXY_SITE) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
 
 # `make up` with the working tree's UI mounted LIVE (docker/compose.dev.yml):

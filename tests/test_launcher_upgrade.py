@@ -226,7 +226,10 @@ def test_behind_walks_the_records_only_and_the_surfaces_exist(world):
     assert "return upgrade_agent(c, user, agent, DEFAULT_IMAGE)" in src and "c = _db()" in src, "its own connection"
     assert '"upgraded": name, "from": out["from"], "to": out["to"]' in src, "the HTTP answer names images, never the token"
     mk = (pathlib.Path(rl.__file__).resolve().parent.parent / "Makefile").read_text()
-    assert "scripts/reveille_launch.py behind" in mk, "make up names what is behind"
+    # DES-006 s7.2 (11807): `make up` no longer only NAMES what is behind -- it
+    # rolls the idle ones and lists the busy ones with why. The `behind` verb
+    # stays as the operator's read-only look.
+    assert "upgrade --all --idle" in mk, "make up rolls what is behind and idle"
     ui = (pathlib.Path(rl.__file__).resolve().parent.parent / "src/reveille/ui/bus/index.html").read_text()
     assert "out+=b('upgrade','&#8679;','upgrade '+t.agent+' from '+a.image+' to '+agDefaultImage" in ui
     assert "if(!broken&&!gone&&a.image&&agDefaultImage&&a.image!==agDefaultImage)" in ui
