@@ -390,6 +390,10 @@ def test_only_allowlisted_types_render_in_the_browser():
         media, disp = daemon.file_headers(name)
         assert disp == "inline", name
         assert not media.startswith("application/octet-stream"), name
+    # NO NATIVE AUDIO UNDER /files (operator 11499, ruling 11500): a raw clip is
+    # a download until DES-017 converts it at upload; the wire form is what plays.
+    for name in ("bell-1.wav", "clip.m4a", "song.mp3"):
+        assert daemon.file_headers(name) == ("application/octet-stream", "attachment"), name
     for name in ("note.html", "page.htm", "logo.svg", "app.js", "data.xml",
                  "file.bin", "noext"):
         media, disp = daemon.file_headers(name)
@@ -405,6 +409,7 @@ def test_the_ui_only_tries_to_render_what_the_server_serves_inline():
     for alt in m.group(1).split("|"):
         for ext in ("." + alt.replace("jpe?g", "jpeg"), "." + alt.replace("?", "")):
             assert daemon.file_headers("x" + ext)[1] == "inline", ext
+    assert "<audio class=\"att\"" not in PAGE, "no player for a raw clip (11500): DES-017 converts first"
 
 
 def test_multipart_is_detected_by_content_type_whatever_its_case():

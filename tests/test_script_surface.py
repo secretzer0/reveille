@@ -215,7 +215,7 @@ def test_generate_on_demand_posts_once_and_plays_on_the_audio_frame():
     assert 'id="vstop" hidden' in UI
     assert "$('vstop').onclick=()=>{vStop();vDone();};" in UI
     assert "function paintStop(){const b=$('vstop');if(b)b.hidden=!vCtl;}" in UI
-    assert "function vDone(){vCtl=null;vBusy=false;paintStop();vPump();}" in UI
+    assert "function vDone(){vCtl=null;vBusy=false;paintStop();if(earconPending)earconRing();vPump();}" in UI
     assert " const c=vCtl;vCtl=null;paintStop();" in UI
 
 

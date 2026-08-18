@@ -232,7 +232,8 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     for forbidden in ("send(", "$('send')", "sendMsg", "requestSubmit", ".submit("):
         assert forbidden not in rest, f"the ear must never send outside earRun ({forbidden})"
     assert run.count("requestSubmit") == 1 and "if(!$('body').value.trim()){toast('nothing to send');return;}" in run
-    assert ear.count("try{vCtxUp();}catch(e){}") == 2, "either mic gesture doubles as the audio unlock"
+    assert ear.count("try{vCtxUp();}catch(e){}") == 1 and \
+        ear.count("try{vCtxUp();earconLoad();}catch(e){}") == 1, "either mic gesture doubles as the audio unlock"
 
 
 def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
@@ -328,7 +329,7 @@ def test_pause_to_send_is_a_deliberate_setting_hands_free_only_with_a_visible_co
     assert "if($('autosendWrap'))$('autosendWrap').hidden=!(me&&me.ear);" in UI
     # Armed ONLY from the hands-free take path, only when text landed, only while listening.
     assert ear.count("pauseSendArm()") == 2 and \
-        "if(earHeard(d.text||'')&&listenVad&&pauseSendOn())pauseSendArm();" in ear
+        "if(earHeard(d.text||'')){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in ear
     talk = ear[:ear.index("const EAR_SILENCE_MS=")]
     assert "autosend" not in talk, "push-to-talk never auto-sends"
     # Counted from landing, shown, aborted by cancel / keystroke / listening off / empty box.
@@ -345,3 +346,22 @@ def test_pause_to_send_is_a_deliberate_setting_hands_free_only_with_a_visible_co
     # The send is still the one send.
     assert "earRun({cmd:'send'});" in b and run.count("requestSubmit") == 1 and b.count("requestSubmit") == 0
 
+
+
+def test_the_earcon_rings_once_when_words_land_in_listen_mode_only():
+    """0.2.134 (ruling 11465): one bell at landing, from the listen chain only;
+    never over an utterance (pending until vDone); no bell in push-to-talk;
+    the WAV ships with the page at /ui/earcon.wav."""
+    page = daemon._ui_read("index.html")
+    assert "if(earHeard(d.text||'')){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in page
+    assert page.count("earconRing()") == 3, "listen chain, vDone (pending), and the definition's own recursion site"
+    talk = page[page.index("function talkStop"):page.index("function talkStop") + 3000]
+    assert "earconRing" not in talk, "no bell in push-to-talk"
+    assert "if(!listenVad)return;\n if(vBusy){earconPending=true;return;}" in page
+    assert "function vDone(){vCtl=null;vBusy=false;paintStop();if(earconPending)earconRing();vPump();}" in page
+    assert "fetch('/ui/earcon.wav'" in page
+    routes = {r.path for r in daemon.build_app().routes if hasattr(r, "path")}
+    assert "/ui/earcon.wav" in routes
+    import wave
+    w = wave.open(io.BytesIO(pathlib.Path(daemon._UI_PACKAGED, "earcon.wav").read_bytes()))
+    assert w.getframerate() == 44100 and w.getnchannels() == 1 and w.getnframes() / 44100 < 1.0

@@ -1556,7 +1556,7 @@ function vPump(){
  vBusy=true;
  vPlay(t.id,vUrl(t.id));
 }
-function vDone(){vCtl=null;vBusy=false;paintStop();vPump();}
+function vDone(){vCtl=null;vBusy=false;paintStop();if(earconPending)earconRing();vPump();}
 // AND THE QUEUE TAKES EACH ID ONCE: whatever delivers a frame twice (a leaked
 // socket, a broker replay), a message is spoken once. This is the belt; dropFeed
 // is the braces.
@@ -3639,7 +3639,7 @@ function listenPaint(state){
 }
 async function listenStart(){
  if(listenVad||vRec)return;                       // not while a talk take is open
- try{vCtxUp();}catch(e){}                        // the mic gesture doubles as the audio unlock
+ try{vCtxUp();earconLoad();}catch(e){}           // the mic gesture doubles as the audio unlock; the bell decodes now
  if(!window.vad||!window.vad.MicVAD){toast('ear: the listener did not load');return;}
  listenPaint('loading the listener...');
  let v;
@@ -3688,9 +3688,34 @@ function listenTake(f32){
     headers:{'content-type':'audio/wav'},body:take});
    const d=await res.json().catch(()=>({}));
    if(!res.ok){toast(d.error||d.detail||('ear: '+res.status));return;}
-   if(earHeard(d.text||'')&&listenVad&&pauseSendOn())pauseSendArm();   // B: the pause sends, hands-free only
+   if(earHeard(d.text||'')){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}   // the bell = the words landed; B: the pause sends, hands-free only
   }catch(e){toast('ear: '+(e.message||e));}
  });
+}
+// ---- THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended): in listen
+// mode ONE bell, at the moment a take's words LAND in the box -- not at silence,
+// not at speech end: landing is when the ear is ready for the next thing, a
+// command or more words. Same moment the pause-to-send countdown starts. A small
+// WAV shipped with the page (/ui/earcon.wav, no CDN), decoded once through the
+// same unlocked AudioContext, constant volume; never over an utterance being
+// spoken (it rings when that one ends); no bell in push-to-talk; off with listen
+// off. One sound only: a second "start" tick is what people turn off.
+let earconBuf=null,earconPending=false;
+function earconLoad(){
+ if(earconBuf)return Promise.resolve(earconBuf);
+ return fetch('/ui/earcon.wav',{credentials:'same-origin'}).then(r=>r.arrayBuffer())
+  .then(ab=>new Promise((res,rej)=>vCtxUp().decodeAudioData(ab,res,rej)))
+  .then(b=>(earconBuf=b));
+}
+function earconRing(){
+ if(!listenVad)return;
+ if(vBusy){earconPending=true;return;}
+ earconPending=false;
+ earconLoad().then(buf=>{
+  if(!listenVad)return;
+  const c=vCtxUp(),src=c.createBufferSource();
+  src.buffer=buf;src.connect(c.destination);src.start();
+ }).catch(()=>{});
 }
 // ---- PAUSE-TO-SEND (operator 11389 "A+B", numbers ruled 11385): hands-free ----
 // ONLY; a deliberate SETTING, off by default, persisted per browser (unlike the

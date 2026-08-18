@@ -224,6 +224,13 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.134 THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended). In
+listen mode the page rings ONE bell when a take's words land in the box --
+ready for a command or more words, the same moment the pause-to-send
+countdown starts. /ui/earcon.wav ships with the page (the operator's pick
+of four synthesized samples), decoded once through the unlocked
+AudioContext; never over an utterance being spoken (rings when it ends);
+no bell in push-to-talk; off with listen off. Bus tools unchanged.
 0.2.133 A TERSE RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE (operator
 11475, ruling 11476/11483; DES-013 s5/s7 amended). tts-<mid>.webm/.m4a is
 kept only when the message is not scriptable (human verbatim, unbound, no
@@ -5563,6 +5570,14 @@ _VAD_FILES = {
 }
 
 
+async def earcon_http(_request):
+    """GET /ui/earcon.wav -> the listen-mode bell (ruling 11465): the operator's
+    pick from four synthesized samples (11471), 44.1 kHz mono, -12 dBFS, faded.
+    Ships with the page like the VAD assets; the page decodes it once."""
+    data = pathlib.Path(_ui_override() or _UI_PACKAGED, "earcon.wav").read_bytes()
+    return Response(data, media_type="audio/wav", headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def vad_asset_http(request):
     """GET /ui/vad/<name> -> one of the six vendored VAD files, by table."""
     name = request.path_params["name"]
@@ -5629,6 +5644,7 @@ def build_app():
             Route("/ui", chat_http),
             Route("/ui/opus-decoder.js", opus_decoder_http),
             Route("/ui/vad/{name}", vad_asset_http),
+            Route("/ui/earcon.wav", earcon_http),
             Route("/setup", setup_http, methods=["POST"]),
             Route("/login", login_http, methods=["POST"]),
             Route("/logout", logout_http, methods=["POST"]),
