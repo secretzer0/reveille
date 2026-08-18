@@ -91,8 +91,15 @@ the header bar + room sheet; the wrap and the 16 px stay.
   rail itself, fixed over the well, with a phone-only `#phRooms` list at the top
   rendered from the same `/me` rooms as the me card; a pick switches through
   `pickRoom` and closes the sheet; agents and the me card follow below. Unread
-  counts per room are NOT built: the page has no per-room unread source today
-  (one feed socket, one room) -- a broker-side count is a follow-up if wanted.
+  counts per room arrived in 0.2.162 (EPIC-001 #6): schema v32's `room_seen`
+  keeps ONE high-water mark per (person, room) -- a person reads a ROOM, where
+  an agent acks the messages addressed to it -- and the backlog fetch for the
+  room being shown IS the mark, so nothing extra is called. `/me` carries
+  `unread: {room_id: count}` (never your own messages; never opened = all of
+  them). The sheet badges each room, the desktop me-card shows one number for
+  everywhere else, and the room in view never wears a badge. The feed socket
+  carries one room, so the counts refresh on the 15 s poll the page already
+  runs and when the sheet opens.
 - Composer: box + Send. `#moreBtn` ("+") toggles `#composer.more`, which shows
   the to/subject row and, in the control row, talk, listen, auto-send, attach --
   in that order (`order:` on the existing buttons; DES-014 untouched). A reply in

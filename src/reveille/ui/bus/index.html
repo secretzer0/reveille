@@ -260,6 +260,11 @@
  #meCard{display:flex;align-items:center;gap:.6rem;padding:.65rem .9rem;
   border-top:1px solid var(--line);cursor:pointer}
  #meCard:hover{background:var(--hover)}
+ /* EPIC-001 #6: what is waiting elsewhere. Empty = no element to see, so a
+    quiet bus looks quiet. */
+ .unread{background:var(--gold);color:#14161a;border-radius:999px;font-size:.68rem;
+  font-weight:700;padding:.05rem .38rem;min-width:1.15rem;text-align:center;line-height:1.5}
+ .unread:empty{display:none}
  #meCard .avatar{width:30px;height:30px;font-size:.72rem}
  #meCard .mename{font-size:.85rem;font-weight:700;line-height:1.2}
  /* The room line is a CONTROL, not a label. It used to render in --faint -- the same
@@ -742,6 +747,7 @@
    border-radius:.5rem;color:var(--dim);cursor:pointer;font-size:.9rem}
   #phRooms .phRoom.sel{color:var(--gold);background:var(--hover)}
   #phRooms .phRoom .rDot{width:.5rem;height:.5rem;border-radius:50%;background:currentColor;flex:none}
+  #phRooms .phRoom .unread{margin-left:auto}
   /* THE HEADER BAR: room name (tap = the sheet), voice, find (filter + history), me. */
   #top{gap:.35rem;padding:.3rem .5rem}
   #top>button.ph{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--line);color:var(--dim);cursor:pointer;font:inherit}
@@ -833,6 +839,7 @@
   <div id="meCard" title="settings, logout">
    <div class="avatar" id="meAvatar"></div>
    <div><div class="mename" id="meName"></div><div class="meroom" id="meRoom"></div></div>
+   <span id="meRoomUnread" class="unread"></span>
    <span id="meDot" title="bus connection"></span>
    <span class="gear">&#9881;</span>
   </div>
@@ -1238,10 +1245,20 @@ function paintMe(){
  // The phone's header and sheet (DES-016 s2), from the SAME rooms: one source, two
  // views. Picking closes the sheet -- you asked for the room, not the list.
  $('roomBtn').innerHTML=esc(r?r.name:'no room')+'<span class="chev">&#9660;</span>';
+ // EPIC-001 #6: what is waiting in each room, from /me. The room you are
+ // LOOKING AT never wears a badge -- reading it is what clears the mark, and a
+ // count on the room in front of you is noise, not news.
+ const un=(me&&me.unread)||{};
  $('phRooms').innerHTML=rooms.length?'<h2>ROOMS</h2>'+rooms.map(x=>'<div class="phRoom'+(x.id===room?' sel':'')+
-  '" data-phroom="'+x.id+'"><span class="rDot"></span>'+esc(x.name)+'</div>').join(''):'';
+  '" data-phroom="'+x.id+'"><span class="rDot"></span>'+esc(x.name)+
+  (x.id!==room&&un[x.id]?'<span class="unread">'+(un[x.id]>99?'99+':un[x.id])+'</span>':'')+
+  '</div>').join(''):'';
  for(const b of $('phRooms').querySelectorAll('[data-phroom]'))
   b.onclick=()=>{document.body.classList.remove('railOpen');if(b.dataset.phroom!==room)pickRoom(b.dataset.phroom);};
+ // The desktop says the same in one number: what is waiting ELSEWHERE.
+ const waiting=rooms.reduce((n,x)=>n+(x.id!==room?(un[x.id]||0):0),0);
+ $('meRoomUnread').textContent=waiting?(waiting>99?'99+':waiting):'';
+ $('meRoomUnread').title=waiting?waiting+' waiting in your other rooms':'';
  $('meCard').title=rooms.length>1
   ? 'settings, logout -- rooms ('+rooms.length+' available) are the first tab of Settings'
   : 'settings, logout';
@@ -1250,7 +1267,8 @@ $('meCard').onclick=e=>{e.stopPropagation();$('meMenu').classList.toggle('on');}
 // The phone sheet (the max-width:640px rules, DES-016 s2): the room name opens it,
 // any tap on the main column closes it -- picking a room or a tab lands you back on
 // the page.
-$('roomBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('railOpen');};
+$('roomBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('railOpen');
+ if(document.body.classList.contains('railOpen'))refreshUnread();};   // fresh counts when you look
 $('toolsBtn').onclick=e=>{e.stopPropagation();const on=document.body.classList.toggle('toolsOpen');if(on)$('filter').focus();};
 $('meBtn').onclick=e=>{e.stopPropagation();$('phMenu').classList.toggle('on');};
 $('phSettings').onclick=()=>{$('phMenu').classList.remove('on');$('miSettings').click();};
@@ -3176,7 +3194,16 @@ async function refreshAgents(){
 // The presence poll is armed once, here or at boot -- whichever gets a room first. A
 // room-less first-run boots without it, so picking the first room must start it.
 let polling=false;
-function start(){if(polling)return;polling=true;setInterval(loadPresence,15000);}
+function start(){if(polling)return;polling=true;
+ setInterval(loadPresence,15000);
+ // The feed socket carries ONE room (the one being viewed), so a count for the
+ // OTHER rooms cannot be ticked from it: the broker is asked, on the poll the
+ // page already runs. One small /me, no new cadence.
+ setInterval(refreshUnread,15000);}
+async function refreshUnread(){
+ if(document.hidden||!me)return;
+ try{const d=await api('/me');if(d&&d.unread){me.unread=d.unread;paintMe();}}catch(e){}
+}
 
 // A DELIBERATE CLOSE DETACHES THE RECONNECT FIRST (operator, 2026-08-17: every
 // agent message was read twice). ws.close() here used to leave the old socket's
@@ -3187,6 +3214,8 @@ function start(){if(polling)return;polling=true;setInterval(loadPresence,15000);
 function dropFeed(){if(ws){ws.onclose=null;ws.onmessage=null;ws.close();ws=null;}}
 function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();earcon('swish');
  closePanel();clearFeed();lastId=0;loadBacklog(true);loadPresence();
+ // Switching INTO a room clears its count as soon as the backlog lands.
+ setTimeout(refreshUnread,400);
  dropFeed();connect();start();}
 
 async function openRooms(){
