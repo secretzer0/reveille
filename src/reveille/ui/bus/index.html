@@ -3612,6 +3612,7 @@ async function listenStart(){
    submitUserSpeechOnPause:true,                  // the cap closes a take by pausing
    startOnLoad:false,                             // we start it, below, once it exists
    onSpeechStart:()=>{listenPaint('hearing you...');
+    if(typeof pauseSendAbort==='function')pauseSendAbort(true);   // speech resuming: the thought is not over (architect 11392)
     clearTimeout(listenCapTimer);listenCapTimer=setTimeout(listenCap,EAR_TAKE_CAP_MS);},
    onSpeechEnd:audio=>{clearTimeout(listenCapTimer);listenPaint('listening');listenTake(audio);},
    onVADMisfire:()=>{clearTimeout(listenCapTimer);listenPaint('listening');},

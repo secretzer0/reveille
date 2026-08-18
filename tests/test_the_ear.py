@@ -338,6 +338,10 @@ def test_pause_to_send_is_a_deliberate_setting_hands_free_only_with_a_visible_co
     run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
     assert "if(typeof pauseSendAbort==='function')pauseSendAbort();" in run, "a spoken cancel aborts"
     assert "if(typeof pauseSendAbort==='function')pauseSendAbort(true);" in ear, "listening off aborts"
+    # Speech RESUMING inside the window aborts it (architect 11392): sentence two
+    # started at second three must not see sentence one leave at second five; the
+    # next landing re-arms.
+    assert "onSpeechStart:()=>{listenPaint('hearing you...');\n    if(typeof pauseSendAbort==='function')pauseSendAbort(true);" in ear
     # The send is still the one send.
     assert "earRun({cmd:'send'});" in b and run.count("requestSubmit") == 1 and b.count("requestSubmit") == 0
 

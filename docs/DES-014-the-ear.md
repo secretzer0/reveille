@@ -199,7 +199,9 @@ tab. Hands-free ONLY: armed from the listen path, only when a take LANDED text
 auto-sends. `EAR_AUTOSEND_MS` = 5000 counted from the moment the words landed;
 the box shows `sending in 5... 4...` because a message leaving on a timer must be
 seen leaving; a spoken `cancel`, any keystroke in the box, listening switched off,
-or an emptied box aborts; no spoken confirmation; the send itself is `earRun`'s
+or an emptied box aborts -- and so does SPEECH RESUMING inside the window (architect
+11392: sentence two started at second three must not see sentence one leave at
+second five; the next landing re-arms); no spoken confirmation; the send itself is `earRun`'s
 `send` -- still the one way the ear sends. Measured: setting off -> the text
 stays; on -> the countdown shows, a keystroke returns the state to `listening`
 with the text kept; a full countdown posted the message and emptied the box; a
