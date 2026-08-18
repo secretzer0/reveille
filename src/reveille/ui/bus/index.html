@@ -774,6 +774,7 @@
   #composer:not(.more) .cbottom>:not(#moreBtn):not(#send):not(#attchips){display:none}
   #mic{order:1}#micState{order:2}#listen{order:3}#listenState{order:4}#autosendWrap{order:5}
   #attachBtn{order:6}#attchips{order:7}#moreBtn{order:8;margin-left:auto}#send{order:9}
+  #clip{min-height:2.75rem}
   #kbdHint{display:none}
   #mic,#listen,#attachBtn,#send,#moreBtn{min-height:2.75rem}
   #moreBtn{min-width:2.75rem;background:none;border:1px solid var(--line);color:var(--dim);
@@ -915,6 +916,9 @@
     <span id="listenState" class="khint"></span>
     <label id="autosendWrap" class="khint" hidden
      title="hands-free only: 5 s after your words land, they are sent -- say cancel or type to stop it"><input type="checkbox" id="autosend"> auto-send</label>
+    <button type="button" id="clip" hidden aria-pressed="false"
+     title="record a clip: your voice, attached to this message and heard as its voice">&#9899; clip</button>
+    <span id="clipState" class="khint"></span>
     <button type="button" id="attachBtn">+ attach</button>
     <span id="attchips"></span>
     <span class="khint" id="kbdHint">Ctrl+Enter to send</span>
@@ -1218,6 +1222,7 @@ for(const id of ['liName','liPass'])
 // The room name is finally printable: it stopped being the credential, which is the
 // only reason it was ever masked to 'room ....N0w'.
 function paintMe(){
+ if($('clip'))$('clip').hidden=!(me&&me.ear);
  if($('mic'))$('mic').hidden=!(me&&me.ear);if($('listen'))$('listen').hidden=!(me&&me.ear);if($('autosendWrap'))$('autosendWrap').hidden=!(me&&me.ear);     // DES-014: the mic exists only where the ear does
  $('meName').textContent=myName;
  $('meName').style.color=color(myName);
@@ -3830,7 +3835,7 @@ function micWhy(e){
 }
 let talkBusy=false;
 async function talkStart(){
- if(vRec||talkBusy)return;
+ if(vRec||talkBusy||clipBusy)return;              // a clip take owns the recorder
  if(typeof listenStop==='function')listenStop();   // one ear at a time: holding talk ends hands-free
  try{vCtxUp();}catch(e){}
  try{await vRecStart();}
@@ -3860,7 +3865,7 @@ async function talkResample(blob,rate){
  return wavBlob(pcm,16000);
 }
 async function talkStop(){
- if(!vRec)return;
+ if(!vRec||clipRec)return;                        // that take belongs to the clip
  const rate=vRec.rate;
  const r=vRecStop();
  $('mic').classList.remove('on');$('mic').setAttribute('aria-pressed','false');
@@ -3877,6 +3882,56 @@ async function talkStop(){
  }catch(e){toast('ear: '+(e.message||e));}
  finally{talkBusy=false;$('mic').classList.remove('busy');$('micState').textContent='';}
 }
+// ---- RECORD A CLIP (DES-017 slice 2): your voice IS the message's voice. ----
+// The recorder is the ear's own (vRecStart/vRecStop, DES-013 s3) -- one
+// capture path on this page, one silence refusal. The take goes through the
+// ORDINARY upload, so the broker transcodes it exactly as it does a dropped
+// .wav (DES-017 s3: nothing crosses the wire in its native format) and comes
+// back as the same {url,name,bytes,clip,duration_s} the attach button gets:
+// from there it is a normal attachment, and the send path binds it as the voice.
+// INVARIANT: this never sends -- the human presses Send, as with every other
+// attachment.
+const CLIP_MAX_S=60;            // ruled (DES-017 s4.2); the ear takes 60 s too
+let clipBusy=false;
+function clipPaint(state){
+ const b=$('clip');if(!b)return;
+ b.classList.toggle('on',!!vRec&&!clipBusy&&clipRec);
+ b.setAttribute('aria-pressed',(vRec&&clipRec)?'true':'false');
+ b.classList.toggle('busy',clipBusy);
+ $('clipState').textContent=state||'';
+}
+let clipRec=false;              // this take is a CLIP, not a talk take
+async function clipStart(){
+ if(vRec||clipBusy||talkBusy)return;
+ if(typeof listenStop==='function')listenStop();   // one ear at a time
+ try{vCtxUp();}catch(e){}
+ try{await vRecStart();}catch(e){toast(micWhy(e));return;}
+ clipRec=true;
+ for(const t of vRec.stream.getAudioTracks())t.addEventListener('ended',()=>clipStop());
+ clipPaint('recording 0 s');
+ const tick=()=>{if(!vRec||!clipRec)return;
+  const sec=(performance.now()-vRec.t0)/1000;
+  clipPaint('recording '+sec.toFixed(0)+' s'+(sec>1.5&&vRec.peak<0.01?' -- NO SIGNAL':''));
+  if(sec>=CLIP_MAX_S){clipStop();return;}          // the cap ENDS the take, keeping it
+  setTimeout(tick,250);};
+ tick();
+}
+async function clipStop(){
+ if(!vRec||!clipRec)return;
+ clipRec=false;
+ const r=vRecStop();
+ if(r.silent){clipPaint('');toast(REC_SILENT_MSG);return;}
+ if(r.seconds<0.5){clipPaint('');toast('too short to send');return;}
+ clipBusy=true;clipPaint('attaching...');
+ try{
+  // The clip is sent at the rate it was recorded: the broker transcodes it,
+  // and resampling here would only cost quality the ear does not need.
+  const name='clip-'+new Date().toISOString().replace(/[:.]/g,'-')+'.wav';
+  await uploadFile(new File([r.blob],name,{type:'audio/wav'}));
+ }catch(e){toast('clip: '+((e&&e.message)||e));}
+ finally{clipBusy=false;clipPaint('');}
+}
+
 // ---- THE EAR, HANDS-FREE (DES-014 slice 2, ruling 11355): the words land where ----
 // you would have typed them. The listen button is a LISTENING TOGGLE, per
 // tab, never persisted; while it is on, a page-side VAD (Silero v5, ONNX in
@@ -4240,6 +4295,10 @@ function earLand(text){
 (function wireListen(){
  const m=$('listen');if(!m)return;
  m.addEventListener('click',()=>{if(listenVad||listenSimple)listenStop();else listenStart();});
+ // The clip button is a plain toggle on every device: a hold would fight the
+ // phone's text selection, and a minute-long take is not a hold anyway.
+ const c=$('clip');
+ if(c)c.addEventListener('click',()=>{if(vRec&&clipRec)clipStop();else clipStart();});
  // OFF when nobody could be watching the indicator: hidden tab, page gone.
  document.addEventListener('visibilitychange',()=>{if(document.hidden)listenStop();});
  window.addEventListener('pagehide',listenStop);
