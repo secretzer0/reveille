@@ -246,6 +246,17 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.160 AN ADMIN ADOPTS AN OWNERLESS ROOM (EPIC-001 #4, ruling 11604 gap).
+Deleting a person leaves their rooms standing -- the history is not theirs to
+take -- and until one has an owner again nobody can change its name,
+retention or publicity. GET /rooms/ownerless (admin) lists them with what is
+at stake, message and member counts; PATCH /rooms/<id>/owner (admin, body
+{} = take it yourself, {"user_id"} = hand it to someone) gives one an owner
+and writes a room_audit 'adopt' row. NEVER a transfer: a room that HAS an
+owner is refused, because seizing one is not a verb this bus has; an adopter
+who already owns that room name is told which, not handed an integrity
+error. Schema v31 rebuilds room_audit for the widened action CHECK. The
+Rooms tab shows OWNERLESS ROOMS to an admin with an adopt button.
 0.2.159 THE LISTEN BUTTON IS NEVER DEAD (DES-014 s2 defect; operator 11718,
 ruling 11719). iOS Safari refuses onnxruntime's WASM memory ("[wasm]
 RangeError: Out of memory, [cpu] previous call to initWasm() failed"), so the
@@ -6312,6 +6323,33 @@ async def room_http(request):
 
 
 @_guard
+async def rooms_ownerless_http(request):
+    """GET /rooms/ownerless -> rooms nobody owns, with what is at stake
+    (messages, members). Admin only: it is the whole deployment's list."""
+    p = _user_principal(request)
+    if not p.is_admin:
+        raise store.AccessError("admin only")
+    return JSONResponse({"rooms": store.ownerless_rooms(_conn)})
+
+
+@_guard
+async def room_owner_http(request):
+    """PATCH /rooms/<rid>/owner {user_id} -- an admin gives an OWNERLESS room
+    an owner (EPIC-001 #4). Never a transfer: a room WITH an owner is refused,
+    because seizing one is not a verb this bus has."""
+    p = _user_principal(request)
+    if not p.is_admin:
+        raise store.AccessError("admin only")
+    d = await request.json()
+    # No user_id = the admin takes it themselves, which is the whole case this
+    # exists for; naming one hands it to somebody else.
+    out = store.adopt_room(_conn, request.path_params["rid"],
+                           (d.get("user_id") or p.user_id).strip(), f"web:{p.name}")
+    log.info("%s adopted room %s to %s", p.name, out["name"], out["owner"])
+    return JSONResponse(out)
+
+
+@_guard
 async def room_members_http(request):
     """GET = the member list (owner's eyes only, store-gated); POST {name} =
     invite by exact name (DES-004 Q2: name entry, not a picker -- a picker
@@ -6765,6 +6803,8 @@ def build_app():
             Route("/users/{uid}/password", reset_password_http, methods=["POST"]),
             Route("/me/password", my_password_http, methods=["POST"]),
             Route("/rooms", rooms_http, methods=["GET", "POST"]),
+            Route("/rooms/ownerless", rooms_ownerless_http),
+            Route("/rooms/{rid}/owner", room_owner_http, methods=["PATCH"]),
             Route("/rooms/{rid}", room_http, methods=["PATCH"]),
             Route("/rooms/{rid}", purge_room_http, methods=["DELETE"]),
             Route("/rooms/{rid}/members", room_members_http,

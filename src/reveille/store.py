@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -272,7 +272,7 @@ CREATE TABLE IF NOT EXISTS room_members (
 CREATE TABLE IF NOT EXISTS room_audit (
     id      INTEGER PRIMARY KEY,
     room_id TEXT NOT NULL,
-    action  TEXT NOT NULL CHECK (action IN ('invite','remove')),
+    action  TEXT NOT NULL CHECK (action IN ('invite','remove','adopt')),
     actor   TEXT NOT NULL,
     subject TEXT NOT NULL,
     ts_ns   INTEGER NOT NULL
@@ -1798,6 +1798,29 @@ CREATE TABLE IF NOT EXISTS invites (
         conn.execute("PRAGMA user_version=30")
 
 
+def _upgrade_v30(conn, db_path):
+    """v30 -> v31 (EPIC-001 #4): room_audit's action CHECK takes 'adopt'.
+    sqlite cannot alter a constraint, so the table is rebuilt in the same
+    transaction -- rows copied verbatim, ids preserved."""
+    with tx(conn):
+        _exec_script(conn, """
+ALTER TABLE room_audit RENAME TO room_audit_old;
+CREATE TABLE room_audit (
+    id      INTEGER PRIMARY KEY,
+    room_id TEXT NOT NULL,
+    action  TEXT NOT NULL CHECK (action IN ('invite','remove','adopt')),
+    actor   TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    ts_ns   INTEGER NOT NULL
+);
+INSERT INTO room_audit(id, room_id, action, actor, subject, ts_ns)
+  SELECT id, room_id, action, actor, subject, ts_ns FROM room_audit_old;
+DROP TABLE room_audit_old;
+CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
+""")
+        conn.execute("PRAGMA user_version=31")
+
+
 def _upgrade_v24(conn, db_path):
     """v24 -> v25: voices.personal -- a voice that exists only for its uploader
     (ruling 11155). Additive column; existing voices are bank voices."""
@@ -1918,7 +1941,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -3029,6 +3052,47 @@ def public_rooms(conn, exclude_owner=None):
         "ORDER BY u.name, ro.name")
     return [_room_dict(r, r["owner_name"]) for r in rows
             if not exclude_owner or r["owner_id"] != exclude_owner]
+
+
+def ownerless_rooms(conn):
+    """Rooms whose owner is gone (deleting a person leaves their rooms
+    standing -- the history is not theirs to take). Nobody can change their
+    retention, publicity or name until someone adopts them, so they are listed
+    for an admin with what is at stake: how many messages, how many members."""
+    return [{"id": r["id"], "name": r["name"], "public": bool(r["public"]),
+             "created_ns": r["created_ns"],
+             "messages": conn.execute("SELECT count(*) FROM messages WHERE room=?",
+                                      (r["id"],)).fetchone()[0],
+             "members": conn.execute("SELECT count(*) FROM members WHERE room_id=? "
+                                     "AND left_ns IS NULL", (r["id"],)).fetchone()[0]}
+            for r in conn.execute("SELECT * FROM rooms WHERE owner_id IS NULL "
+                                  "ORDER BY name")]
+
+
+def adopt_room(conn, room_id, new_owner_id, actor_name):
+    """An admin gives an OWNERLESS room an owner (EPIC-001 #4, ruling 11604
+    gap). Only ownerless: taking a room that has an owner would be seizure,
+    and there is no such verb here. The audit row is the record -- ownership
+    moved by an act, never silently."""
+    r = conn.execute("SELECT id, name, owner_id FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise NotFound("no such room")
+    if r["owner_id"]:
+        raise BusError("that room already has an owner")
+    u = conn.execute("SELECT id, name FROM users WHERE id=? AND deleted_ns IS NULL",
+                     (new_owner_id,)).fetchone()
+    if not u:
+        raise NotFound("no such user")
+    # Room names are unique per owner: an adopter who already has one by that
+    # name is told, rather than the UPDATE failing as an opaque integrity error.
+    if conn.execute("SELECT 1 FROM rooms WHERE owner_id=? AND name=?",
+                    (new_owner_id, r["name"])).fetchone():
+        raise BusError(f"{u['name']} already owns a room named {r['name']!r} -- "
+                       f"rename one of them first")
+    with tx(conn):
+        conn.execute("UPDATE rooms SET owner_id=? WHERE id=?", (new_owner_id, room_id))
+        _audit_room(conn, room_id, "adopt", actor_name, u["name"])
+    return {"id": room_id, "name": r["name"], "owner": u["name"]}
 
 
 def rename_room(conn, room_id, owner_id, name):

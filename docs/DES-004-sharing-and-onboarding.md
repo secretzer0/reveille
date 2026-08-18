@@ -190,6 +190,27 @@ on. "Your agent is on the bus" is the end of onboarding, not "token created".
 
 M1 landed first and unblocked the rest. M3 is the last slice.
 
+## 7a. Ownerless rooms and adoption (EPIC-001 #4, as built 0.2.160)
+
+`delete_user` leaves the person's rooms standing with `owner_id = NULL` --
+their history is not theirs to take, and `purge_room` is the explicit way to
+end a room. The gap (ruling 11604) was that nothing could ever own one again:
+every room verb (rename, public, retention, purge, member list) is
+owner-gated, so an ownerless room was frozen for good.
+
+- `GET /rooms/ownerless` (admin) lists them with what is at stake: message
+  count and live member count.
+- `PATCH /rooms/<id>/owner` (admin): body `{}` takes it yourself, `{"user_id"}`
+  hands it to someone. Writes a `room_audit` row `adopt` (actor, subject) --
+  ownership moves by an act, never silently. Schema v31 rebuilds `room_audit`
+  for the widened `action` CHECK.
+- ONLY ownerless. A room that has an owner is refused: seizing one is not a
+  verb this bus has, and an admin who wants one asks its owner.
+- Room names are unique per owner, so an adopter who already owns that name is
+  told which room to rename -- never an opaque integrity error.
+- The Rooms tab shows OWNERLESS ROOMS to an admin, with the counts and one
+  adopt button.
+
 ## 8. Open questions
 
 - **Q1. Should a member see the room's *memory* drafts?** Currently drafts are
