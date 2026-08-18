@@ -4601,6 +4601,18 @@ def presence(conn, rooms):
     ]
 
 
+def agent_activity(conn, principal, rooms):
+    """The two facts the auto-roll decision reads from the BROKER (DES-006
+    s7.2, ruling 11807): when this identity last SENT, and how many messages
+    are waiting unread for it. Both are about the AGENT's work, not its
+    transport -- a heartbeat says a process is up, which is exactly what a
+    container about to be replaced also has."""
+    aid = agent_of(principal)
+    last = conn.execute("SELECT max(ts_ns) FROM messages WHERE sender_agent_id=?",
+                        (aid,)).fetchone()[0] if aid else None
+    return {"last_send_ns": last or 0, "unread": len(inbox(conn, principal, rooms))}
+
+
 def reap_stale(conn):
     """Drop members whose heartbeat has gone stale. Named away from prune_agent on
     purpose: this reaps presence, that erases a trace. Two very different verbs."""

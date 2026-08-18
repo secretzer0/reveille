@@ -402,3 +402,43 @@ file (0600) stays rejected. Consequences, all built as `upgrade_agent`:
   rolled forward.
 - `/agents`: one "upgrade" button per container whose recorded image differs from
   the launcher's default; the same call, the answer names images only.
+
+## 7.2 Amendment (2026-08-18): auto-roll on deploy, under an idle rule (ruling 11807)
+
+§7 left the roll to a human: `make up` NAMED what was behind and stopped. That
+is the last per-bump human act, and it is the act nobody performs -- which is
+the lesson `image-fix-never-reaches-a-running-container` waiting to happen
+again. The other failure is just as real: a deploy that restarts an agent
+mid-task. So the deploy rolls, and only what is IDLE.
+
+**Idle, as built** (`roll_block`, pure; `roll_reason`, the reads):
+
+1. no live attach grant for that agent -- `grants` rows not revoked and not
+   expired, the same rows the sweep acts on: a live grant means a human may be
+   at that terminal right now;
+2. its spool's `new/` is empty -- rings delivered and not yet processed;
+3. nothing unread for it on the broker;
+4. no bus send by that agent inside the window.
+
+`N = REVEILLE_ROLL_IDLE_MIN`, default 10 minutes, read at import and printed
+by the deploy line. 3 and 4 come from `GET /agent/activity` on the broker,
+answered to the agent's OWN carried token -- the credential the upgrade already
+carries (§7 carry-not-park is unchanged; nothing new is parked). The broker
+answers WORK, not transport: a heartbeat says "up", which a container about to
+be replaced also is.
+
+**An unknown is never an idle.** A stale record, a container with no token to
+carry, a spool that cannot be read, a broker that does not answer: each is
+BUSY, listed with its reason, rolled on some later deploy. A container that is
+not running is idle by construction.
+
+**Busy is skipped and LISTED** -- `<user>/<agent>: behind, busy: <why>` -- and
+retried on the next `make up`. Nothing is ever killed mid-task, and a busy
+agent never fails the deploy (the line ends in `|| true`). Force one by name
+with `reveille-launch upgrade <user> <agent>`, unchanged.
+
+**The scheduler is named here, in the same slice** (lesson
+`periodic-task-proven-correct-never-scheduled`): `make up` runs
+`reveille-launch upgrade --all --idle`, after the launcher is confirmed on its
+pinned commit. The roll itself is `upgrade_agent` from §7 -- same carry, same
+health-before-destroy, same rollback.
