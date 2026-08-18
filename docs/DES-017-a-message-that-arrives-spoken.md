@@ -97,3 +97,49 @@ surprises and no 20 MB WAV crossing LTE three times.
 
 Streaming a live microphone into the room (that is a call, not a message);
 per-listener codecs; keeping originals.
+
+## 6. Corrections taken before ruling (devops 11503) -- binding
+
+- Loudness: one-pass `loudnorm` at a named constant, `CLIP_LUFS` = -16 to
+  start, measured against a TTS utterance before the pin (there was no such
+  constant on the synth path; now there is one, shared).
+- Inline player = the page's own Opus decoder path (`vPlayClip`, the bank's
+  "play clip"), NOT `<audio>` (iOS Safari cannot play WebM/Opus in `<audio>`).
+  `/files` types only `.webm -> audio/webm` inline for that decoder's fetch;
+  the `.m4a` stays the shell's (a download on the web); nothing raw is ever
+  inline.
+- Send trusts nothing in the client's dict: the proof that an attachment is a
+  converted clip is the stored PAIR `<stem>.webm` + `<stem>.m4a` under
+  `<files>` (only the transcoder writes a pair; upload names are
+  timestamp-uniqued, so nobody can plant a sibling). Binding = hard-link the
+  pair to `tts-<mid>.webm/.m4a`, `keep=True`, no writer, announce as today;
+  bind regardless of listeners (a link is free) -- the audio frame is what
+  listeners get.
+- At upload: temp file under the byte cap first (25 MB), ffprobe (an audio
+  stream and NO video stream = a clip; else an ordinary attachment), ffmpeg in
+  a thread pool; `AUDIO_ATTACH_MAX_S` = 600 bites mostly on compressed input.
+- The MCP `upload()` tool (256 KB base64) is not a path for audio;
+  `reveille-upload` (DES ruling 11449) is.
+- Clip-voiced messages carry `clip: true` on the attachment and the message;
+  11476's keep rule and boot sweep EXCLUDE them (an agent key + persona + no
+  script row would otherwise unlink a clip as "terse").
+- Delete: the choke point unlinks the attachment pair AND the `tts-<mid>` pair
+  (hard links, two names each).
+- Gate wording: "plays inline on iPhone" = through the page's decoder.
+
+## 7. The original: a ten-minute holding pen, then the cold store (operator 11502; shape proposed 11504, awaiting the operator's word)
+
+The raw upload is written to `<files>/raw/<stored>` -- never served on the
+feed, never inline. `RAW_HOLD_S` = 600: during the hold the uploader may fetch
+their own original once (`GET /files/raw/<stored>`, owner-only). At the end of
+the hold -- or at once if the conversion failed (the raw is then the only
+copy) -- the broker calls `absoluteZeroStorage.put(key, path, meta)`; on True
+the local raw is unlinked. `put` is a stub today: it writes a durable ledger
+row (key, sha256, bytes, mime, message id, uploader, archived_at,
+tier="absolute-zero", location=None) and returns True; later it becomes the
+S3 deep-archive tier with `location` filled, same call, same row.
+`absoluteZeroStorage.get(key)` exists from day one and answers "frozen: not
+retrievable on this broker yet" with the row -- the ledger of every original
+ever taken is durable before the bytes have anywhere to thaw from. Boot: raws
+older than the hold are archived-then-unlinked by the sweep; a `.part` raw is
+removed. Not today: the S3 client, credentials, thaw.
