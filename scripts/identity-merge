@@ -46,6 +46,7 @@ import time
 # credentials are SUPERSEDED instead, below.
 ID_SITES = (
     ("messages", "sender_agent_id"),        # attribution of every message sent
+    ("messages", "recipient_agent_id"),     # who it was addressed to (v27, DES-011 s6.1a)
     ("memories", "author_agent_id"),        # who authored a fact
     ("reads", "agent_id"),                  # receipts
     ("token_tombstones", "agent_id"),       # supersede signposts
@@ -185,9 +186,10 @@ def merge(conn, src, dst, dst_rooms):
         (src["name"],)).fetchone()[0]
 
     # RETIRE, never delete: the row is the record that this name existed and
-    # what became of it, and retiring frees the label for reuse.
-    conn.execute("UPDATE agents SET retired_ns=? WHERE id=?",
-                 (time.time_ns(), src["id"]))
+    # what became of it, and retiring frees the label for reuse. merged_into is
+    # the same fact from the schema's end (v27): readers follow it to the head.
+    conn.execute("UPDATE agents SET retired_ns=?, merged_into=? WHERE id=?",
+                 (time.time_ns(), dst["id"], src["id"]))
     return moved
 
 
