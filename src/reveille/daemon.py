@@ -268,6 +268,18 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.168 THE CLIP BUTTON IS GONE (operator 11831, ruled 11832). Recording your
+voice into the composer shipped in 0.2.161 and earned its keep for exactly one
+afternoon: "absolutely worthless -- it serves no purpose at this point". So it
+is removed, not deprecated -- the button, its take, its 60 s cap and its
+gates. Everything the button borrowed stays: the ear's own recorder, talk,
+listen, slice 1's transcode-at-upload, the CLIP chip on a converted attachment
+and its player -- because an UPLOADED .wav or .mp3 is still a clip, still
+plays where it landed, and is still the thing worth having (operator 11834).
+The clip TRANSCRIPT into the message body -- an external recording
+transcribed so agents can work on it -- stays on the backlog, unscheduled and
+deliberately not built here. DES-017 s4.2 records the removal; EPIC-001 row 5
+reads "built, removed on operator word".
 0.2.167 A NEW AGENT CAN BE BORN FROM THE PAGE, AND A SETTING STOPS LIVING IN
 A SHELL (operator, 2026-08-18). Two holes, both found walking a body-swap
 test. (1) The Tokens tab could only ATTACH to an identity that already
