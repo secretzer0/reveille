@@ -57,6 +57,10 @@ not a phone layout.
   14 + Pixel 7; sign-in, room, ear on, "+" open, room sheet, voices) writes
   PNGs from a scratch broker in ~20 s. It is the artifact for every UI PR from
   now on and the gate for this one: the architect looks at the pictures.
+- **Operator approval on the pictures is a gate (operator 11446):** every
+  phone-layout PR posts its before/after screenshots (iPhone 14 + Pixel 7) to
+  the room BEFORE merge, uploaded through the bus so they render inline; the
+  operator's word on them stands beside CI green and the architect's review.
 
 ## 3. Slices (two PRs)
 
