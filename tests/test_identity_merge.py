@@ -32,7 +32,7 @@ def _tool():
 
 def _rooms(c, agent):
     return {r["room_id"] for r in c.execute(
-        "SELECT room_id FROM members WHERE agent_id=?", (agent["id"],))}
+        "SELECT room_id FROM members WHERE principal=?", (f"agent:{agent['id']}",))}
 
 
 def _two_bodies():
@@ -110,10 +110,10 @@ def test_the_ghost_membership_goes_and_room_reach_is_kept():
     # Both in one room (the ghost case), the loser alone in another (the reach
     # case). members is keyed (room_id, name).
     for name, aid in ((src["name"], src["id"]), (dst["name"], dst["id"])):
-        c.execute("INSERT INTO members(room_id, name, agent_id, joined_ns, seen_ns)"
-                  " VALUES(?,?,?,?,?)", (room["id"], name, aid, now, now))
-    c.execute("INSERT INTO members(room_id, name, agent_id, joined_ns, seen_ns)"
-              " VALUES(?,?,?,?,?)", (other["id"], src["name"], src["id"], now, now))
+        c.execute("INSERT INTO members(room_id, name, principal, joined_ns, seen_ns)"
+                  " VALUES(?,?,?,?,?)", (room["id"], name, f"agent:{aid}", now, now))
+    c.execute("INSERT INTO members(room_id, name, principal, joined_ns, seen_ns)"
+              " VALUES(?,?,?,?,?)", (other["id"], src["name"], f"agent:{src['id']}", now, now))
 
     c.execute("BEGIN IMMEDIATE")
     moved = m.merge(c, src, dst, _rooms(c, dst))
@@ -179,8 +179,8 @@ def test_the_survivor_keeps_its_rooms_when_a_source_shares_its_name():
               (twin_id,))
     for aid, rid, name in ((dst["id"], room["id"], dst["name"]),
                            (fork["id"], other["id"], fork["name"])):
-        c.execute("INSERT INTO members(room_id, name, agent_id, joined_ns, seen_ns)"
-                  " VALUES(?,?,?,1,1)", (rid, name, aid))
+        c.execute("INSERT INTO members(room_id, name, principal, joined_ns, seen_ns)"
+                  " VALUES(?,?,?,1,1)", (rid, name, f"agent:{aid}"))
 
     dst_rooms = _rooms(c, dst)
     c.execute("BEGIN IMMEDIATE")

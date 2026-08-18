@@ -50,7 +50,8 @@ def _seed(tmp_path, monkeypatch):
     admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
     r1 = store.create_room(c, admin["id"], "bridge")
     r2 = store.create_room(c, admin["id"], "ten-forward")
-    m = store.send(c, "picard", "*", "terse", room=r1["id"])
+    picard = store.agent_principal(store.mint_agent(c, admin["id"], "picard")["id"])
+    m = store.send(c, picard, "*", "terse", room=r1["id"])
     monkeypatch.setattr(daemon, "_conn", c)
     monkeypatch.setattr(store, "AUDIO_DIR", str(tmp_path))
     return c, r1["id"], r2["id"], m["id"]
@@ -106,7 +107,8 @@ def test_audio_is_made_on_demand_for_a_message_that_has_none(tmp_path, monkeypat
     (args, kw), = queued
     assert args[:2] == (mid, r1) and args[2] == "picard" and args[4] == "terse"
     assert kw["asked"] is True, "the click IS the listener: the room gate is passed"
-    assert kw["key"] is None, "an unbound sender (no sender_agent_id, no such user) = digest pick"
+    pid = c.execute("SELECT id FROM agents WHERE name='picard'").fetchone()["id"]
+    assert kw["key"] == f"agent:{pid}", "the stored row's identity is the speaker key"
     assert _ask(mid) == (200, {"state": "queued"}), "a second ask is answered, not queued twice"
     assert len(queued) == 1
     # In flight (the registry) and ready (the file) answer without queueing.
@@ -127,13 +129,18 @@ def test_the_speaker_key_of_a_stored_message_comes_from_the_row(tmp_path, monkey
     """No credential is on the wire for backlog: agent:<sender_agent_id> when the
     send recorded one; user:<id> for a web user by its unique name; None otherwise."""
     c, r1, r2, mid = _seed(tmp_path, monkeypatch)
+    pid = c.execute("SELECT id FROM agents WHERE name='picard'").fetchone()["id"]
     row = c.execute("SELECT room, sender, subject, body, sender_agent_id FROM messages "
                     "WHERE id=?", (mid,)).fetchone()
-    assert daemon._speaker_key_of(row) is None, "picard sent with no identity: digest pick"
-    m2 = store.send(c, "travis", "*", "as a human", room=r1)
+    assert daemon._speaker_key_of(row) == f"agent:{pid}"
+    c.execute("UPDATE messages SET sender_agent_id=NULL WHERE id=?", (mid,))
+    row = c.execute("SELECT room, sender, subject, body, sender_agent_id FROM messages "
+                    "WHERE id=?", (mid,)).fetchone()
+    assert daemon._speaker_key_of(row) is None, "a historical row nobody attributed: digest pick"
+    uid = c.execute("SELECT id FROM users WHERE name='travis'").fetchone()["id"]
+    m2 = store.send(c, f"user:{uid}", "*", "as a human", room=r1)
     row = c.execute("SELECT room, sender, subject, body, sender_agent_id FROM messages "
                     "WHERE id=?", (m2["id"],)).fetchone()
-    uid = c.execute("SELECT id FROM users WHERE name='travis'").fetchone()["id"]
     assert daemon._speaker_key_of(row) == f"user:{uid}"
     c.execute("UPDATE messages SET sender_agent_id='agent-7' WHERE id=?", (mid,))
     row = c.execute("SELECT room, sender, subject, body, sender_agent_id FROM messages "

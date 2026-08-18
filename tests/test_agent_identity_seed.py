@@ -105,8 +105,5 @@ def test_the_name_a_live_agent_still_uses_is_listed_too(tmp_path):
     is not ownership."""
     conn, _ = db(tmp_path)
     msg(conn, "reveille-senior-dev", ts=time.time_ns())
-    conn.execute("INSERT INTO members(room_id, name, tag, joined_ns, seen_ns) "
-                 "VALUES('r1','reveille-senior-dev','reveille-senior-dev',1,?)",
-                 (time.time_ns(),))
     assert [e["name"] for e in store.unresolved_agent_names(conn)] \
         == ["reveille-senior-dev"]

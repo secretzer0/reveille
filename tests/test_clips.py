@@ -127,7 +127,7 @@ def test_send_binds_the_pair_as_the_messages_voice_and_delete_takes_both_pairs(m
     monkeypatch.setattr(daemon, "RAW_HOLD_S", 60.0)
     att = daemon._store_upload(_P(), "r1", "note.wav", _wav(1.0), "http")
     stem = att["url"][len("/files/"):-5]
-    res = store.send(conn, "travis", "*", "", room="r1", attachments=[att])
+    res = store.send(conn, "user:u1", "*", "", room="r1", attachments=[att])
     mid = res["id"]
     calls = []
     monkeypatch.setattr(daemon, "_tts_enqueue", lambda *a, **k: calls.append(a))
@@ -182,9 +182,8 @@ def test_the_worker_binds_a_clip_item_in_its_turn_and_the_sweep_leaves_it(monkey
                  "VALUES('worf','Worf','Klingon honour','u1',6,1,1,1)")
     conn.execute("INSERT INTO voice_assignments(room_id, speaker, voice_id, set_by, ts_ns) "
                  "VALUES('r1','agent:a1','worf','room',1)")
-    mid = store.send(conn, "worf", "*", "hear this", room="r1",
+    mid = store.send(conn, "agent:a1", "*", "hear this", room="r1",
                      attachments=[{"url": "/files/c.webm", "clip": True, "duration_s": 1}])["id"]
-    conn.execute("UPDATE messages SET sender_agent_id='a1' WHERE id=?", (mid,)); conn.commit()
     (files / f"tts-{mid}.webm").write_bytes(b"1")
     assert daemon._sweep_terse_renditions(conn, files) == 0
     assert (files / f"tts-{mid}.webm").is_file()

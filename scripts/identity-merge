@@ -48,7 +48,6 @@ ID_SITES = (
     ("messages", "sender_agent_id"),        # attribution of every message sent
     ("messages", "recipient_agent_id"),     # who it was addressed to (v27, DES-011 s6.1a)
     ("memories", "author_agent_id"),        # who authored a fact
-    ("reads", "agent_id"),                  # receipts
     ("token_tombstones", "agent_id"),       # supersede signposts
     ("token_audit", "agent_id"),            # credential audit
 )
@@ -108,7 +107,7 @@ def counts(conn, agent_id):
     out["memories.scope(state)"] = conn.execute(
         "SELECT count(*) FROM memories WHERE scope=?", (f"agent:{agent_id}",)).fetchone()[0]
     out["members(rows)"] = conn.execute(
-        "SELECT count(*) FROM members WHERE agent_id=?", (agent_id,)).fetchone()[0]
+        "SELECT count(*) FROM members WHERE principal=?", (f"agent:{agent_id}",)).fetchone()[0]
     out["tokens(live, to supersede)"] = conn.execute(
         "SELECT count(*) FROM tokens WHERE agent_id=?", (agent_id,)).fetchone()[0]
     return out
@@ -129,10 +128,16 @@ def merge(conn, src, dst, dst_rooms):
         moved[f"{table}.{col}"] = conn.execute(
             f"UPDATE {table} SET {col}=? WHERE {col}=?", (dst["id"], src["id"])).rowcount
 
-    # State notes hide in a STRING, not a column (DES-011 section 7).
+    # State notes hide in a STRING, not a column (DES-011 section 7); receipts
+    # key on the same principal string (v28). A receipt the survivor already
+    # holds is one receipt, not two.
     moved["memories.scope(state)"] = conn.execute(
         "UPDATE memories SET scope=? WHERE scope=?",
         (f"agent:{dst['id']}", f"agent:{src['id']}")).rowcount
+    moved["reads.principal"] = conn.execute(
+        "UPDATE OR IGNORE reads SET principal=? WHERE principal=?",
+        (f"agent:{dst['id']}", f"agent:{src['id']}")).rowcount
+    conn.execute("DELETE FROM reads WHERE principal=?", (f"agent:{src['id']}",))
 
     # THE MERGE IS A SUPERSESSION (devops rehearsal, msg 10959). A revoke
     # DELETES the row, so every tokens row is a LIVE credential: re-pointing
@@ -163,27 +168,22 @@ def merge(conn, src, dst, dst_rooms):
     # every transport signal green. That is tonight's failure rebuilt by its
     # own repair tool, and the fix is to stop letting a NAME identify a body.
     dropped = relabelled = 0
-    for r in conn.execute("SELECT room_id, name FROM members WHERE agent_id=?",
-                          (src["id"],)).fetchall():
+    src_p, dst_p = f"agent:{src['id']}", f"agent:{dst['id']}"
+    for r in conn.execute("SELECT room_id, name FROM members WHERE principal=?",
+                          (src_p,)).fetchall():
         if r["room_id"] in dst_rooms:
             # The ghost that keeps a dead name in presence.
-            conn.execute("DELETE FROM members WHERE room_id=? AND name=?",
-                         (r["room_id"], r["name"]))
+            conn.execute("DELETE FROM members WHERE room_id=? AND principal=?",
+                         (r["room_id"], src_p))
             dropped += 1
         else:
             conn.execute(
-                "UPDATE members SET name=?, agent_id=? WHERE room_id=? AND name=?",
-                (dst["name"], dst["id"], r["room_id"], r["name"]))
+                "UPDATE members SET name=?, principal=? WHERE room_id=? AND principal=?",
+                (dst["name"], dst_p, r["room_id"], src_p))
             dst_rooms.add(r["room_id"])   # the next source must see it as ours
             relabelled += 1
     moved["members.dropped(ghost)"] = dropped
     moved["members.relabelled"] = relabelled
-
-    # Rows predating agent ids cannot be attributed, so they are COUNTED rather
-    # than guessed at -- a silent skip reads as "nothing there".
-    moved["members.unattributed(left)"] = conn.execute(
-        "SELECT count(*) FROM members WHERE agent_id IS NULL AND name=?",
-        (src["name"],)).fetchone()[0]
 
     # RETIRE, never delete: the row is the record that this name existed and
     # what became of it, and retiring frees the label for reuse. merged_into is
@@ -244,7 +244,7 @@ def main():
     try:
         moved = {}
         dst_rooms = {r["room_id"] for r in conn.execute(
-            "SELECT room_id FROM members WHERE agent_id=?", (dst["id"],))}
+            "SELECT room_id FROM members WHERE principal=?", (f"agent:{dst['id']}",))}
         for s in sources:
             for k, v in merge(conn, s, dst, dst_rooms).items():
                 moved[k] = moved.get(k, 0) + v
@@ -276,7 +276,7 @@ def main():
         print(f"  {v:6d}  {k}")
     print(f"\nrecorded in {log}")
     survivor_rooms = [r["room_id"] for r in conn.execute(
-        "SELECT room_id FROM members WHERE agent_id=?", (dst["id"],))]
+        "SELECT room_id FROM members WHERE principal=?", (f"agent:{dst['id']}",))]
     live_tokens = conn.execute("SELECT count(*) FROM tokens WHERE agent_id=?",
                                (dst["id"],)).fetchone()[0]
     print(f"survivor holds {len(survivor_rooms)} room(s) and {live_tokens} live "

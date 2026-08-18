@@ -259,6 +259,70 @@ sets `merged_into` on the source. Rehearsal tool for this and every later step:
 `scripts/rehearse-migration <db> [--keep DIR]` (copy via the backup API,
 migrate the copy, print). Nothing reads the new column yet -- (b) does.
 
+#### 6.1(b) as built (schema v28, EPIC-001 S1)
+
+**The principal.** Everywhere the store keys on WHO it keys on the DES-013 s2
+speaker key: `agent:<agents.id>` for a body holding a bound token, `user:<users.id>`
+for a person at the page. The daemon derives it from the credential
+(`speaker_key(p)`), `join()`/`readmit()` from the token or the `web:` tag
+(`_join_principal`); a name alone cannot join ("join needs an identity"). Nothing
+derives it from a name: `agent_id_for()` is gone.
+
+**Schema.** `members(room_id, principal, name, ...)` PK `(room_id, principal)`,
+with `name` = the ROOM-NAME and `idx_members_roomname` UNIQUE `(room_id, name)`
+among live rows (a row marked left keeps its name, holds nothing).
+`reads(message_id, principal, read_ns)` PK `(message_id, principal)`. Both
+rebuilt by `_upgrade_v27` (v27 -> v28): members re-keyed from `agent_id`, else
+the token's identity, else the person behind a `web:` tag, else the succession
+clock at `seen_ns`; rows that resolve to nothing are dropped and printed, two
+rows landing on one `(room, principal)` keep the newest. reads re-keyed the same
+way (agent_id folded to its head; a person's name to `user:`; else the clock at
+`read_ns`); plus **the successor's catch-up**: a re-minted identity that joined
+under a name whose earlier holder had read the backlog got no catch-up receipts
+of its own (join marks INSERT OR IGNORE by name), so the step writes for every
+agent membership the receipts `join()` would have written at its arrival --
+everything in the room older than `joined_ns - CATCHUP_NS`. Measured on the live
+copy (2026-08-18): 13 members and 234,755 receipts re-keyed, 0 dropped, 31,498
+catch-up receipts; unread-by-id equals unread-by-name for every live agent
+except the three re-minted ones, which differ by the 5 broadcasts inside their
+own catch-up window (correctly unread: nobody acked them for the successor).
+
+**Delivery.** `send(conn, principal, to, ...)` writes under the room-name the
+room calls the sender (`room_name()`: its members row, else its own name), stamps
+`sender_agent_id` from the principal and `recipient_agent_id` from the members
+row the `to=` room-name resolves to, and returns `sender`. `inbox()`/`ack()` key
+on `recipient_agent_id` + broadcast and receipts by principal (an unbound token,
+read-only by 11252, sees the broadcasts). `deafness()`/`activity()`, `readers()`
+(rendering the CURRENT name), `delete_if_unseen()`, `prune_agent()` (sent AND
+received by id; no "left received"), `reap_stale()`, `known()`, `touch()`,
+`leave()`, `leave_listed()`, `left_rooms()`, presence (carries `principal`): all
+by principal. `_wake_targets` returns room-names and the waiter registry is
+still `(token_id, name)` -- an aliased agent's ring is 6.1(c)'s to land.
+
+**The room-name.** `_room_name_for()`: the bare name unless a LIVE member of
+another identity holds it in the room, then `<owner>-<name>` (owner = the
+account name of the agent's owner, or the person; must pass `NAME_RE`); an alias
+that is itself held live is refused naming both; a stale holder is reaped on the
+spot. Fixed for the life of the membership: a re-join of a live row keeps
+whatever it was called; a rejoin after leave re-runs the check. `join()` returns
+it, the join tool answers `as` per room, `send()` writes it as `sender`.
+
+**Rename.** `rename_agent(conn, agent_id, new_name)`: same uniqueness as a
+mint (one live per owner+name, refused naming the holder), rename log closes
+the old row and opens the new, and every live membership whose room-name was
+the bare old name re-runs the room-name check (an alias in force is untouched).
+`PATCH /identities/<agent_id> {"name"}` (owner or admin) answers `{name, rooms:
+{room_id: room-name}}`. Gate 9.1 (`tests/test_delivery_by_id.py`): mail sent
+before the rename still arrives and acks, presence shows the new name, the old
+address names nobody, readers render the current name. Gate 9.3: two owners'
+`architect` in one room -- the second is `bob-architect`, presence shows both
+with their principals, each room-name reaches only its holder, the sender writes
+as `bob-architect` there and `architect` at home, the alias survives the
+incumbent leaving and a re-join, a stale holder yields the bare name, a held
+alias refuses naming both. Not in (b): the body's own env (`REVEILLE_AGENT_ROLE`,
+`waked --name`, the spool dir) still carries the name the body was minted with
+-- the launcher/native shape half of a rename is 6.1(c)/(later).
+
 ## 7. The one-time merge (executed 2026-08-15)
 
 `scripts/identity-merge` re-points one identity's rows onto another and
