@@ -269,7 +269,7 @@ def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
         "Settings > (Safari or Chrome) > Microphone" in UI
     assert "catch(e){toast(micWhy(e));return;}" in UI, "talk says the same"
     assert "m.classList.toggle('on',!!listenVad);m.setAttribute('aria-pressed',listenVad?'true':'false');" in ear
-    listen = ear[:ear.index("const EAR_AUTOSEND_MS=")]
+    listen = ear[:ear.index("const EARCON_GAIN=")]        # the listen toggle's code; the sounds SETTING after it is per browser by ruling (11577)
     for persisted in ("localStorage", "sessionStorage", "document.cookie"):
         assert persisted not in listen, "listening is per tab, never persisted"
     assert "baseAssetPath:'/ui/vad/',onnxWASMBasePath:'/ui/vad/'" in ear and "model:'v5'" in ear
@@ -364,15 +364,17 @@ def test_pause_to_send_is_a_deliberate_setting_hands_free_only_with_a_visible_co
 
 def test_the_earcon_rings_once_when_words_land_in_listen_mode_only():
     """0.2.134 (ruling 11465): one bell at landing, from the listen chain only;
-    never over an utterance (pending until vDone); no bell in push-to-talk;
-    the WAV ships with the page at /ui/earcon.wav."""
+    never over an utterance (queued until vDone); no bell in push-to-talk;
+    the WAV ships with the page at /ui/earcon.wav. Since 0.2.146 the bell is the
+    "ding" of the vocabulary (11577); the same rules hold through earcon()."""
     page = daemon._ui_read("index.html")
     assert "if(earHeard(d)){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in page
-    assert page.count("earconRing()") == 3, "listen chain, vDone (pending), and the definition's own recursion site"
+    assert page.count("earconRing()") == 2, "the listen chain, and the definition"
     talk = page[page.index("function talkStop"):page.index("function talkStop") + 3000]
     assert "earconRing" not in talk, "no bell in push-to-talk"
-    assert "if(!listenVad)return;\n if(vBusy){earconPending=true;return;}" in page
-    assert "function vDone(){vCtl=null;vBusy=false;paintStop();if(earconPending)earconRing();vPump();}" in page
+    assert "function earconRing(){if(listenVad)earcon('ding');}" in page
+    assert " if(vBusy){earconQ.push(name);return;}" in page, "never over an utterance"
+    assert "function vDone(){vCtl=null;vBusy=false;paintStop();earconDrain();vPump();}" in page
     assert "fetch('/ui/earcon.wav'" in page
     routes = {r.path for r in daemon.build_app().routes if hasattr(r, "path")}
     assert "/ui/earcon.wav" in routes
@@ -448,3 +450,37 @@ def test_a_degenerate_take_is_dropped_before_it_lands(ear):
     """ % json.dumps(OH_OH_OH)
     res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
     assert res.returncode == 0 and "ok" in res.stdout, res.stderr or res.stdout
+
+
+def test_the_earcon_vocabulary_is_one_table_one_function_one_toggle():
+    """DES-014 section 5 earcon amendment (operator 11576/11578, architect 11577): eight named sounds,
+    each on the event it names, synthesized in-page (no new files), never over an
+    utterance (queued to vDone), one "sounds" setting per browser (default ON),
+    constant volume. Skipped on purpose: countdown ticks, a dropped degenerate
+    take, push-to-talk start/stop."""
+    page = daemon._ui_read("index.html")
+    table = page[page.index("const EARCONS={"):page.index("};", page.index("const EARCONS={"))]
+    for name, kind in (("whoosh", "noise"), ("bonk", "sine"), ("ding", "wav"), ("bip", "sine"), ("bop", "sine"),
+                       ("plip", "sine"), ("pop", "sine"), ("clunk", "square"), ("swish", "noise")):
+        assert f" {name}:" in table and kind in table[table.index(f" {name}:"):table.index("\n", table.index(f" {name}:"))], name
+    assert "const EARCON_GAIN=0.06;" in page
+    assert "function earcon(name){" in page and "function soundsOn(){return localStorage.revSounds!=='0';}" in page
+    # each event rings its own name, once, at the place it happens
+    for call, where in (("earcon('whoosh');", "send accepted"), ("earcon('bonk');", "a red toast"),
+                        ("earcon('bip');", "listen ON"), ("earcon('bop');", "listen OFF"),
+                        ("earcon('plip');", "auto-send cancelled"), ("earcon('pop');", "message for me / human broadcast"),
+                        ("earcon('clunk');", "attach done"), ("earcon('swish');", "room switched")):
+        assert call in page, where
+    assert page.count("earcon('whoosh');") == 1 and page.count("earcon('swish');") == 1 and page.count("earcon('clunk');") == 1
+    assert "if(!info&&typeof earcon==='function')earcon('bonk');" in page, "any red toast bonks; an info toast does not"
+    assert "if(!voiceOn&&m.from&&m.from!==myName&&(m.to===myName||(m.to==='*'&&humanNames.has(m.from))))earcon('pop');" in page, \
+        "pop only with voice OFF (voice ON speaks it), never my own words, a human's broadcast or a message to me"
+    assert "if(!quiet){listenPaint(listenVad?'listening':'');earcon('plip');}" in page, "the cancel that a person made"
+    assert 'id="miSounds"' in page and 'id="phSounds"' in page and "function setSounds(on){" in page
+    # the eight ring nowhere the ruling skipped: not in the countdown tick, not in the degenerate drop, not in talk
+    tick = page[page.index("function pauseSendArm(){"):page.index("(function wirePauseSend(){")]
+    assert "earcon(" not in tick.replace("pauseSendAbort(true)", "")
+    heard = page[page.index("function earHeard(d){"):page.index("function earLand(text){")]
+    assert "earcon(" not in heard
+    talk = page[page.index("async function talkStart(){"):page.index("async function talkResample(")]
+    assert "earcon(" not in talk

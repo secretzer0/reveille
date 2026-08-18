@@ -220,6 +220,26 @@ without it); off with listen off. One sound only -- a second "start" tick is
 what people turn off. Gate: `earconRing()` is called only from the listen chain,
 after `earHeard` returned true; `talkStop`'s path never calls it.
 
+**The earcon vocabulary (0.2.146; operator 11576/11578, architect 11577; section 5 amended,
+supersedes 11465's "one bell only").** Every command that lands makes ONE short
+sound, so a hand on the wheel hears what happened. One table `EARCONS`, one
+function `earcon(name)`, one "sounds" setting per browser (`revSounds`, default
+ON, in the me menu and the phone's me menu), constant volume 0.06, all
+synthesized in the page (an oscillator or a filtered noise burst through a gain
+envelope) except the existing bell; NEVER over an utterance being spoken --
+names queue and ring in order at `vDone`. The set: send accepted WHOOSH (noise
+1200->300 Hz, 180 ms); send refused/failed = any red toast BONK (sine 220->110,
+150 ms); words landed DING (the bell, listen mode only, unchanged); listen ON BIP
+(440->880, 80 ms), listen OFF BOP (880->440, 80 ms); auto-send cancelled by a
+spoken "cancel" or a keystroke PLIP (1000 Hz, 40 ms); a live message for me, or a
+human's broadcast, with voice OFF only POP (900 Hz, 35 ms -- with voice ON it is
+spoken); attach done CLUNK (160 Hz square, 60 ms); room switched SWISH (noise
+300->1200, 120 ms). Skipped on purpose: countdown ticks (visible already), a
+dropped degenerate take (silence, 11572), push-to-talk start/stop (the finger is
+on the button). Gate: `tests/test_the_ear.py` asserts the table's names and
+kinds, each call site once, the toast rule, the pop rule, and that the skipped
+places ring nothing.
+
 **The degenerate take (0.2.145; operator 11569, ruling 11572; s4/s5 amended).**
 Whisper answers a non-speech take with a hallucination -- "oh, oh, oh, ..." 118
 times, verbatim from the operator's phone -- and hands-free auto-send shipped
