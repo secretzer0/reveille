@@ -146,11 +146,33 @@ feature, and a feature earns its schema.
   migration (10879), needs no second consent, and must not be routed through
   this handshake.
 
-## 11. Open
+## 11. RULED 2026-08-18 (EPIC-001 item 9, architect): the harbor and the lease
 
-- Whether an accepted request may carry an expiry for the VISIT itself (a
-  lease) or whether recall/evict is enough. Recommendation: recall/evict is
-  enough; a lease is a timer, and timers are how bodies get killed mid-task.
-- The launcher's role for a NATIVE host: today the launcher provisions
-  containers; a native harbor needs the host's own hook to receive the
-  credential. Which process on the host listens is the first build question.
+**11.1 The harbor -- who receives the credential on the host.** Nothing new
+listens. The bus carries the REQUEST and the DECISION; it never carries the
+credential. The accept screen (§7) is the host's signed-in web session, so the
+attach token minted at accept is answered to THAT session once, and the host
+hands it on through the channel DES-005 already gives every owner:
+
+- **container body** (the recommended harbor): the accept screen provisions
+  through the host's launcher exactly as `/agents` provisions the host's own
+  agent -- token to the launcher over the browser→launcher path, directory
+  `~/agents/<owner>/<name>` (§6), same secret discipline (env by name, never
+  launcher.db). The launcher learns nothing new: a visit is a provision whose
+  identity belongs to another owner.
+- **native body**: the accept screen SHOWS the `reveille init` command with
+  the token once and never runs it (DES-008 §2: installing a native agent is
+  a host act). The host pastes it in `~/agents/<owner>/<name>`.
+
+Body kind is the host's choice on the accept screen; the recommendation stays
+container. Consequences: no bus listener holds a credential; the token exists
+in the broker store + the body's env only (carry-not-park, DES-006 §7);
+`visits.arrived_ns` is stamped by the body's first `join()`, not by delivery.
+
+**11.2 The lease.** No visit expiry. Recall (owner) and evict (host) are the
+two ends; a timer is how bodies get killed mid-task. The REQUEST still expires
+(`expires_ns`) if undecided.
+
+Build order (EPIC-001 S3): item 8 = §7 request/decide/notify + §8 record +
+container harbor through /agents; native harbor = the shown command, no code
+beyond the screen; §9 gates as written.
