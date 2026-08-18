@@ -209,6 +209,13 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.119 A LOST REACH IS A DEPARTURE; NO GHOST MEMBERS. Revoking a token, or
+taking a room away from it (unassign, a room flipped private, a member
+removed), now marks that agent's membership left in the same transaction,
+so the roster stops listing a credential that can no longer hear -- and
+leave(room=) works for a room you are listed in but no longer reach (a verb
+that only reduces access needs no access). Ghosts from before this rule
+heal at the next detach. Bus tools unchanged in shape.
 0.2.118 THE EAR, SLICE 1 (DES-014). REVEILLE_STT_URL (with _TOKEN, _MODEL,
 _TIMEOUT) points the broker at a speech-to-text server (OpenAI-shaped
 /v1/audio/transcriptions: speaches / faster-whisper-server) -- the third
@@ -3473,7 +3480,13 @@ async def leave(room: str = "", ctx: Context = None) -> str:
     p = _acting(ctx.request_context.request)
     targets = [room] if room else list(p.rooms)
     if room and room not in p.rooms:
-        raise store.AccessError(f"no access to room {room}")
+        # A VERB THAT ONLY REDUCES ACCESS NEEDS NO ACCESS (11337): a room this
+        # token no longer reaches but is still listed in is left, not refused --
+        # the refusal was what made a revoked reach a ghost membership.
+        store.leave_listed(_conn, p.name, p.token_id, room)
+        _push_presence(room)
+        log.info("%s left %s (no longer reachable; listed row cleared)", p.name, room)
+        return f"left: {p.name}"
     store.leave(_conn, p.name, targets)
     for rid in targets:
         _push_presence(rid)
