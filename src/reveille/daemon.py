@@ -246,6 +246,20 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.158 THE PASSWORD DOOR CLOSES (DES-018 s10 slice 2; operator 11758,
+ruling 11759). Wherever a provider is configured, the password form is GONE
+from the login card and POST /login answers 410 "password sign-in is closed
+-- use one of the doors": the credential is not wrong, the way in is, and a
+401 would teach a page to retry forever. One condition, no second flag -- a
+broker with no provider signs in by password exactly as before. Adding a
+person is now an INVITE: POST /users is refused while the doors are the only
+way in, and the Users tab says so where the add-user row used to be. The
+Account tab drops the password section for anyone holding a door. THE
+LOCKOUT CHECK is the point of care: store.password_only_users names every
+live person whose only way in is a password, printed at boot as a WARNING
+naming them, so nobody discovers the close at their next sign-in. /setup
+still makes the first admin on a fresh broker; /version says "password
+closed".
 0.2.157 WHAT THE SYSTEM WROTE FOR YOU IS NOT YOUR HISTORY (#106 review;
 rulings 11746, 11611 follow-on). MEASURED ON LIVE: two accounts that only
 ever signed in were tombstoned by 0.2.155 because each carried 10145 read
@@ -4570,7 +4584,8 @@ async def version_http(_request):
     ui = _ui_override()
     lan = (f" (LAN plaintext: {', '.join(_plaintext_hosts)} -- REVEILLE_LAN_PLAINTEXT=1)"
            if _plaintext_hosts else "")
-    doors = (f" (sign in with: {', '.join(_oidc_doors)}; signup {_signup_policy})"
+    doors = (f" (sign in with: {', '.join(_oidc_doors)}; signup {_signup_policy}; "
+             f"password {'closed' if _password_closed() else 'open'})"
              if _oidc_doors else "")
     return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "") + lan + doors)
 
@@ -5758,6 +5773,12 @@ async def setup_http(request):
 
 @_guard
 async def login_http(request):
+    # DES-018 s10 slice 2: the password door is CLOSED wherever a door exists.
+    # 410, not 401: the credential is not wrong, the way in is gone -- and a
+    # page that reads 401 as "try again" would loop forever.
+    if _password_closed():
+        return JSONResponse({"error": "password sign-in is closed on this broker -- "
+                                      "use one of the doors"}, status_code=410)
     d = await request.json()
     u = store.authenticate(_conn, (d.get("name") or "").strip(), d.get("password") or "")
     if not u:
@@ -5767,6 +5788,22 @@ async def login_http(request):
     # A fresh session id on every login (fixation, DES-018 s7).
     return _cookie(JSONResponse(u), store.rotate_session(
         _conn, request.cookies.get(_cookie_name()), u["id"]), request)
+
+
+def _password_closed():
+    """The password form is gone once ANY door is configured (slice 2). One
+    condition, no second flag to forget: a broker with no provider still signs
+    in by password, exactly as it always did."""
+    return bool(_oidc_doors)
+
+
+def _lockout_check():
+    """WHO WOULD BE LOCKED OUT. Closing the password door with someone
+    password-only is the one way this slice can hurt a person, so it is
+    checked at boot and named -- never discovered by them at 3am."""
+    if not _password_closed():
+        return []
+    return store.password_only_users(_conn)
 
 
 @_guard
@@ -6045,7 +6082,7 @@ async def auth_doors_http(_request):
     whether to offer the code field; `note` whether to offer the textarea."""
     return JSONResponse({"doors": [{"name": n, "label": PROVIDERS[n]["label"]}
                                    for n in _oidc_doors],
-                         "signup": _signup_policy, "password": True,
+                         "signup": _signup_policy, "password": not _password_closed(),
                          "invite": _signup_policy in ("request", "closed"),
                          "note": _signup_policy == "request"})
 
@@ -6164,6 +6201,11 @@ async def users_http(request):
         _admin(request)
         return JSONResponse({"users": store.list_users(_conn)})
     p = _admin(request)
+    if _password_closed():
+        # A password account nobody can sign into is not a user, it is a
+        # reserved name. An invite code is how a person is added now.
+        raise store.BusError("password accounts are closed -- invite them instead "
+                             "(Users tab -> INVITE CODES)")
     d = await request.json()
     u = store.create_user(_conn, (d.get("name") or "").strip(), d.get("password") or "",
                           role=d.get("role") or "user")
@@ -6869,6 +6911,12 @@ def main():
     # DES-018: the doors. Providers by env; the public URL builds the redirect.
     doors = _oidc_boot()
     if doors:
+        locked = _lockout_check()
+        if locked:
+            print(f"WARNING: password sign-in is closed (doors configured) but "
+                  f"{', '.join(locked)} ha{'s' if len(locked) == 1 else 've'} no door -- "
+                  f"they cannot sign in until an admin invites them or they link one",
+                  flush=True)
         where = _public_url or "(REVEILLE_PUBLIC_URL UNSET: sign-in will refuse)"
         print(f"sign in with: {', '.join(doors)} -- redirect {where}/auth/<p>/callback; "
               f"signup {_signup_policy}"

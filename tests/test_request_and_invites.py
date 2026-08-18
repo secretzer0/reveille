@@ -13,6 +13,7 @@ import urllib.parse
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from conftest import sit  # noqa: E402
 from reveille import daemon, store  # noqa: E402
 from test_sign_in_with import _hop, _in, _me  # noqa: E402
 
@@ -21,8 +22,7 @@ from test_sign_in_with import _hop, _in, _me  # noqa: E402
 def admin(broker):
     """A signed-in admin, the way the operator's account exists: password."""
     u = store.create_user(broker.conn, "travis", "pw-not-a-real-secret", role="admin")
-    r = broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
-    assert r.status_code == 200
+    sit(broker, "travis")
     return u
 
 
@@ -58,7 +58,7 @@ def test_the_queue_is_admin_only_and_approve_makes_exactly_one_account(broker, a
     # a stranger cannot read the queue
     assert broker.get("/users/requests").status_code == 401
     broker.cookies.clear()
-    broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
+    sit(broker, "travis")
     q = broker.get("/users/requests").json()
     assert q["pending"] == 1 and q["requests"][0]["provider"] == "google"
     r = broker.post("/users/requests/google/sub-1/approve", json={})
@@ -81,7 +81,7 @@ def test_deny_is_quiet_undeny_restores_forget_erases(broker, admin):
     daemon._signup_policy = "request"
     broker.cookies.clear()
     _door(broker)
-    broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
+    sit(broker, "travis")
     assert broker.post("/users/requests/google/sub-1/deny", json={}).status_code == 200
     assert store.request_get(broker.conn, "google", "sub-1")["state"] == "denied"
     # the denied stranger sees the SAME page and files nothing new
@@ -90,7 +90,7 @@ def test_deny_is_quiet_undeny_restores_forget_erases(broker, admin):
     assert r.headers["location"] == "/ui?requested=1" and not _in(broker)
     assert store.request_get(broker.conn, "google", "sub-1")["state"] == "denied"
     assert broker.get("/users/requests").status_code == 401
-    broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
+    sit(broker, "travis")
     assert broker.get("/users/requests").json()["pending"] == 0
     assert broker.post("/users/requests/google/sub-1/undeny", json={}).status_code == 200
     assert broker.get("/users/requests").json()["pending"] == 1
@@ -141,7 +141,7 @@ def test_a_bad_code_is_not_an_error_and_a_revoked_one_stops_working(broker, admi
     broker.stub.claims["google"] = {"sub": "sub-3"}
     assert _door(broker, invite="not-a-code").headers["location"] == "/ui?requested=1"
     # a used code cannot be revoked away (it is the record of who came in)
-    broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
+    sit(broker, "travis")
     code2 = broker.post("/invites", json={}).json()["code"]
     h2 = [i["code_hash"] for i in broker.get("/invites").json()["invites"]
           if not i["used_ns"]][0]
@@ -149,7 +149,7 @@ def test_a_bad_code_is_not_an_error_and_a_revoked_one_stops_working(broker, admi
     broker.stub.claims["google"] = {"sub": "sub-4"}
     _door(broker, invite=code2)
     broker.cookies.clear()
-    broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
+    sit(broker, "travis")
     assert broker.delete("/invites/" + h2).status_code == 404
     assert [i["used_by_name"] for i in broker.get("/invites").json()["invites"]
             if i["code_hash"] == h2] == ["ada"]
@@ -171,7 +171,7 @@ def test_closed_means_invite_only_and_open_ignores_the_code(broker, admin):
     daemon._signup_policy = "open"
     code2 = None
     broker.cookies.clear()
-    broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
+    sit(broker, "travis")
     code2 = broker.post("/invites", json={}).json()["code"]
     broker.cookies.clear()
     broker.stub.claims["google"] = {"sub": "sub-5", "email": "cy@example.com"}

@@ -156,3 +156,13 @@ def broker(tmp_path, monkeypatch):
     conn.close()
 
 
+
+
+def sit(web, name, role="user"):
+    """Sign `name` in without the password door (which slice 2 closes): the
+    session is minted straight from the store, exactly as a callback would.
+    Returns the user row."""
+    row = web.conn.execute("SELECT id, name, role FROM users WHERE name=?", (name,)).fetchone()
+    u = dict(row) if row else store.create_user(web.conn, name, "pw-not-a-real-secret", role=role)
+    web.cookies.set(daemon._cookie_name(), store.create_session(web.conn, u["id"]))
+    return u

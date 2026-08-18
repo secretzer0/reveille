@@ -1171,7 +1171,13 @@ async function paintDoors(){
    'and an admin will review your request.</div>':'')+
   (d.signup==='closed'?'<div class="pDim liHint">This bus is invite-only.</div>':'')
   :'';
- $('liOr').textContent=(d.doors||[]).length?'OR WITH A PASSWORD':'';
+ // Slice 2: where doors exist, the password form is GONE -- not disabled,
+ // not hidden behind a link. A control that cannot work must not be shown.
+ const pw=d.password!==false;
+ for(const id of ['liName','liPass','liGo'])$(id).style.display=pw?'':'none';
+ for(const el of document.querySelectorAll('#loginCard label'))
+  el.style.display=pw?'':'none';
+ $('liOr').textContent=pw&&(d.doors||[]).length?'OR WITH A PASSWORD':'';
  for(const a of $('liDoors').querySelectorAll('a'))
   a.onclick=()=>{localStorage.revDoor=a.dataset.door;
    const q=[],inv=$('liInvite'),nt=$('liNote');
@@ -4338,7 +4344,8 @@ async function openUsers(){
  const d=await api('/users');
  // DES-018 s6 amendment: strangers who asked, and the one-time codes that skip
  // the queue. Both are admin-only on the server; a non-admin never gets here.
- let reqs={requests:[]},invs={invites:[]},tombs={tombstones:[]};
+ let reqs={requests:[]},invs={invites:[]},tombs={tombstones:[]},doorsPassword=true;
+ try{doorsPassword=(await (await fetch('/auth/doors')).json()).password!==false;}catch(e){}
  try{reqs=await api('/users/requests?state=all');}catch(e){}
  try{invs=await api('/invites');}catch(e){}
  try{tombs=await api('/users/tombstones');}catch(e){}
@@ -4397,7 +4404,13 @@ async function openUsers(){
    'account and links that door; deny is silent to them and their next try shows the '+
    'same page.</div>'+reqs.requests.map(reqRow).join(''):'')+
   '<div class="pSec">USERS</div>'+rows+
-  '<div class="pRow"><input id="nuName" placeholder="name"><input id="nuPass" type="password" placeholder="password"><button id="mkUser">add</button></div>'+
+  // Slice 2: a password account nobody can sign into is a reserved name, not
+  // a user. An invite code is how a person is added once the doors are the
+  // only way in.
+  (doorsPassword
+   ?'<div class="pRow"><input id="nuName" placeholder="name"><input id="nuPass" type="password" placeholder="password"><button id="mkUser">add</button></div>'
+   :'<div class="pDim">Password accounts are closed -- mint an invite code below and '+
+    'send it; whoever redeems it arrives as their own account.</div>')+
   (tombs.tombstones.length?'<div class="pSec">RESERVED NAMES</div>'+
    '<div class="pDim">Deleted accounts. A name stays reserved while anything cites '+
    'the person -- messages, agents, tokens, rooms, memories -- so the citation still '+
@@ -4445,7 +4458,7 @@ async function openUsers(){
      {method:'POST',body:'{}'});
     toast(verb==='approve'?('approved -- '+r.user.name+' can sign in now'):verb+'d',true);
     openUsers();}catch(e){toast(e.message);}};
- $('mkUser').onclick=async()=>{
+ if($('mkUser'))$('mkUser').onclick=async()=>{
   try{await api('/users',{method:'POST',body:JSON.stringify(
    {name:$('nuName').value.trim(),password:$('nuPass').value})});openUsers();}
   catch(e){toast(e.message);}};
@@ -4496,13 +4509,14 @@ function openAccount(){
    '<div class="pRow doorRow">'+doors.filter(n=>!mine.some(i=>i.provider===n)).map(n=>
     '<a class="door" href="/auth/'+n+'/login?link=1">add '+esc(DOOR_LABEL[n]||n)+'</a>').join('')+
    '</div>':'')+
-  '<div class="pSec">'+(mine.length?'PASSWORD':'CHANGE YOUR PASSWORD')+'</div>'+
+  (mine.length&&doors.length?'':   // a door-holder has no password to change
+   '<div class="pSec">CHANGE YOUR PASSWORD</div>'+
   '<div class="pDim">Your current password is required -- without it, a borrowed unlocked '+
   'browser could take the account. Changing it signs out every other session.</div>'+
   '<div class="pRow"><input id="pwOld" type="password" placeholder="current password"></div>'+
   '<div class="pRow"><input id="pwNew" type="password" placeholder="new password (min 8)"></div>'+
   '<div class="pRow"><input id="pwNew2" type="password" placeholder="repeat new password">'+
-  '<button id="pwGo">change</button></div>'+
+  '<button id="pwGo">change</button></div>')+
   (typeof AGBASE!=='undefined'?
    '<div class="pSec">CLAUDE LOGIN</div>'+
    '<div class="pDim">One login per user; agents in home-login mode copy it '+
@@ -4523,13 +4537,13 @@ function openAccount(){
     '<span class="pDim">stored 0600 on the launcher host; values are never '+
     'echoed back</span></div>'+
    '<div id="agCredNotes" class="pDim"></div>':''));
- $('pwGo').onclick=async()=>{
+ if($('pwGo'))$('pwGo').onclick=async()=>{
   if($('pwNew').value!==$('pwNew2').value){toast('the new passwords do not match');return;}
   try{await api('/me/password',{method:'POST',
     body:JSON.stringify({old:$('pwOld').value,new:$('pwNew').value})});
    toast('password changed');openAccount();}catch(e){toast(e.message);}};
  for(const id of ['pwOld','pwNew','pwNew2'])
-  $(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('pwGo').click();});
+  if($(id))$(id).addEventListener('keydown',e=>{if(e.key==='Enter')$('pwGo').click();});
  for(const b of document.querySelectorAll('[data-unlink]'))
   b.onclick=async()=>{try{await api('/me/identities/'+b.dataset.unlink,{method:'DELETE'});
    me=await api('/me');toast('door removed');openAccount();}catch(e){toast(e.message);}};
