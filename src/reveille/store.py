@@ -4517,10 +4517,31 @@ def agents_seen(conn, rooms, exclude=(), present=True):
     # present=False for the migration-time caller (unresolved_agent_names inside
     # _upgrade_v17): presence() reads the CURRENT members shape, which an older
     # database does not have yet, and the refusal list needs no liveness.
-    here = {a["name"] for a in presence(conn, rooms)} if present else set()
+    # AND WHOSE IT IS (architect BLOCKING on #124). A name alone cannot tell a
+    # caller whether an agent is theirs to move -- these rooms are shared, so a
+    # list without owners let one human be offered a one-click body swap of
+    # ANOTHER human's agent. That act exists and has a name: it is a VISIT, and
+    # it needs both humans' consent (DES-012 s3). presence() already carries the
+    # owner per room-name (6.1(c)); a name nobody is currently wearing is
+    # resolved from `agents`, and only when exactly ONE live identity wears it
+    # -- two owners running one name is legal, and guessing between them would
+    # be worse than saying nothing.
+    seen_here = presence(conn, rooms) if present else []
+    here = {a["name"]: a.get("owner") or "" for a in seen_here}
     for name, e in seen.items():
         e["present"] = name in here
+        e["owner"] = here.get(name) or _sole_owner(conn, name)
     return sorted(seen.values(), key=lambda e: e["name"])
+
+
+def _sole_owner(conn, name):
+    """The account behind a name when exactly one live agent wears it, else "".
+    Ambiguity answers nothing rather than guessing (DES-011 s2: a name is per
+    owner, so two owners' `architect` is a normal state, not a conflict)."""
+    rows = conn.execute(
+        "SELECT u.name FROM agents a JOIN users u ON u.id=a.owner_id "
+        "WHERE a.name=? AND a.retired_ns IS NULL", (name,)).fetchall()
+    return rows[0]["name"] if len(rows) == 1 else ""
 
 
 def unresolved_agent_names(conn):

@@ -2626,7 +2626,13 @@ def _agent_status(conn, user, hive_by_name=None):
         # SUPERSEDES the previous body's credential in the same transaction, so
         # the offer is a MOVE and duplication is not one of the outcomes. The
         # row says `elsewhere` and the page offers exactly one verb on it.
-        if hive.get("present"):
+        # ONLY YOUR OWN (architect BLOCKING on #124). These rooms are shared,
+        # so the hive's present names include OTHER humans' agents. Moving one
+        # of those is not a swap a person may perform alone: it is a VISIT, and
+        # DES-012 s3 requires both humans to consent, per visit. An unowned or
+        # ambiguous name is not offered either -- the broker answers "" when two
+        # owners wear one name, and a guess there would move the wrong being.
+        if hive.get("present") and hive.get("owner") == user:
             out.append({"agent": agent, "container": container_name(user, agent),
                         "status": "absent", "image": "", "repo_url": "",
                         "created_ns": hive.get("last_ns") or 0,
