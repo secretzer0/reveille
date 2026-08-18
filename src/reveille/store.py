@@ -2121,7 +2121,11 @@ def user_history(conn, user_id):
         "memberships": q("SELECT count(*) FROM members WHERE principal=?", principal),
         "reads": q("SELECT count(*) FROM reads WHERE principal=?", principal),
         "room_members": q("SELECT count(*) FROM room_members WHERE user_id=?"),
-        "identities": q("SELECT count(*) FROM identities WHERE user_id=?"),
+        # NOT counted: identities. A door is a CREDENTIAL of the person, not
+        # something that refers to them -- the same class as pw_hash, which
+        # nobody would call history. An account that only ever signed in and
+        # left is still the never-used account whose name should go free
+        # (#106 review); its identity rows are deleted with it.
         "memories": q("SELECT count(*) FROM memories WHERE author=?", name),
     }
 

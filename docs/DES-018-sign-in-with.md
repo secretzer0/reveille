@@ -181,8 +181,9 @@ burn one code only.
 
 A `users` row is a REFERENT only while something refers to it. `user_history`
 counts messages (their own and their agents'), agents, tokens, owned rooms,
-memberships, receipts, room invitations, doors and memories -- BEFORE the
-delete wipes any of them. Zero across the board: the row is removed and the
+memberships, receipts, room invitations and memories -- BEFORE the delete
+wipes any of them. Identities are NOT counted: a door is a CREDENTIAL of the
+person, the same class as `pw_hash`, and it is deleted with the row. Zero across the board: the row is removed and the
 name is free again (the account created and never used; reserving its name
 forever was the bug). Anything at all: tombstone, unchanged (8938 / 11611) --
 the messages still carry the claim, so the referent stays. `DELETE

@@ -4332,6 +4332,7 @@ async function openVoices(){
 }
 
 function whenStr(ns){return new Date(Number(ns)/1e6).toLocaleString();}
+let showUsedInvites=false;   // used codes are kept, not shown (ruling 11746)
 
 async function openUsers(){
  const d=await api('/users');
@@ -4401,7 +4402,15 @@ async function openUsers(){
   'queue. It is shown ONCE here -- copy it before you leave this screen.</div>'+
   '<div class="pRow"><input id="ivNote" placeholder="who is this for (note, optional)">'+
   '<button id="mkInvite">new code</button></div><div id="ivNew"></div>'+
-  invs.invites.map(invRow).join(''));
+  // Used codes are the record of who let whom in, so they are kept -- but out
+  // of the way: the list an admin acts on is the OPEN ones (ruling 11746).
+  invs.invites.filter(i=>!i.used_ns).map(invRow).join('')+
+  (invs.invites.some(i=>i.used_ns)
+   ?'<div class="pRow"><button id="ivUsed">'+(showUsedInvites?'hide':'show')+' used ('+
+    invs.invites.filter(i=>i.used_ns).length+')</button></div>'+
+    (showUsedInvites?invs.invites.filter(i=>i.used_ns).map(invRow).join(''):'')
+   :''));
+ if($('ivUsed'))$('ivUsed').onclick=()=>{showUsedInvites=!showUsedInvites;openUsers();};
  $('mkInvite').onclick=async()=>{
   try{const r=await api('/invites',{method:'POST',
     body:JSON.stringify({note:$('ivNote').value.trim()})});

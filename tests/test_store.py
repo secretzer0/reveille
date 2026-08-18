@@ -181,7 +181,7 @@ def test_a_never_used_account_is_removed_and_its_name_freed(tmp_path):
     assert os.path.exists(db)
 
 
-def test_a_door_or_a_token_is_history_too(tmp_path):
+def test_a_token_is_history_but_a_door_is_a_credential(tmp_path):
     db = str(tmp_path / "b2.db")
     c = store.connect(db)
     store.migrate(c, db)
@@ -191,8 +191,12 @@ def test_a_door_or_a_token_is_history_too(tmp_path):
                                       "email_verified": True, "display_name": "Bob",
                                       "avatar_url": None, "login": "bob", "raw": {}},
                         u["id"], actor="test")
-    assert store.user_history(c, u["id"])["identities"] == 1
-    assert store.delete_user(c, u["id"]) == "tombstoned"
+    # A DOOR IS A CREDENTIAL, not history (#106 review): the same class as a
+    # password, and nobody calls a password a reason to reserve a name. The
+    # account that only ever signed in and left is removed, doors and all.
+    assert "identities" not in store.user_history(c, u["id"])
+    assert store.delete_user(c, u["id"]) == "removed"
+    assert c.execute("SELECT count(*) FROM identities").fetchone()[0] == 0
     v = store.create_user(c, "carol", "hunter2hunter2")
     store.create_token(c, v["id"], "carol-laptop")
     assert store.delete_user(c, v["id"]) == "tombstoned"

@@ -246,6 +246,13 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.156 A DOOR IS A CREDENTIAL, NOT HISTORY (#106 review; ruling 11746). An
+identities row no longer counts as history when a user is deleted -- it is
+the same class as pw_hash, so an account that only ever signed in and left is
+REMOVED with its doors and its name goes free; anything that refers to the
+person (messages, agents, tokens, rooms, memberships, receipts, invitations,
+memories) still tombstones. The Users tab lists OPEN invite codes only, with
+"show used (n)" revealing the record of who let whom in.
 0.2.155 A ROW IS A REFERENT ONLY WHILE SOMETHING REFERS TO IT (ruling 11732).
 Deleting a user has two outcomes and the page says which: an account with NO
 history (no messages, agents, tokens, rooms, memberships, receipts, doors,
