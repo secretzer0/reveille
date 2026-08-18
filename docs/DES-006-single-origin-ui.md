@@ -354,3 +354,46 @@ an immutable image — and it was simply never extended to the second service.
 Containerising the launcher is the other honest answer; it needs the docker
 socket, which is a security decision that has not been made, so the pinned clone
 is the shape until it is.
+
+## 7. Amendment (2026-08-18): upgrade in place -- carry, not park (ruling 11600)
+
+Every agent-image bump used to mean a per-agent recreate by the owner, pasting
+the agent's bound token, because the launcher keeps no token at rest
+(`launcher.db` token-free, secrets by env name). The token is on the host anyway,
+in the container's own `Config.Env`, readable by the launcher user -- so the rule
+bought nothing against a same-host reader and cost a dance per bump (operator
+11594/11599).
+
+Binding -- one invariant, not special cases: **a bound token exists in exactly two
+places, the broker's store and the env of a container the launcher provisioned;
+the launcher may CARRY it between those, never PARK it.** Never-at-rest is
+unchanged (no db, log, file, HTTP body, journal); this is what provision already
+did in-process, and what `read_container_config` already read. A host-side token
+file (0600) stays rejected. Consequences, all built as `upgrade_agent`:
+
+- Read source = `Config.Env` of `rev-<user>-<agent>`, only with a `launcher.db`
+  record for (user, agent) and, over HTTP, the owner's session (2.3). CLI
+  `reveille-launch upgrade USER AGENT [--image]` and `upgrade --all` (host
+  operator; walks `launcher.db`, never `docker ps` -- the launcher never adopts a
+  container it did not create). `reveille-launch behind` lists what `--all` would
+  walk; `make up` prints it and stops (no auto-roll: that is a separate ruling,
+  it needs an idle rule).
+- The value rides the docker child's ENV (`ENV_PASSTHROUGH_SECRET`, no argv); the
+  gate secret rides with it so grants signed against it survive. Nothing
+  token-shaped in `launcher.log`, `launcher.db`, the audit line or the HTTP
+  answer (gate: the token string is absent from every one after a full run).
+- Never two containers holding driver state: OLD is stopped, renamed aside, and
+  NEW starts under the real name on the same data-root bind. Health before
+  destroy = NEW running AND its boot report present AND the broker's presence
+  shows the agent (the same `wait_healthy`); else destroy NEW, put OLD back
+  (started again if it was running), surface the reason. Only then is OLD removed
+  and the record's image updated (`UPGRADE` on the audit line).
+- The same agent: data-root inode equal; `Config.Env` set-equal on every
+  `REVEILLE_*` name+value and `ANTHROPIC_MODEL` (image-derived variables may
+  change); same repo, boot command, network, quotas.
+- A purged container (no env to read) is today's prompt path, verbatim
+  (`new --replace` / the Agents form). A token the broker refuses (401/403 on
+  presence) is refused: "token dead, re-provision" -- a dead credential is never
+  rolled forward.
+- `/agents`: one "upgrade" button per container whose recorded image differs from
+  the launcher's default; the same call, the answer names images only.

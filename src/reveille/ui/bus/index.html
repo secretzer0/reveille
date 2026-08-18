@@ -2426,6 +2426,14 @@ function tabActions(t){
  // a blank form reads as "this agent is configured with nothing" rather
  // than "we cannot see it". Destroy is still the honest action there.
  if(!broken&&!gone)out+=b('edit','&#9998;','edit '+t.agent);
+ // UPGRADE IN PLACE (ruling 11600): a container whose recorded image differs
+ // from the launcher's default gets one button; the launcher carries the bound
+ // token from the container it made -- no form, no token, no credential
+ // rotation, data root kept; the old container comes back if the new one is
+ // not healthy. Not on a broken row (no container to carry from -- that is the
+ // recreate path) and not on a retired/erased one.
+ if(!broken&&!gone&&a.image&&agDefaultImage&&a.image!==agDefaultImage)
+  out+=b('upgrade','&#8679;','upgrade '+t.agent+' from '+a.image+' to '+agDefaultImage+' (token carried, data kept)');
  if(!gone)out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
  return '<span class="acts">'+out+'</span>';
 }
@@ -2956,10 +2964,13 @@ async function openCreate(name){
 // terminal and a stopped one lands on the sentence saying why it has none,
 // without a second click to find out.
 async function agLifecycle(name,verb){
+ let r=null;
+ if(verb==='upgrade')toast('upgrading '+name+' to '+agDefaultImage+' -- old container stays until the new one is healthy (a minute or two)',true);
  try{
-  await lapi('/agents/'+encodeURIComponent(name)+'/'+verb,
+  r=await lapi('/agents/'+encodeURIComponent(name)+'/'+verb,
    {method:'POST',body:'{}'});
  }catch(e){toast(e.message);return;}
+ if(verb==='upgrade'&&r)toast('upgraded '+name+': '+(r.from||'?')+' -> '+(r.to||agDefaultImage),true);
  const t=agTabs.find(x=>x.agent===name);
  if(t)await closeTab(t.gid);
  await refreshAgents();
