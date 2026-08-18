@@ -706,7 +706,7 @@
   border-radius:7px;padding:.3rem .6rem;cursor:pointer;font:inherit;font-size:1rem;line-height:1}
  @media(max-width:760px){
   body{grid-template-columns:1fr}
-  #rail{display:none;position:fixed;inset:0 22% 0 0;z-index:40;box-shadow:4px 0 24px #0009}
+  #rail{display:none;position:fixed;inset:0 22% 0 0;z-index:15;box-shadow:4px 0 24px #0009}
   body.railOpen #rail{display:flex}
   #railBtn{display:inline-block}
   #top{flex-wrap:wrap;gap:.45rem;padding:.45rem .6rem}
@@ -715,6 +715,8 @@
   #composerWrap{padding:.5rem .5rem .6rem}
   #composer{margin:0}
   .cbottom{flex-wrap:wrap;gap:.4rem}
+  .ctop{flex-wrap:wrap}
+  #subject{min-width:0;flex:1 1 8rem}                /* mobile-shots: 320-360 wide put the subject box past the glass */
   #kbdHint{display:none}
   #composer input,#composer textarea,#filter{font-size:16px}
   #jump{bottom:auto;top:5.2rem;right:.8rem}          /* off the message box (operator 11478 picture) */
@@ -1098,6 +1100,9 @@ $('meCard').onclick=e=>{e.stopPropagation();$('meMenu').classList.toggle('on');}
 $('railBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('railOpen');};
 $('main').addEventListener('click',e=>{if(!e.target.closest('#railBtn'))document.body.classList.remove('railOpen');},true);
 $('brand').addEventListener('click',()=>document.body.classList.remove('railOpen'));
+// Picking Settings or Logout from the drawer closes it: the panel is what you
+// asked for, and mobile-shots found the drawer (z 40 then) sitting ON the panel.
+$('meMenu').addEventListener('click',()=>document.body.classList.remove('railOpen'));
 $('miSettings').onclick=()=>{$('meMenu').classList.remove('on');openRooms();};
 // Logout is the panel's sign-out, reached without opening the panel: same one call, same
 // reload. The reload is what clears every in-page trace of the session.

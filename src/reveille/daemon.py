@@ -225,6 +225,19 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.140 THE PHONE PAGE HAS A GATE: scripts/mobile-shots (DES-016 s2, rulings
+11443/11447/11456/11483 B). A scratch broker is seeded (a 200-char token, a
+300-char subject, a code block, ear on), a human signs in, and Chrome walks
+signin/room/drawer/settings/voices on iPhone 14 and Pixel 7, both
+orientations, then the room at 320/360/390/430 portrait and 640/740/852/932
+landscape -- devices are only names for viewports. Every shot asserts the
+layout width == the glass (visualViewport), document.scrollWidth <= it and
+#feed.scrollWidth == clientWidth; a red shot exits 1. Proven red on 0.2.130
+(10 shots), green now. What it found, fixed here: the drawer sat ON the
+Settings panel (z 40 -> 15, and picking Settings/Logout closes it); at
+320-360 wide the subject box ran past the glass (.ctop wraps, #subject
+min-width:0). The pictures go to the room for approval before every phone
+merge (11447). Bus tools unchanged.
 0.2.139 A MESSAGE THAT ARRIVES SPOKEN -- DES-017 slice 1 (operator 11473/
 11499/11502, rulings 11500/11507). Every AUDIO upload (POST /upload,
 reveille-upload, the MCP tool) is transcoded AT UPLOAD into the wire form:
