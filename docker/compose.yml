@@ -80,6 +80,19 @@ services:
       REVEILLE_STT_TOKEN: ${REVEILLE_STT_TOKEN:-}
       REVEILLE_STT_MODEL: ${REVEILLE_STT_MODEL:-}
       REVEILLE_STT_TIMEOUT: ${REVEILLE_STT_TIMEOUT:-}
+      # DES-018: the public origin -- builds the exact redirect URI the
+      # providers were registered with, and turns the session cookie into
+      # __Host- + Secure when it is https. Derived from PROXY_SITE by make.
+      REVEILLE_PUBLIC_URL: ${REVEILLE_PUBLIC_URL:-}
+    # DES-018 s4: the provider credentials live in ONE file beside the data,
+    # never in this file, the Makefile, git or the bus:
+    #   $SERVER_DATA/reveille.env   (mode 600)
+    #     REVEILLE_OIDC_GOOGLE_ID=... / _SECRET, _GITHUB_, _MICROSOFT_
+    #     REVEILLE_SIGNUP=open|closed|mythos.org,other.org   (optional)
+    # Absent file = no doors; a provider without an ID is simply not a door.
+    env_file:
+      - path: ${SERVER_DATA}/reveille.env
+        required: false
     # The daemon bounds its own graceful shutdown at 5s (0.2.26); 12 gives it
     # room plus the courtesy-frame delay before docker escalates to SIGKILL.
     # Before 0.2.26 a SIGTERM could wedge the process half-dead forever, and

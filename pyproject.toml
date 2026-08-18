@@ -1,6 +1,6 @@
 [project]
 name = "reveille"
-version = "0.2.150"
+version = "0.2.151"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -8,6 +8,7 @@ dependencies = [
     "mcp>=1.2",
     "websockets>=13",
     "uvicorn>=0.30",
+    "authlib==1.7.2",
 ]
 
 [project.scripts]

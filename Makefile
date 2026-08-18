@@ -152,6 +152,10 @@ PROXY_PORT  ?= 80
 # (plain HTTP on PROXY_PORT); setting a hostname (PROXY_SITE=reveille.mythos.org)
 # turns on Caddy's automatic HTTPS -- LE issuance and renewal via TLS-ALPN-01.
 PROXY_SITE  ?= :$(PROXY_PORT)
+# The public origin the broker tells providers to send the browser back to
+# (DES-018). A hostname PROXY_SITE means https://<hostname>; the port-only
+# default has no public origin -- override PUBLIC_URL for a plain-http eval.
+PUBLIC_URL  ?= $(if $(filter :%,$(PROXY_SITE)),,https://$(PROXY_SITE))
 BROKER_NAME ?= reveille-server
 PROXY_NAME  ?= reveille-proxy
 TTS_NAME    ?= reveille-tts
@@ -166,7 +170,7 @@ COMPOSE_EXTRA =
 COMPOSE_PROJECT ?= reveille
 COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
   REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
-  PROXY_IMAGE=$(PROXY_IMAGE) PROXY_SITE=$(PROXY_SITE) \
+  PROXY_IMAGE=$(PROXY_IMAGE) PROXY_SITE=$(PROXY_SITE) REVEILLE_PUBLIC_URL=$(PUBLIC_URL) \
   BROKER_NAME=$(BROKER_NAME) PROXY_NAME=$(PROXY_NAME) \
   TTS_IMAGE=$(TTS_IMAGE) TTS_NAME=$(TTS_NAME) \
   docker compose -p $(COMPOSE_PROJECT) -f docker/compose.yml $(COMPOSE_EXTRA)

@@ -61,14 +61,27 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
-                                 StreamingResponse)
+from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                                 RedirectResponse, Response, StreamingResponse)
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from reveille import __version__, store
 
-COOKIE = "rev_session"
+COOKIE = "rev_session"          # http; on an https public URL the reader/writer use __Host-
+OIDC_COOKIE = "rev_oidc"        # the browser marker for a login in flight (10 min)
+_public_url = ""                # REVEILLE_PUBLIC_URL, e.g. https://reveille.mythos.org (DES-018 s4)
+
+
+def _https_public():
+    return _public_url.startswith("https://")
+
+
+def _cookie_name():
+    """__Host-rev_session on an https public URL (prefix = Secure + Path=/ + no
+    Domain, enforced by the browser), rev_session on plain http. ONE function
+    for the writer and every reader (DES-018 s7)."""
+    return "__Host-" + COOKIE if _https_public() else COOKIE
 SWEEP_SECS = 3600
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
@@ -226,6 +239,30 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.151 SIGN IN WITH GOOGLE / GITHUB / MICROSOFT (DES-018 slice 1, EPIC-001
+S1 item 3; rulings 11648/11659). Three doors BESIDE the password form:
+GET /auth/<p>/login -> the provider -> GET /auth/<p>/callback; Authlib
+1.7.2 does discovery, PKCE S256, state, nonce and id_token verification,
+its state server-side in oidc_state (schema v29, additive: identities,
+oidc_state, identity_audit) under a 10-minute browser marker cookie
+rev_oidc -- no signed cookie, no session middleware. A provider identity
+(provider, subject) is a CREDENTIAL of a person: known door -> that person;
+unknown door with a VERIFIED email held by exactly one live user -> linked
+and signed in (audit line); otherwise a new account under REVEILLE_SIGNUP
+(open | closed | domain,domain) with a derived name shown once
+(?welcome=), or "use your other door" when the email is already someone's
+-- never a merge on an unverified or ambiguous email. Signed-in link
+(?link=1) attaches to the SESSION user; DELETE /me/identities/<p>/<sub>
+removes a door but never the last way in unless a password is set. First
+federated signup on an empty broker is the admin. Sessions ROTATE on every
+login (password too); on an https REVEILLE_PUBLIC_URL the cookie is
+__Host-rev_session + Secure. Microsoft through /common with iss checked
+against tid; GitHub OAuth2-only with the verified primary email. Nothing
+token-shaped is stored or logged. Config: REVEILLE_OIDC_<GOOGLE|GITHUB|
+MICROSOFT>_ID/_SECRET (env_file $SERVER_DATA/reveille.env, never git),
+REVEILLE_PUBLIC_URL (make derives https://PROXY_SITE), REVEILLE_SIGNUP;
+/auth/doors and /version name the doors; /me carries doors + identities.
+Nothing on the bus wire changes.
 0.2.150 DELIVERY BY ID (DES-011 6.1(b), EPIC-001 S1; ruling 10983). Schema
 v28, rebuilt in one transaction with a `.pre-v28-<ns>.bak` beside the db:
 members keyed (room_id, principal) with the ROOM-NAME beside it, unique per
@@ -3676,7 +3713,7 @@ def _user_principal(request):
     A user's rooms are the ones they own, the ones shared with them (DES-004
     membership: reach, never rule -- ratify authority derives from list_rooms
     alone, never from this set), plus every public room."""
-    u = store.resolve_session(_conn, request.cookies.get(COOKIE) if request else None)
+    u = store.resolve_session(_conn, request.cookies.get(_cookie_name()) if request else None)
     if not u:
         raise store.AuthError("no session")
     rooms = {r["id"]: r["name"] for r in store.list_rooms(_conn, u["id"])}
@@ -4461,7 +4498,9 @@ async def version_http(_request):
     ui = _ui_override()
     lan = (f" (LAN plaintext: {', '.join(_plaintext_hosts)} -- REVEILLE_LAN_PLAINTEXT=1)"
            if _plaintext_hosts else "")
-    return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "") + lan)
+    doors = (f" (sign in with: {', '.join(_oidc_doors)}; signup {_signup_policy})"
+             if _oidc_doors else "")
+    return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "") + lan + doors)
 
 
 async def usage_http(_request):
@@ -5623,10 +5662,11 @@ def _admin(request):
 
 
 def _cookie(resp, secret, request):
-    # Secure only under https: this box serves plain http on the LAN, and an
-    # unconditional Secure flag would silently break every login.
-    resp.set_cookie(COOKIE, secret, httponly=True, samesite="lax", max_age=14 * 86400,
-                    path="/", secure=request.url.scheme == "https")
+    # Secure under https -- the PUBLIC url's scheme when one is configured (the
+    # broker sits behind the proxy and sees http), else the request's. Plain
+    # http on the LAN keeps working; an https deployment gets __Host- + Secure.
+    resp.set_cookie(_cookie_name(), secret, httponly=True, samesite="lax", max_age=14 * 86400,
+                    path="/", secure=_https_public() or request.url.scheme == "https")
     return resp
 
 
@@ -5640,7 +5680,8 @@ async def setup_http(request):
     d = await request.json()
     u = store.setup_first_admin(_conn, (d.get("name") or "").strip(), d.get("password") or "")
     log.info("first admin created: %s (claimed the migrated rooms)", u["name"])
-    return _cookie(JSONResponse(u), store.create_session(_conn, u["id"]), request)
+    return _cookie(JSONResponse(u), store.rotate_session(
+        _conn, request.cookies.get(_cookie_name()), u["id"]), request)
 
 
 @_guard
@@ -5651,7 +5692,9 @@ async def login_http(request):
         log.warning("failed login for %r", d.get("name"))
         return JSONResponse({"error": "bad credentials"}, status_code=401)
     log.info("%s logged in", u["name"])
-    return _cookie(JSONResponse(u), store.create_session(_conn, u["id"]), request)
+    # A fresh session id on every login (fixation, DES-018 s7).
+    return _cookie(JSONResponse(u), store.rotate_session(
+        _conn, request.cookies.get(_cookie_name()), u["id"]), request)
 
 
 @_guard
@@ -5665,10 +5708,269 @@ async def logout_http(request):
         p = _principal(request)
         if p and p.name:
             store.leave(_conn, speaker_key(p), list(p.rooms))
-    store.delete_session(_conn, request.cookies.get(COOKIE))
+    store.delete_session(_conn, request.cookies.get(_cookie_name()))
     resp = JSONResponse({"ok": True})
-    resp.delete_cookie(COOKIE, path="/")
+    resp.delete_cookie(_cookie_name(), path="/", secure=_https_public(), httponly=True,
+                       samesite="lax")
     return resp
+
+
+# ---- DES-018: sign in with (federated doors) --------------------------------------
+# A provider identity is a CREDENTIAL of a person (store.identities). Authlib
+# does OIDC discovery, id_token verification, PKCE S256, state + nonce; its
+# state lives server-side in oidc_state (cache=) and its browser marker in a
+# one-key dict we hang on the ASGI scope, backed by the same table under a
+# random opaque cookie -- no SessionMiddleware, nothing in a signed cookie.
+
+_oidc = None                    # authlib OAuth registry, built by _oidc_boot()
+_oidc_doors: list = []          # provider names configured, in display order
+_signup_policy = "open"
+OIDC_TTL_S = 600                # state / marker lifetime (s7)
+
+# One provider table (s9): adding one = one entry + two env names.
+PROVIDERS = {
+    "google": {
+        "kind": "oidc",
+        "server_metadata_url": "https://accounts.google.com/.well-known/openid-configuration",
+        "scope": "openid email profile",
+        "label": "Google",
+    },
+    "github": {
+        "kind": "oauth2",
+        "authorize_url": "https://github.com/login/oauth/authorize",
+        "access_token_url": "https://github.com/login/oauth/access_token",
+        "api_base_url": "https://api.github.com/",
+        "scope": "read:user user:email",
+        "label": "GitHub",
+    },
+    "microsoft": {
+        "kind": "oidc",
+        "server_metadata_url":
+            "https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
+        "scope": "openid email profile",
+        # /common: the metadata issuer is templated {tenantid}; authlib's default
+        # iss check would refuse every token. We check iss ourselves against tid
+        # below (the check Microsoft prescribes) -- not a bypass, a substitution.
+        "claims_options": {"iss": {"essential": False}},
+        "label": "Microsoft",
+    },
+}
+
+
+class _OidcCache:
+    """authlib's `cache=`: state/nonce/code_verifier by key, TTL, in oidc_state."""
+    async def get(self, key):
+        return store.oidc_state_get(_conn, key)
+
+    async def set(self, key, value, expires=None):
+        store.oidc_state_set(_conn, key, value, min(expires or OIDC_TTL_S, OIDC_TTL_S))
+
+    async def delete(self, key):
+        store.oidc_state_delete(_conn, key)
+
+
+def _oidc_boot(env=None):
+    """Build the registry from REVEILLE_OIDC_<P>_ID/_SECRET (s4). A provider
+    without an id is simply not a door. Returns the door names."""
+    global _oidc, _oidc_doors, _signup_policy, _public_url
+    env = os.environ if env is None else env
+    from authlib.integrations.starlette_client import OAuth
+    _public_url = (env.get("REVEILLE_PUBLIC_URL") or "").rstrip("/")
+    _signup_policy = (env.get("REVEILLE_SIGNUP") or "open").strip().lower()
+    _oidc = OAuth(cache=_OidcCache())
+    _oidc_doors = []
+    for name, spec in PROVIDERS.items():
+        cid = env.get(f"REVEILLE_OIDC_{name.upper()}_ID") or ""
+        secret = env.get(f"REVEILLE_OIDC_{name.upper()}_SECRET") or ""
+        if not cid:
+            continue
+        kw = {k: v for k, v in spec.items()
+              if k in ("server_metadata_url", "authorize_url", "access_token_url", "api_base_url")}
+        _oidc.register(name, client_id=cid, client_secret=secret,
+                       client_kwargs={"scope": spec["scope"], "code_challenge_method": "S256",
+                                      **_oidc_client_kwargs(name)}, **kw)
+        _oidc_doors.append(name)
+    return list(_oidc_doors)
+
+
+def _oidc_client_kwargs(_name):
+    """Extra httpx client kwargs per provider -- the test harness points these
+    at a stub provider (transport=); production passes nothing."""
+    return {}
+
+
+def _oidc_redirect(name):
+    """EXACTLY https://<public>/auth/<p>/callback, from the configured public
+    URL, never from Host (providers exact-match the registration)."""
+    if not _public_url:
+        raise store.BusError("REVEILLE_PUBLIC_URL is not set -- federated sign-in needs the "
+                             "public origin to build its redirect URI")
+    return f"{_public_url}/auth/{name}/callback"
+
+
+def _oidc_marker(request):
+    """The browser's login-in-flight dict: cookie rev_oidc -> opaque id -> a
+    JSON dict in oidc_state. Loaded onto request.scope['session'] for authlib;
+    returns (dict, id) -- the caller saves it back and sets the cookie."""
+    sid = request.cookies.get(OIDC_COOKIE) or ""
+    data = {}
+    if sid:
+        raw = store.oidc_state_get(_conn, f"marker:{sid}")
+        if raw:
+            with contextlib.suppress(ValueError):
+                data = json.loads(raw)
+    if not sid or not isinstance(data, dict):
+        sid, data = secrets.token_urlsafe(24), {}
+    request.scope["session"] = data
+    return data, sid
+
+
+def _oidc_marker_save(resp, request, data, sid):
+    store.oidc_state_set(_conn, f"marker:{sid}", json.dumps(data), OIDC_TTL_S)
+    resp.set_cookie(OIDC_COOKIE, sid, httponly=True, samesite="lax", max_age=OIDC_TTL_S,
+                    path="/auth", secure=_https_public() or request.url.scheme == "https")
+    return resp
+
+
+def _oidc_marker_drop(resp, request, sid):
+    store.oidc_state_delete(_conn, f"marker:{sid}")
+    resp.delete_cookie(OIDC_COOKIE, path="/auth", secure=_https_public(), httponly=True,
+                       samesite="lax")
+    return resp
+
+
+def _oidc_fail(request, why, sid=None):
+    """One page, the reason, the buttons again (s7): the login card renders
+    ?auth_error=<why> -- never a stack trace, never a loop."""
+    log.warning("sign-in refused: %s", why)
+    resp = RedirectResponse(f"/ui?auth_error={urllib.parse.quote(why)}", status_code=303)
+    return _oidc_marker_drop(resp, request, sid) if sid else resp
+
+
+async def _oidc_profile(name, client, token):
+    """The normalized profile: subject (the KEY), email + email_verified (s4
+    table), display_name, avatar_url, login, raw. Provider tokens are used
+    here and DROPPED (s7): nothing token-shaped leaves this function."""
+    if name == "google":
+        u = token.get("userinfo") or {}
+        return {"subject": u["sub"], "email": u.get("email"),
+                "email_verified": bool(u.get("email_verified")) and bool(u.get("email")),
+                "display_name": u.get("name"), "avatar_url": u.get("picture"),
+                "login": (u.get("email") or "").split("@")[0], "raw": dict(u)}
+    if name == "microsoft":
+        u = token.get("userinfo") or {}
+        tid = u.get("tid") or ""
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", tid) or \
+                u.get("iss") != f"https://login.microsoftonline.com/{tid}/v2.0":
+            raise store.AuthError("Microsoft token issuer does not match its tenant")
+        email = u.get("email") or ""
+        return {"subject": f"{u['oid']}@{tid}", "email": email or None,
+                "email_verified": bool(email) and u.get("xms_edov") in (True, "true", 1, "1"),
+                "display_name": u.get("name"), "avatar_url": None,
+                "login": (u.get("preferred_username") or email).split("@")[0],
+                "raw": {k: v for k, v in u.items() if k not in ("nonce", "aud", "exp", "iat")}}
+    # github: OAuth2 only -- profile + verified primary email from the API
+    r = await client.get("user", token=token)
+    r.raise_for_status()
+    u = r.json()
+    email, verified = None, False
+    r2 = await client.get("user/emails", token=token)
+    if r2.status_code == 200:
+        for e in r2.json():
+            if e.get("primary") and e.get("verified"):
+                email, verified = e.get("email"), True
+                break
+    return {"subject": str(u["id"]), "email": email, "email_verified": verified,
+            "display_name": u.get("name") or u.get("login"), "avatar_url": u.get("avatar_url"),
+            "login": u.get("login"),
+            "raw": {k: u.get(k) for k in ("id", "login", "name", "avatar_url", "html_url")}}
+
+
+@_guard
+async def auth_login_http(request):
+    """GET /auth/<p>/login[?link=1] -> 302 to the provider. link=1 (signed in)
+    records the intent to ATTACH the door to the current session's user (s5.1)."""
+    name = request.path_params["provider"]
+    if not _oidc or name not in _oidc_doors:
+        return JSONResponse({"error": f"no such door: {name}"}, status_code=404)
+    link = request.query_params.get("link") == "1"
+    if link:
+        _user_principal(request)          # must be signed in to link
+    data, sid = _oidc_marker(request)
+    data["intent"] = "link" if link else "login"
+    client = _oidc.create_client(name)
+    kw = {}
+    hint = request.query_params.get("login_hint")
+    if hint and name in ("google", "microsoft"):
+        kw["login_hint"] = hint
+    resp = await client.authorize_redirect(request, _oidc_redirect(name), **kw)
+    return _oidc_marker_save(resp, request, data, sid)
+
+
+@_guard
+async def auth_callback_http(request):
+    """GET /auth/<p>/callback -- the provider sends the browser back. Verify
+    (state, nonce, id_token, PKCE), normalize the profile, then either LINK to
+    the signed-in user or run the one login rule (store.federated_login)."""
+    from authlib.integrations.starlette_client import OAuthError
+    name = request.path_params["provider"]
+    if not _oidc or name not in _oidc_doors:
+        return JSONResponse({"error": f"no such door: {name}"}, status_code=404)
+    data, sid = _oidc_marker(request)
+    intent = data.get("intent") or "login"
+    client = _oidc.create_client(name)
+    try:
+        token = await client.authorize_access_token(
+            request, claims_options=PROVIDERS[name].get("claims_options"))
+        profile = await _oidc_profile(name, client, token)
+    except OAuthError as e:
+        return _oidc_fail(request, f"{PROVIDERS[name]['label']}: {e.error or 'refused'}", sid)
+    except store.AuthError as e:
+        return _oidc_fail(request, str(e), sid)
+    except Exception as e:  # noqa: BLE001 -- a provider hiccup is one line, never a trace
+        log.warning("sign-in with %s failed: %s", name, e)
+        return _oidc_fail(request, f"{PROVIDERS[name]['label']} did not answer", sid)
+    del token
+    if intent == "link":
+        try:
+            p = _user_principal(request)
+            store.link_identity(_conn, name, profile, p.user_id, actor=f"web:{p.name}")
+        except (store.BusError, store.AuthError) as e:
+            return _oidc_fail(request, str(e), sid)
+        log.info("%s linked a %s door", p.name, name)
+        return _oidc_marker_drop(RedirectResponse("/ui#doors", status_code=303), request, sid)
+    try:
+        out = store.federated_login(_conn, name, profile, _signup_policy, actor=f"door:{name}")
+    except store.AuthError as e:
+        return _oidc_fail(request, str(e), sid)
+    u = out["user"]
+    secret = store.rotate_session(_conn, request.cookies.get(_cookie_name()), u["id"])
+    log.info("%s signed in with %s (%s)%s", u["name"], name, out["how"],
+             " -- FIRST ADMIN by federated signup" if out.get("first_admin") else "")
+    target = "/ui" + (f"?welcome={urllib.parse.quote(out['banner'])}" if out["banner"] else "")
+    resp = _cookie(RedirectResponse(target, status_code=303), secret, request)
+    return _oidc_marker_drop(resp, request, sid)
+
+
+async def auth_doors_http(_request):
+    """GET /auth/doors -> the configured providers + signup policy, no session
+    needed: the login card asks before anyone is signed in."""
+    return JSONResponse({"doors": [{"name": n, "label": PROVIDERS[n]["label"]} for n in _oidc_doors],
+                         "signup": _signup_policy, "password": True})
+
+
+@_guard
+async def unlink_http(request):
+    """DELETE /me/identities/<provider>/<subject> -- remove one of your doors
+    (admin: anyone's, ?user=<id>)."""
+    p = _user_principal(request)
+    provider, subject = request.path_params["provider"], request.path_params["subject"]
+    target = request.query_params.get("user") or p.user_id
+    if target != p.user_id and not p.is_admin:
+        raise store.AccessError("admin only")
+    store.unlink_identity(_conn, target, provider, subject, actor=f"web:{p.name}",
+                          admin=p.is_admin and target != p.user_id)
+    return JSONResponse({"ok": True, "identities": store.identities_of(_conn, target)})
 
 
 @_guard
@@ -5681,6 +5983,8 @@ async def me_http(request):
     return JSONResponse({
         "name": p.name, "is_admin": p.is_admin,
         "ear": _stt_on,           # DES-014: the page shows the mic only when the ear is on
+        "doors": list(_oidc_doors),                       # DES-018: providers configured
+        "identities": store.identities_of(_conn, p.user_id),   # the person's own doors
         "rooms": [{"id": r, "name": n} for r, n in p.rooms.items()],
         "owned": [dict(r, members=store.member_count(_conn, r["id"]))
                   for r in store.list_rooms(_conn, p.user_id)],
@@ -6176,6 +6480,7 @@ async def _sweeper():
     while True:
         await asyncio.sleep(SWEEP_SECS)
         try:
+            store.sweep_oidc_state(_conn)
             dropped = store.sweep_retention(_conn)
             store.sweep_sessions(_conn)
             store.reap_stale(_conn)
@@ -6210,6 +6515,10 @@ def build_app():
             Route("/setup", setup_http, methods=["POST"]),
             Route("/login", login_http, methods=["POST"]),
             Route("/logout", logout_http, methods=["POST"]),
+            Route("/auth/doors", auth_doors_http),
+            Route("/auth/{provider}/login", auth_login_http),
+            Route("/auth/{provider}/callback", auth_callback_http),
+            Route("/me/identities/{provider}/{subject}", unlink_http, methods=["DELETE"]),
             Route("/me", me_http),
             Route("/users", users_http, methods=["GET", "POST"]),
             Route("/users/{uid}", user_http, methods=["PATCH", "DELETE"]),
@@ -6370,6 +6679,14 @@ def main():
         _stt_timeout = float(os.environ.get("REVEILLE_STT_TIMEOUT") or "20")
         _plaintext_banner(stt_url, lan_ok, "the ear")
         print(f"ear ON: {stt_url} model={_stt_model or '(server default)'}", flush=True)
+    # DES-018: the doors. Providers by env; the public URL builds the redirect.
+    doors = _oidc_boot()
+    if doors:
+        where = _public_url or "(REVEILLE_PUBLIC_URL UNSET: sign-in will refuse)"
+        print(f"sign in with: {', '.join(doors)} -- redirect {where}/auth/<p>/callback; "
+              f"signup {_signup_policy}"
+              + ("; FIRST federated signup becomes admin" if not store.any_users(_conn) else ""),
+              flush=True)
     host = os.environ.get("REVEILLE_HOST", "0.0.0.0")
     port = int(os.environ.get("REVEILLE_PORT", "8765"))
     # REVEILLE_UDS binds a unix socket instead of a TCP port. One broker per tenant means
