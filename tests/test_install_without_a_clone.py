@@ -475,18 +475,39 @@ def test_a_piped_stdin_takes_the_default_rather_than_blocking(monkeypatch):
     assert cli.ask("broker url", cli.DEFAULT_URL) == cli.DEFAULT_URL
 
 
-def test_the_type_seeds_a_claude_md_and_never_overwrites_one(tmp_path):
-    """A type that changes nothing would be a question whose answer had no
-    effect. And a directory that already has a CLAUDE.md has an opinion -- this
-    is an installer, not an editor."""
-    seeded = cli.starter_claude_md(tmp_path, "reveille-devops", "devops")
-    text = seeded.read_text()
+def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
+    """RULED by the operator (11879) after red-shirt came up doctrine-less: the
+    block is written, and REFRESHED, on every init -- but only the block. A
+    directory that already has a CLAUDE.md has an opinion, and every byte of it
+    outside the markers survives in place.
+
+    The seed used to run on the wizard path only, which the web-mint-then-paste
+    install never takes -- and with the password door closed that is the only
+    way to install a native agent. red-shirt joined 0.2.170 with a bus
+    connection, a Stop hook and no idea a broadcast does not wake anybody."""
+    path, what = cli.sync_claude_md(tmp_path, "reveille-devops", "devops")
+    text = path.read_text()
+    assert what == "created"
     assert "reveille-devops" in text and "devops" in text
     assert "join()" in text and "wake-watch" in text, "the boot ritual must be in it"
-    mine = tmp_path / "CLAUDE.md"
-    mine.write_text("my own instructions")
-    assert cli.starter_claude_md(tmp_path, "x", "devops") is None
-    assert mine.read_text() == "my own instructions"
+    assert "does not wake anyone" in text, "the rule red-shirt did not have"
+    assert cli.DOCTRINE_BEGIN in text and cli.DOCTRINE_END in text
+    # Idempotent, and a later init corrects a stale block in place.
+    assert cli.sync_claude_md(tmp_path, "reveille-devops", "devops")[1] == "unchanged"
+    assert cli.sync_claude_md(tmp_path, "reveille-devops", "architect")[1] == "updated"
+    assert "architect" in path.read_text()
+    # A human's own file: the block is APPENDED once, and their words are kept
+    # exactly, in place, forever after.
+    mine = tmp_path / "own" / "CLAUDE.md"
+    mine.parent.mkdir()
+    mine.write_text("# my own instructions\nnever touch this line\n")
+    _, what = cli.sync_claude_md(mine.parent, "x", "devops")
+    assert what == "appended"
+    assert mine.read_text().startswith("# my own instructions\nnever touch this line\n")
+    assert cli.DOCTRINE_BEGIN in mine.read_text()
+    assert cli.sync_claude_md(mine.parent, "x", "devops")[1] == "unchanged"
+    assert cli.sync_claude_md(mine.parent, "x", "senior-dev")[1] == "updated"
+    assert "never touch this line" in mine.read_text(), "outside the markers is theirs"
 
 
 def daemon_routes():
@@ -647,7 +668,7 @@ def test_the_boot_doctrine_arms_the_living_ritual_not_the_retired_one(tmp_path):
     wrapper that used to print the banner is gone; the doctrine's home is now
     the CLAUDE.md init seeds into the agent directory, so that text is what is
     gated -- a capability absent from the boot doctrine goes unused."""
-    path = cli.starter_claude_md(tmp_path, "dev-agent", "devops")
+    path, _ = cli.sync_claude_md(tmp_path, "dev-agent", "devops")
     text = path.read_text()
     assert "wake-watch $REVEILLE_AGENT_ROLE" in text
     assert "--once" not in text, "the boot doctrine prescribes the retired arm"

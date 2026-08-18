@@ -138,8 +138,8 @@ def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
     assert "BUS DOCTRINE" in (daemon.send.__doc__ or "") and "ULTRA-TERSE" in daemon.send.__doc__
     assert '"doctrine": BUS_DOCTRINE' in inspect.getsource(daemon.join), "join() hands it over on every boot"
     assert "ULTRA-TERSE" in daemon.BUS_DOCTRINE and "never for the ear" in daemon.BUS_DOCTRINE and "quoted verbatim" in daemon.BUS_DOCTRINE
-    src = inspect.getsource(cli.starter_claude_md)
-    assert "BUS DOCTRINE" in src and "ULTRA-TERSE" in src, "the starter CLAUDE.md carries it"
+    src = inspect.getsource(cli.doctrine_block)
+    assert "BUS DOCTRINE" in src and "ULTRA-TERSE" in src, "the seeded CLAUDE.md carries it"
 
 
 def test_wake_url_from_http():

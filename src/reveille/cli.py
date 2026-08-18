@@ -35,6 +35,8 @@ import sys
 import urllib.error
 import urllib.request
 
+from reveille import __version__
+
 from . import install
 
 
@@ -488,20 +490,32 @@ def ask_type(stdin=None):
         print(f"  pick 1-{len(AGENT_TYPES)}, or the type's name")
 
 
-def starter_claude_md(workdir, name, agent_type):
-    """Seed a CLAUDE.md naming the role and the boot ritual, unless one exists.
+# THE DOCTRINE BLOCK IS MANAGED, AND ONLY THE BLOCK (operator 11879). A native
+# agent's CLAUDE.md is the only thing that tells it to call lessons(), brief()
+# and inbox() -- the hive is PULLED, never pushed -- and red-shirt proved what
+# happens without one: it joined 0.2.170 with a bus connection, a Stop hook and
+# no idea that a broadcast does not wake anybody. The seed used to be written
+# only on the wizard path, which the web-mint-then-paste install (the only way
+# to install a native agent now that the password door is closed) never takes.
+#
+# So: the block is delimited and REWRITTEN in place on every init, and
+# everything outside the markers is the agent's own and is never touched. A
+# directory with no CLAUDE.md gets one containing the block; a CLAUDE.md
+# written by a human gets the block appended once and updated thereafter. The
+# markers carry the version that wrote them, so a later boot can tell whether
+# what it is reading is current.
+DOCTRINE_BEGIN = "<!-- reveille:begin -- managed by `reveille init`; edit OUTSIDE these markers -->"
+DOCTRINE_END = "<!-- reveille:end -->"
 
-    Otherwise "type" is a label that changes nothing, which is worse than not
-    asking: the operator would answer a question whose answer had no effect. It
-    never overwrites -- a directory that already has a CLAUDE.md has an opinion,
-    and this is an installer rather than an editor.
-    """
-    path = pathlib.Path(workdir) / "CLAUDE.md"
-    if path.exists():
-        return None
-    path.write_text(
+
+def doctrine_block(name, agent_type, version=__version__):
+    """The managed section, verbatim. Pure, so a gate can read it."""
+    role = f"You are the fleet's **{agent_type}**.\n\n" if agent_type else ""
+    return (
+        f"{DOCTRINE_BEGIN}\n"
+        f"<!-- written by reveille {version} -->\n"
         f"# {name}\n\n"
-        f"You are the fleet's **{agent_type}**.\n\n"
+        f"{role}"
         f"## Bus\n"
         f"BUS DOCTRINE: write ULTRA-TERSE -- fragments, no articles or filler,\n"
         f"ids/numbers/names exact, code and errors quoted verbatim. Write for AGENTS,\n"
@@ -517,8 +531,40 @@ def starter_claude_md(workdir, name, agent_type):
         f"Per ring: `inbox()`, `ack()` everything, act only if owed, delete the\n"
         f"spool files you handled, then re-arm `wake-watch $REVEILLE_AGENT_ROLE`.\n"
         f"Nothing owed -> silence is a valid turn.\n\n"
-        f"Full reference: `usage()`.\n")
-    return path
+        f"WHO HEARS WHAT: a unicast (`to=\"<name>\"`) WAKES that agent. YOUR\n"
+        f"broadcast (`to=\"*\"`) does not wake anyone -- it is read on each\n"
+        f"recipient's next turn; a HUMAN's broadcast does ring the room. So: needed\n"
+        f"now -> unicast the one who owes it. Broadcast only when a shared contract\n"
+        f"changed or you block several peers.\n\n"
+        f"Full reference: `usage()`.\n"
+        f"{DOCTRINE_END}\n")
+
+
+def sync_claude_md(workdir, name, agent_type, version=__version__):
+    """Write or refresh the managed doctrine block. Returns (path, what) where
+    what is 'created' | 'updated' | 'appended' | 'unchanged'.
+
+    NEVER an overwrite of somebody's file: outside the markers, every byte the
+    directory already had survives, in place. Between them, this owns the text
+    -- which is what makes a later boot able to correct a doctrine that has
+    moved on without asking a human to merge prose by hand.
+    """
+    path = pathlib.Path(workdir) / "CLAUDE.md"
+    block = doctrine_block(name, agent_type, version)
+    if not path.exists():
+        path.write_text(block)
+        return path, "created"
+    text = path.read_text()
+    i, j = text.find(DOCTRINE_BEGIN), text.find(DOCTRINE_END)
+    if i == -1 or j == -1 or j < i:
+        sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        path.write_text(text + sep + block)
+        return path, "appended"
+    cur = text[i:j + len(DOCTRINE_END) + 1]
+    if cur == block:
+        return path, "unchanged"
+    path.write_text(text[:i] + block + text[j + len(DOCTRINE_END) + 1:])
+    return path, "updated"
 
 
 def cmd_init(a):
@@ -681,11 +727,13 @@ def cmd_init(a):
               f"file is fixed and init converges the rest.", file=sys.stderr)
         return 1
     steps.append(f"credential: {path} (0600) -- this directory IS the agent")
-    if agent_type:
-        seeded = starter_claude_md(workdir, name, agent_type)
-        steps.append(f"role: {agent_type}" + (f", CLAUDE.md written to {seeded}"
-                                              if seeded else
-                                              " (CLAUDE.md already here, left alone)"))
+    # ALWAYS, wizard or not (operator 11879 + red-shirt, 2026-08-18): the paste
+    # path skips every prompt, and an agent with no CLAUDE.md has no boot ritual
+    # -- it comes up connected and doctrine-less, which is what red-shirt did.
+    doc, what = sync_claude_md(workdir, name, agent_type)
+    steps.append(f"doctrine: {doc} ({what}" +
+                 (f"; role {agent_type}" if agent_type else "") +
+                 ") -- the reveille block is managed, everything outside it is yours")
 
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
