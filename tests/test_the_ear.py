@@ -5,6 +5,8 @@ wears. Driven in-process against a stub /v1/audio/transcriptions.
 """
 import asyncio
 import pathlib
+import shutil
+import subprocess
 import http.server
 import io
 import json
@@ -37,6 +39,8 @@ class _Stt(http.server.BaseHTTPRequestHandler):
     calls = []
     hold = None          # an Event: the handler waits on it before answering
     down = False
+    text = "  make it so  "
+    segments = [{"avg_logprob": -0.21, "no_speech_prob": 0.02}]
 
     def do_POST(self):
         n = int(self.headers.get("content-length", 0))
@@ -48,7 +52,8 @@ class _Stt(http.server.BaseHTTPRequestHandler):
         if _Stt.down:
             self.send_error(500)
             return
-        body = json.dumps({"text": "  make it so  "}).encode()
+        # A verbose_json answer, as speaches gives it: text + segments with the numbers.
+        body = json.dumps({"text": _Stt.text, "segments": _Stt.segments}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
@@ -62,6 +67,7 @@ class _Stt(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def stt():
     _Stt.calls, _Stt.hold, _Stt.down = [], None, False
+    _Stt.text, _Stt.segments = "  make it so  ", [{"avg_logprob": -0.21, "no_speech_prob": 0.02}]
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Stt)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -117,13 +123,15 @@ def test_a_take_comes_back_as_words_and_nothing_is_stored(ear, tmp_path, caplog)
     before = sorted(p.name for p in tmp_path.iterdir())
     with caplog.at_level("INFO"):
         st, out = _call(_req(_take(2.0), {"content-type": "audio/wav"}, b"lang=en"))
-    assert (st, out) == (200, {"text": "make it so"}), out
+    assert (st, out) == (200, {"text": "make it so", "compression_ratio": 0.556,
+                               "no_speech_prob": 0.02, "avg_logprob": -0.21}), out
     # The upstream saw multipart with the file, the model and the language; the
     # token rode as a bearer.
     c = _Stt.calls[-1]
     assert c["path"] == "/v1/audio/transcriptions" and c["ctype"].startswith("multipart/form-data")
     assert b'name="file"; filename="take.wav"' in c["raw"] and b"RIFF" in c["raw"]
     assert b'name="model"\r\n\r\nwhisper-turbo' in c["raw"] and b'name="language"\r\n\r\nen' in c["raw"]
+    assert b'name="response_format"\r\n\r\nverbose_json' in c["raw"], "the segments' numbers ride back (11572)"
     assert c["auth"] == "Bearer shh"
     # NOTHING STORED, NOTHING LOGGED BUT THE LENGTH.
     assert sorted(p.name for p in tmp_path.iterdir()) == before
@@ -217,7 +225,8 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     assert ear.count("fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',") == 2 and \
         ear.count("headers:{'content-type':'audio/wav'},body:take") == 2
     assert "const take=wavBlob(pcm,16000);" in ear, "the VAD hands 16 kHz float; the wire is the same 16 kHz WAV"
-    assert ear.count("earHeard(d.text||'')") == 2 and UI.count("function earLand(text){") == 1, \
+    assert ear.count("earHeard(d)") - ear.count("function earHeard(d)") == 2 and \
+        UI.count("function earLand(text){") == 1, \
         "every take lands through earHeard: a command runs, anything else is text"
     assert "if(typeof listenStop==='function')listenStop();" in ear and "if(listenVad||vRec)return;" in ear, \
         "one ear at a time"
@@ -227,7 +236,7 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
         "b.setSelectionRange(b.value.length,b.value.length);" in land
     # THE ONE WAY THE EAR EVER SENDS is the spoken "send" inside earRun (slice 4,
     # 11355 s5) -- the human said the word. Nowhere else in the ear.
-    run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
+    run = ear[ear.index("function earRun(c){"):ear.index("const EAR_RATIO_MAX=2.4")]
     rest = ear.replace(run, "")
     for forbidden in ("send(", "$('send')", "sendMsg", "requestSubmit", ".submit("):
         assert forbidden not in rest, f"the ear must never send outside earRun ({forbidden})"
@@ -302,10 +311,10 @@ def test_voice_commands_are_a_fixed_grammar_on_the_whole_final_transcript():
     assert "const m=/^room (.+)$/.exec(t);" in ear and "return {cmd:'room',arg:m[1]};" in ear
     assert ".toLowerCase().replace(/[\\s.!?,;:]+$/,'')" in ear, "case-folded, trailing punctuation dropped"
     assert "if(EAR_COMMANDS.includes(t))return {cmd:t};" in ear and "return null;" in ear, "exact words, nothing fuzzy"
-    heard = ear[ear.index("function earHeard(text){"):ear.index("function earLand(text){")]
+    heard = ear[ear.index("const EAR_RATIO_MAX=2.4"):ear.index("function earLand(text){")]
     assert "if(c){earRun(c);return false;}" in heard and "return earLand(text);" in heard, \
         "a command is consumed, text lands (and says so, for the pause-to-send window)"
-    run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
+    run = ear[ear.index("function earRun(c){"):ear.index("const EAR_RATIO_MAX=2.4")]
     for row in ("case 'send':", "case 'cancel':", "case 'stop':{vStop();vDone();return;}", "case 'reply':",
                 "case 'room':", "case 'voice on':{if(!voiceOn)toggleVoice();return;}",
                 "case 'voice off':{if(voiceOn)toggleVoice();return;}"):
@@ -334,14 +343,14 @@ def test_pause_to_send_is_a_deliberate_setting_hands_free_only_with_a_visible_co
     assert "if($('autosendWrap'))$('autosendWrap').hidden=!(me&&me.ear);" in UI
     # Armed ONLY from the hands-free take path, only when text landed, only while listening.
     assert ear.count("pauseSendArm()") == 2 and \
-        "if(earHeard(d.text||'')){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in ear
+        "if(earHeard(d)){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in ear
     talk = ear[:ear.index("const EAR_SILENCE_MS=")]
     assert "autosend" not in talk, "push-to-talk never auto-sends"
     # Counted from landing, shown, aborted by cancel / keystroke / listening off / empty box.
     assert "listenPaint('sending in '+left+'...')" in b
     assert "if(!listenVad||!$('body').value.trim()){pauseSendAbort();return;}" in b
     assert "$('body').addEventListener('keydown',()=>pauseSendAbort());" in b
-    run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
+    run = ear[ear.index("function earRun(c){"):ear.index("const EAR_RATIO_MAX=2.4")]
     assert "if(typeof pauseSendAbort==='function')pauseSendAbort();" in run, "a spoken cancel aborts"
     assert "if(typeof pauseSendAbort==='function')pauseSendAbort(true);" in ear, "listening off aborts"
     # Speech RESUMING inside the window aborts it (architect 11392): sentence two
@@ -358,7 +367,7 @@ def test_the_earcon_rings_once_when_words_land_in_listen_mode_only():
     never over an utterance (pending until vDone); no bell in push-to-talk;
     the WAV ships with the page at /ui/earcon.wav."""
     page = daemon._ui_read("index.html")
-    assert "if(earHeard(d.text||'')){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in page
+    assert "if(earHeard(d)){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in page
     assert page.count("earconRing()") == 3, "listen chain, vDone (pending), and the definition's own recursion site"
     talk = page[page.index("function talkStop"):page.index("function talkStop") + 3000]
     assert "earconRing" not in talk, "no bell in push-to-talk"
@@ -370,3 +379,72 @@ def test_the_earcon_rings_once_when_words_land_in_listen_mode_only():
     import wave
     w = wave.open(io.BytesIO(pathlib.Path(daemon._UI_PACKAGED, "earcon.wav").read_bytes()))
     assert w.getframerate() == 44100 and w.getnchannels() == 1 and w.getnframes() / 44100 < 1.0
+
+
+# Operator 11569, verbatim: whisper's answer to a non-speech take, auto-sent.
+OH_OH_OH = ", ".join(["oh"] * 118).capitalize()
+
+
+def test_a_degenerate_take_is_dropped_before_it_lands(ear):
+    """Ruling 11572 (DES-014 s4/s5 amended): the broker returns whisper's own
+    numbers with the text -- compression ratio over the whole take (zlib, the same
+    heuristic whisper applies per segment), max no_speech_prob and min avg_logprob
+    from verbose_json's segments when present -- and the PAGE drops the take,
+    once, before append/auto-send, when ratio > 2.4 or no_speech_prob > 0.6 or
+    avg_logprob < -1.0 or the text equals the previous take. Dropped: no bell, no
+    post, no stub; console.debug only."""
+    st = daemon.stt_take_stats
+    assert st(OH_OH_OH)["compression_ratio"] > 2.4, st(OH_OH_OH)
+    assert st("make it so, number one, and mind the gap")["compression_ratio"] < 1.2
+    assert st("")["compression_ratio"] == 0.0 and "no_speech_prob" not in st("x")
+    assert st("x", [{"no_speech_prob": 0.1}, {"no_speech_prob": 0.7, "avg_logprob": -1.4},
+                    {"avg_logprob": -0.3}, "junk"]) == {"compression_ratio": 0.111,
+                                                        "no_speech_prob": 0.7, "avg_logprob": -1.4}, \
+        "worst segment wins: max no_speech_prob, min avg_logprob; junk rows ignored"
+    # Through the route: the 11569 body comes back with its ratio, and the numbers
+    # from the segments; the page reads them, the broker keeps nothing.
+    _Stt.text, _Stt.segments = OH_OH_OH, [{"avg_logprob": -1.31, "no_speech_prob": 0.83}]
+    code, out = _call(_req(_take(3.0), {"content-type": "audio/wav"}))
+    assert code == 200 and out["text"] == OH_OH_OH and out["compression_ratio"] > 2.4
+    assert out["no_speech_prob"] == 0.83 and out["avg_logprob"] == -1.31
+    _Stt.text, _Stt.segments = "  make it so  ", []
+    code, out = _call(_req(_take(2.0), {"content-type": "audio/wav"}))
+    assert out == {"text": "make it so", "compression_ratio": 0.556}, "no segments -> no numbers, no invention"
+    # The page: ONE gate, in earHeard, after the command match, before earLand.
+    ear_js = UI[UI.index("const EAR_RATIO_MAX=2.4"):UI.index("function earLand(text){")]
+    assert "const EAR_RATIO_MAX=2.4,EAR_NO_SPEECH_MAX=0.6,EAR_LOGPROB_MIN=-1.0;" in ear_js
+    assert "function earDegenerate(d){" in ear_js and "let earPrevTake='';" in ear_js
+    assert "if(d.compression_ratio>EAR_RATIO_MAX)return" in ear_js
+    assert "if(d.no_speech_prob>EAR_NO_SPEECH_MAX)return" in ear_js
+    assert "if(typeof d.avg_logprob==='number'&&d.avg_logprob<EAR_LOGPROB_MIN)return" in ear_js
+    assert "if(t===earPrevTake)return 'same as the previous take';" in ear_js
+    assert UI.count("earPrevTake='';") == 3, "the repeat memory clears with the box: init, after a send, on a spoken cancel (11581)"
+    heard = ear_js[ear_js.index("function earHeard(d){"):]
+    assert heard.index("if(c){earRun(c);return false;}") < heard.index("const why=earDegenerate(d);") \
+        < heard.index("earPrevTake=text;") < heard.index("return earLand(text);"), \
+        "command first (send twice is two sends), then the gate, then the text lands"
+    assert "console.debug('ear: take dropped ('+why+'): '" in heard and "toast(" not in heard, \
+        "dropped = console.debug only: no bell (earHeard returns false), no post, no stub"
+    # A ratio and a text-repeat gate in JS, run: the 11569 body is dropped, speech lands.
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not on PATH")
+    prog = ear_js.replace("function earLand(text){", "") + """
+    var landed=[]; function earLand(t){landed.push(t);return true;}
+    function earCommand(t){return t==='send'?{cmd:'send'}:null;} var ran=[]; function earRun(c){ran.push(c.cmd);}
+    console.debug=function(){};
+    if(earHeard({text:%s,compression_ratio:2.9})!==false)throw 'oh-oh landed';
+    if(!earHeard({text:'make it so',compression_ratio:0.6}))throw 'speech dropped';
+    if(earHeard({text:'make it so',compression_ratio:0.6})!==false)throw 'repeat landed';
+    if(earHeard({text:'again',compression_ratio:0.7,no_speech_prob:0.9})!==false)throw 'no-speech landed';
+    if(earHeard({text:'again',compression_ratio:0.7,avg_logprob:-1.5})!==false)throw 'low logprob landed';
+    if(!earHeard({text:'again',compression_ratio:0.7,avg_logprob:-0.4}))throw 'good take dropped';
+    earHeard({text:'send'});earHeard({text:'send'});
+    if(ran.length!==2)throw 'send twice must be two sends, got '+ran.length;
+    earPrevTake='';                                   // what a send / a cleared box does (11581)
+    if(!earHeard({text:'again',compression_ratio:0.7}))throw 'the same words after a send must land';
+    if(landed.join('|')!=='make it so|again|again')throw 'landed: '+landed.join('|');
+    console.log('ok');
+    """ % json.dumps(OH_OH_OH)
+    res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
+    assert res.returncode == 0 and "ok" in res.stdout, res.stderr or res.stdout

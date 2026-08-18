@@ -53,6 +53,7 @@ import sqlite3
 import threading
 import time
 import wave
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -225,6 +226,15 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.145 A DEGENERATE TAKE IS DROPPED BEFORE IT LANDS (operator 11569, ruling
+11572; DES-014 s4/s5 amended). Whisper turned a non-speech take into "oh, oh,
+oh, ..." and auto-send shipped it. The broker now asks verbose_json and returns
+whisper's own numbers with the text: compression_ratio (zlib, over the whole
+take), max no_speech_prob and min avg_logprob from the segments when present.
+The page drops a take, once, in earHeard after the command match: ratio > 2.4,
+or no_speech_prob > 0.6, or avg_logprob < -1.0, or the same text as the
+previous take -- console.debug, no bell, no post, no stub. Bus tools
+unchanged; POST /stt gains three numbers.
 0.2.144 THE PHONE PAGE, SLICE 2 (DES-016 s2, rulings 11443/11447/11456/11483 B;
 operator 11439/11478). One block, narrow OR short (max-width 640 / max-height
 480 -- a phone on its side): a header bar (room name = the sheet with rooms,
@@ -2575,15 +2585,36 @@ def stt_take_refusal(data):
     return None
 
 
+def stt_take_stats(text, segments=None):
+    """The numbers the page's degenerate-take gate reads (ruling 11572, operator
+    11569: whisper hallucinated "oh, oh, oh, ..." on a non-speech take and
+    auto-send shipped it). compression_ratio is whisper's own heuristic --
+    len(bytes) / len(zlib(bytes)) -- computed HERE, with the same zlib whisper
+    uses, over the whole take; no_speech_prob (max) and avg_logprob (min) ride
+    along only when the upstream's verbose_json carried segments with them. Pure."""
+    raw = (text or "").encode()
+    out = {"compression_ratio": round(len(raw) / max(1, len(zlib.compress(raw))), 3) if raw else 0.0}
+    nsp = [s.get("no_speech_prob") for s in (segments or []) if isinstance(s, dict)
+           and isinstance(s.get("no_speech_prob"), (int, float))]
+    alp = [s.get("avg_logprob") for s in (segments or []) if isinstance(s, dict)
+           and isinstance(s.get("avg_logprob"), (int, float))]
+    if nsp:
+        out["no_speech_prob"] = round(max(nsp), 3)
+    if alp:
+        out["avg_logprob"] = round(min(alp), 3)
+    return out
+
+
 def _stt_transcribe(url, token, model, data, timeout, language=""):
     """POST the take to the OpenAI-shaped /v1/audio/transcriptions (speaches,
-    faster-whisper-server) as multipart; return the text. Stdlib, like every
-    other upstream call here."""
+    faster-whisper-server) as multipart; return {"text", ...stt_take_stats}.
+    verbose_json so the segments' no_speech_prob / avg_logprob come back when
+    the upstream has them (11572). Stdlib, like every other upstream call here."""
     boundary = "----reveille-ear-" + secrets.token_hex(8)
     parts = [("model", model or "")]
     if language:
         parts.append(("language", language))
-    parts.append(("response_format", "json"))
+    parts.append(("response_format", "verbose_json"))
     body = b""
     for name, value in parts:
         body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
@@ -2597,7 +2628,8 @@ def _stt_transcribe(url, token, model, data, timeout, language=""):
         req.add_header("Authorization", f"Bearer {token}")
     with urllib.request.urlopen(req, timeout=timeout) as r:
         out = json.loads(r.read().decode() or "{}")
-    return (out.get("text") or "").strip()
+    text = (out.get("text") or "").strip()
+    return {"text": text, **stt_take_stats(text, out.get("segments"))}
 
 
 _plaintext_hosts = []   # hosts reached in the clear under REVEILLE_LAN_PLAINTEXT=1
@@ -5189,7 +5221,7 @@ async def stt_http(request):
     lang = (request.query_params.get("lang") or "")[:8]
     t0 = time.monotonic()
     try:
-        text = await asyncio.to_thread(_stt_transcribe, _stt_url, _stt_token, _stt_model,
+        take = await asyncio.to_thread(_stt_transcribe, _stt_url, _stt_token, _stt_model,
                                        data, _stt_timeout, lang)
     except Exception as e:
         log.warning("%s ear: upstream failed: %s", p.name, e)
@@ -5197,8 +5229,8 @@ async def stt_http(request):
     finally:
         _stt_slot.release()
     log.info("%s ear: %.1fs take -> %d chars in %d ms", p.name, _voice_seconds(data),
-             len(text), int((time.monotonic() - t0) * 1000))
-    return JSONResponse({"text": text})
+             len(take["text"]), int((time.monotonic() - t0) * 1000))
+    return JSONResponse(take)
 
 
 @_guard
