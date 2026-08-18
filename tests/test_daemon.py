@@ -1281,3 +1281,20 @@ def test_the_page_fits_a_phone():
     assert ".cbottom{flex-wrap:wrap" in mobile and "#top{flex-wrap:wrap" in mobile
     assert "#composer input,#composer textarea,#filter{font-size:16px}" in mobile
     assert "$('railBtn').onclick" in PAGE and "classList.toggle('railOpen')" in PAGE
+
+
+def test_nothing_in_the_feed_is_wider_than_the_feed():
+    """0.2.135 (rulings 11480/11483 B): the fluid rules that keep a long token,
+    subject or code block from panning the feed sideways -- pinned as strings,
+    measured by scripts/mobile-shots (feed scrollWidth == clientWidth)."""
+    assert "#feed{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;" in PAGE
+    assert "touch-action:pan-y" in PAGE and ".msgcol{min-width:0}" in PAGE
+    assert ".body{color:#c3ccd8;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;" in PAGE
+    assert ".mdview pre{overflow-x:auto;max-width:100%}" in PAGE
+    mobile = PAGE[PAGE.index("@media(max-width:760px)"):]
+    mobile = mobile[:mobile.index("</style>")]
+    assert "html,body{overflow-x:hidden;overscroll-behavior-x:none}" in mobile
+    assert "#jump{bottom:auto;top:5.2rem;right:.8rem}" in mobile
+    sized = re.findall(r"(?:width|height|left|right|top|bottom|inset|gap|padding|margin):[^;}]*\dpx",
+                       mobile.replace("(max-width:760px)", ""))
+    assert not sized, f"no device pixels in the phone LAYOUT rules (11483 B): {sized}"
