@@ -29,13 +29,22 @@ no second app), DES-014 (talk/listen/auto-send in the compose row), DES-015
 5. Not measured here, reported: iOS keyboard vs `100vh`, tap targets under
    44 px (`.mid`, `.del`, `.arts` icons), pinch-zoom on the textarea.
 
-Nothing overflows horizontally. It is a desktop page with the columns hidden,
-not a phone layout.
+With the ear OFF nothing overflows; with the ear ON it does (devops 11451:
+iPhone 15 emulation, 393 px, signed in -- layout width 478 vs visual viewport
+393, `#send` right edge at x=478, `#histBtn` at 402; the page zooms out to
+fit). It is a desktop page with the columns hidden, not a phone layout.
+
+**Stopgap shipped first (0.2.131, #78, devops on the night of 11439):** the
+rail as a drawer behind a menu button, top bar and control row wrap, 16 px
+inputs; measured nothing wider than 393 after. s2 supersedes the drawer with
+the header bar + room sheet; the wrap and the 16 px stay.
 
 ## 2. Binding
 
 - **One page** (DES-006). CSS media query + a handful of DOM moves in the same
   `index.html`. No second template, no user-agent sniffing: width decides.
+  ONE breakpoint: the existing `@media(max-width:760px)` block becomes the
+  phone block at 640 px -- replaced, not joined by a second.
 - **The rail comes back as a sheet.** Under 640 px a header bar replaces it:
   room name (tap = room list sheet with unread counts), and three icons --
   voice, history/filter, me (settings/logout). Agents/roster open from the
