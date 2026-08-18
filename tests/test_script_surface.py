@@ -183,7 +183,11 @@ def test_the_page_paints_icons_from_the_flags_and_the_frames():
     # Row click ignores the icons (they own their click), like .mid does. THE
     # ICON IS ON EVERY MESSAGE (operator directive 2026-08-17): filled = play,
     # hollow = generate then play; the voice toggle only rules the AUTOMATIC path.
-    assert "if(e.target.closest('.play')){if(m.has_audio)playOne(m.id);else genOne(m);return;}" in UI
+    # The click always ASKS first (ruling 11483): ready -> play, else queued --
+    # a terse stand-in heard earlier is not a file (11476).
+    assert "if(e.target.closest('.play')){genOne(m);return;}" in UI
+    assert "if(r.state==='ready'){m.gen_pending=false;m.has_audio=true;paintIcons(m);playOne(m.id);return;}" in UI
+    assert "if(!m.terse)mm.has_audio=true;" in UI, "a terse frame keeps the icon hollow"
     assert "if(e.target.closest('.scr')){toggleScript(row,m);return;}" in UI
     assert "(m.has_audio?'&#9654;':'&#9655;')" in UI, "filled when made, hollow when not"
 

@@ -190,7 +190,7 @@ def test_the_worker_reconciles_at_start_and_the_utterance_clones_the_pushed_name
     daemon._tts_on = True
     name = daemon.clip_name(row)
     assert _Synth.uploads == [] and name not in _Synth.files
-    daemon._tts_q.put((5, "r1", "picard", "hello", name))
+    daemon._tts_q.put((5, "r1", "picard", "hello", name, True))
     daemon._tts_q.put(None)
     daemon._tts_worker(broker["url"], "", 5)
     assert _Synth.uploads == [name], "reconciled at worker start"
