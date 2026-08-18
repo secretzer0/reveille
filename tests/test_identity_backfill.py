@@ -151,16 +151,26 @@ def test_reads_and_members_carry_the_identity_too(tmp_path):
     has never seen, and inbox() would skip it silently."""
     conn, path = at_v17(tmp_path)
     mid = msg(conn, "reveille-devops")
+    store.claim_unresolved_names(conn, "u1")
+    aid = conn.execute("SELECT id FROM agents WHERE name='reveille-devops'").fetchone()[0]
+    # The v17 shape of both tables (name-keyed), so the whole chain from there
+    # runs on real old rows: v18 attributes them, v28 re-keys them.
+    conn.executescript("""
+        DROP TABLE reads; DROP TABLE members;
+        CREATE TABLE reads (message_id INTEGER NOT NULL, agent TEXT NOT NULL,
+                            read_ns INTEGER NOT NULL, PRIMARY KEY (message_id, agent));
+        CREATE TABLE members (room_id TEXT NOT NULL, name TEXT NOT NULL, tag TEXT, url TEXT,
+                              token_id TEXT, joined_ns INTEGER NOT NULL, seen_ns INTEGER NOT NULL,
+                              left_ns INTEGER, PRIMARY KEY (room_id, name));
+    """)
     conn.execute("INSERT INTO reads(message_id, agent, read_ns) VALUES(?,?,1)",
                  (mid, "reveille-devops"))
     conn.execute("INSERT INTO members(room_id, name, tag, joined_ns, seen_ns) "
                  "VALUES('r1','reveille-devops','reveille-devops',1,1)")
-    store.claim_unresolved_names(conn, "u1")
-    aid = conn.execute("SELECT id FROM agents WHERE name='reveille-devops'").fetchone()[0]
     back_to_17(conn)
     assert store.migrate(conn, path) == store.SCHEMA_VERSION
-    assert conn.execute("SELECT agent_id FROM reads").fetchone()[0] == aid
-    assert conn.execute("SELECT agent_id FROM members").fetchone()[0] == aid
+    assert conn.execute("SELECT principal FROM reads").fetchone()[0] == f"agent:{aid}"
+    assert conn.execute("SELECT principal FROM members").fetchone()[0] == f"agent:{aid}"
 
 
 def test_a_broadcast_recipient_is_not_an_identity(tmp_path):
@@ -330,31 +340,3 @@ def test_an_ambiguous_sender_stays_null_and_is_counted(tmp_path, capsys):
     assert conn.execute("SELECT sender_agent_id FROM messages WHERE id=?",
                         (mid,)).fetchone()[0] is None
     assert "more than one identity" in capsys.readouterr().out
-
-
-def test_the_write_path_attributes_to_the_live_identity(tmp_path):
-    """WRITE time is different from migration time, deliberately: a message
-    being written now is being written by the live instance -- that is what
-    live means. With no live row and several retired ones, None: unattributed
-    is honest, misattributed is not."""
-    conn, path = at_v17(tmp_path)
-    two_identities(conn)
-    assert store.agent_id_for(conn, "reveille-devops") == "new-id"
-    conn.execute("UPDATE agents SET retired_ns=9 WHERE id='new-id'")
-    assert store.agent_id_for(conn, "reveille-devops") is None
-    assert store.agent_id_for(conn, "tmelhiser") is None
-
-
-def test_two_owners_live_same_name_attributes_to_neither(tmp_path):
-    """Architect 9009: idx_agents_live is per-OWNER, so two accounts can each
-    run a live agent under one name -- two speakers, not a speaker and a ghost.
-    Picking one attributes a message across a tenancy boundary; None does not.
-    Red on the version whose comment cited the index as if it were global."""
-    conn, path = at_v17(tmp_path)
-    conn.execute("INSERT INTO users(id, name, pw_hash, role, created_ns) "
-                 "VALUES('u2','other','x','user',1)")
-    conn.execute("INSERT INTO agents(id, owner_id, name, created_ns) "
-                 "VALUES('a-mine','u1','devops',1)")
-    conn.execute("INSERT INTO agents(id, owner_id, name, created_ns) "
-                 "VALUES('a-theirs','u2','devops',2)")
-    assert store.agent_id_for(conn, "devops") is None

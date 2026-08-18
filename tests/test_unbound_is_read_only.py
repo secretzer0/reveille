@@ -81,7 +81,8 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_mcp_plane(tmp_path, monkey
     monkeypatch.setattr(daemon, "_push_presence", lambda room: None)
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
     ctx = _Ctx()
-    store.send(c, "picard", "*", "hello there", room=rid)
+    store.send(c, store.agent_principal(store.mint_agent(c, uid, "picard")["id"]), "*",
+               "hello there", room=rid)
     # READS answer.
     assert asyncio.run(daemon.rooms(ctx))["rooms"]
     assert len(asyncio.run(daemon.inbox(ctx))["messages"]) == 1
@@ -123,7 +124,8 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_http_plane(tmp_path, monke
     who = {"p": _principal("agent", uid, rid, "")}
     monkeypatch.setattr(daemon, "_principal", lambda request: who["p"])
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
-    store.send(c, "picard", "*", "hello there", room=rid)
+    store.send(c, store.agent_principal(store.mint_agent(c, uid, "picard")["id"]), "*",
+               "hello there", room=rid)
     # GET /messages: 200 (the curl-without-X-Agent read scripts/set-token depends on).
     r = asyncio.run(daemon.messages_http(_http("GET", "/messages")))
     assert r.status_code == 200
@@ -138,7 +140,8 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_http_plane(tmp_path, monke
                    "query_string": b"", "path_params": {"mid": str(mid)}})
     assert asyncio.run(daemon.audio_make_http(req)).status_code == 401
     # Bound: the send lands.
-    who["p"] = _principal("agent", uid, rid, "agent-1")
+    ghost = store.create_token(c, uid, "ghost body", agent_name="ghost", create=True)
+    who["p"] = _principal("agent", uid, rid, ghost["agent_id"], ghost["id"])
     r = asyncio.run(daemon.send_http(_http("POST", "/send", {"to": "*", "body": "hi", "room": rid})))
     assert r.status_code == 200, r.body
     assert c.execute("SELECT count(*) FROM messages WHERE sender='ghost'").fetchone()[0] == 1

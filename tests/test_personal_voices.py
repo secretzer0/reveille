@@ -214,7 +214,7 @@ def test_rename_carries_assignments_scripts_and_the_clip_and_refuses_collisions(
     st, row = _put_clip(w, "vyzon", "rom")
     store.voice_patch(c, "rom", persona="Meek.", sample="Brother?")
     store.assign_voice(c, w["r1"], w["ks"], "rom", set_by="owner")
-    m = store.send(c, "scotty", "*", "hello", room=w["r1"])
+    m = store.send(c, w["ks"], "*", "hello", room=w["r1"])
     store.script_put(c, m["id"], "Hello, brother.", "rom", "stub", 5)
     _as(w, "vyzon")
     st, out = _call(daemon.voice_rename_http, _req("PUT", "/voices/rom/rename", {"vid": "rom"},

@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -213,12 +213,18 @@ CREATE TABLE IF NOT EXISTS room_audit (
     ts_ns   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
--- One row per (room, agent). Names are unique WITHIN a room -- that is all bus
--- routing needs, and it lets one agent hold the same name in several rooms.
+-- One row per (room, IDENTITY) -- DES-011 s6.1(b): the key is who, the name is
+-- what the room calls them. principal is the DES-013 s2 speaker key,
+-- agent:<agents.id> for a body holding a bound token, user:<users.id> for a
+-- person at the web page. name is the ROOM-NAME: the identity's own name, or
+-- the alias <owner>-<name> assigned at join when the bare name was already held
+-- live by another owner's agent in this room (s2). Unique per room among LIVE
+-- rows (idx_members_roomname); a row marked left keeps its name but holds
+-- nothing.
 CREATE TABLE IF NOT EXISTS members (
     room_id   TEXT NOT NULL REFERENCES rooms(id),
+    principal TEXT NOT NULL,
     name      TEXT NOT NULL,
-    agent_id  TEXT,
     tag       TEXT,
     url       TEXT,
     token_id  TEXT REFERENCES tokens(id),
@@ -230,8 +236,10 @@ CREATE TABLE IF NOT EXISTS members (
     -- two are the same absence, and re-admitting on the next call silently
     -- undoes leave() -- ratified doctrine, voided by an implementation detail.
     left_ns   INTEGER,
-    PRIMARY KEY (room_id, name)
+    PRIMARY KEY (room_id, principal)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_members_roomname
+    ON members(room_id, name) WHERE left_ns IS NULL;
 -- WHO AN AGENT IS (DES-007, ruling 8665). The identity is a UUID; (owner_id,
 -- name) is a LABEL on it, not a key. The operator's own requirement proves the
 -- composite cannot be the key: declining a resurrect mints a NEW identity under
@@ -296,17 +304,16 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient_agent_id TEXT,
     ts_ns     INTEGER NOT NULL
 );
--- agent is the NAME (routing reads it); agent_id is the IDENTITY (DES-007 4.3).
--- Both, not one: a resurrected identity under a reused name would otherwise
--- inherit the previous instance's read state, and a DECLINED resurrect would mint
--- an agent that appears to have already read mail it has never seen -- inbox()
--- would skip it silently, which is the worst shape a bug in a mailbox can take.
+-- Receipts key on the IDENTITY (DES-011 s6.1(b); DES-007 4.3 said why a name
+-- cannot: a resurrected identity under a reused name would inherit the previous
+-- instance's read state, and a DECLINED resurrect would mint an agent that
+-- appears to have already read mail it has never seen -- inbox() would skip it
+-- silently). principal as in members.
 CREATE TABLE IF NOT EXISTS reads (
     message_id INTEGER NOT NULL REFERENCES messages(id),
-    agent      TEXT NOT NULL,
-    agent_id   TEXT,
+    principal  TEXT NOT NULL,
     read_ns    INTEGER NOT NULL,
-    PRIMARY KEY (message_id, agent)
+    PRIMARY KEY (message_id, principal)
 );
 -- The full reply graph. parent_id on messages is the PRIMARY parent (cheap linear
 -- back-trace + which thread a reply joins); links holds EVERY parent edge, so a
@@ -365,7 +372,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_sender    ON messages(sender);
 CREATE INDEX IF NOT EXISTS idx_msg_parent    ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS idx_links_child   ON links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent  ON links(parent_id);
-CREATE INDEX IF NOT EXISTS idx_reads_agent   ON reads(agent);
+CREATE INDEX IF NOT EXISTS idx_reads_principal ON reads(principal);
 CREATE INDEX IF NOT EXISTS idx_troom_room    ON token_rooms(room_id);
 CREATE INDEX IF NOT EXISTS idx_members_name  ON members(name);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -1087,6 +1094,10 @@ def _upgrade_v17(conn, db_path):
                                     ("memories", "author_agent_id", "author"),
                                     ("reads", "agent_id", "agent"),
                                     ("members", "agent_id", "name")):
+            # A table already at a later shape (v28 keys reads/members on the
+            # identity and has no name column) has nothing here to resolve.
+            if namecol not in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}:
+                continue
             conn.execute(f"""
                 UPDATE {table} SET {col} =
                   (SELECT a.id FROM agents a WHERE a.name = {table}.{namecol})
@@ -1324,47 +1335,116 @@ def resolve_recipient_ids(conn):
     spans left in a gap (later holder not yet minted). One rule, from recorded
     facts, no nearest-neighbour guess.
     """
-    merged = {r["id"]: r["merged_into"] for r in
-              conn.execute("SELECT id, merged_into FROM agents WHERE merged_into IS NOT NULL")}
-    agents = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM agents")}
-    # Every name an identity ever wore maps to its LINEAGE HEAD -- a folded
-    # source under a DIFFERENT name (X "architect" -> Y "reveille-architect")
-    # still answers for mail addressed to X's name: it is Y's mail.
-    heads = {}
-    for a in agents.values():
-        head = agents.get(_lineage_head(merged, a["id"]), a)
-        heads.setdefault(a["name"], {})[head["id"]] = head
-    heads = {name: list(by_id.values()) for name, by_id in heads.items()}
+    heads = _name_lineages(conn)
     people = {r["name"] for r in conn.execute("SELECT name FROM users")}
     report = {"resolved": {}, "how": {}, "humans": 0, "unresolvable": []}
     for m in conn.execute("SELECT id, room, recipient, ts_ns FROM messages "
                           "WHERE recipient != ? ORDER BY id", (BROADCAST,)):
         name, ts = m["recipient"], m["ts_ns"]
-        rows = heads.get(name, [])
-        if not rows:
-            if name in people:
-                report["humans"] += 1
-            else:
-                report["unresolvable"].append(
-                    (m["id"], m["room"], name, ts, "no identity ever held this name"))
+        if name not in heads and name in people:
+            report["humans"] += 1
             continue
-        born = [a for a in rows if a["created_ns"] <= ts]
-        live = [a for a in born if a["retired_ns"] is None or a["retired_ns"] > ts]
-        if len(live) == 1:
-            aid, how = live[0]["id"], "live-at-ts"
-        elif live:
-            report["unresolvable"].append(
-                (m["id"], m["room"], name, ts,
-                 f"{len(live)} identities live under this name at once: "
-                 + ", ".join(a["id"] for a in live)))
+        aid, how = _holder_at(heads.get(name, []), ts)
+        if aid is None:
+            report["unresolvable"].append((m["id"], m["room"], name, ts, how))
             continue
-        elif born:
-            aid, how = max(born, key=lambda a: a["created_ns"])["id"], "last-holder"
-        else:
-            aid, how = min(rows, key=lambda a: a["created_ns"])["id"], "earliest"
         report["resolved"][m["id"]] = aid
         report["how"][how] = report["how"].get(how, 0) + 1
     return report
+
+
+def _name_lineages(conn):
+    """{name: [lineage-head agents rows]} for every name an identity ever wore.
+    A folded source under a DIFFERENT name (X "architect" -> Y
+    "reveille-architect") still answers for mail addressed to X's name: it is
+    Y's mail."""
+    merged = {r["id"]: r["merged_into"] for r in
+              conn.execute("SELECT id, merged_into FROM agents WHERE merged_into IS NOT NULL")}
+    agents = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM agents")}
+    heads = {}
+    for a in agents.values():
+        head = agents.get(_lineage_head(merged, a["id"]), a)
+        heads.setdefault(a["name"], {})[head["id"]] = head
+    return {name: list(by_id.values()) for name, by_id in heads.items()}
+
+
+def _holder_at(rows, ts):
+    """The succession clock (see resolve_recipient_ids): which of `rows` (lineage
+    heads of one name) held the name at `ts`. Returns (agent_id, rule) or
+    (None, why)."""
+    if not rows:
+        return None, "no identity ever held this name"
+    born = [a for a in rows if a["created_ns"] <= ts]
+    live = [a for a in born if a["retired_ns"] is None or a["retired_ns"] > ts]
+    if len(live) == 1:
+        return live[0]["id"], "live-at-ts"
+    if live:
+        return None, (f"{len(live)} identities live under this name at once: "
+                      + ", ".join(a["id"] for a in live))
+    if born:
+        return max(born, key=lambda a: a["created_ns"])["id"], "last-holder"
+    return min(rows, key=lambda a: a["created_ns"])["id"], "earliest"
+
+
+# ---- the principal: who a row is about (DES-011 s6.1(b)) --------------------
+# The DES-013 s2 speaker key IS the identity key everywhere the store keys on
+# who: agent:<agents.id> for a body holding a bound token, user:<users.id> for
+# a person. One form, derived from the credential by the daemon (speaker_key)
+# and by join() from the token/tag -- never from a name.
+
+def agent_principal(agent_id):
+    return f"agent:{agent_id}"
+
+
+def user_principal(user_id):
+    return f"user:{user_id}"
+
+
+def agent_of(principal):
+    """The agents.id behind a principal, or None for a person / nothing."""
+    return principal[6:] if principal and principal.startswith("agent:") else None
+
+
+def user_of(principal):
+    return principal[5:] if principal and principal.startswith("user:") else None
+
+
+def _identity_name(conn, principal):
+    """The identity's OWN name (agents.name / users.name), or None."""
+    aid, uid = agent_of(principal), user_of(principal)
+    r = None
+    if aid:
+        r = conn.execute("SELECT name FROM agents WHERE id=?", (aid,)).fetchone()
+    elif uid:
+        r = conn.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    return r["name"] if r else None
+
+
+def _owner_name(conn, principal):
+    """The account name that prefixes an alias: the agent's owner, or the person."""
+    aid, uid = agent_of(principal), user_of(principal)
+    if aid:
+        r = conn.execute("SELECT u.name FROM agents a JOIN users u ON u.id=a.owner_id "
+                         "WHERE a.id=?", (aid,)).fetchone()
+    else:
+        r = conn.execute("SELECT name FROM users WHERE id=?", (uid,)).fetchone()
+    return r["name"] if r else None
+
+
+def _join_principal(conn, tag, token_id):
+    """Who is joining, from the credential: a BOUND token's identity, or the
+    person behind a web:<name> tag. Anything else has no identity to key a
+    membership on and is refused -- an unbound token cannot act (11252)."""
+    if token_id:
+        r = conn.execute("SELECT agent_id FROM tokens WHERE id=?", (token_id,)).fetchone()
+        if r and r["agent_id"]:
+            return agent_principal(r["agent_id"])
+    if (tag or "").startswith("web:"):
+        u = conn.execute("SELECT id FROM users WHERE name=?", (tag[4:],)).fetchone()
+        if u:
+            return user_principal(u["id"])
+    raise BusError("join needs an identity: a token bound to an agent, or a signed-in "
+                   "person -- a name alone is not a member (DES-011 s6.1(b))")
 
 
 def record_agent_name(conn, agent_id, name, from_ns):
@@ -1436,6 +1516,128 @@ CREATE INDEX IF NOT EXISTS idx_msg_recipient_id ON messages(recipient_agent_id);
         conn.execute("PRAGMA user_version=27")
 
 
+def _upgrade_v27(conn, db_path):
+    """v27 -> v28 (DES-011 s6.1(b), ruling 10983): membership and receipts key on
+    the IDENTITY. members re-keyed (room_id, principal) with the room-name beside
+    it, unique per room among live rows; reads re-keyed (message_id, principal).
+    Both tables are rebuilt (a PRIMARY KEY cannot be altered in place).
+
+    principal for a members row: agent:<agent_id> when the row (or its token)
+    carries one; user:<id> for a web:<name> tag whose person exists; otherwise
+    the succession clock at seen_ns over the name's lineage; a row that still
+    resolves to nothing is DROPPED and printed (presence is a cache and the
+    reaper would have taken it). Two rows landing on one (room, principal) keep
+    the most recently seen; the other is printed. reads: agent_id (folded to
+    its head) -> agent:; else a person's name -> user:; else the clock at
+    read_ns; unresolvable rows are dropped and COUNTED -- a receipt for a name
+    nobody can attribute is not a receipt. Rerunnable: a table already keyed on
+    principal is left alone.
+    """
+    snapshot(conn, f"{db_path}.pre-v28-{time.time_ns()}.bak")
+    heads = _name_lineages(conn)
+    merged = {r["id"]: r["merged_into"] for r in
+              conn.execute("SELECT id, merged_into FROM agents WHERE merged_into IS NOT NULL")}
+    people = {r["name"]: r["id"] for r in conn.execute("SELECT name, id FROM users")}
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        with tx(conn):
+            mcols = {r["name"] for r in conn.execute("PRAGMA table_info(members)")}
+            rcols = {r["name"] for r in conn.execute("PRAGMA table_info(reads)")}
+            # Rename BOTH old tables aside before the one schema replay: the
+            # replay indexes each new table's principal column, so neither may
+            # still be the old shape when it runs.
+            if "principal" not in mcols:
+                rows = conn.execute(
+                    "SELECT m.*, t.agent_id AS tok_agent FROM members m "
+                    "LEFT JOIN tokens t ON t.id=m.token_id").fetchall()
+                conn.execute("ALTER TABLE members RENAME TO members_v27")
+            if "principal" not in rcols:
+                conn.execute("ALTER TABLE reads RENAME TO reads_v27")
+            _exec_script(conn, _SCHEMA)
+            if "principal" not in mcols:
+                kept, dropped = {}, []
+                for m in rows:
+                    aid = m["agent_id"] if "agent_id" in m.keys() else None
+                    aid = aid or m["tok_agent"]
+                    if aid:
+                        pr = agent_principal(_lineage_head(merged, aid))
+                    elif (m["tag"] or "").startswith("web:") and m["tag"][4:] in people:
+                        pr = user_principal(people[m["tag"][4:]])
+                    else:
+                        hid, _why = _holder_at(heads.get(m["name"], []), m["seen_ns"])
+                        pr = agent_principal(hid) if hid else None
+                    if pr is None:
+                        dropped.append((m["room_id"], m["name"], m["tag"]))
+                        continue
+                    key = (m["room_id"], pr)
+                    if key in kept and kept[key]["seen_ns"] >= m["seen_ns"]:
+                        dropped.append((m["room_id"], m["name"], "duplicate of "
+                                        + kept[key]["name"]))
+                        continue
+                    kept[key] = dict(m, principal=pr)
+                for (rid, pr), m in kept.items():
+                    conn.execute(
+                        "INSERT INTO members(room_id, principal, name, tag, url, token_id, "
+                        "joined_ns, seen_ns, left_ns) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (rid, pr, m["name"], m["tag"], m["url"], m["token_id"],
+                         m["joined_ns"], m["seen_ns"], m["left_ns"]))
+                conn.execute("DROP TABLE members_v27")
+                print(f"v28 members: {len(kept)} re-keyed on the identity, "
+                      f"{len(dropped)} dropped")
+                for rid, name, why in dropped:
+                    print(f"  dropped member: room {rid} name {name!r} ({why})")
+            if "principal" not in rcols:
+                has_aid = "agent_id" in rcols
+                sel = ("SELECT message_id, agent, read_ns" + (", agent_id" if has_aid else "")
+                       + " FROM reads_v27")
+                n_ok = n_drop = 0
+                batch = []
+                for r in conn.execute(sel):
+                    aid = r["agent_id"] if has_aid else None
+                    if aid:
+                        pr = agent_principal(_lineage_head(merged, aid))
+                    elif r["agent"] in people and r["agent"] not in heads:
+                        pr = user_principal(people[r["agent"]])
+                    else:
+                        hid, _why = _holder_at(heads.get(r["agent"], []), r["read_ns"])
+                        pr = agent_principal(hid) if hid else None
+                    if pr is None:
+                        n_drop += 1
+                        continue
+                    batch.append((r["message_id"], pr, r["read_ns"]))
+                    n_ok += 1
+                conn.executemany(
+                    "INSERT OR IGNORE INTO reads(message_id, principal, read_ns) VALUES(?,?,?)",
+                    batch)
+                conn.execute("DROP TABLE reads_v27")
+                print(f"v28 reads: {n_ok} receipts re-keyed on the identity, "
+                      f"{n_drop} dropped (name attributable to no identity)")
+                # THE SUCCESSOR'S CATCH-UP. A re-minted identity joined under a
+                # name whose earlier holder had already read the room's backlog;
+                # join()'s catch-up marks (INSERT OR IGNORE by name) therefore
+                # wrote nothing, and now that those receipts belong to the
+                # earlier holder the successor would find the whole backlog
+                # unread on its next inbox() (measured on the live copy: 321 ->
+                # 1617 for three re-minted agents). Give every agent membership
+                # the receipts join() would have written at its own join --
+                # everything in the room older than joined_ns minus the
+                # catch-up window -- and nothing newer.
+                caught = conn.execute("""
+                    INSERT OR IGNORE INTO reads(message_id, principal, read_ns)
+                    SELECT m.id, mem.principal, mem.joined_ns FROM members mem
+                      JOIN messages m ON m.room = mem.room_id
+                     WHERE mem.principal LIKE 'agent:%'
+                       AND m.ts_ns < mem.joined_ns - ?""", (CATCHUP_NS,)).rowcount
+                print(f"v28 reads: {caught} catch-up receipt(s) written for re-keyed "
+                      f"memberships (what join() marks at arrival)")
+            bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if bad:
+                raise BusError(f"v28 migration left {len(bad)} FK violations")
+            conn.execute("PRAGMA user_version=28")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 def _upgrade_v24(conn, db_path):
     """v24 -> v25: voices.personal -- a voice that exists only for its uploader
     (ruling 11155). Additive column; existing voices are bank voices."""
@@ -1485,6 +1687,10 @@ def _upgrade_v0(conn, db_path):
             # way first -- it is read twice below and dropped, and it must not be
             # mistaken for the new table by anything in between.
             conn.execute("ALTER TABLE agents RENAME TO agents_v0")
+            # v0 receipts are catch-up marks keyed on a NAME; there is no identity
+            # in a v0 database to key them to, and nothing reads them (v28 keys
+            # reads on the principal). Dropped; the replay lays the new table.
+            conn.execute("DROP TABLE reads")
             # _SCHEMA indexes the identity columns of `messages`; the v0 table
             # predates them, so they are added here (empty) before the replay and
             # carried by messages_new below.
@@ -1552,7 +1758,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26)}
+              21, 22, 23, 24, 25, 26, 27)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -1862,8 +2068,8 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
                 # sits before supersede_bound_tokens.
                 rooms = [r["name"] for r in conn.execute(
                     "SELECT r.name FROM members m JOIN rooms r ON r.id=m.room_id "
-                    "WHERE m.agent_id=? AND m.left_ns IS NULL ORDER BY r.name",
-                    (row["id"],))]
+                    "WHERE m.principal=? AND m.left_ns IS NULL ORDER BY r.name",
+                    (agent_principal(row["id"]),))]
                 raise BusError(
                     f"you already have a live agent named {agent_name!r} "
                     f"(in: {', '.join(rooms) if rooms else 'no rooms'}). "
@@ -2020,12 +2226,12 @@ def reconcile_reach(conn):
         "AND tr.room_id=members.room_id)", (time.time_ns(),))
 
 
-def leave_listed(conn, name, token_id, room_id):
+def leave_listed(conn, principal, token_id, room_id):
     """leave() for a room the caller is LISTED in but no longer reaches (11337):
     a verb whose only effect is to reduce access must not require access. Marks
-    only this token's own row for that name and room."""
-    conn.execute("UPDATE members SET left_ns=? WHERE name=? AND token_id=? AND room_id=? "
-                 "AND left_ns IS NULL", (time.time_ns(), name, token_id, room_id))
+    only this token's own row for that identity and room."""
+    conn.execute("UPDATE members SET left_ns=? WHERE principal=? AND token_id=? AND room_id=? "
+                 "AND left_ns IS NULL", (time.time_ns(), principal, token_id, room_id))
 
 
 def supersede_bound_tokens(conn, owner_id, agent_id):
@@ -2571,19 +2777,16 @@ def room_speakers(conn, room_id):
                     "kind": kind, "present": False, "voice_id": r["voice_id"],
                     "set_by": r["set_by"]})
     by_key = {s["speaker"]: s for s in out}
-    # THE KEY COMES FROM THE CREDENTIAL: members.agent_id is stamped at join,
-    # but a membership healed by readmit() (send path, reap recovery) carries
-    # only token_id -- so the bound token's agent_id is the fallback, or the
-    # eval box listed every speaker twice, once keyed and once "unbound".
+    # THE KEY IS THE PRINCIPAL the membership is keyed on (v28): stamped from
+    # the credential at join, so a healed row (readmit) carries it too.
     for m in conn.execute(
-            "SELECT m.name, m.tag, COALESCE(m.agent_id, t.agent_id) AS agent_id, m.seen_ns "
-            "FROM members m LEFT JOIN tokens t ON t.id=m.token_id "
-            "WHERE m.room_id=? AND m.left_ns IS NULL", (room_id,)):
+            "SELECT m.name, m.tag, m.principal, m.seen_ns "
+            "FROM members m WHERE m.room_id=? AND m.left_ns IS NULL", (room_id,)):
         if not _is_live(m["seen_ns"], now):
             continue
-        if (m["tag"] or "").startswith("web:"):
+        if user_of(m["principal"]):
             continue          # a human: keyed user:<id> by their own row, never "unbound"
-        key = f"agent:{m['agent_id']}" if m["agent_id"] else None
+        key = m["principal"]
         if key in by_key:
             by_key[key]["present"] = True
             continue
@@ -2719,17 +2922,18 @@ def sweep_sessions(conn):
 
 # ---- membership / presence ---------------------------------------------------
 
-def _member(conn, room_id, name):
-    """The raw row, INCLUDING one marked left_ns. Callers that ask "is this agent
-    HERE" want _present() instead; this one exists for the two callers that need
-    to know a row exists at all -- readmit (a row you left is not a gap to fill)
-    and join (which clears the mark)."""
-    return conn.execute("SELECT * FROM members WHERE room_id=? AND name=?",
-                        (room_id, name)).fetchone()
+def _member(conn, room_id, principal):
+    """The identity's raw row in this room, INCLUDING one marked left_ns. Callers
+    that ask "is this room-name HERE" want _present() instead; this one exists
+    for the callers that need to know a row exists at all -- readmit (a row you
+    left is not a gap to fill) and join (which clears the mark)."""
+    return conn.execute("SELECT * FROM members WHERE room_id=? AND principal=?",
+                        (room_id, principal)).fetchone()
 
 
 def _present(conn, room_id, name):
-    """Is this agent in this room right now? A row marked left_ns is not."""
+    """Does a room-name resolve to a member here right now? A row marked left_ns
+    does not. `to=` names a room-name (DES-011 s3), so this is a NAME lookup."""
     return conn.execute(
         "SELECT 1 FROM members WHERE room_id=? AND name=? AND left_ns IS NULL",
         (room_id, name)).fetchone() is not None
@@ -2738,12 +2942,51 @@ def _present(conn, room_id, name):
 def recipient_agent_id(conn, room_id, name):
     """The identity a room-name denotes in this room right now, or None (a
     broadcast, a human, or a name nobody holds here). Reads the members row,
-    which join() stamps from the token -- the one place a room-name meets an id."""
+    which join() keys on the principal -- the one place a room-name meets an id."""
     if name == BROADCAST:
         return None
-    r = conn.execute("SELECT agent_id FROM members WHERE room_id=? AND name=?",
-                     (room_id, name)).fetchone()
-    return r["agent_id"] if r else None
+    r = conn.execute("SELECT principal FROM members WHERE room_id=? AND name=? "
+                     "AND left_ns IS NULL", (room_id, name)).fetchone()
+    return agent_of(r["principal"]) if r else None
+
+
+def room_name(conn, room_id, principal):
+    """What this room calls the identity: its members row's name (own name or
+    alias) while it is a member; its own name otherwise."""
+    r = conn.execute("SELECT name FROM members WHERE room_id=? AND principal=? "
+                     "AND left_ns IS NULL", (room_id, principal)).fetchone()
+    return r["name"] if r else _identity_name(conn, principal)
+
+
+def _room_name_for(conn, room_id, principal, name, now):
+    """The room-name a joining identity gets (DES-011 s2): the bare `name` unless
+    a LIVE member of another identity holds it here, then the alias
+    <owner>-<name>; an alias that is itself held live is refused naming both. A
+    stale holder (heartbeat gone) is reaped on the spot -- the reaper would have,
+    and a dead row must not decide a live agent's name."""
+    def holder(n):
+        h = conn.execute(
+            "SELECT principal, tag, seen_ns FROM members WHERE room_id=? AND name=? "
+            "AND left_ns IS NULL AND principal!=?", (room_id, n, principal)).fetchone()
+        if h and not _is_live(h["seen_ns"], now):
+            conn.execute("DELETE FROM members WHERE room_id=? AND principal=?",
+                         (room_id, h["principal"]))
+            return None
+        return h
+    if holder(name) is None:
+        return name
+    owner = _owner_name(conn, principal)
+    alias = f"{owner}-{name}"
+    try:
+        valid_name(alias)
+    except BusError:
+        raise BusError(f"name {name!r} is held by a live agent in this room and "
+                       f"{owner!r} cannot form the alias {alias!r} -- pick another name")
+    h2 = holder(alias)
+    if h2 is not None:
+        raise BusError(f"name {name!r} is held by a live agent in this room, and so is "
+                       f"the alias {alias!r} (tag {h2['tag']}). pick another.")
+    return alias
 
 
 def mint_agent(conn, owner_id, name, now=None):
@@ -2842,6 +3085,47 @@ def resurrect_agent(conn, agent_id, now=None):
     return dict(conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone())
 
 
+def rename_agent(conn, agent_id, new_name, now=None):
+    """Rename an identity: an UPDATE of the label, nothing else moves (DES-011
+    s2/s5). Checked against the same uniqueness as a mint (one live instance per
+    (owner, name)); the rename log closes the old row and opens the new one; and
+    every live membership whose room-name was the bare old name re-runs the
+    room-name check -- where the new name is held by another owner's agent in
+    that room the renamed agent takes the alias there; aliases it already holds
+    are untouched. Mail already sent to it keeps arriving: delivery keys on the
+    id (gate 9.1). Returns {name, rooms: {room_id: room-name}}."""
+    valid_name(new_name)
+    now = now or time.time_ns()
+    row = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+    if not row:
+        raise BusError(f"no such agent identity {agent_id!r}")
+    old = row["name"]
+    if old == new_name:
+        return {"name": old, "rooms": {}}
+    held = conn.execute(
+        "SELECT id FROM agents WHERE owner_id=? AND name=? AND retired_ns IS NULL AND id!=?",
+        (row["owner_id"], new_name, agent_id)).fetchone()
+    if held:
+        raise BusError(f"you already have a live agent named {new_name!r} ({held['id']}) "
+                       f"-- one owner's live agents cannot share a name")
+    principal = agent_principal(agent_id)
+    with tx(conn):
+        conn.execute("UPDATE agents SET name=? WHERE id=?", (new_name, agent_id))
+        conn.execute("UPDATE agent_names SET to_ns=? WHERE agent_id=? AND to_ns IS NULL",
+                     (now, agent_id))
+        record_agent_name(conn, agent_id, new_name, now)
+        renamed = {}
+        for m in conn.execute("SELECT room_id, name FROM members WHERE principal=? "
+                              "AND left_ns IS NULL", (principal,)).fetchall():
+            if m["name"] != old:
+                continue                    # an alias in force stays as it is
+            rname = _room_name_for(conn, m["room_id"], principal, new_name, now)
+            conn.execute("UPDATE members SET name=? WHERE room_id=? AND principal=?",
+                         (rname, m["room_id"], principal))
+            renamed[m["room_id"]] = rname
+    return {"name": new_name, "rooms": renamed}
+
+
 def release_agent_name(conn, agent_id, by, now=None):
     """Free a label so another account may claim it. Do not ship the lock without
     the key: a name held forever by a deleted account is a leak. Audited by the
@@ -2861,8 +3145,8 @@ def release_agent_name(conn, agent_id, by, now=None):
     return dict(r) if r else None
 
 
-def left_rooms(conn, name, rooms):
-    """Of `rooms`, the ones this name deliberately LEFT and has not rejoined.
+def left_rooms(conn, principal, rooms):
+    """Of `rooms`, the ones this identity deliberately LEFT and has not rejoined.
 
     The bare join() skips these (DES-007 4.5): a directive that a restart undoes
     is not a directive."""
@@ -2870,68 +3154,65 @@ def left_rooms(conn, name, rooms):
         return set()
     rooms = list(rooms)
     return {r["room_id"] for r in conn.execute(
-        f"SELECT room_id FROM members WHERE name=? AND left_ns IS NOT NULL "
-        f"AND room_id IN ({_ph(rooms)})", [name] + rooms)}
+        f"SELECT room_id FROM members WHERE principal=? AND left_ns IS NOT NULL "
+        f"AND room_id IN ({_ph(rooms)})", [principal] + rooms)}
 
 
 def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
          clear_leave=True):
-    """Sign up under `name` in one room. Fails if a *live* agent holds that name in
-    THIS room under a different tag -- names are per-room now, so the same name in
-    another room is not a collision. Replays only the last CATCHUP_NS of the room's
+    """Sign up in one room. WHO joins comes from the credential (a bound token's
+    identity, or the person behind a web: tag), never from `name`; `name` is the
+    label the identity wants, and the ROOM-NAME it gets is that name unless
+    another owner's live agent holds it here, then the alias <owner>-<name>
+    (DES-011 s2; refused if the alias is held too). Returns the room-name.
+    An alias is fixed for the life of the membership: a re-join of a live row
+    keeps whatever it was called. Replays only the last CATCHUP_NS of the room's
     backlog; fresh=True skips it.
 
     clear_leave=False refuses to resurrect a membership the agent deliberately
     ended: the caller has already decided this room is not one of them, and the
     upsert must not quietly undo a leave it was not asked to undo."""
     valid_name(name)
+    principal = _join_principal(conn, tag, token_id)
     now = time.time_ns()
-    cur = _member(conn, room_id, name)
-    if cur and cur["left_ns"] is None and cur["tag"] != tag \
-            and _is_live(cur["seen_ns"], now):
-        raise BusError(f"name {name!r} is held by a live agent (tag {cur['tag']}). pick another.")
-    # THE WRITER STAMPS THE IDENTITY -- from the token, its honest source. The
-    # v17 backfill filled members.agent_id and join() went on inserting NULL,
-    # which is the writer-never-moved defect for the third time tonight; here it
-    # made prune unable to tell whose seat a membership is, so pruning a retired
-    # identity took the live successor's seat with it.
-    aid_row = conn.execute("SELECT agent_id FROM tokens WHERE id=?",
-                           (token_id,)).fetchone() if token_id else None
-    aid = aid_row["agent_id"] if aid_row else None
+    cur = _member(conn, room_id, principal)
+    if cur and cur["left_ns"] is None:
+        rname = cur["name"]
+    else:
+        rname = _room_name_for(conn, room_id, principal, name, now)
     conn.execute(
-        "INSERT INTO members(room_id, name, tag, url, token_id, agent_id, "
+        "INSERT INTO members(room_id, principal, name, tag, url, token_id, "
         "joined_ns, seen_ns) VALUES(?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(room_id, name) DO UPDATE SET tag=excluded.tag, url=excluded.url, "
-        "token_id=excluded.token_id, agent_id=COALESCE(excluded.agent_id, agent_id), "
+        "ON CONFLICT(room_id, principal) DO UPDATE SET name=excluded.name, "
+        "tag=excluded.tag, url=excluded.url, token_id=excluded.token_id, "
         "seen_ns=excluded.seen_ns" +
         (", left_ns=NULL" if clear_leave else ""),
-        (room_id, name, tag, url, token_id, aid, now, now))
+        (room_id, principal, rname, tag, url, token_id, now, now))
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
     cutoff = now if fresh else now - CATCHUP_NS
     conn.execute(
-        "INSERT OR IGNORE INTO reads(message_id, agent, read_ns) "
-        "SELECT id, ?, ? FROM messages WHERE sender != ? AND ts_ns < ? AND room = ?",
-        (name, now, name, cutoff, room_id))
-    return name
+        "INSERT OR IGNORE INTO reads(message_id, principal, read_ns) "
+        "SELECT id, ?, ? FROM messages WHERE ts_ns < ? AND room = ?",
+        (principal, now, cutoff, room_id))
+    return rname
 
 
-def touch(conn, name, rooms):
-    """Heartbeat across every room the agent is a member of. Returns how many rows
-    it refreshed -- fewer than len(rooms) means a membership is MISSING, which is
-    the caller's cue to readmit() rather than carry on invisibly."""
-    valid_name(name)
+def touch(conn, principal, rooms):
+    """Heartbeat across every room the identity is a member of. Returns how many
+    rows it refreshed -- fewer than len(rooms) means a membership is MISSING,
+    which is the caller's cue to readmit() rather than carry on invisibly."""
     if not rooms:
         return 0
     rooms = list(rooms)
     return conn.execute(
-        f"UPDATE members SET seen_ns=? WHERE name=? AND room_id IN ({_ph(rooms)})",
-        [time.time_ns(), name] + rooms).rowcount
+        f"UPDATE members SET seen_ns=? WHERE principal=? AND room_id IN ({_ph(rooms)})",
+        [time.time_ns(), principal] + rooms).rowcount
 
 
 def readmit(conn, name, tag, rooms, token_id=None):
     """Re-establish membership that reap_stale removed, in every named room the
-    agent is not already in. Returns the rooms readmitted.
+    identity is not already in. Returns the rooms readmitted.
 
     WHY THIS EXISTS: membership is a CACHE of what the token already grants -- the
     broker maps a token to its rooms server-side and no room name is ever in an
@@ -2948,24 +3229,25 @@ def readmit(conn, name, tag, rooms, token_id=None):
     possible side effect for a recovery path, since the mail that piled up during
     the outage is exactly what the agent needs. This touches reads never.
 
-    No name-collision check, and that is not an omission: this inserts ONLY where
-    no row exists at all, so there is no holder to take over. A room where someone
-    else holds the name still has a row, so this skips it and join's refusal
-    remains the only path that can contest a name."""
+    Inserts ONLY where the identity has no row at all, so a row it left is not a
+    gap to fill; the room-name is assigned by the same rule as join (a healed
+    row is a membership like any other)."""
     valid_name(name)
+    principal = _join_principal(conn, tag, token_id)
     now = time.time_ns()
     back = []
     for room_id in list(rooms):
-        if _member(conn, room_id, name):
+        if _member(conn, room_id, principal):
             continue
+        rname = _room_name_for(conn, room_id, principal, name, now)
         conn.execute(
-            "INSERT INTO members(room_id, name, tag, token_id, joined_ns, seen_ns) "
-            "VALUES(?,?,?,?,?,?)", (room_id, name, tag, token_id, now, now))
+            "INSERT INTO members(room_id, principal, name, tag, token_id, joined_ns, seen_ns) "
+            "VALUES(?,?,?,?,?,?,?)", (room_id, principal, rname, tag, token_id, now, now))
         back.append(room_id)
     return back
 
 
-def leave(conn, name, rooms):
+def leave(conn, principal, rooms):
     """Sign off. Membership only -- messages are never touched.
 
     MARKS the row rather than deleting it, so a departure survives contact with
@@ -2978,8 +3260,8 @@ def leave(conn, name, rooms):
         return
     rooms = list(rooms)
     conn.execute(
-        f"UPDATE members SET left_ns=? WHERE name=? AND room_id IN ({_ph(rooms)})",
-        [time.time_ns(), name] + rooms)
+        f"UPDATE members SET left_ns=? WHERE principal=? AND room_id IN ({_ph(rooms)})",
+        [time.time_ns(), principal] + rooms)
 
 
 def whoami(conn, tag):
@@ -3020,11 +3302,11 @@ def deafness(conn, rooms, now=None):
     rows = conn.execute(
         f"SELECT mem.room_id, mem.name, min(m.ts_ns) AS stuck "
         f"FROM members mem JOIN messages m "
-        f"  ON m.room = mem.room_id AND m.recipient = mem.name "
+        f"  ON m.room = mem.room_id AND 'agent:' || m.recipient_agent_id = mem.principal "
         f"WHERE mem.room_id IN ({_ph(rooms)}) AND mem.left_ns IS NULL "
         f"  AND m.ts_ns <= ? AND m.ts_ns > mem.seen_ns "
         f"  AND NOT EXISTS (SELECT 1 FROM reads r "
-        f"                  WHERE r.message_id = m.id AND r.agent = mem.name) "
+        f"                  WHERE r.message_id = m.id AND r.principal = mem.principal) "
         f"GROUP BY mem.room_id, mem.name",
         rooms + [now - DEAF_AFTER_NS]).fetchall()
     return {(r["room_id"], r["name"]): r["stuck"] for r in rows}
@@ -3073,11 +3355,11 @@ def activity(conn, rooms, now=None):
     for r in conn.execute(
             f"SELECT mem.room_id, mem.name, min(m.ts_ns) AS oldest "
             f"FROM members mem JOIN messages m "
-            f"  ON m.room = mem.room_id AND m.recipient = mem.name "
+            f"  ON m.room = mem.room_id AND 'agent:' || m.recipient_agent_id = mem.principal "
             f"WHERE mem.room_id IN ({_ph(rooms)}) AND mem.left_ns IS NULL "
             f"  AND m.ts_ns > mem.seen_ns "
             f"  AND NOT EXISTS (SELECT 1 FROM reads r "
-            f"                  WHERE r.message_id = m.id AND r.agent = mem.name) "
+            f"                  WHERE r.message_id = m.id AND r.principal = mem.principal) "
             f"GROUP BY mem.room_id, mem.name", rooms).fetchall():
         stuck[(r["room_id"], r["name"])] = r["oldest"]
 
@@ -3096,7 +3378,7 @@ def activity(conn, rooms, now=None):
     return out
 
 
-def agents_seen(conn, rooms, exclude=()):
+def agents_seen(conn, rooms, exclude=(), present=True):
     """Every agent name the HIVE still knows in these rooms, with what it has
     of theirs. Operator requirement 2026-07-30: an agent whose container and
     files were erased is NOT unrecoverable -- its messages, lessons and its
@@ -3149,7 +3431,10 @@ def agents_seen(conn, rooms, exclude=()):
     # user's container, anywhere. Carried so a caller never offers to
     # "recreate" an agent that is currently working: remembered by the hive
     # and gone are different facts, and only the second is a recovery case.
-    here = {a["name"] for a in presence(conn, rooms)}
+    # present=False for the migration-time caller (unresolved_agent_names inside
+    # _upgrade_v17): presence() reads the CURRENT members shape, which an older
+    # database does not have yet, and the refusal list needs no liveness.
+    here = {a["name"] for a in presence(conn, rooms)} if present else set()
     for name, e in seen.items():
         e["present"] = name in here
     return sorted(seen.values(), key=lambda e: e["name"])
@@ -3174,7 +3459,7 @@ def unresolved_agent_names(conn):
     rooms = [r["id"] for r in conn.execute("SELECT id FROM rooms")]
     people = {r["name"] for r in conn.execute("SELECT name FROM users")}
     claimed = {r["name"] for r in conn.execute("SELECT name FROM agents")}
-    return [a for a in agents_seen(conn, rooms, exclude=people)
+    return [a for a in agents_seen(conn, rooms, exclude=people, present=False)
             if a["name"] not in claimed]
 
 
@@ -3215,7 +3500,7 @@ def presence(conn, rooms):
     return [
         {"name": r["name"], "tag": r["tag"], "url": r["url"], "room": r["room_id"],
          "room_name": r["room_name"], "token_id": r["token_id"],
-         "live": _is_live(r["seen_ns"], now),
+         "principal": r["principal"], "live": _is_live(r["seen_ns"], now),
          "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"]}
         for r in conn.execute(
             f"SELECT m.*, ro.name AS room_name FROM members m JOIN rooms ro ON ro.id=m.room_id "
@@ -3228,36 +3513,37 @@ def reap_stale(conn):
     """Drop members whose heartbeat has gone stale. Named away from prune_agent on
     purpose: this reaps presence, that erases a trace. Two very different verbs."""
     now = time.time_ns()
-    dead = [(r["room_id"], r["name"]) for r in
-            conn.execute("SELECT room_id, name, seen_ns FROM members")
+    dead = [(r["room_id"], r["principal"], r["name"]) for r in
+            conn.execute("SELECT room_id, principal, name, seen_ns FROM members")
             if not _is_live(r["seen_ns"], now)]
-    for room_id, name in dead:
-        conn.execute("DELETE FROM members WHERE room_id=? AND name=?", (room_id, name))
-    return [n for _, n in dead]
+    for room_id, principal, _n in dead:
+        conn.execute("DELETE FROM members WHERE room_id=? AND principal=?", (room_id, principal))
+    return [n for _, _, n in dead]
 
 
-def known(conn, name, rooms):
-    """Is this name addressable here? A row marked left_ns is NOT: leaving means
-    a unicast to you is refused, same as never having joined."""
+def known(conn, principal, rooms):
+    """Is this identity a member of any of these rooms? A row marked left_ns is
+    NOT: leaving means a unicast to you is refused, same as never having joined."""
     if not rooms:
         return False
     rooms = list(rooms)
     return conn.execute(
-        f"SELECT 1 FROM members WHERE name=? AND left_ns IS NULL "
+        f"SELECT 1 FROM members WHERE principal=? AND left_ns IS NULL "
         f"AND room_id IN ({_ph(rooms)})",
-        [name] + rooms).fetchone() is not None
+        [principal] + rooms).fetchone() is not None
 
 
 # ---- messages ----------------------------------------------------------------
 
-def _wake_targets(conn, sender, recipient, room_id):
+def _wake_targets(conn, principal, recipient, room_id):
+    """Room-names to ring: the one addressed, or every live member but the sender."""
     if recipient != BROADCAST:
         return [recipient]
     now = time.time_ns()
     return [r["name"] for r in conn.execute(
-                "SELECT name, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL",
+                "SELECT name, principal, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL",
                 (room_id,))
-            if r["name"] != sender and _is_live(r["seen_ns"], now)]
+            if r["principal"] != principal and _is_live(r["seen_ns"], now)]
 
 
 def resolve_send_room(rooms, room=None, parent_room=None):
@@ -3284,9 +3570,12 @@ def resolve_send_room(rooms, room=None, parent_room=None):
     raise AmbiguousRoom([{"id": r, "name": n} for r, n in rooms.items()])
 
 
-def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=None,
+def send(conn, principal, recipient, body, subject="", reply_to=None, attachments=None,
          room=None):
-    """Insert a message. recipient='*' broadcasts.
+    """Insert a message from `principal` (agent:<id> | user:<id>, DES-011
+    s6.1(b)); it is written under the ROOM-NAME the room calls that identity
+    (its members row, else its own name). recipient='*' broadcasts; otherwise it
+    is a room-name (s3), resolved here to the identity it denotes.
 
     reply_to threads this under a parent. Pass one id for a normal reply, or a
     list of ids to re-link/merge several branches (the message gets many parents).
@@ -3302,9 +3591,12 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
 
     Returns {id, thread_id, parents, wake:[names]}.
     """
-    valid_name(sender)
     if not room:
         raise BusError("room is required")
+    sender = room_name(conn, room, principal)
+    if not sender:
+        raise BusError(f"no such identity: {principal!r}")
+    valid_name(sender)
     # Before anything is written: a message that carries one hostile attachment is
     # refused whole rather than stored with the attachment dropped. A caller who
     # gets a message id back is entitled to assume the attachment went with it.
@@ -3331,18 +3623,13 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
             "body, room, sender_agent_id, recipient_agent_id, ts_ns) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (thread_id, parent_id, sender, recipient, subject, body, room,
-             # THE WRITER LEARNS THE IDENTITY TOO. The v18 backfill filled this
-             # column for all of history and send() went on inserting NULL, so
-             # every message after that deploy was unattributed -- 39 of them on
-             # the operator's box within the hour. A migration that fills a
-             # column while the write path ignores it is the same defect as a
-             # data move whose readers did not move: the two halves of one
-             # cutover, shipped apart.
-             agent_id_for(conn, sender),
-             # And the recipient's, resolved from the ROOM-NAME at send (DES-011
-             # s3): the members row that holds this name in this room. A human
-             # member has no identity, so a message to a person stays NULL here.
-             recipient_agent_id(conn, room, recipient), now))
+             # BOTH IDENTITIES FROM THE STORE'S OWN KEYS: the sender's from the
+             # principal the caller proved (the credential -- never agent_id_for
+             # (name), ambiguous the day two owners run one name; the v18 lesson
+             # is that a column the writer skips is a backfill that rots), the
+             # recipient's from the members row the room-name resolves to
+             # (DES-011 s3). A person on either side is NULL.
+             agent_of(principal), recipient_agent_id(conn, room, recipient), now))
         mid = cur.lastrowid
         # Manual FTS sync (DES-001 S1): external-content tables index nothing on their
         # own; every insert here must be mirrored or the message is unsearchable.
@@ -3361,8 +3648,8 @@ def send(conn, sender, recipient, body, subject="", reply_to=None, attachments=N
                          "VALUES(?,?,?,?,?,?)",
                          (mid, a["url"], a.get("name"), a.get("bytes"),
                           1 if a.get("clip") else 0, a.get("duration_s")))
-    return {"id": mid, "thread_id": thread_id, "parents": parents,
-            "wake": _wake_targets(conn, sender, recipient, room)}
+    return {"id": mid, "thread_id": thread_id, "parents": parents, "sender": sender,
+            "wake": _wake_targets(conn, principal, recipient, room)}
 
 
 def _msg(r):
@@ -3415,20 +3702,29 @@ def _with_artifacts(conn, msgs):
     return msgs
 
 
-def inbox(conn, agent, rooms):
-    """Unread messages addressed to `agent` (direct or broadcast) across ALL of the
-    caller's rooms, oldest first. Each message carries its room, which is what lets
-    an agent reply into the room a message came from."""
-    valid_name(agent)
+def inbox(conn, principal, rooms):
+    """Unread messages addressed to the identity (direct, by recipient_agent_id,
+    or broadcast) across ALL of the caller's rooms, oldest first -- whatever the
+    room calls it. Each message carries its room, which is what lets an agent
+    reply into the room a message came from. A principal with no agent identity
+    (an unbound token: reads answer, 11252) sees the broadcasts -- nothing is
+    ever addressed to nobody and nobody has acked for it."""
     if not rooms:
         return []
     rooms = list(rooms)
+    aid = agent_of(principal)
+    if not aid:
+        rows = conn.execute(
+            f"{_SEL} WHERE m.room IN ({_ph(rooms)}) AND m.recipient=? ORDER BY m.id",
+            rooms + [BROADCAST]).fetchall()
+        return _with_attachments(conn, [_msg(r) for r in rows])
     rows = conn.execute(
-        f"{_SEL} WHERE m.room IN ({_ph(rooms)}) AND (m.recipient=? OR m.recipient=?) "
-        f"AND m.sender!=? "
-        f"AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id=m.id AND r.agent=?) "
+        f"{_SEL} WHERE m.room IN ({_ph(rooms)}) "
+        f"AND (m.recipient_agent_id=? OR m.recipient=?) "
+        f"AND COALESCE(m.sender_agent_id, '')!=? "
+        f"AND NOT EXISTS (SELECT 1 FROM reads r WHERE r.message_id=m.id AND r.principal=?) "
         f"ORDER BY m.id",
-        rooms + [agent, BROADCAST, agent, agent]).fetchall()
+        rooms + [aid, BROADCAST, aid, principal]).fetchall()
     return _with_attachments(conn, [_msg(r) for r in rows])
 
 
@@ -3606,53 +3902,58 @@ def graph(conn, thread_id, rooms):
 
 
 def readers(conn, message_id, exclude=None):
-    """Agents that have read (acked or auto-caught-up) a message, sorted.
-    exclude drops one name -- a sender's own read never counts as being seen."""
-    return sorted(r["agent"] for r in conn.execute(
-        "SELECT agent FROM reads WHERE message_id=? AND agent!=?",
-        (message_id, exclude or "")))
+    """Names of those who have read (acked or auto-caught-up) a message, sorted;
+    rendered from the identity (its CURRENT name, DES-011 s4). exclude drops one
+    principal -- a sender's own read never counts as being seen."""
+    return sorted(filter(None, (
+        _identity_name(conn, r["principal"]) for r in conn.execute(
+            "SELECT principal FROM reads WHERE message_id=? AND principal!=?",
+            (message_id, exclude or "")))))
 
 
-def delete_if_unseen(conn, message_id, sender, rooms):
-    """Retract a message nobody has consumed yet: sender-only, and refused the moment
-    any reads row or reply edge references it. Used by the web UI to pull back a
-    mistaken broadcast before anyone has read it."""
+def delete_if_unseen(conn, message_id, principal, rooms):
+    """Retract a message nobody has consumed yet: sender-only (by identity), and
+    refused the moment any reads row or reply edge references it. Used by the web
+    UI to pull back a mistaken broadcast before anyone has read it."""
     if not rooms:
         raise BusError(f"no such message in this room: {message_id}")
     rooms = list(rooms)
     with tx(conn):
         r = conn.execute(
-            f"SELECT sender FROM messages WHERE id=? AND room IN ({_ph(rooms)})",
-            [message_id] + rooms).fetchone()
+            f"SELECT sender, sender_agent_id, room FROM messages "
+            f"WHERE id=? AND room IN ({_ph(rooms)})", [message_id] + rooms).fetchone()
         if not r:
             raise BusError(f"no such message in this room: {message_id}")
-        if r["sender"] != sender:
+        mine = (agent_of(principal) and r["sender_agent_id"] == agent_of(principal)) or \
+               (user_of(principal) and r["sender_agent_id"] is None
+                and r["sender"] == _identity_name(conn, principal))
+        if not mine:
             raise BusError("not your message")
-        if conn.execute("SELECT 1 FROM reads WHERE message_id=? AND agent!=?",
-                        (message_id, sender)).fetchone():
+        if conn.execute("SELECT 1 FROM reads WHERE message_id=? AND principal!=?",
+                        (message_id, principal)).fetchone():
             raise BusError("already read by someone -- cannot retract")
         if conn.execute("SELECT 1 FROM links WHERE parent_id=?", (message_id,)).fetchone():
             raise BusError("already replied to -- cannot retract")
         _delete_messages(conn, [message_id])
 
 
-def ack(conn, agent, message_ids, rooms):
-    """Mark messages read for `agent`. Idempotent. Ids outside the caller's rooms,
-    or not addressed to it, are IGNORED rather than raising -- an ack is a batch and
-    one stale id must not fail the rest. Returns {acked, ignored}."""
-    valid_name(agent)
+def ack(conn, principal, message_ids, rooms):
+    """Mark messages read for the identity. Idempotent. Ids outside the caller's
+    rooms, or not addressed to it, are IGNORED rather than raising -- an ack is a
+    batch and one stale id must not fail the rest. Returns {acked, ignored}."""
+    aid = agent_of(principal)
     ids = [int(m) for m in message_ids]
-    if not ids or not rooms:
+    if not ids or not rooms or not aid:
         return {"acked": 0, "ignored": ids}
     rooms = list(rooms)
     ok = {r["id"] for r in conn.execute(
         f"SELECT id FROM messages WHERE id IN ({_ph(ids)}) AND room IN ({_ph(rooms)}) "
-        f"AND (recipient=? OR recipient=?)",
-        ids + rooms + [agent, BROADCAST])}
+        f"AND (recipient_agent_id=? OR recipient=?)",
+        ids + rooms + [aid, BROADCAST])}
     now = time.time_ns()
     conn.executemany(
-        "INSERT OR IGNORE INTO reads(message_id, agent, read_ns) VALUES(?,?,?)",
-        [(mid, agent, now) for mid in ok])
+        "INSERT OR IGNORE INTO reads(message_id, principal, read_ns) VALUES(?,?,?)",
+        [(mid, principal, now) for mid in ok])
     return {"acked": len(ok), "ignored": [i for i in ids if i not in ok]}
 
 
@@ -3739,30 +4040,16 @@ def prune_agent(conn, agent_id, room_id):
         raise BusError(f"no such identity: {agent_id} -- prune takes an agents.id; "
                        f"a bare name cannot say WHICH history it means")
     name = row["name"]
-    sole = conn.execute("SELECT count(*) FROM agents WHERE name=?",
-                        (name,)).fetchone()[0] == 1
     # The receipt is measured BEFORE the delete: `citing` is found through his
     # message ids, so afterwards there is nothing left to find it by.
     hive = agent_hive_footprint(conn, name, room_id)
     with tx(conn):
-        # SENT: his trace, scoped by identity -- broadcasts included, because
-        # sender_agent_id says WHICH instance spoke. RECEIVED direct mail is
-        # name-keyed (recipient carries no id) and '*' never matches
-        # (NAME_RE forbids it), so broadcasts he received survive; with two
-        # identities under the name, received mail cannot be split and is LEFT,
-        # counted in the return rather than guessed at.
-        if sole:
-            doomed = [r["id"] for r in conn.execute(
-                "SELECT id FROM messages WHERE room=? AND "
-                "(sender_agent_id=? OR recipient=?)", (room_id, agent_id, name))]
-            left_received = 0
-        else:
-            doomed = [r["id"] for r in conn.execute(
-                "SELECT id FROM messages WHERE room=? AND sender_agent_id=?",
-                (room_id, agent_id))]
-            left_received = conn.execute(
-                "SELECT count(*) FROM messages WHERE room=? AND recipient=?",
-                (room_id, name)).fetchone()[0]
+        # SENT and RECEIVED, both scoped by IDENTITY (v27 gave the recipient
+        # side its id): broadcasts he sent go, broadcasts he received stay --
+        # they were everyone's.
+        doomed = [r["id"] for r in conn.execute(
+            "SELECT id FROM messages WHERE room=? AND "
+            "(sender_agent_id=? OR recipient_agent_id=?)", (room_id, agent_id, agent_id))]
         dset, new_roots = set(doomed), []
         if doomed:
             # Survivors whose PRIMARY parent dies. Repair BEFORE the delete.
@@ -3789,14 +4076,13 @@ def prune_agent(conn, agent_id, room_id):
         # belonging to a different repair and stamp it with the wrong thread_id.
         for r in new_roots:
             _rethread(conn, r)
-        conn.execute("DELETE FROM reads WHERE agent_id=?", (agent_id,))
+        conn.execute("DELETE FROM reads WHERE principal=?", (agent_principal(agent_id),))
         conn.execute("DELETE FROM voice_assignments WHERE room_id=? AND speaker=?",
-                     (room_id, f"agent:{agent_id}"))
+                     (room_id, agent_principal(agent_id)))
         # The membership dies only if it is THIS identity's: a live successor
         # under the same label keeps its seat.
-        conn.execute("DELETE FROM members WHERE room_id=? AND name=? "
-                     "AND (agent_id=? OR agent_id IS NULL)",
-                     (room_id, name, agent_id))
+        conn.execute("DELETE FROM members WHERE room_id=? AND principal=?",
+                     (room_id, agent_principal(agent_id)))
         orphans = _orphaned_uploads(conn, name, room_id)
         if orphans:
             conn.execute(f"DELETE FROM files WHERE stored IN ({_ph(orphans)})", orphans)
@@ -3805,8 +4091,7 @@ def prune_agent(conn, agent_id, room_id):
     # is what makes the two halves testable apart and impossible to drift: the route
     # deletes exactly what the store said it orphaned.
     return {"messages": len(doomed), "reparented": len(new_roots),
-            "files": orphans, "hive": hive, "name": name,
-            "left_received": left_received}
+            "files": orphans, "hive": hive, "name": name}
 
 
 def _orphaned_uploads(conn, name, room_id):
@@ -3972,38 +4257,6 @@ def _chain_info(conn, row):
         if depth > 100:                        # a cycle would be a bug, not a chain
             break
     return depth, fork
-
-
-def agent_id_for(conn, name):
-    """The identity behind a bus NAME, or None for a human or an unknown name.
-
-    THIS IS THE WRITE-TIME RESOLVER AND ITS RULES ARE WRITE-TIME RULES. A
-    message being written NOW is being written by the live instance -- that is
-    what live means -- so a live row wins outright. With no live row and several
-    retired ones, the answer is None: an unattributed message is honest and an
-    attributed-to-the-wrong-agent one is not, and the migration-time version of
-    that same guess is exactly what handed one agent's history to another
-    (architect, msg 9000). None also means "not an agent": a human's messages
-    carry a name and no identity, and inventing one is the failure the backfill
-    refuses at migration time.
-    """
-    rows = conn.execute(
-        "SELECT id, retired_ns FROM agents WHERE name=?", (name,)).fetchall()
-    live = [r for r in rows if r["retired_ns"] is None]
-    if len(live) == 1:
-        return live[0]["id"]
-    if live:
-        # idx_agents_live is UNIQUE(owner_id, name): at most one live row per
-        # name PER OWNER, so two accounts can each run a live agent under this
-        # name and there are two speakers to choose between. Picking one
-        # attributes a message across a tenancy boundary; None does not
-        # (architect ruling 9005/9009 -- the first version's comment here cited
-        # that index as if it were global, which is a claim the schema does not
-        # make). This resolver dies entirely when send() takes the identity
-        # from the caller's token, which is the enforcement slice's first
-        # commit and this guard must not survive it.
-        return None
-    return rows[0]["id"] if len(rows) == 1 else None
 
 
 def agent_scope(conn, token_id):
