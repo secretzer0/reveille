@@ -253,7 +253,12 @@ def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
     assert "m.addEventListener('click',()=>{if(listenVad)listenStop();else listenStart();});" in ear
     assert "document.addEventListener('visibilitychange',()=>{if(document.hidden)listenStop();});" in ear
     assert "window.addEventListener('pagehide',listenStop);" in ear
-    assert "toast('microphone: '+(e.message||e));return;}" in ear, "a mic error leaves listening OFF"
+    assert "}catch(e){listenPaint('');toast(micWhy(e));return;}" in ear, "a mic error leaves listening OFF"
+    # 11559 (iPhone/Chrome): a NotAllowedError is the phone's answer, not the page's --
+    # the toast names where to allow the microphone instead of quoting WebKit.
+    assert "function micWhy(e){" in UI and "e.name==='NotAllowedError'" in UI and \
+        "Settings > (Safari or Chrome) > Microphone" in UI
+    assert "catch(e){toast(micWhy(e));return;}" in UI, "talk says the same"
     assert "m.classList.toggle('on',!!listenVad);m.setAttribute('aria-pressed',listenVad?'true':'false');" in ear
     listen = ear[:ear.index("const EAR_AUTOSEND_MS=")]
     for persisted in ("localStorage", "sessionStorage", "document.cookie"):
