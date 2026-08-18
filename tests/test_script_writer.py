@@ -384,3 +384,39 @@ def test_two_scripts_finishing_on_two_threads_both_leave_rows(llama, world):
         time.sleep(0.05)
     assert store.script_get(c, world["mid"])["text"] == "First one. Second one."
     assert store.script_get(c, m2["id"])["text"] == "First one. Second one."
+
+
+def test_live_before_asked_and_a_click_gets_its_own_budget(llama, world, caplog):
+    """Ruling 11528: the writer's queue orders (asked, mid) -- a live message's
+    first sentence never waits behind a burst of clicks on history -- and an
+    ASKED item carries the flat SCRIPT_ASKED_BUDGET_S instead of the first-sound
+    slope, so a click on history scripts where a live miss would fall to terse.
+    One INFO line per script made, countable."""
+    while not daemon._script_q.empty():
+        daemon._script_q.get_nowait()
+    while not daemon._tts_q.empty():
+        daemon._tts_q.get_nowait()
+    _Llama.tokens = ["Slow ", "start ", "here. ", "Then more."]
+    _Llama.pace = 0.7                                        # ~1.4 s to the first sentence
+    n = world["item"]
+    a_id = store.send(world["c"], "quark", "*", "old one", room=world["room"])["id"]
+    l_id = store.send(world["c"], "quark", "*", "live one", room=world["room"])["id"]
+    asked = (a_id,) + n[1:]                                  # a click on history
+    live = (l_id,) + n[1:]                                   # a live arrival, newer id
+    daemon._script_q.put(asked, asked=True)
+    daemon._script_q.put(live)                               # put after, dequeued FIRST
+    daemon._script_q.put(None)
+    monkeypatch_budget = 1.0                                 # live budget: too short for 1.5 s -> terse
+    with caplog.at_level("INFO"):
+        daemon._script_worker(llama, "qwen", "", monkeypatch_budget)
+        got = [daemon._tts_q.get_nowait() for _ in range(2)]
+        assert [g[0] for g in got] == [live[0], asked[0]], "live first, then the click"
+        assert isinstance(got[0][3], str) and got[0][5] is False, "the live one missed 1.0 s: terse, not kept"
+        assert isinstance(got[1][3], daemon._SentenceStream) and got[1][5] is True, \
+            "the click had SCRIPT_ASKED_BUDGET_S and scripted"
+        _drain_stream(got[1][3])
+        assert daemon.SCRIPT_ASKED_BUDGET_S == 20.0
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and f"script: {asked[0]} made (" not in caplog.text:
+            time.sleep(0.05)                                 # the row + INFO land on the helper thread
+        assert f"script: {asked[0]} made (" in caplog.text, "one INFO per script made"

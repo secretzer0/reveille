@@ -465,7 +465,7 @@ wheels = [
 
 [[package]]
 name = "reveille"
-version = "0.2.137"
+version = "0.2.138"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

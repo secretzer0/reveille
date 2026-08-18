@@ -157,6 +157,16 @@ current, holder)`:
   POSTs `/audio/<mid>` first and follows the state, so the next click with the
   writer up makes the script and THEN the durable file. Boot runs
   `_sweep_terse_renditions` once for files that became durable before the rule.
+  RULED 11528 (operator 11523), 0.2.138: **live before asked.** The writer's
+  queue is a priority queue on `(asked, mid)`: a live arrival's first sentence
+  never waits behind a burst of on-demand clicks on history; a click waits behind
+  live and carries its own flat budget `SCRIPT_ASKED_BUDGET_S` = 20 s (a click is
+  not a first-sound event; a terse click is pure waste under the rule above). The
+  live budget (`REVEILLE_SCRIPT_TIMEOUT` + 1.5 ms/char) is unchanged. One INFO
+  line per script made, so misses and makes are countable side by side. The
+  contention that motivated it: the ear (whisper) and vLLM share GPU0 on the
+  pinned box -- if they keep colliding, the fix is placement (ear to GPU1), not a
+  broker constant.
 - Enqueue: `_tts_enqueue(mid, room, speaker_key, speaker_name, subject, body)` — no
   listener → drop; listener and the writer on and a persona resolved → the script
   queue; else the synth queue with the terse text.
