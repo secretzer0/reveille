@@ -122,29 +122,24 @@ clip renders as a play control through `vPlayClip` with its length; the
 composer's chip says CLIP m:ss. Not in slice 1: the "record a clip" control
 (slice 2), transcript into the body (slice 3).
 
-## 4.2 Slice 2 as built (0.2.161)
+## 4.2 Record a clip -- BUILT 0.2.161, REMOVED BY THE OPERATOR 0.2.168
 
-A `clip` button beside talk and listen, shown by the same rule (`me.ear`).
-It is a plain toggle on every device -- a hold fights a phone's text
-selection, and a minute-long take is not a hold.
+The clip button (a recorder beside talk and listen, 60 s cap, uploaded through
+the ordinary path and bound as the message's voice) shipped in 0.2.161 and was
+stripped in 0.2.168 on the operator's word (11831: "absolutely worthless ...
+it serves no purpose at this point"), ruled 11832. EPIC-001 row 5 reads
+"built, removed on operator word".
 
-- Records with the ear's own `vRecStart`/`vRecStop` (DES-013 s3): one capture
-  path on this page, one silence refusal, one NO SIGNAL warning while
-  recording rather than after.
-- `CLIP_MAX_S = 60`: at the cap the take CLOSES and is kept, never discarded.
-  Under 0.5 s, or silent, it is refused by name.
-- Uploads through the ORDINARY `uploadFile` -> `POST /upload`, so slice 1's
-  transcode is the only audio path: the take goes as `audio/wav` named
-  `clip-<iso>.wav` and comes back as the converted `{url, name, bytes, clip,
-  duration_s}`. Nothing new on the broker.
-- From there it is an ordinary attachment: the composer chip says CLIP m:ss,
-  and `send()` binds it as the message's voice exactly as a dropped file.
-- INVARIANT: it never sends. The human presses Send.
-- Talk and clip never steal each other's recorder (each yields while the
-  other holds it), and starting a clip ends hands-free listening.
+What was removed is the BUTTON and its take: `#clip`, `clipStart`/`clipStop`,
+`CLIP_MAX_S`, and their gates. Nothing else moved -- the ear's own recorder
+(`vRecStart`/`vRecStop`), talk, listen, slice 1's transcode-at-upload, the
+CLIP chip on a converted attachment and its player are all untouched, because
+an UPLOADED .wav or .mp3 is still a clip and still plays where it landed.
 
-Not in this slice: the phone shell's own recorder (DES-015 s5), and STT of
-the clip into the body (slice 3).
+Still wanted, on the backlog and unscheduled (operator 11834): the clip
+TRANSCRIPT into the message body, so an externally recorded file can be
+transcribed and worked on by agents. That is a different feature from a
+record button, and it is why the upload half stays.
 
 ## 4.3 An attachment you can play (amendment, as built 0.2.163)
 
