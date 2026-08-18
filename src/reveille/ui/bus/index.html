@@ -3875,11 +3875,12 @@ let listenCapTimer=null;
 let listenChain=Promise.resolve(); // takes post one at a time (the broker holds one slot)
 function listenPaint(state){
  const m=$('listen');if(!m)return;
- m.classList.toggle('on',!!listenVad);m.setAttribute('aria-pressed',listenVad?'true':'false');
+ const on=!!(listenVad||listenSimple);
+ m.classList.toggle('on',on);m.setAttribute('aria-pressed',on?'true':'false');
  $('listenState').textContent=state||'';
 }
 async function listenStart(){
- if(listenVad||vRec)return;                       // not while a talk take is open
+ if(listenVad||listenSimple||vRec)return;          // not while a talk take is open
  try{vCtxUp();earconLoad();}catch(e){}           // the mic gesture doubles as the audio unlock; the bell decodes now
  if(!window.vad||!window.vad.MicVAD){toast('ear: the listener did not load');return;}
  listenPaint('loading the listener...');
@@ -3887,7 +3888,13 @@ async function listenStart(){
  try{
   v=await vad.MicVAD.new({
    model:'v5',baseAssetPath:'/ui/vad/',onnxWASMBasePath:'/ui/vad/',
-   ortConfig:o=>{o.env.wasm.numThreads=1;},      // no cross-origin isolation needed
+   // iOS Safari refuses the threaded/proxied build's WebAssembly.Memory
+   // (operator 11718: "[wasm] RangeError: Out of memory, [cpu] previous call
+   // to initWasm() failed"), so: one thread, no proxy worker, and the simd
+   // artifact by name. If it still refuses, listenSimple below takes over --
+   // the button is never dead.
+   ortConfig:o=>{o.env.wasm.numThreads=1;o.env.wasm.proxy=false;
+    o.env.wasm.simd=true;},
    redemptionMs:EAR_SILENCE_MS,minSpeechMs:250,preSpeechPadMs:300,
    submitUserSpeechOnPause:true,                  // the cap closes a take by pausing
    startOnLoad:false,                             // we start it, below, once it exists
@@ -3903,10 +3910,81 @@ async function listenStart(){
     for(const t of st.getAudioTracks())t.addEventListener('ended',listenStop);return st;},
   });
   await v.start();
- }catch(e){listenPaint('');toast(micWhy(e));return;}
+ }catch(e){
+  // A MIC refusal is the phone's answer and must be said as such; anything
+  // else here is the LISTENER failing to start (iOS WASM), and that falls
+  // back rather than dying (architect 11719).
+  if(e&&/NotAllowed|NotFound|NotReadable|SecurityError/.test(e.name||'')){
+   listenPaint('');toast(micWhy(e));return;}
+  console.warn('vad unavailable, falling back:',e);
+  return listenSimpleStart(e);
+ }
  listenVad=v;listenPaint('listening');earcon('bip');
 }
+// ---- THE FALLBACK EAR (architect 11719): where the ONNX VAD cannot start --
+// iOS Safari refuses its WASM memory -- listening still works, with a plain
+// loudness gate on the same PCM the push-to-talk recorder takes: a take opens
+// when the mic is loud enough for EAR_OPEN_MS, closes after the SAME
+// EAR_SILENCE_MS of quiet (one knob, ruled 11355), caps at EAR_TAKE_CAP_MS,
+// and goes through the SAME POST /stt. It cannot tell speech from a slammed
+// door, so it says so in the toast; a dead listen button says nothing at all.
+// ponytail: loudness gate, not a model -- if a phone's noise floor defeats it,
+// the upgrade is a small energy+zero-crossing test, still no WASM.
+const EAR_OPEN_RMS=0.02, EAR_CLOSE_RMS=0.012, EAR_OPEN_MS=150;
+let listenSimple=null;      // {ctx,stream,node,...} while the fallback listens
+function listenSimpleStart(why){
+ listenPaint('starting simple listening...');
+ return navigator.mediaDevices.getUserMedia(
+   {audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}})
+ .then(stream=>{
+  const ctx=new (window.AudioContext||window.webkitAudioContext)();
+  const src=ctx.createMediaStreamSource(stream);
+  const node=ctx.createScriptProcessor(4096,1,1);   // same ceiling as vRecStart
+  const g={ctx,stream,node,rate:ctx.sampleRate,chunks:[],pre:[],open:false,
+           loudMs:0,quietMs:0,ms:0};
+  const frameMs=()=>4096/g.rate*1000;
+  node.onaudioprocess=e=>{
+   if(listenSimple!==g)return;
+   const d=e.inputBuffer.getChannelData(0);
+   let sum=0;for(let i=0;i<d.length;i++)sum+=d[i]*d[i];
+   const rms=Math.sqrt(sum/d.length), dt=frameMs();
+   if(!g.open){
+    // A short pre-roll is kept so a take never starts mid-word.
+    g.pre.push(new Float32Array(d));
+    while(g.pre.length>Math.ceil(300/dt))g.pre.shift();
+    g.loudMs=rms>EAR_OPEN_RMS?g.loudMs+dt:0;
+    if(g.loudMs>=EAR_OPEN_MS){g.open=true;g.ms=0;g.quietMs=0;
+     g.chunks=g.pre.slice();g.pre=[];listenPaint('hearing you...');
+     if(typeof pauseSendAbort==='function')pauseSendAbort(true);}
+    return;
+   }
+   g.chunks.push(new Float32Array(d));g.ms+=dt;
+   g.quietMs=rms<EAR_CLOSE_RMS?g.quietMs+dt:0;
+   if(g.quietMs>=EAR_SILENCE_MS||g.ms>=EAR_TAKE_CAP_MS)listenSimpleClose(g);
+  };
+  const sink=ctx.createGain();sink.gain.value=0;   // mic stays off the speakers
+  src.connect(node);node.connect(sink);sink.connect(ctx.destination);
+  for(const t of stream.getAudioTracks())t.addEventListener('ended',listenStop);
+  listenSimple=g;listenPaint('listening');earcon('bip');
+  toast('this browser cannot run the voice detector -- listening with simple '+
+        'loudness detection instead',true);
+ }).catch(e=>{listenPaint('');toast(micWhy(e));});
+}
+function listenSimpleClose(g){
+ const n=g.chunks.reduce((a,c)=>a+c.length,0);
+ const f32=new Float32Array(n);let o=0;
+ for(const c of g.chunks)  {f32.set(c,o);o+=c.length;}
+ g.chunks=[];g.open=false;g.loudMs=0;g.quietMs=0;g.ms=0;
+ listenPaint('listening');
+ if(n>g.rate*0.25)listenTake(f32,g.rate);      // shorter than a syllable: noise
+}
+function listenSimpleStop(){
+ const g=listenSimple;if(!g)return;listenSimple=null;
+ try{g.node.disconnect();for(const t of g.stream.getTracks())t.stop();g.ctx.close();}catch(e){}
+ listenPaint('');earcon('bop');
+}
 function listenStop(){
+ if(listenSimple)return listenSimpleStop();
  const v=listenVad;if(!v)return;listenVad=null;clearTimeout(listenCapTimer);
  if(typeof pauseSendAbort==='function')pauseSendAbort(true);
  try{v.destroy();}catch(e){}                      // pause + release the mic
@@ -3919,10 +3997,12 @@ async function listenCap(){
  catch(e){listenStop();toast('ear: '+(e.message||e));}
 }
 // One VAD-closed take -> 16 kHz WAV (the VAD already resampled) -> POST /stt.
-function listenTake(f32){
+function listenTake(f32,rate){
  const pcm=new Int16Array(f32.length);
  for(let i=0;i<f32.length;i++){const x=Math.max(-1,Math.min(1,f32[i]));pcm[i]=x<0?x*32768:x*32767;}
- const take=wavBlob(pcm,16000);
+ // The VAD hands back 16 kHz; the fallback hands back the device's own rate
+ // and says so in the header rather than resampling in the page.
+ const take=wavBlob(pcm,rate||16000);
  listenChain=listenChain.then(async()=>{
   try{
    const res=await fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',
@@ -4139,7 +4219,7 @@ function earLand(text){
 
 (function wireListen(){
  const m=$('listen');if(!m)return;
- m.addEventListener('click',()=>{if(listenVad)listenStop();else listenStart();});
+ m.addEventListener('click',()=>{if(listenVad||listenSimple)listenStop();else listenStart();});
  // OFF when nobody could be watching the indicator: hidden tab, page gone.
  document.addEventListener('visibilitychange',()=>{if(document.hidden)listenStop();});
  window.addEventListener('pagehide',listenStop);

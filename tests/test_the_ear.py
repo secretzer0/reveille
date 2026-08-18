@@ -224,12 +224,13 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     # BOTH controls post to the ONE route as audio/wav and land through the ONE earLand.
     assert ear.count("fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',") == 2 and \
         ear.count("headers:{'content-type':'audio/wav'},body:take") == 2
-    assert "const take=wavBlob(pcm,16000);" in ear, "the VAD hands 16 kHz float; the wire is the same 16 kHz WAV"
+    assert "const take=wavBlob(pcm,rate||16000);" in ear, \
+        "the VAD hands 16 kHz float; the fallback hands the device's rate, said in the header"
     assert ear.count("earHeard(d)") - ear.count("function earHeard(d)") == 2 and \
         UI.count("function earLand(text){") == 1, \
         "every take lands through earHeard: a command runs, anything else is text"
-    assert "if(typeof listenStop==='function')listenStop();" in ear and "if(listenVad||vRec)return;" in ear, \
-        "one ear at a time"
+    assert "if(typeof listenStop==='function')listenStop();" in ear and \
+        "if(listenVad||listenSimple||vRec)return;" in ear, "one ear at a time"
     land = ear[ear.index("function earLand(text){"):]
     land = land[:land.index("\n}\n")]
     assert "const b=$('body');" in land and "b.value=had+" in land and \
@@ -259,16 +260,17 @@ def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
         "the cap closes the open take (pause submits it) and reopens"
     assert "onSpeechEnd:audio=>{clearTimeout(listenCapTimer);listenPaint('listening');listenTake(audio);}" in ear, \
         "only a VAD-closed take becomes a request"
-    assert "m.addEventListener('click',()=>{if(listenVad)listenStop();else listenStart();});" in ear
+    assert "m.addEventListener('click',()=>{if(listenVad||listenSimple)listenStop();else listenStart();});" in ear
     assert "document.addEventListener('visibilitychange',()=>{if(document.hidden)listenStop();});" in ear
     assert "window.addEventListener('pagehide',listenStop);" in ear
-    assert "}catch(e){listenPaint('');toast(micWhy(e));return;}" in ear, "a mic error leaves listening OFF"
+    assert "listenPaint('');toast(micWhy(e));return;}" in ear, "a mic error leaves listening OFF"
     # 11559 (iPhone/Chrome): a NotAllowedError is the phone's answer, not the page's --
     # the toast names where to allow the microphone instead of quoting WebKit.
     assert "function micWhy(e){" in UI and "e.name==='NotAllowedError'" in UI and \
         "Settings > (Safari or Chrome) > Microphone" in UI
     assert "catch(e){toast(micWhy(e));return;}" in UI, "talk says the same"
-    assert "m.classList.toggle('on',!!listenVad);m.setAttribute('aria-pressed',listenVad?'true':'false');" in ear
+    assert "const on=!!(listenVad||listenSimple);" in ear and \
+        "m.classList.toggle('on',on);m.setAttribute('aria-pressed',on?'true':'false');" in ear
     listen = ear[:ear.index("const EARCON_GAIN=")]        # the listen toggle's code; the sounds SETTING after it is per browser by ruling (11577)
     for persisted in ("localStorage", "sessionStorage", "document.cookie"):
         assert persisted not in listen, "listening is per tab, never persisted"
@@ -484,3 +486,32 @@ def test_the_earcon_vocabulary_is_one_table_one_function_one_toggle():
     assert "earcon(" not in heard
     talk = page[page.index("async function talkStart(){"):page.index("async function talkResample(")]
     assert "earcon(" not in talk
+
+
+def test_a_browser_that_cannot_run_the_vad_still_listens():
+    """DES-014 s2 defect (operator 11718, ruling 11719): iOS Safari refuses
+    onnxruntime's WASM memory, so the ONNX VAD never starts there. The button
+    must not be dead: a loudness gate on the same PCM the push-to-talk
+    recorder takes, the same 3 s silence close, the same POST /stt -- and a
+    toast that says which detector is running."""
+    ear = UI[UI.index("const EAR_SILENCE_MS="):UI.index("async function openVoices(){")]
+    # 1. the ONNX attempt is made single-threaded and unproxied first
+    assert "o.env.wasm.numThreads=1;o.env.wasm.proxy=false;" in ear and "o.env.wasm.simd=true;" in ear
+    # 2. a MIC refusal is still the phone's answer and does NOT fall back
+    assert "if(e&&/NotAllowed|NotFound|NotReadable|SecurityError/.test(e.name||'')){" in ear
+    # 3. anything else falls back rather than dying
+    assert "return listenSimpleStart(e);" in ear
+    # 4. the fallback shares the ruled knobs: one silence, one cap, one route
+    simple = ear[ear.index("function listenSimpleStart(why){"):ear.index("function listenSimpleStop(){")]
+    assert "g.quietMs>=EAR_SILENCE_MS||g.ms>=EAR_TAKE_CAP_MS" in simple
+    assert "listenTake(f32,g.rate)" in ear and "fetch('/stt'" not in simple, \
+        "one take path: the fallback closes a take, listenTake posts it"
+    # 5. it says what it is -- a loudness gate is not a voice detector
+    assert "cannot run the voice detector" in simple and "loudness" in simple
+    # 6. the mic stays off the speakers, as in the recorder
+    assert "sink.gain.value=0;" in simple
+    # 7. stopping stops whichever ear is running
+    assert "if(listenSimple)return listenSimpleStop();" in ear
+    # 8. still per tab, never persisted
+    for persisted in ("localStorage", "sessionStorage", "document.cookie"):
+        assert persisted not in simple
