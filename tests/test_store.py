@@ -209,6 +209,27 @@ def test_receipts_and_membership_are_not_history(tmp_path):
     c.close()
 
 
+def test_being_addressed_is_a_citation(tmp_path):
+    """A message that says 'to: dmorse' refers to this person as surely as one
+    they wrote: free the name and that line re-points at somebody else."""
+    db = str(tmp_path / "b5.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    room = store.create_room(c, admin["id"], "r")
+    store.join(c, "travis", "web:travis", room["id"], None)
+    dm = store.create_user(c, "dmorse", "hunter2hunter2")
+    store.invite_member(c, room["id"], admin["id"], "dmorse", "web:travis")
+    store.join(c, "dmorse", "web:dmorse", room["id"], None)
+    assert not any(store.user_history(c, dm["id"]).values()), "joined, said nothing"
+    store.send(c, store.user_principal(admin["id"]), "dmorse", "for you", room=room["id"])
+    assert store.user_history(c, dm["id"])["addressed"] == 1
+    assert store.delete_user(c, dm["id"]) == "tombstoned"
+    with pytest.raises(store.BusError, match="addressed"):
+        store.free_tombstone(c, dm["id"])
+    c.close()
+
+
 def test_an_admin_frees_a_reserved_name_only_when_nothing_cites_it(tmp_path):
     """Ruling 11611 follow-on: the tombstone of a person nothing cites is a
     reserved name doing no work. One that IS cited keeps its referent."""

@@ -251,7 +251,8 @@ rulings 11746, 11611 follow-on). MEASURED ON LIVE: two accounts that only
 ever signed in were tombstoned by 0.2.155 because each carried 10145 read
 receipts -- written by join()'s catch-up, not by them. user_history now
 counts only CITATIONS of the person (their messages and their agents',
-agents, tokens, owned rooms, memories); read receipts, membership/presence
+mail ADDRESSED to them or their agents, agents, tokens, owned rooms,
+memories); read receipts, membership/presence
 rows, room invitations and identities are bookkeeping or credentials, and are
 deleted with the row. An admin can free a name a tombstone still reserves
 when nothing cites it: GET /users/tombstones lists them with what cites each,

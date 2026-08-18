@@ -181,7 +181,9 @@ burn one code only.
 
 A `users` row is a REFERENT only while something refers to it. `user_history`
 counts messages (their own and their agents'), agents, tokens, owned rooms,
-owned rooms and memories -- BEFORE the delete wipes any of them. NOT counted,
+mail ADDRESSED to them or their agents (a line that says "to: dmorse" refers
+to this person as surely as one they wrote), owned rooms and memories --
+BEFORE the delete wipes any of them. NOT counted,
 because the system wrote them rather than the person: read receipts (join()
 stamps one per older message -- two live accounts that had only ever signed
 in carried 10145 each), membership/presence rows, room invitations, and

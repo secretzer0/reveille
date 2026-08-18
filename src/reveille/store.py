@@ -2122,6 +2122,13 @@ def user_history(conn, user_id):
                       "(SELECT id FROM agents WHERE owner_id=?)")
                   + q("SELECT count(*) FROM messages WHERE sender=? "
                       "AND sender_agent_id IS NULL", name),
+        # BEING ADDRESSED IS A CITATION (11611, architect on #108): a message
+        # that says "to: dmorse" refers to this person as surely as one they
+        # wrote, and freeing the name would re-point it at someone else.
+        "addressed": q("SELECT count(*) FROM messages WHERE recipient_agent_id IN "
+                       "(SELECT id FROM agents WHERE owner_id=?)")
+                   + q("SELECT count(*) FROM messages WHERE recipient=? "
+                       "AND recipient_agent_id IS NULL", name),
         "agents": q("SELECT count(*) FROM agents WHERE owner_id=?"),
         "tokens": q("SELECT count(*) FROM tokens WHERE owner_id=?"),
         "rooms": q("SELECT count(*) FROM rooms WHERE owner_id=?"),
