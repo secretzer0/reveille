@@ -677,6 +677,11 @@
  #liOr{color:var(--faint);font-size:.72rem;text-align:center;margin:.6rem 0 .2rem;
   letter-spacing:.14em}
  .doorRow .door{display:inline-block;margin:.2rem .4rem .2rem 0;padding:.3rem .6rem}
+ #liAsk input{width:100%;background:var(--rail);border:1px solid var(--line);
+  border-radius:8px;padding:.5rem;color:var(--ink);font:inherit;margin:.35rem 0}
+ #liAsk .liHint{font-size:.72rem;margin:.1rem 0 .2rem}
+ .pRow .ok{color:#6fcf7f}
+ .pRow .warn{color:#e0a44c}
 
  /* ---- recipient picker ---- */
  #toWrap{position:relative}
@@ -998,6 +1003,7 @@
   <h1>REVEILLE</h1>
   <p id="liBlurb"></p>
   <div id="liDoors"></div>
+  <div id="liAsk"></div>
   <div id="liOr"></div>
   <label for="liName">USERNAME</label>
   <input id="liName" autocomplete="username" autocapitalize="none" spellcheck="false">
@@ -1140,7 +1146,8 @@ function showLogin(msg){
  $('liGo').textContent=setupMode?'Create admin':'Sign in';
  $('loginErr').textContent=msg||'';
  $('login').classList.add('on');$('liName').focus();
- paintDoors();   // in setup mode too: the first federated signup is the admin (DES-018 s6)
+ // setup mode too: the first federated signup is the admin (DES-018 s6)
+ paintDoors().then(()=>{const i=$('liInvite');if(i&&urlInvite&&!i.value)i.value=urlInvite;});
 }
 // DES-018: the doors beside the password form. /auth/doors is public (the card
 // asks before anyone is signed in); the last door used is remembered in this
@@ -1152,16 +1159,36 @@ async function paintDoors(){
  $('liDoors').innerHTML=(d.doors||[]).map(x=>'<a class="door'+(x.name===last?' last':'')+
   '" href="/auth/'+x.name+'/login" data-door="'+x.name+'">Continue with '+
   esc(x.label||DOOR_LABEL[x.name]||x.name)+'</a>').join('');
+ // An invite code (and, where the broker asks strangers for one, a short note)
+ // ride the door: typed HERE, before the provider, and the broker carries them
+ // through the round-trip. A code is single-use, so it never has to live in a
+ // link anyone can re-share.
+ $('liAsk').innerHTML=(d.doors||[]).length&&(d.invite||d.note)?
+  (d.invite?'<input id="liInvite" placeholder="invite code (optional)" '+
+   'autocapitalize="none" spellcheck="false">':'')+
+  (d.note?'<input id="liNote" placeholder="why you want in (optional)" maxlength="280">':'')+
+  (d.signup==='request'?'<div class="pDim liHint">No invite code? Continue with a door '+
+   'and an admin will review your request.</div>':'')+
+  (d.signup==='closed'?'<div class="pDim liHint">This bus is invite-only.</div>':'')
+  :'';
  $('liOr').textContent=(d.doors||[]).length?'OR WITH A PASSWORD':'';
  for(const a of $('liDoors').querySelectorAll('a'))
-  a.onclick=()=>{localStorage.revDoor=a.dataset.door;};
+  a.onclick=()=>{localStorage.revDoor=a.dataset.door;
+   const q=[],inv=$('liInvite'),nt=$('liNote');
+   if(inv&&inv.value.trim())q.push('invite='+encodeURIComponent(inv.value.trim()));
+   if(nt&&nt.value.trim())q.push('note='+encodeURIComponent(nt.value.trim()));
+   if(q.length)a.href='/auth/'+a.dataset.door+'/login?'+q.join('&');};
 }
 // The callback lands the browser on /ui?auth_error=<why> (refused: one line, the
 // buttons again) or /ui?welcome=<name> (first sign-in banner). Read once, then
 // scrub the URL so a reload does not repeat it.
 const authQ=new URLSearchParams(location.search);
-const authErr=authQ.get('auth_error'),authWelcome=authQ.get('welcome');
-if(authErr||authWelcome){authQ.delete('auth_error');authQ.delete('welcome');
+const urlInvite=authQ.get('invite')||'';      // /ui?invite=CODE prefills the field
+const authErr=authQ.get('auth_error'),authWelcome=authQ.get('welcome'),
+      authRequested=authQ.get('requested');
+if(authErr||authWelcome||authRequested||urlInvite){
+ authQ.delete('auth_error');authQ.delete('welcome');authQ.delete('requested');
+ authQ.delete('invite');
  history.replaceState(null,'',location.pathname+(authQ.toString()?'?'+authQ:'')+location.hash);}
 $('liGo').onclick=async()=>{
  const body={name:$('liName').value.trim(),password:$('liPass').value};
@@ -4304,8 +4331,33 @@ async function openVoices(){
   catch(e){toast(e.message);}};
 }
 
+function whenStr(ns){return new Date(Number(ns)/1e6).toLocaleString();}
+
 async function openUsers(){
  const d=await api('/users');
+ // DES-018 s6 amendment: strangers who asked, and the one-time codes that skip
+ // the queue. Both are admin-only on the server; a non-admin never gets here.
+ let reqs={requests:[]},invs={invites:[]};
+ try{reqs=await api('/users/requests?state=all');}catch(e){}
+ try{invs=await api('/invites');}catch(e){}
+ const pend=reqs.requests.filter(r=>r.state==='pending');
+ const reqRow=r=>'<div class="pRow"><b>'+esc(r.display_name||r.login||'(no name)')+'</b>'+
+  '<span class="pDim">'+esc(r.provider)+(r.email?' -- '+esc(r.email):'')+
+  (r.email_verified?' <span class="ok">verified</span>':' <span class="warn">unverified</span>')+
+  ' -- '+esc(whenStr(r.requested_ns))+'</span>'+
+  (r.note?'<div class="pDim">"'+esc(r.note)+'"</div>':'')+
+  (r.state==='pending'
+   ?'<button data-appr="'+esc(r.provider)+'/'+encodeURIComponent(r.subject)+'">approve</button>'+
+    '<button class="danger" data-deny="'+esc(r.provider)+'/'+encodeURIComponent(r.subject)+'">deny</button>'
+   :'<span class="pDim">denied</span>'+
+    '<button data-undeny="'+esc(r.provider)+'/'+encodeURIComponent(r.subject)+'">un-deny</button>'+
+    '<button class="danger" data-forget="'+esc(r.provider)+'/'+encodeURIComponent(r.subject)+'">forget</button>')+
+  '</div>';
+ const invRow=i=>'<div class="pRow"><b>'+esc(i.note||'(no note)')+'</b><span class="pDim">'+
+  (i.used_ns?'used by '+esc(i.used_by_name||'?')+' '+esc(whenStr(i.used_ns))
+            :'open -- made by '+esc(i.created_by_name||'?')+' '+esc(whenStr(i.created_ns)))+
+  '</span>'+(i.used_ns?'':'<button class="danger" data-revoke="'+esc(i.code_hash)+'">revoke</button>')+
+  '</div>';
  // The server refuses to remove the last admin either way (guarded inside the
  // transaction). Don't OFFER what can only fail: a button that always errors reads as a
  // broken app, not a safety rail. Say why instead.
@@ -4335,8 +4387,39 @@ async function openUsers(){
   return '<div class="pRow"><b>'+esc(u.name)+(isMe?' <span class="pDim">(you)</span>':'')+'</b>'+
    '<span class="pDim">'+u.role+'</span>'+ctl+'</div>';
  }).join('');
- panel('users',rows+
-  '<div class="pRow"><input id="nuName" placeholder="name"><input id="nuPass" type="password" placeholder="password"><button id="mkUser">add</button></div>');
+ panel('users',
+  (reqs.requests.length?'<div class="pSec">REQUESTS'+(pend.length?' ('+pend.length+')':'')+
+   '</div><div class="pDim">Someone asked to join through a door. Approve makes the '+
+   'account and links that door; deny is silent to them and their next try shows the '+
+   'same page.</div>'+reqs.requests.map(reqRow).join(''):'')+
+  '<div class="pSec">USERS</div>'+rows+
+  '<div class="pRow"><input id="nuName" placeholder="name"><input id="nuPass" type="password" placeholder="password"><button id="mkUser">add</button></div>'+
+  '<div class="pSec">INVITE CODES</div>'+
+  '<div class="pDim">A code works once, for any email, through any door, and skips the '+
+  'queue. It is shown ONCE here -- copy it before you leave this screen.</div>'+
+  '<div class="pRow"><input id="ivNote" placeholder="who is this for (note, optional)">'+
+  '<button id="mkInvite">new code</button></div><div id="ivNew"></div>'+
+  invs.invites.map(invRow).join(''));
+ $('mkInvite').onclick=async()=>{
+  try{const r=await api('/invites',{method:'POST',
+    body:JSON.stringify({note:$('ivNote').value.trim()})});
+   // The ONLY time this string exists: shown, copyable, never fetched again.
+   const url=location.origin+'/ui?invite='+encodeURIComponent(r.code);
+   $('ivNew').innerHTML='<div class="pRow"><b>copy it now</b><code>'+esc(r.code)+
+    '</code><button id="ivCopy">copy link</button></div>'+
+    '<div class="pDim">'+esc(url)+'</div>';
+   $('ivCopy').onclick=()=>{navigator.clipboard.writeText(url);toast('invite link copied',true);};
+  }catch(e){toast(e.message);}};
+ for(const b of document.querySelectorAll('[data-revoke]'))b.onclick=async()=>{
+  try{await api('/invites/'+b.dataset.revoke,{method:'DELETE'});openUsers();}
+  catch(e){toast(e.message);}};
+ for(const [attr,verb] of [['appr','approve'],['deny','deny'],['undeny','undeny'],
+                           ['forget','forget']])
+  for(const b of document.querySelectorAll('[data-'+attr+']'))b.onclick=async()=>{
+   try{const r=await api('/users/requests/'+b.dataset[attr==='appr'?'appr':attr]+'/'+verb,
+     {method:'POST',body:'{}'});
+    toast(verb==='approve'?('approved -- '+r.user.name+' can sign in now'):verb+'d',true);
+    openUsers();}catch(e){toast(e.message);}};
  $('mkUser').onclick=async()=>{
   try{await api('/users',{method:'POST',body:JSON.stringify(
    {name:$('nuName').value.trim(),password:$('nuPass').value})});openUsers();}
@@ -4602,7 +4685,13 @@ fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+
 (async function boot(){
  let d;
  try{d=await api('/me');}
- catch(e){setupMode=false;showLogin(authErr||'');return;}
+ catch(e){setupMode=false;
+  // The request page: one line, the same for a fresh ask, a pending one and a
+  // denied one -- a stranger never learns which, and there is nothing to retry.
+  showLogin(authRequested?'':(authErr||''));
+  if(authRequested)$('liBlurb').textContent=
+   'request received -- an admin reviews it; try your door again later';
+  return;}
  if(authWelcome)toast(authWelcome,true);
  if(d.setup){setupMode=true;showLogin(authErr||'');return;}   // zero users: bootstrap the first admin
  me=d;myName=d.name;
