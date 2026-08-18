@@ -1372,8 +1372,7 @@ const vDiag={lib:false,frames:0,decoded:0,scheduled:0,errors:0,ctx:'',rate:0};
 function vDiagPaint(){const line='last: '+vDiag.frames+' frames, '+vDiag.decoded+
  ' samples, '+vDiag.scheduled+' buffers, '+vDiag.errors+' errors; ctx '+vDiag.ctx+' @'+vDiag.rate+
  (vDiag.lib?'':'; NO DECODER');
- const b=$('voice');if(b)b.title=line;
- if(V_IOS)toast(line,true);   // a phone has no console: the numbers go on screen (2026-08-17, until iOS sounds)
+ const b=$('voice');if(b)b.title=line;   // iOS sounds since 0.2.117: the on-screen toast is gone (operator 11401)
 }
 // Refusal is the failure mode worth naming: without this the queue drains into
 // silence and looks like a broken synthesizer. The toggle was the gesture; if the

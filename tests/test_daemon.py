@@ -1033,6 +1033,7 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
         "the queue must advance from the last buffer's onended"
     assert "const finish=()=>{if(vCtl===ctl&&ended&&pending===0){" in player and \
         "vDiagPaint();vDone();}};" in player, "done = fetch ended AND the last buffer ended"
+    assert "toast(line,true)" not in PAGE, "the iOS diagnostic toast is gone (operator 11401): the numbers live in the title"
     # The only <audio> element is the iOS unlock (a silent data: URI loop played
     # in the gesture so Web Audio survives the ringer switch) -- never the player,
     # never a URL anyone sent, iOS only.
@@ -1241,3 +1242,17 @@ def test_the_panel_mints_rooms_in_one_call_rather_than_attaching_after():
     # 4. A zero-room mint is legal and nearly always a mistake, so it is NAMED.
     assert "This token carries NO ROOMS" in PAGE, \
         "a token that reaches nothing must say so -- it looks healthy from every angle"
+
+
+def test_the_plaintext_banner_names_a_host_once_and_never_loopback(monkeypatch, capsys):
+    """/version's LAN-plaintext list: one host reached by two upstreams is named
+    once; loopback is this host, no allowance was used, so it is not named."""
+    monkeypatch.setattr(daemon, "_plaintext_hosts", [])
+    daemon._plaintext_banner("http://192.168.85.101:18080", True, "the writer")
+    daemon._plaintext_banner("http://192.168.85.101:18090", True, "the ear")
+    daemon._plaintext_banner("http://127.0.0.1:18004", True, "the synthesizer")
+    daemon._plaintext_banner("http://192.168.90.136:18004", True, "the synthesizer")
+    assert daemon._plaintext_hosts == ["192.168.85.101", "192.168.90.136"]
+    out = capsys.readouterr().out
+    assert out.count("PLAINTEXT ON YOUR LAN") == 3 and "127.0.0.1" not in out
+
