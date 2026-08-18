@@ -1229,7 +1229,7 @@ async function hydrateMd(el){
 // arrivals are made and played AUTOMATICALLY; the icon is the manual path.
 function artIcons(m){
  return '<span class="play'+(m.gen_pending?' busy':'')+'" data-play="'+m.id+'" title="'+
-   (m.has_audio?'play audio':m.gen_pending?'generating...':'generate the audio, then play it')+
+   (m.has_audio?'play audio':m.gen_pending?'writing the script, then the audio...':'generate the audio, then play it')+
    '" aria-label="play audio">'+(m.has_audio?'&#9654;':'&#9655;')+'</span>'
   +(m.has_script?'<span class="scr" data-scr="'+m.id+'" title="view the script" '+
    'aria-label="view the script">&#9998;</span>':'');

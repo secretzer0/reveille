@@ -224,6 +224,14 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.138 LIVE BEFORE ASKED, AND A CLICK GETS ITS OWN BUDGET (operator 11523,
+ruling 11528; DES-013 s5 amended). The writer's queue orders (asked, mid):
+a live message's first sentence never waits behind a burst of clicks on
+history; a click waits behind live and carries SCRIPT_ASKED_BUDGET_S
+(20 s) instead of the first-sound slope -- a click is not first-sound,
+and a terse click is waste since 0.2.133. One INFO line per script made
+("script: <mid> made (...)"), countable beside the "falls to terse" line.
+Live budget constants unchanged. Bus tools unchanged.
 0.2.137 NOTHING IN THE FEED IS WIDER THAN THE FEED (operator 11478, rulings
 11480/11483 B). Fluid, no device pixels: the message column may shrink
 (min-width:0), any token may break (overflow-wrap:anywhere on body, head,
@@ -2099,7 +2107,47 @@ _tts_linger = {}               # mid -> Timer that unlinks the lingering terse .
 # ---- the script writer (DES-013 section 5): a second worker, the same shape ----
 # as voices. It CALLS a model behind an opt-in URL (DES-001 G4 as amended: the
 # broker never loads one) and STREAMS: sentence by sentence into the synth queue.
-_script_q = queue.Queue()
+class _ScriptQueue:
+    """LIVE BEFORE ASKED (ruling 11528): the writer's queue orders (asked, mid)
+    -- a live message's first sentence never waits behind a burst of clicks on
+    history; a click waits behind live and gets its own, longer budget. Same
+    surface as queue.Queue for the callers and the tests (put/get/get_nowait/
+    qsize/empty; None is the stop sentinel and sorts last); the worker's
+    get_flagged() also says whether the item was asked."""
+
+    def __init__(self):
+        self._q = queue.PriorityQueue()
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def put(self, item, asked=False):
+        with self._lock:
+            self._n += 1
+            n = self._n
+        if item is None:
+            self._q.put((2, 0, n, False, None))
+        else:
+            self._q.put((1 if asked else 0, item[0], n, asked, item))
+
+    def get_flagged(self, block=True, timeout=None):
+        _, _, _, asked, item = self._q.get(block, timeout)
+        return item, asked
+
+    def get(self, block=True, timeout=None):
+        return self.get_flagged(block, timeout)[0]
+
+    def get_nowait(self):
+        return self.get(False)
+
+    def qsize(self):
+        return self._q.qsize()
+
+    def empty(self):
+        return self._q.empty()
+
+
+_script_q = _ScriptQueue()
+SCRIPT_ASKED_BUDGET_S = 20.0   # a click is not first-sound (11528); a terse click is waste (11476)
 _script_on = False
 _script_url = ""
 _script_model = ""
@@ -2222,7 +2270,7 @@ class _SentenceStream:
             yield s
 
 
-def _script_one(item, url, model, token, first_timeout, wait=False):
+def _script_one(item, url, model, token, first_timeout, wait=False, asked=False):
     """Write one message's script, streaming sentences into the synth queue.
     Returns True if the message went scripted, False if it went terse.
 
@@ -2234,7 +2282,9 @@ def _script_one(item, url, model, token, first_timeout, wait=False):
     wait for message N's last. `wait=True` joins that helper (tests)."""
     mid, room, speaker, text, assigned, voice, subject, body = item
     messages = script_prompt(voice["name"], voice.get("persona") or "", speaker, subject, body)
-    first_timeout = script_budget(first_timeout, body)
+    # An ASKED item (a click on history) carries its own flat budget: the
+    # first-sound slope is for live arrivals (11528).
+    first_timeout = first_timeout if asked else script_budget(first_timeout, body)
     t0 = time.monotonic()
     stream = _SentenceStream()
     buf, in_think = "", False
@@ -2327,6 +2377,7 @@ def _script_rest(pieces, buf, full, stream, mid, room, voice, model, t0):
         log.info("script: %s not kept (retracted): %s", mid, e)
         return
     _feed_push(room, {"event": "script", "id": mid, "text": full.strip(), "voice_id": voice["id"]})
+    log.info("script: %s made (%d chars, %d ms, voice %s)", mid, len(full.strip()), ms, voice["id"])
 
 
 def _script_worker(url, model, token, first_timeout):
@@ -2338,7 +2389,7 @@ def _script_worker(url, model, token, first_timeout):
     messages in id order by construction (DES-009 section 2, 11020). Depth past
     SCRIPT_MAX hands a scripted item through unscripted and says so."""
     while True:
-        item = _script_q.get()
+        item, asked = _script_q.get_flagged()
         if item is None:
             return
         mid, room, speaker, text, assigned = item[:5]
@@ -2350,7 +2401,8 @@ def _script_worker(url, model, token, first_timeout):
                         _script_q.qsize())
             _tts_q.put((mid, room, speaker, text, assigned, False))  # heard, not kept (11476)
             continue
-        _script_one(item, url, model, token, first_timeout)
+        _script_one(item, url, model, token, SCRIPT_ASKED_BUDGET_S if asked else first_timeout,
+                    asked=asked)
 
 
 def _lan_host(host):
@@ -3011,9 +3063,9 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # depth is heard and then unlinked, so the next click with the writer up
         # makes the script and then the file.
         if _script_on and scriptable:
-            _script_q.put((mid, room, speaker, text, assigned, v, subject, body))
+            _script_q.put((mid, room, speaker, text, assigned, v, subject, body), asked=asked)
         elif _script_on:
-            _script_q.put((mid, room, speaker, text, assigned, True))
+            _script_q.put((mid, room, speaker, text, assigned, True), asked=asked)
         else:
             _tts_q.put((mid, room, speaker, text, assigned, True))
 
