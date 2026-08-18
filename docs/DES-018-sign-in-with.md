@@ -1,0 +1,205 @@
+# DES-018 -- Sign in with: passwordless federated login (OIDC / OAuth 2.0)
+
+Status: RULED 2026-08-18 (operator directive 11648/11650/11654; architect).
+Builds on DES-005 (web provisioning, users/sessions), DES-011 (identity is an
+id; a person is `user:<id>`), ruling 8938 (a user row is never deleted),
+ruling 11611 (a tombstone keeps its name). Sources fetched today: Authlib
+1.7.2 (2026-05-06) source + releases; Google OIDC docs; GitHub OAuth app
+docs; Microsoft identity platform id-token / optional-claims / issuer docs;
+OWASP session cheat sheet; Ory + Auth0 linking guidance; Sudhodanan & Paverd
+(USENIX Sec 2022) pre-hijack.
+
+## 1. Problem
+
+Today a person exists only because an admin ran "add user" and typed a
+password (DES-005). The operator wants developers to arrive with one click --
+"Continue with Google / GitHub / Microsoft" -- no local password, one internal
+account whichever door they use, returning users in with as few interactions
+as possible, and the door list open to more providers later.
+
+## 2. RULED: the shape, in one sentence
+
+**A provider identity is a CREDENTIAL of a person, not a person.** The person
+stays `users(id)`; a new table `identities(provider, subject) -> user_id` holds
+every door that person may enter by; login = prove a (provider, subject) via
+the provider, then look it up. Nothing else about the person changes: name,
+role, rooms, agents, sessions, `user:<id>` on the bus.
+
+## 3. RULED: the library
+
+**Authlib** (`authlib.integrations.starlette_client.OAuth`), 1.7.2, actively
+maintained, Starlette-native, OIDC discovery + id_token verification (JWKS)
++ PKCE S256 + state + nonce built in. Rejected: oauthlib/requests-oauthlib
+(primitives, no OIDC verification -- exactly what we must not hand-roll),
+social-auth-core (Django-shaped, no Starlette strategy), fastapi-sso (no
+id_token verification), loginpass (dead since 2020). One dependency, pinned
+in pyproject; server image only.
+
+Authlib keeps state/nonce/code_verifier in `request.session` (a mutable dict
+in ASGI scope). We do NOT add Starlette SessionMiddleware (a second cookie, a
+second session store). RULED: pass `cache=` to `OAuth(...)` -- a small
+broker-side store (table `oidc_state(key, value, expires_ns)`, swept) -- and
+expose a one-key session dict on the scope only for Authlib's CSRF marker.
+Everything the login needs lives in our store; nothing in a signed cookie.
+
+## 4. RULED: providers, keys, verified email
+
+Configured by env, by name (DES-006 secret discipline): `REVEILLE_OIDC_<P>_ID`
+/ `_SECRET`; a provider with no id is simply not shown. Redirect URI is
+exactly `https://<host>/auth/<p>/callback` (providers exact-match; the broker
+builds it from PROXY_SITE, never from Host).
+
+| provider | protocol | subject (the KEY) | email + verified | scopes |
+|---|---|---|---|---|
+| google | OIDC, discovery `accounts.google.com` | `sub` | `email` when `email_verified == true` | `openid email profile` |
+| github | OAuth2 only, no id_token | `id` (int64) | `GET /user/emails` -> the entry with `primary && verified`; none -> no email | `read:user user:email` |
+| microsoft | OIDC, discovery `login.microsoftonline.com/common/v2.0` (any org + personal, operator 11654) | `oid` + `tid` (pairwise `sub` is per-app; store `sub` too) | `email` when `xms_edov == true` (optional claim, request it); else NOT verified | `openid email profile` |
+
+Microsoft `common`: the metadata issuer is templated `{tenantid}` so Authlib's
+default `iss` check fails (authlib #605). RULED: `claims_options={"iss":
+{"essential": False}}` at `authorize_access_token`, then WE assert `iss ==
+f"https://login.microsoftonline.com/{tid}/v2.0"` and `tid` is a GUID -- the
+check Microsoft's own docs prescribe. Not a bypass: an exact check with the
+tenant substituted.
+
+`identities` row = (provider, subject, user_id, email, email_verified,
+display_name, avatar_url, raw_profile JSON, created_ns, last_login_ns),
+UNIQUE (provider, subject). Email is a HINT stored for linking and display,
+never the key. `sub`/`oid` are stable; email and username are mutable at
+every provider.
+
+## 5. RULED: linking -- the security rule
+
+One invariant: **a door is attached to a person only by proof that the same
+person is on both sides.** Two proofs exist:
+
+1. **Signed-in link.** A signed-in person clicks "add Google/GitHub/Microsoft"
+   in their profile; the callback attaches (provider, subject) to the CURRENT
+   session's user. Always allowed (both sides proven: session + provider).
+2. **Verified-email match at login.** Not signed in, (provider, subject)
+   unknown, provider asserts a VERIFIED email (table above), and exactly one
+   live user already has an identity with that same verified email -> attach
+   and sign in as that user. This is the Ory rule and it defeats the
+   pre-hijack merge (attacker pre-registers the victim's email unverified: no
+   verified email, no match, no merge).
+
+Everything else is a NEW account (see §6) or a refusal:
+- unverified email (GitHub without a verified primary, Microsoft without
+  `xms_edov`) never auto-links; the login creates a new account or -- if a
+  user with that email exists -- answers "sign in with the door you used before,
+  then add this one in your profile" (a link, not a dead end).
+- two users with the same verified email (legacy data): no auto-link, same
+  message.
+- an identity attached to a TOMBSTONED user (8938): refused as "account
+  deleted"; the tombstone keeps its identities (a deleted person's doors do not
+  become someone else's).
+
+Unlink: a person may remove a door if at least one other door remains (no
+person may lock themselves out); admin may unlink any. Audit line for every
+link/unlink.
+
+## 6. RULED: signup and onboarding
+
+Signup policy is one env, `REVEILLE_SIGNUP` = `open` (default when any
+provider is configured -- the operator's primary objective is zero friction)
+| `<domain>[,<domain>]` (only verified emails in those domains may CREATE
+accounts; existing users still sign in) | `closed` (admin-created users only,
+today's behaviour). One knob, read at boot, printed in /version.
+
+New account, zero screens: user row created with `pw_hash='!oidc'` (never a
+valid hash -- `authenticate()` already refuses non-hash), role `user`, name
+DERIVED: GitHub `login` / Google email local-part / Microsoft
+`preferred_username` local-part, lowercased, mapped through `valid_name`
+(illegal chars -> `-`, trimmed), collision -> `-2`, `-3`. The person lands in
+the app immediately; the derived name is shown once in a dismissable banner
+"You are `alice-2` here -- change it in your profile". Rename of a person is
+NOT in this DES (users.name is the human's bus name; DES-011 (b) keyed members
+on `user:<id>` so it is now buildable -- separate slice, EPIC backlog).
+
+First admin: `POST /setup` stays (a first admin exists before any provider is
+configured); a fresh instance with providers configured and no users makes the
+FIRST federated signup the admin -- printed at boot and in the audit log so it
+is never a surprise.
+
+## 7. RULED: sessions, tokens, cookies
+
+- Session = the existing server-side `sessions` table and `rev_session` cookie
+  (hashed secret, HttpOnly, SameSite=Lax -- Strict would break the callback
+  landing -- Secure on https, Path=/, 14 d). RULED additions: rotate the
+  session id on every login (fixation), and set the cookie name to
+  `__Host-rev_session` on https (prefix = Secure + Path=/ + no Domain enforced
+  by the browser). One rename, both readers.
+- Provider tokens are NOT stored. We need identity, not API access: the
+  access/refresh tokens are used inside the callback (GitHub /user/emails) and
+  dropped. No token at rest anywhere = nothing to leak (same reach as R1).
+- state: CSPRNG >= 30 chars (Authlib default), one-time, TTL 10 min in
+  `oidc_state`, bound to the browser by Authlib's session marker; PKCE S256 on
+  all three (GitHub accepts and "strongly recommends" it); nonce on OIDC.
+- Callback errors (`error=access_denied`, bad state, unverified) render one
+  page with the reason and the three buttons again -- never a stack trace,
+  never a redirect loop.
+- Logout unchanged (leaves rooms, deletes session). No provider logout.
+
+## 8. RULED: returning users, fewest clicks
+
+- The login page remembers the last door used per browser (localStorage) and
+  shows it first, others below.
+- `login_hint=<email>` is passed when the browser remembers one (Google, MS);
+  no `prompt=none` in slice 1 (silent SSO fails opaquely behind proxies and
+  MS forbids pairing it with select_account) -- measured later if the
+  operator asks.
+- A returning user with a live session never sees the page: `/` redirects to
+  the app; the session is 14 d sliding.
+
+## 9. Extensibility
+
+One provider table in code: `PROVIDERS = {name: {kind: oidc|oauth2, metadata
+url or endpoints, scopes, subject_fn, email_fn, claims_options}}`. Adding
+GitLab/Apple/Okta = one entry + two env names. Nothing else grows.
+
+## 10. Local passwords: "no local passwords"
+
+RULED as a two-step: slice 1 ships federated login BESIDE the password form
+(admins created by /setup and existing users must be able to sign in and LINK
+a door -- §5.1 -- before their password stops working). Slice 2 (operator
+word) removes the password form and refuses `POST /login`; `add user` in the
+admin tab becomes "invite" (name reserved, first federated login with a
+verified email the admin typed claims it -- §5.2 rule). `pw_hash` column stays
+(8938 shape; `'!oidc'` / `'!deleted'` sentinels).
+
+## 11. Gates (each red before green)
+
+1. Unknown (provider, subject) + verified email matching one user -> linked,
+   signed in as that user, audit line. Same with `email_verified=false` ->
+   NEW account, not linked. Same with two matching users -> refused with the
+   "use your other door" message.
+2. Signed-in link attaches to the SESSION user, not to an email match.
+3. Tombstoned user's identity -> "account deleted", no session.
+4. Microsoft: id_token with `iss` of another tenant than `tid` -> refused;
+   correct pair -> accepted through `common`.
+5. GitHub: `/user/emails` with no verified primary -> account with no email,
+   no auto-link.
+6. state replay -> refused; state after 10 min -> refused; PKCE verifier
+   present in the token request (recorded by a stub provider).
+7. Session id rotates on login; cookie carries `__Host-` + Secure on https.
+8. `REVEILLE_SIGNUP=closed` -> unknown identity refused with the invite
+   message; `=example.com` -> `bob@example.com` creates, `bob@other.io` refused.
+9. Nothing token-shaped (access_token/refresh_token/id_token) in the db, log,
+   or any HTTP body after a full login (grep gate).
+10. Whole flow against a stub OIDC provider in tests (Authlib's client is
+    exercised, not mocked); real Google/GitHub/Microsoft once on the eval box
+    by devops with the operator's registrations, screenshots on the PR.
+
+## 12. Slices
+
+1. **Doors beside the password** (one PR, server): Authlib pin, `identities`
+   + `oidc_state` (schema v29), `/auth/<p>/login|callback`, linking rule,
+   signup policy, session rotation + `__Host-`, login page with three buttons
+   + password form, profile "doors" list (add/remove). Gates 1-10.
+2. **Password door closes** (operator word): remove form + POST /login,
+   invite flow. Gates: /login 410, invite claims by verified email.
+3. Later, backlog: person rename; `prompt=none` measurement; more providers.
+
+Devops guides the operator through the three app registrations (11650/11651):
+redirect `https://reveille.mythos.org/auth/<p>/callback`; Microsoft
+"any org + personal" (11654); secrets by env name only.
