@@ -331,11 +331,40 @@ beside it, same prefill, slower gen). VRAM 8.6 + 9.6 GB. Generation 21-28 tok/s 
 MTP (16 without); prefill 200-465 tok/s, compute-bound, ~0.7 s floor, not parallel
 across the pair (`-ub` 256/512/2048 equal). Cold first token: 1.0-1.3 s at 700 chars,
 1.6-2.0 s at 1500, 3.0-3.6 s at 5000. Warm (prompt-cache hit) 0.35 s -- not what a
-live room gets. Consequence: §5's budget amendment. Second bench, ruled and pending:
-vLLM AWQ-Int4 TP=2 (Ampere tensor-core prefill), the same prompts. The ear (DES-014)
-shares the box: `~/gpu/ear.sh`, speaches `latest-cuda`, `deepdml/faster-whisper-
-large-v3-turbo-ct2` fp16 resident on GPU 0 (2.2 GB), port 18090; 0.8 s per take of
-4-8 s over the LAN, 3.6 s once for the load.
+live room gets. Consequence: §5's budget amendment.
+
+**Second bench, measured 2026-08-17 (operator 11343: "start C right away"), and THE
+PIN:** vLLM 0.27.1 (`vllm/vllm-openai:v0.27.1`), `abihsoro/Qwen3.8-27B-AWQ-INT4`
+(compressed-tensors, symmetric int4 g128, text-only, 17.6 GB; the DeltaNet layers stay
+bf16, the vision tower and MTP head are dropped), `--tensor-parallel-size 2`
+(`NCCL_P2P_DISABLE=1` -- the VM has no P2P; NCCL falls back to host memory and it is
+fine), `--max-model-len 4096` (SCRIPT_BODY_CAP 9000 chars ~ 2100 tok + persona + 200
+out), `--max-num-seqs 2 --max-num-batched-tokens 2048 --gpu-memory-utilization 0.86
+--reasoning-parser qwen3 --default-chat-template-kwargs '{"enable_thinking": false}'
+--enable-prefix-caching`; `~/gpu/writer-vllm.sh`, port 18080, alias `writer`, the same
+address the broker holds. Same harness, same prompts, distinct each run:
+
+| body | llama.cpp layer split, MTP | vLLM TP=2 int4 |
+|---|---|---|
+| 700 chars (214 tok) | 1.1-1.5 s | 0.32-0.34 s |
+| 1500 chars (394 tok) | 1.6-1.8 s | 0.53-0.55 s |
+| 5000 chars (1174 tok) | 3.3-3.4 s | 1.50-1.54 s |
+| 9000 chars (2074 tok) | 4.3-4.5 s | 2.60 s |
+| generation | 25-29 tok/s | 34-35 tok/s |
+
+Both GPUs compute at once under TP (llama.cpp's layer split runs them in turn), so
+prefill is 2-4x faster and generation faster without MTP. VRAM 10.3 GB per GPU with
+16.7k KV tokens; the ear beside it on GPU 0 at `int8_float16` (1.2 GB) -- 11.7 of
+12.3 GB on GPU 0. Boot: the first boot compiles (~5 min); `~/.cache/vllm` is mounted so
+every later boot reuses it (init engine 18 s, ~45 s to healthy). `~/gpu/writer.sh`
+(llama.cpp) stays as the fallback on the same port. Recipe read:
+https://recipes.vllm.ai/Qwen/Qwen3.8-27B (NVFP4 there is Blackwell-only; `--kv-cache-dtype
+fp8` and `--enforce-eager` are the two knobs left if memory ever bites). Under §5's
+budget (1.5 s + 1.5 ms/char) every message up to the cap now scripts with margin.
+
+The ear (DES-014) shares the box: `~/gpu/ear.sh`, speaches `latest-cuda`,
+`deepdml/faster-whisper-large-v3-turbo-ct2` int8_float16 resident on GPU 0, port 18090;
+0.8 s per take of 4-8 s over the LAN, 3.6 s once for the load.
 
 **Amended 2026-08-17 (ruling 11322): the host is the operator's 2x RTX 3060 (12 GB
 each), not the P40s.** Same decode bandwidth as a P40 (360 vs 347 GB/s) but Ampere:

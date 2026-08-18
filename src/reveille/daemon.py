@@ -211,7 +211,9 @@ its CHANGES section says what changed and how to use it.
 CHANGES = """
 0.2.120 THE SCRIPT BUDGET SCALES WITH THE BODY (DES-013 section 5 amended,
 operator 11343 on the bench 11342). Prefill is the wall on the pinned pair
-(section 8: two RTX 3060, layer split, measured), and most agent messages
+(section 8: two RTX 3060, measured -- and the second bench moved the pin to
+vLLM TP=2 int4: prefill 2-4x faster, first token 0.3 s at 700 chars, 2.6 s
+at 9000), and most agent messages
 are longer than the 1500 chars the writer was shown, so a flat 1.5 s meant
 terse for most of them. Now the writer sees up to 9000 chars (the live
 db's p99.9) and its time to first sentence is REVEILLE_SCRIPT_TIMEOUT plus
