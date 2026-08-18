@@ -225,6 +225,13 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.141 VOICE IS REMEMBERED, PER BROWSER (operator 11442, ruling 11444; DES-009
+s8.3 amended). localStorage.revVoice; a load ARMS it -- the button reads
+"voice: tap to resume", the first pointerdown/keydown anywhere flips it on
+through toggleVoice (the unlock gesture, iOS covered), a tap on the button is
+just the toggle, nothing plays by itself; off forgets it; a refusal drops the
+arm for that load. Auto-send was already remembered (#70). Listening never is
+(11355 #2). Bus tools unchanged.
 0.2.140 THE PHONE PAGE HAS A GATE: scripts/mobile-shots (DES-016 s2, rulings
 11443/11447/11456/11483 B). A scratch broker is seeded (a 200-char token, a
 300-char subject, a code block, ear on), a human signs in, and Chrome walks
