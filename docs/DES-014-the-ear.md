@@ -190,6 +190,21 @@ command; a spoken `send` with text in the box posted message 29 on the eval box
 and emptied the box. Also in this slice (architect 11374): a microphone that
 dies mid-take turns listening off / ends the talk take -- the track's `ended`.
 
+**Pause-to-send (0.2.125; operator 11378 -> 11389 "A+B"; numbers ruled 11385;
+measured 2026-08-18 on the eval box).** A deliberate SETTING beside `listen`
+(`auto-send`, a checkbox, hidden with the ear), OFF by default, persisted per
+browser in `localStorage.revAutosend` -- unlike the listen toggle, which stays per
+tab. Hands-free ONLY: armed from the listen path, only when a take LANDED text
+(a command take never arms it), only while listening; push-to-talk never
+auto-sends. `EAR_AUTOSEND_MS` = 5000 counted from the moment the words landed;
+the box shows `sending in 5... 4...` because a message leaving on a timer must be
+seen leaving; a spoken `cancel`, any keystroke in the box, listening switched off,
+or an emptied box aborts; no spoken confirmation; the send itself is `earRun`'s
+`send` -- still the one way the ear sends. Measured: setting off -> the text
+stays; on -> the countdown shows, a keystroke returns the state to `listening`
+with the text kept; a full countdown posted the message and emptied the box; a
+spoken `cancel` mid-count aborted and cleared.
+
 **Slice 5 -- wake word.** "reveille" (openWakeWord, on-device: in the page via
 ONNX Runtime Web, or on the STT host if the page cannot carry it). Without the
 word the room is not listening to the human; the word arms slice 2's

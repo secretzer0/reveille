@@ -209,6 +209,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.125 PAUSE-TO-SEND (DES-014, operator 11389 "A+B", numbers ruled 11385).
+An `auto-send` setting beside `listen`, off by default and remembered per
+browser: hands-free only, five seconds after your words land they are sent
+-- the box counts down where you can see it; say "cancel", type, or switch
+listening off and nothing goes. Push-to-talk never auto-sends. Bus tools
+unchanged.
 0.2.124 THE EAR, SLICE 4: VOICE COMMANDS (DES-014, pre-ruled 11355 s5). A
 take that IS one of `send`, `cancel`, `stop`, `reply`, `voice on`, `voice
 off` or `room <name>` -- the whole final transcript, case-folded, trailing

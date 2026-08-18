@@ -790,6 +790,8 @@
     <button type="button" id="listen" hidden aria-pressed="false"
      title="hands-free: listen until you switch it off; each thing you say lands here as text, you press Send">&#9678; listen</button>
     <span id="listenState" class="khint"></span>
+    <label id="autosendWrap" class="khint" hidden
+     title="hands-free only: 5 s after your words land, they are sent -- say cancel or type to stop it"><input type="checkbox" id="autosend"> auto-send</label>
     <button type="button" id="attachBtn">+ attach</button>
     <span id="attchips"></span>
     <span class="khint">Ctrl+Enter to send</span>
@@ -1031,7 +1033,7 @@ for(const id of ['liName','liPass'])
 // The room name is finally printable: it stopped being the credential, which is the
 // only reason it was ever masked to 'room ....N0w'.
 function paintMe(){
- if($('mic'))$('mic').hidden=!(me&&me.ear);if($('listen'))$('listen').hidden=!(me&&me.ear);     // DES-014: the mic exists only where the ear does
+ if($('mic'))$('mic').hidden=!(me&&me.ear);if($('listen'))$('listen').hidden=!(me&&me.ear);if($('autosendWrap'))$('autosendWrap').hidden=!(me&&me.ear);     // DES-014: the mic exists only where the ear does
  $('meName').textContent=myName;
  $('meName').style.color=color(myName);
  $('meAvatar').textContent=initials(myName);
@@ -3625,6 +3627,7 @@ async function listenStart(){
 }
 function listenStop(){
  const v=listenVad;if(!v)return;listenVad=null;clearTimeout(listenCapTimer);
+ if(typeof pauseSendAbort==='function')pauseSendAbort(true);
  try{v.destroy();}catch(e){}                      // pause + release the mic
  listenPaint('');
 }
@@ -3645,10 +3648,41 @@ function listenTake(f32){
     headers:{'content-type':'audio/wav'},body:take});
    const d=await res.json().catch(()=>({}));
    if(!res.ok){toast(d.error||d.detail||('ear: '+res.status));return;}
-   earHeard(d.text||'');
+   if(earHeard(d.text||'')&&listenVad&&pauseSendOn())pauseSendArm();   // B: the pause sends, hands-free only
   }catch(e){toast('ear: '+(e.message||e));}
  });
 }
+// ---- PAUSE-TO-SEND (operator 11389 "A+B", numbers ruled 11385): hands-free ----
+// ONLY; a deliberate SETTING, off by default, persisted per browser (unlike the
+// listen toggle, which is per tab); counted from the moment the words LANDED
+// (the ear's latency never eats the window); a spoken "cancel" or any keystroke
+// in the box aborts; the box shows the countdown because a message leaving on
+// a timer must be seen leaving; the send itself is earRun's "send" -- still the
+// one way. Push-to-talk never auto-sends.
+const EAR_AUTOSEND_MS=5000;
+let pauseSendTimer=null;
+function pauseSendOn(){return !!localStorage.revAutosend;}
+function pauseSendAbort(quiet){
+ if(!pauseSendTimer)return;clearInterval(pauseSendTimer);pauseSendTimer=null;
+ if(!quiet)listenPaint(listenVad?'listening':'');
+}
+function pauseSendArm(){
+ pauseSendAbort(true);
+ const t0=performance.now();
+ const tick=()=>{
+  const left=Math.ceil((EAR_AUTOSEND_MS-(performance.now()-t0))/1000);
+  if(!listenVad||!$('body').value.trim()){pauseSendAbort();return;}   // listening ended, or nothing to send
+  if(left>0){listenPaint('sending in '+left+'...');return;}
+  pauseSendAbort(true);listenPaint('listening');earRun({cmd:'send'});
+ };
+ tick();pauseSendTimer=setInterval(tick,250);
+}
+(function wirePauseSend(){
+ const c=$('autosend');if(!c)return;
+ c.checked=pauseSendOn();
+ c.addEventListener('change',()=>{if(c.checked)localStorage.revAutosend='1';else delete localStorage.revAutosend;pauseSendAbort();});
+ $('body').addEventListener('keydown',()=>pauseSendAbort());   // a keystroke in the box is the human taking over
+})();
 // ---- VOICE COMMANDS (DES-014 slice 4, pre-ruled 11355 s5): a SMALL FIXED ----
 // GRAMMAR matched on the WHOLE final transcript of ONE take -- case-folded,
 // trailing punctuation dropped, exact words, nothing fuzzy. A take that IS a
@@ -3671,6 +3705,7 @@ function earRun(c){
    if(!$('body').value.trim()){toast('nothing to send');return;}
    $('composer').requestSubmit();return;}
   case 'cancel':{
+   if(typeof pauseSendAbort==='function')pauseSendAbort();
    $('body').value='';$('body').dispatchEvent(new Event('input',{bubbles:true}));toast('cleared');return;}
   case 'stop':{vStop();vDone();return;}
   case 'reply':{
@@ -3693,16 +3728,17 @@ function earRun(c){
 // Every take lands here: a command runs, anything else is text.
 function earHeard(text){
  const c=earCommand(text);
- if(c){earRun(c);return;}
- earLand(text);
+ if(c){earRun(c);return false;}
+ return earLand(text);
 }
 // The words go INTO the compose box, after what is there, caret at the end.
 function earLand(text){
- text=(text||'').trim();if(!text)return;
+ text=(text||'').trim();if(!text)return false;
  const b=$('body');const had=b.value;
  b.value=had+(had&&!/\s$/.test(had)?' ':'')+text;
  b.focus();b.setSelectionRange(b.value.length,b.value.length);
  b.dispatchEvent(new Event('input',{bubbles:true}));
+ return true;
 }
 (function wireTalk(){
  const m=$('mic');if(!m)return;

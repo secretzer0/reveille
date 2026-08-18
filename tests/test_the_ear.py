@@ -217,7 +217,7 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     assert ear.count("fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',") == 2 and \
         ear.count("headers:{'content-type':'audio/wav'},body:take") == 2
     assert "const take=wavBlob(pcm,16000);" in ear, "the VAD hands 16 kHz float; the wire is the same 16 kHz WAV"
-    assert ear.count("earHeard(d.text||'');") == 2 and UI.count("function earLand(text){") == 1, \
+    assert ear.count("earHeard(d.text||'')") == 2 and UI.count("function earLand(text){") == 1, \
         "every take lands through earHeard: a command runs, anything else is text"
     assert "if(typeof listenStop==='function')listenStop();" in ear and "if(listenVad||vRec)return;" in ear, \
         "one ear at a time"
@@ -254,8 +254,9 @@ def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
     assert "window.addEventListener('pagehide',listenStop);" in ear
     assert "toast('microphone: '+(e.message||e));return;}" in ear, "a mic error leaves listening OFF"
     assert "m.classList.toggle('on',!!listenVad);m.setAttribute('aria-pressed',listenVad?'true':'false');" in ear
+    listen = ear[:ear.index("const EAR_AUTOSEND_MS=")]
     for persisted in ("localStorage", "sessionStorage", "document.cookie"):
-        assert persisted not in ear, "listening is per tab, never persisted"
+        assert persisted not in listen, "listening is per tab, never persisted"
     assert "baseAssetPath:'/ui/vad/',onnxWASMBasePath:'/ui/vad/'" in ear and "model:'v5'" in ear
     assert "cdn." not in UI.lower() and "jsdelivr" not in UI, "the model ships with the page"
     assert '<script src="/ui/vad/ort.wasm.min.js"></script>' in UI and \
@@ -296,7 +297,8 @@ def test_voice_commands_are_a_fixed_grammar_on_the_whole_final_transcript():
     assert ".toLowerCase().replace(/[\\s.!?,;:]+$/,'')" in ear, "case-folded, trailing punctuation dropped"
     assert "if(EAR_COMMANDS.includes(t))return {cmd:t};" in ear and "return null;" in ear, "exact words, nothing fuzzy"
     heard = ear[ear.index("function earHeard(text){"):ear.index("function earLand(text){")]
-    assert "if(c){earRun(c);return;}" in heard and "earLand(text);" in heard, "a command is consumed, text lands"
+    assert "if(c){earRun(c);return false;}" in heard and "return earLand(text);" in heard, \
+        "a command is consumed, text lands (and says so, for the pause-to-send window)"
     run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
     for row in ("case 'send':", "case 'cancel':", "case 'stop':{vStop();vDone();return;}", "case 'reply':",
                 "case 'room':", "case 'voice on':{if(!voiceOn)toggleVoice();return;}",
@@ -310,4 +312,32 @@ def test_voice_commands_are_a_fixed_grammar_on_the_whole_final_transcript():
     whole = UI[UI.index("let talkBusy=false;"):UI.index("async function openVoices(){")]
     assert "for(const t of st.getAudioTracks())t.addEventListener('ended',listenStop);return st;" in whole
     assert "for(const t of vRec.stream.getAudioTracks())t.addEventListener('ended',()=>talkStop());" in whole
+
+
+def test_pause_to_send_is_a_deliberate_setting_hands_free_only_with_a_visible_countdown():
+    """Operator 11389 (A+B), numbers ruled 11385: hands-free ONLY; off by default;
+    a localStorage setting beside listen (unlike the per-tab toggle); counted
+    from the moment the words LANDED; a spoken cancel or any keystroke aborts;
+    the countdown is shown; the send is earRun's "send" -- still the one way;
+    push-to-talk never auto-sends."""
+    ear = UI[UI.index("let talkBusy=false;"):UI.index("async function openVoices(){")]
+    b = ear[ear.index("const EAR_AUTOSEND_MS="):ear.index("// ---- VOICE COMMANDS")]
+    assert "const EAR_AUTOSEND_MS=5000;" in b
+    assert "function pauseSendOn(){return !!localStorage.revAutosend;}" in b, "a persisted setting, off by default"
+    assert '<label id="autosendWrap" class="khint" hidden' in UI and '<input type="checkbox" id="autosend">' in UI
+    assert "if($('autosendWrap'))$('autosendWrap').hidden=!(me&&me.ear);" in UI
+    # Armed ONLY from the hands-free take path, only when text landed, only while listening.
+    assert ear.count("pauseSendArm()") == 2 and \
+        "if(earHeard(d.text||'')&&listenVad&&pauseSendOn())pauseSendArm();" in ear
+    talk = ear[:ear.index("const EAR_SILENCE_MS=")]
+    assert "autosend" not in talk, "push-to-talk never auto-sends"
+    # Counted from landing, shown, aborted by cancel / keystroke / listening off / empty box.
+    assert "listenPaint('sending in '+left+'...')" in b
+    assert "if(!listenVad||!$('body').value.trim()){pauseSendAbort();return;}" in b
+    assert "$('body').addEventListener('keydown',()=>pauseSendAbort());" in b
+    run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
+    assert "if(typeof pauseSendAbort==='function')pauseSendAbort();" in run, "a spoken cancel aborts"
+    assert "if(typeof pauseSendAbort==='function')pauseSendAbort(true);" in ear, "listening off aborts"
+    # The send is still the one send.
+    assert "earRun({cmd:'send'});" in b and run.count("requestSubmit") == 1 and b.count("requestSubmit") == 0
 
