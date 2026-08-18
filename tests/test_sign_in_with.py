@@ -261,6 +261,23 @@ def test_gate1_verified_email_links_unverified_creates_two_matches_refuse(broker
     assert broker.conn.execute("SELECT count(*) FROM users").fetchone()[0] == 3
 
 
+def test_email_case_never_decides_a_match(broker):
+    # ada signs in with google asserting Ada@Example.COM (verified) ...
+    broker.stub.claims["google"] = {"email": "Ada@Example.COM"}
+    _hop(broker, "google")
+    ident = _me(broker)[1]["identities"][0]
+    assert ident["email"] == "ada@example.com", "stored in one case"
+    # ... and a microsoft door asserting ada@example.com is the SAME mailbox:
+    # linked to ada (one verified holder), not a second account
+    broker.cookies.clear()
+    r = _hop(broker, "microsoft")
+    assert r.headers["location"] == "/ui", r.headers
+    assert _me(broker)[1]["name"] == "ada"
+    assert store.users_with_verified_email(broker.conn, "ADA@example.com") == \
+        store.users_with_verified_email(broker.conn, "ada@example.com")
+    assert broker.conn.execute("SELECT count(*) FROM users").fetchone()[0] == 1
+
+
 def test_gate2_signed_in_link_attaches_to_the_session_user(broker):
     admin = store.create_user(broker.conn, "travis", "pw-not-a-real-secret", role="admin")
     r = broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})

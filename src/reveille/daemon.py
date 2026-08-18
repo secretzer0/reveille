@@ -239,6 +239,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.152 EMAIL IN ONE CASE (DES-018 follow-up, architect 11667). The store
+lowercases every email it keeps or compares (identities upsert, the s5.2
+verified-holder match, the "use your other door" check): Ada@Example.com and
+ada@example.com are one mailbox, so which spelling a provider sent first can
+no longer decide whether a door links or a second account is made. Nothing
+on the wire changes.
 0.2.151 SIGN IN WITH GOOGLE / GITHUB / MICROSOFT (DES-018 slice 1, EPIC-001
 S1 item 3; rulings 11648/11659). Three doors BESIDE the password form:
 GET /auth/<p>/login -> the provider -> GET /auth/<p>/callback; Authlib

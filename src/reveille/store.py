@@ -2118,6 +2118,14 @@ def _identity_audit(conn, action, provider, subject, user_id, actor):
                                          time.time_ns()))
 
 
+def _email(value):
+    """One case for every email the store keeps or compares: providers assert
+    Ada@Example.com and ada@example.com for the same mailbox, and the s5.2
+    match must not depend on which spelling came first."""
+    e = (value or "").strip().lower()
+    return e or None
+
+
 def _identity_upsert(conn, provider, profile, user_id, now):
     conn.execute(
         "INSERT INTO identities(provider, subject, user_id, email, email_verified, "
@@ -2127,7 +2135,7 @@ def _identity_upsert(conn, provider, profile, user_id, now):
         "email_verified=excluded.email_verified, display_name=excluded.display_name, "
         "avatar_url=excluded.avatar_url, raw_profile=excluded.raw_profile, "
         "last_login_ns=excluded.last_login_ns",
-        (provider, str(profile["subject"]), user_id, profile.get("email"),
+        (provider, str(profile["subject"]), user_id, _email(profile.get("email")),
          1 if profile.get("email_verified") else 0, profile.get("display_name"),
          profile.get("avatar_url"), json.dumps(profile.get("raw") or {}), now, now))
 
@@ -2171,6 +2179,7 @@ def unlink_identity(conn, user_id, provider, subject, actor, admin=False):
 def users_with_verified_email(conn, email):
     """Live users holding a door whose VERIFIED email is exactly this one -- the
     only kind of email match that may attach a door at login (s5.2)."""
+    email = _email(email)
     if not email:
         return []
     return [r["user_id"] for r in conn.execute(
@@ -2228,7 +2237,7 @@ def federated_login(conn, provider, profile, signup_policy="open", actor="web"):
             _identity_upsert(conn, provider, profile, u["id"], now)
         return {"user": {"id": u["id"], "name": u["name"], "role": u["role"]},
                 "how": "known", "banner": None}
-    email, verified = profile.get("email"), bool(profile.get("email_verified"))
+    email, verified = _email(profile.get("email")), bool(profile.get("email_verified"))
     matches = users_with_verified_email(conn, email) if verified else []
     if len(matches) == 1:
         u = conn.execute("SELECT id, name, role FROM users WHERE id=?", (matches[0],)).fetchone()
