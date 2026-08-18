@@ -1,0 +1,222 @@
+#!/usr/bin/env -S uv run --quiet --with playwright python
+"""mobile-shots: PICTURES of the phone page, from a scratch broker, in ~20 s.
+
+DES-016 s2 (ruling 11443/11447): a phone layout is measured, never tweaked
+blind, and the operator approves the pictures before a merge. This is the
+artifact for every UI PR from now on:
+
+    scripts/mobile-shots                # -> shots/<device>-<orientation>-<scene>.png
+    scripts/mobile-shots out/before     # any directory
+
+Seeds a throwaway broker (one human, one room, one agent, a handful of
+messages incl. a 200-char unbroken token, a 300-char subject and a code block,
+ear ON so talk/listen/auto-send show), signs the human in, and walks the
+scenes on iPhone 14 and Pixel 7, portrait AND landscape (operator 11456):
+signin, room, drawer (the rail), settings, voices. Then the RANGE (ruling
+11483 B: devices are only names for viewports): the room scene at 320, 360,
+390, 430 wide portrait and 640, 740, 852, 932 landscape. Every shot asserts
+layout width == the glass (visualViewport), document.scrollWidth <= it, AND
+#feed.scrollWidth == clientWidth;
+any failure prints OVER and the exit code is 1 -- this is a gate, not a
+gallery. Each line also names the widest element when something sticks out.
+
+Needs Google Chrome or a Playwright chromium on this machine
+(`uv run --with playwright playwright install chromium` once). Nothing else.
+"""
+import json
+import os
+import pathlib
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+from reveille import store  # noqa: E402
+
+DEVICES = ("iPhone 14", "Pixel 7")
+USER, PW = "shot", "shot-pw-not-a-secret"
+
+
+def seed(db):
+    conn = store.connect(db)
+    store.migrate(conn, db)
+    u = store.create_user(conn, USER, PW)
+    room = store.create_room(conn, u["id"], "phone-lab")
+    tok = store.create_token(conn, u["id"], "dev", agent_name="roc-api-dev", create=True)
+    store.assign_room(conn, tok["id"], room["id"], u["id"])
+    rid = room["id"]
+    store.send(conn, "roc-api-dev", "*", "Deployed 0.2.130 to reveille.mythos.org: writer at "
+               "192.168.85.101:18080, ear take cap 8 MiB / 60 s, GPU 0 at 11.26 of 12.29 GB, "
+               "PR #65 merged.", subject="smoke 0.2.130", room=rid)
+    store.send(conn, USER, "*", "slice four: this was sent by the spoken word", room=rid)
+    store.send(conn, "roc-api-dev", "*", "NEED: your GO on #78 -- drawer, wrap, 16 px; "
+               "measured <= 393. Reply GO or what is wrong.", subject="#78 review", room=rid)
+    store.send(conn, USER, "*", "pause to send test", room=rid)
+    store.send(conn, USER, "*", "sentence one sentence two", room=rid)
+    store.send(conn, "roc-api-dev", "*", "an unbroken token: " + "x" * 200 + " and `audio_make_http` "
+               "answers ready whenever tts-<mid>.webm exists -- /home/vyzon/reveille/files/tts-11476.webm.part",
+               room=rid)
+    store.send(conn, "roc-api-dev", "*", "Where the defect lives, from the code as merged: on-demand "
+               "(`POST /audio/<mid>`, 0.2.117) already goes through the writer's queue -- BUT "
+               "`audio_make_http` answers \"ready\" whenever tts-<mid>.webm exists.",
+               subject="RULING (operator 11475, DES-013 s5/s7 amended): A TERSE RENDITION OF A "
+               "SCRIPTABLE MESSAGE IS NEVER DURABLE. Invariant: tts-<mid>.webm/.m4a is kept only if "
+               "(a) the message is not scriptable or (b) it was made from a script.", room=rid)
+    store.send(conn, "roc-api-dev", "*", "code block:\n```\nREVEILLE_TTS_URL=http://192.168.90.136:18004 "
+               "REVEILLE_LAN_PLAINTEXT=1 REVEILLE_SCRIPT_URL=http://192.168.85.101:18080 make "
+               "SERVER_DATA=/home/vyzon/reveille PROXY_SITE=reveille.mythos.org up\n```", room=rid)
+    conn.close()
+
+
+def free_port():
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+
+
+def broker():
+    tmp = tempfile.mkdtemp(prefix="mobile-shots-")
+    db = os.path.join(tmp, "broker.db")
+    seed(db)
+    port = free_port()
+    env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port), REVEILLE_HOST="127.0.0.1",
+               REVEILLE_STT_URL="http://127.0.0.1:1")     # loopback = the ear is ON, unreachable is fine
+    for k in ("REVEILLE_TTS_URL", "REVEILLE_SCRIPT_URL"):
+        env.pop(k, None)
+    proc = subprocess.Popen([sys.executable, "-m", "reveille.daemon"], env=env,
+                            stdout=open(os.path.join(tmp, "broker.log"), "w"), stderr=subprocess.STDOUT)
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            if urllib.request.urlopen(url + "/health", timeout=1).read() == b"ok":
+                return proc, url, tmp
+        except OSError:
+            time.sleep(0.1)
+    proc.kill()
+    raise SystemExit(f"scratch broker did not come up; log: {tmp}/broker.log")
+
+
+FAILED = []
+
+
+def measure(page):
+    return page.evaluate("""() => {
+      const vw = document.documentElement.clientWidth; let widest = null;
+      for (const el of document.querySelectorAll('body *')) {
+        const b = el.getBoundingClientRect(); if (!b.width) continue;
+        if (b.right > vw + 1 && (!widest || b.right > widest.r))
+          widest = {sel: el.tagName.toLowerCase() + (el.id ? '#' + el.id : ''), r: Math.round(b.right)};
+      }
+      const f = document.getElementById('feed');
+      return {vw, layout: innerWidth, visual: Math.round(visualViewport.width), widest,
+              docSW: document.documentElement.scrollWidth,
+              feedSW: f ? f.scrollWidth : 0, feedCW: f ? f.clientWidth : 0};
+    }""")
+
+
+def shoot(page, out, name):
+    path = out / f"{name}.png"
+    page.screenshot(path=str(path))
+    m = measure(page)
+    # The reference is the VISUAL viewport (the glass): Chrome widens the layout
+    # viewport to fit overflowing content, so "document == innerWidth" can be
+    # true of a page that is 478 px wide on a 390 px screen (0.2.130 measured).
+    ok = m["layout"] == m["visual"] and m["docSW"] <= m["visual"] and m["feedSW"] == m["feedCW"]
+    over = "fits" if ok else (f"OVER glass {m['visual']} layout {m['layout']} doc {m['docSW']} "
+                              f"feed {m['feedSW']}/{m['feedCW']}"
+                              + (f" widest {m['widest']['sel']} r={m['widest']['r']}" if m["widest"] else ""))
+    if not ok:
+        FAILED.append(name)
+    print(f"{path}  layout {m['layout']} / viewport {m['visual']}  {over}")
+    return m
+
+
+def signin(ctx, url):
+    p = ctx.new_page()
+    p.goto(url + "/ui", wait_until="networkidle")
+    return p
+
+
+def login(p):
+    p.fill("#liName", USER); p.fill("#liPass", PW); p.click("#liGo")
+    p.wait_for_selector("#feed .row", timeout=10000)
+    p.wait_for_timeout(600)
+
+
+def scenes(ctx, url, out, tag):
+    p = signin(ctx, url)
+    shoot(p, out, f"{tag}-signin")
+    login(p)
+    shoot(p, out, f"{tag}-room")
+    if p.locator("#railBtn").is_visible():
+        p.locator("#railBtn").tap()
+        p.wait_for_timeout(300)
+        shoot(p, out, f"{tag}-drawer")
+        p.locator("#brand").tap()
+        p.wait_for_timeout(200)
+        p.locator("#railBtn").tap()
+        p.wait_for_timeout(200)
+    if not p.locator("#meCard").is_visible():
+        # No way to reach Settings/logout on this screen: that IS the finding
+        # (DES-016 s1.1), and a gate failure, not a scene to skip quietly.
+        FAILED.append(f"{tag}-settings-unreachable")
+        print(f"   {tag}: Settings/logout UNREACHABLE (no rail, no menu) -- gate red")
+        p.close()
+        return
+    p.locator("#meCard").tap()
+    p.wait_for_timeout(200)
+    p.locator("#miSettings").tap()
+    p.wait_for_timeout(600)
+    shoot(p, out, f"{tag}-settings")
+    p.locator('#panTabs .tab[data-tab="voices"]').tap(timeout=5000)
+    p.wait_for_timeout(600)
+    shoot(p, out, f"{tag}-voices")
+    p.close()
+
+
+def main():
+    from playwright.sync_api import sync_playwright
+    out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "shots")
+    out.mkdir(parents=True, exist_ok=True)
+    proc, url, tmp = broker()
+    t0 = time.time()
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(channel="chrome", headless=True)
+            except Exception:
+                browser = pw.chromium.launch(headless=True)
+            for dev in DEVICES:
+                d = pw.devices[dev]
+                for orient in ("portrait", "landscape"):
+                    opts = dict(d)
+                    if orient == "landscape":
+                        v = opts["viewport"]; opts["viewport"] = {"width": v["height"], "height": v["width"]}
+                    ctx = browser.new_context(**opts)
+                    scenes(ctx, url, out, f"{dev.lower().replace(' ', '')}-{orient}")
+                    ctx.close()
+            # THE RANGE (11483 B): the room at widths no device is named for.
+            base = dict(pw.devices["iPhone 14"])
+            for w, h in ((320, 568), (360, 740), (390, 700), (430, 800), (640, 360), (740, 360), (852, 393), (932, 430)):
+                opts = dict(base); opts["viewport"] = {"width": w, "height": h}
+                ctx = browser.new_context(**opts)
+                p = signin(ctx, url); login(p)
+                shoot(p, out, f"range-{w}x{h}-room")
+                ctx.close()
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    print(f"done in {time.time() - t0:.1f}s -> {out}/  (broker db kept at {tmp})")
+    if FAILED:
+        print(f"GATE RED: {len(FAILED)} shot(s) wider than the screen: {', '.join(FAILED)}")
+        sys.exit(1)
+    print("GATE GREEN: nothing wider than the screen in any shot")
+
+
+if __name__ == "__main__":
+    main()
