@@ -1444,8 +1444,27 @@ def create_user(conn, name, password, role="user"):
             "INSERT INTO users(id, name, pw_hash, role, created_ns) VALUES(?,?,?,?,?)",
             (uid, name, pw_hash, role, now))
     except sqlite3.IntegrityError:
+        # The name may be held by a TOMBSTONE (ruling 8938 / 11607): a deleted
+        # account keeps its row and its name for the history it owns, so the
+        # refusal says which it is rather than a bare "already exists".
+        held = conn.execute("SELECT deleted_ns FROM users WHERE name=?", (name,)).fetchone()
+        if held is not None and held["deleted_ns"]:
+            raise BusError(f"name {name!r} is taken by a deleted account -- the tombstone "
+                           f"keeps it for the history it owns")
         raise BusError(f"user {name!r} already exists")
     return {"id": uid, "name": name, "role": role, "created_ns": now}
+
+
+def live_user(conn, user_id):
+    """The users row for an ACCOUNT, or NotFound: a tombstone (deleted_ns set)
+    is not a user anyone can act on (11607) -- delete, role, password reset all
+    answer 404 "user deleted" through this one check."""
+    r = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if r is None:
+        raise NotFound(f"no such user {user_id}")
+    if r["deleted_ns"]:
+        raise NotFound("user deleted")
+    return r
 
 
 def setup_first_admin(conn, name, password):
@@ -1501,9 +1520,14 @@ def change_password(conn, user_id, old_password, new_password):
 
 
 def list_users(conn):
+    """The ACCOUNTS -- not the tombstones (operator 11606: "bill" deleted and
+    confirmed, still listed with make-admin/reset/delete beside him). A deleted
+    user is a tombstone by ruling 8938: the row stays as the referent for the
+    history it owns, credentials wiped, and it is not an account anyone can act
+    on. The Users tab lists what can be acted on."""
     return [{"id": r["id"], "name": r["name"], "role": r["role"],
              "created_ns": r["created_ns"]}
-            for r in conn.execute("SELECT * FROM users ORDER BY name")]
+            for r in conn.execute("SELECT * FROM users WHERE deleted_ns IS NULL ORDER BY name")]
 
 
 def set_role(conn, user_id, role):
