@@ -226,6 +226,24 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.149 THE RECIPIENT PLANE LEARNS THE IDENTITY (DES-011 6.1(a), EPIC-001
+S1; ruling 10983). Schema v27, additive, one transaction, snapshot
+`broker.db.pre-v27-<ns>.bak` beside the db: messages.recipient_agent_id
+backfilled by the succession clock (the identity live at the message's ts
+among those that ever wore the name, folded to lineage heads -- a folded
+source's name maps to its head; else the last created before ts, a
+successor not yet minted cannot be meant; else the earliest ever); what
+cannot be resolved is LISTED "message <id> room <room> to <name> at <ts>:
+<why>", left NULL, counted, never silent, never refused; a user's name is
+a person (NULL, counted). agent_names(agent_id, name, from_ns, to_ns) seeded
+one open row per agent; agents.merged_into from identity-merges.jsonl
+beside the db. Writers moved: send() stamps recipient_agent_id from the
+room-name's members row; every INSERT INTO agents logs its name;
+scripts/identity-merge re-points the column and sets merged_into.
+scripts/rehearse-migration <db> [--keep DIR] copies (backup API), migrates
+the copy, prints. Rehearsed on the live copy: 9706 resolved / 274 to a
+person / 2 folds / 0 unresolvable of 9980. Nothing reads the column yet --
+6.1(b) does. Bus tools unchanged.
 0.2.148 THE USERS TAB LISTS ACCOUNTS, NOT TOMBSTONES (operator 11606: "bill"
 deleted, confirm hit, still listed with make-admin / reset / delete beside
 him). A deleted user is a tombstone by ruling 8938 -- the row stays as the

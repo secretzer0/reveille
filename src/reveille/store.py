@@ -1326,10 +1326,15 @@ def resolve_recipient_ids(conn):
     """
     merged = {r["id"]: r["merged_into"] for r in
               conn.execute("SELECT id, merged_into FROM agents WHERE merged_into IS NOT NULL")}
+    agents = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM agents")}
+    # Every name an identity ever wore maps to its LINEAGE HEAD -- a folded
+    # source under a DIFFERENT name (X "architect" -> Y "reveille-architect")
+    # still answers for mail addressed to X's name: it is Y's mail.
     heads = {}
-    for r in conn.execute("SELECT * FROM agents"):
-        if _lineage_head(merged, r["id"]) == r["id"]:
-            heads.setdefault(r["name"], []).append(dict(r))
+    for a in agents.values():
+        head = agents.get(_lineage_head(merged, a["id"]), a)
+        heads.setdefault(a["name"], {})[head["id"]] = head
+    heads = {name: list(by_id.values()) for name, by_id in heads.items()}
     people = {r["name"] for r in conn.execute("SELECT name FROM users")}
     report = {"resolved": {}, "how": {}, "humans": 0, "unresolvable": []}
     for m in conn.execute("SELECT id, room, recipient, ts_ns FROM messages "

@@ -60,6 +60,7 @@ def world(tmp_path):
     agent(conn, "S1", "solo", 1000)                 # seeded long after its history
     agent(conn, "X", "arch", 10, retired=800)       # folded into Y (jsonl beside the db)
     agent(conn, "Y", "arch", 900)
+    agent(conn, "OX", "old-arch", 10, retired=800)  # folded into Y under ANOTHER name
     agent(conn, "T1", "twin", 1)                    # two owners, both live: no answer
     agent(conn, "T2", "twin", 2, owner="u2")
     m = {
@@ -72,10 +73,12 @@ def world(tmp_path):
         "ghost": msg(conn, "ghost", 30),
         "bcast": msg(conn, "*", 35),
         "arch": msg(conn, "arch", 40),
+        "old-arch": msg(conn, "old-arch", 42),
         "twin": msg(conn, "twin", 45),
     }
     (tmp_path / "identity-merges.jsonl").write_text(json.dumps(
-        {"to": {"id": "Y", "name": "arch"}, "from": [{"id": "X", "name": "arch"}]}) + "\n")
+        {"to": {"id": "Y", "name": "arch"},
+         "from": [{"id": "X", "name": "arch"}, {"id": "OX", "name": "old-arch"}]}) + "\n")
     back_to_26(conn)
     return conn, path, m
 
@@ -89,11 +92,12 @@ def test_the_succession_clock_resolves_every_message_it_can(tmp_path, capsys):
     assert rid(conn, m["a2-live"]) == "A2"
     assert rid(conn, m["solo"]) == "S1"           # seeded after its history
     assert rid(conn, m["arch"]) == "Y"            # folded: the survivor's mail
+    assert rid(conn, m["old-arch"]) == "Y"        # folded under ANOTHER name: still Y's
     assert rid(conn, m["human"]) is None          # a person is not an identity
     assert rid(conn, m["bcast"]) is None
     out = capsys.readouterr().out
-    assert "6 resolved" in out and "1 addressed to a person" in out
-    assert "1 fold(s) recorded" in out
+    assert "7 resolved" in out and "1 addressed to a person" in out
+    assert "2 fold(s) recorded" in out
 
 
 def test_what_it_cannot_resolve_is_listed_with_room_name_and_ts_and_left_null(tmp_path, capsys):
@@ -115,10 +119,11 @@ def test_the_rename_log_is_seeded_and_the_fold_recorded(tmp_path):
     log = {(r["agent_id"], r["name"], r["from_ns"], r["to_ns"]) for r in
            conn.execute("SELECT * FROM agent_names")}
     assert log == {("A1", "dev", 100, None), ("A2", "dev", 600, None), ("S1", "solo", 1000, None),
-                   ("X", "arch", 10, None), ("Y", "arch", 900, None),
+                   ("X", "arch", 10, None), ("Y", "arch", 900, None), ("OX", "old-arch", 10, None),
                    ("T1", "twin", 1, None), ("T2", "twin", 2, None)}
     assert conn.execute("SELECT merged_into FROM agents WHERE id='X'").fetchone()[0] == "Y"
-    assert conn.execute("SELECT count(*) FROM agents WHERE merged_into IS NOT NULL").fetchone()[0] == 1
+    assert conn.execute("SELECT merged_into FROM agents WHERE id='OX'").fetchone()[0] == "Y"
+    assert conn.execute("SELECT count(*) FROM agents WHERE merged_into IS NOT NULL").fetchone()[0] == 2
 
 
 def test_the_step_is_rerunnable_and_does_not_double_the_log(tmp_path):
@@ -126,7 +131,7 @@ def test_the_step_is_rerunnable_and_does_not_double_the_log(tmp_path):
     store.migrate(conn, path)
     conn.execute("PRAGMA user_version=26")
     assert store.migrate(conn, path) == store.SCHEMA_VERSION
-    assert conn.execute("SELECT count(*) FROM agent_names").fetchone()[0] == 7
+    assert conn.execute("SELECT count(*) FROM agent_names").fetchone()[0] == 8
     assert rid(conn, m["a2-live"]) == "A2"
 
 
@@ -135,8 +140,10 @@ def test_no_merge_record_beside_the_db_means_no_folds(tmp_path):
     (tmp_path / "identity-merges.jsonl").unlink()
     store.migrate(conn, path)
     assert conn.execute("SELECT count(*) FROM agents WHERE merged_into IS NOT NULL").fetchone()[0] == 0
-    # X and Y are then two heads of `arch`: at ts 40 only X existed -> X.
+    # X and Y are then two heads of `arch`: at ts 40 only X existed -> X; and
+    # `old-arch` is OX's own name.
     assert rid(conn, m["arch"]) == "X"
+    assert rid(conn, m["old-arch"]) == "OX"
 
 
 def test_the_step_is_in_the_chain():
