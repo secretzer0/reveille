@@ -239,6 +239,19 @@ GitLab/Apple/Okta = one entry + two env names. Nothing else grows.
 
 ## 10. Local passwords: "no local passwords"
 
+**Slice 2 as built (0.2.158, operator 11758 / ruling 11759).** The close is
+conditional on doors existing -- `_password_closed()` is `bool(_oidc_doors)`,
+one condition with no second flag to forget. With doors: the login card
+renders the three buttons and nothing else, `POST /login` answers **410**
+(not 401 -- the credential is not wrong, the way in is gone, and a 401 teaches
+a page to retry forever), `POST /users` is refused and points at INVITE
+CODES, and the Account tab has no password section for a door-holder.
+Without doors nothing changes. `store.password_only_users` names every live
+person whose only way in is a password; the boot banner WARNS with their
+names, because being locked out is the one harm this slice can do and it must
+never be discovered by the person at their next sign-in. `POST /setup`
+survives: a fresh broker has no users and no doors linked to anyone.
+
 RULED as a two-step: slice 1 ships federated login BESIDE the password form
 (admins created by /setup and existing users must be able to sign in and LINK
 a door -- §5.1 -- before their password stops working). Slice 2 (operator

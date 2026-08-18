@@ -10,12 +10,11 @@ import sys
 import time
 import urllib.parse
 
-from starlette.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import daemon, store  # noqa: E402
 
-from conftest import CID, SECRET, TID  # noqa: E402,F401
+from conftest import CID, SECRET, TID, sit  # noqa: E402,F401
 
 def _hop(web, provider, extra=""):
     """Browser walk: /auth/<p>/login -> provider authorize -> callback. Returns
@@ -24,13 +23,13 @@ def _hop(web, provider, extra=""):
     assert r.status_code in (302, 303, 307), (r.status_code, r.text)
     loc = r.headers["location"]
     q = urllib.parse.parse_qs(urllib.parse.urlsplit(loc).query)
-    assert q["redirect_uri"] == [f"http://testserver/auth/{provider}/callback"]
+    assert q["redirect_uri"] == [f"{daemon._public_url}/auth/{provider}/callback"]
     assert q["state"] and q.get("code_challenge_method") == ["S256"]
     pr = web.stub.browser.get("http://stub/authorize?" + urllib.parse.urlsplit(loc).query)
     assert pr.status_code == 307
     back = pr.headers["location"]
-    assert back.startswith(f"http://testserver/auth/{provider}/callback?")
-    return web.get(back[len("http://testserver"):])
+    assert back.startswith(f"{daemon._public_url}/auth/{provider}/callback?")
+    return web.get(back[len(daemon._public_url):])
 
 
 def _me(web):
@@ -107,7 +106,7 @@ def test_gate1_verified_email_links_unverified_creates_two_matches_refuse(broker
     # refused with "use your other door" -- never merged, never guessed
     broker.cookies.clear()
     store.create_user(broker.conn, "eve", "pw-not-a-real-secret")
-    broker.post("/login", json={"name": "eve", "password": "pw-not-a-real-secret"})
+    sit(broker, "eve")
     broker.stub.github_user = {**broker.stub.github_user, "id": 4343, "login": "eve-gh"}
     broker.stub.github_emails = [{"email": "ada@example.com", "primary": True, "verified": True}]
     assert _hop(broker, "github", "?link=1").headers["location"] == "/ui#doors"
@@ -140,8 +139,7 @@ def test_email_case_never_decides_a_match(broker):
 
 def test_gate2_signed_in_link_attaches_to_the_session_user(broker):
     admin = store.create_user(broker.conn, "travis", "pw-not-a-real-secret", role="admin")
-    r = broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
-    assert r.status_code == 200
+    sit(broker, "travis")
     # google asserts ada@example.com -- there is no such user; the link goes to
     # the SESSION user travis, not to an email match
     r = _hop(broker, "google", "?link=1")
@@ -152,12 +150,12 @@ def test_gate2_signed_in_link_attaches_to_the_session_user(broker):
     # the same door cannot be attached to a second account
     broker.cookies.clear()
     store.create_user(broker.conn, "eve", "pw-not-a-real-secret")
-    broker.post("/login", json={"name": "eve", "password": "pw-not-a-real-secret"})
+    sit(broker, "eve")
     r = _hop(broker, "google", "?link=1")
     assert "already the door of another user" in urllib.parse.unquote(r.headers["location"])
     # unlink: travis has a password, so the last door may go; then it is gone
     broker.cookies.clear()
-    broker.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
+    sit(broker, "travis")
     r = broker.delete("/me/identities/google/sub-1")
     assert r.status_code == 200 and r.json()["identities"] == []
     # link without a session -> refused, no row
@@ -238,19 +236,28 @@ def test_gate6_state_replay_expiry_and_the_pkce_verifier(broker):
 
 
 def test_gate7_cookie_is_host_prefixed_and_secure_on_https(broker):
-    daemon._public_url = "https://reveille.example"
-    # a browser on https (the jar drops a Secure cookie set over plain http)
-    tls = TestClient(daemon.build_app(), base_url="https://testserver", follow_redirects=False)
+    """The cookie NAME follows the PUBLIC url's scheme, one function for the
+    writer and every reader. Driven over https, because a Secure cookie handed
+    to a browser over plain http is dropped -- including the login marker."""
+    from starlette.testclient import TestClient
+    tls = TestClient(daemon.build_app(), base_url="https://testserver",
+                     follow_redirects=False)
+    tls.stub, tls.conn = broker.stub, broker.conn
+    daemon._public_url = "https://testserver"
     try:
         assert daemon._cookie_name() == "__Host-rev_session"
-        store.create_user(broker.conn, "travis", "pw-not-a-real-secret", role="admin")
-        r = tls.post("/login", json={"name": "travis", "password": "pw-not-a-real-secret"})
-        sc = r.headers["set-cookie"]
-        assert sc.startswith("__Host-rev_session=") and "Secure" in sc and "HttpOnly" in sc
+        r = _hop(tls, "google")                     # a door mints the session
+        assert r.status_code == 303, (r.status_code, r.text)
+        sc = next(h for h in r.headers.get_list("set-cookie") if h.startswith("__Host-"))
+        assert "Secure" in sc and "HttpOnly" in sc and "SameSite=lax" in sc
         assert "Path=/" in sc and "Domain" not in sc
-        assert tls.get("/me").status_code == 200, "the reader takes the same name"
+        secret = sc.split("=", 1)[1].split(";")[0]
+        assert store.resolve_session(broker.conn, secret)["name"] == "ada", \
+            "the reader takes the same name the writer used"
+        assert tls.get("/me").json()["name"] == "ada"
         r = tls.post("/logout")
         assert r.headers["set-cookie"].startswith("__Host-rev_session=")
+        assert store.resolve_session(broker.conn, secret) is None, "logout killed it"
         assert tls.get("/me").status_code == 401
     finally:
         daemon._public_url = "http://testserver"

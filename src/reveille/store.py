@@ -2202,6 +2202,17 @@ def delete_user(conn, user_id):
 
 # ---- sessions ----------------------------------------------------------------
 
+def password_only_users(conn):
+    """Live people whose ONLY way in is a password. Closing the password door
+    (DES-018 s10 slice 2) locks exactly these out, so the close names them
+    instead of discovering them at their next sign-in."""
+    return [r["name"] for r in conn.execute(
+        "SELECT u.name FROM users u WHERE u.deleted_ns IS NULL "
+        "AND u.pw_hash LIKE 'scrypt$%' "
+        "AND NOT EXISTS (SELECT 1 FROM identities i WHERE i.user_id=u.id) "
+        "ORDER BY u.name")]
+
+
 def free_tombstone(conn, user_id, actor="admin"):
     """An admin frees a RESERVED name (ruling 11611 follow-on). Only a
     tombstone with nothing citing it may go -- one that any message, agent,
