@@ -50,7 +50,7 @@ def test_every_start_version_runs_every_step_after_it(tmp_path, spy):
     # step no v9-v13 database ever ran.
     conn, path = db_at(tmp_path, 9)
     assert store.migrate(conn, path) == store.SCHEMA_VERSION
-    assert spy == [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29], spy
+    assert spy == [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], spy
     assert conn.execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
 
 

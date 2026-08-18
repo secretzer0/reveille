@@ -3278,11 +3278,31 @@ async function openRooms(){
    '<span class="rName">'+esc(r.owner||'?')+' \u2192 '+esc(r.name)+'</span>'+
    (sel?'<span class="rNow">VIEWING</span>':'')+'</span></div>';
  }).join('')||'<div class="pDim">none</div>';
+ // OWNERLESS ROOMS (EPIC-001 #4): deleting a person leaves their rooms
+ // standing -- the history is not theirs to take -- and nobody can change a
+ // room's name, retention or publicity until it has an owner again. Admin
+ // only, and only ADOPT: taking a room that has an owner is not a verb here.
+ let orphan='';
+ if(d.is_admin){
+  try{const o=await api('/rooms/ownerless');
+   orphan=(o.rooms||[]).map(r=>'<div class="pRow"><b>'+esc(r.name)+'</b>'+
+    '<span class="pDim">'+r.messages+' message'+(r.messages===1?'':'s')+', '+
+    r.members+' member'+(r.members===1?'':'s')+'</span>'+
+    '<button data-adopt="'+r.id+'" data-aname="'+esc(r.name)+'">adopt</button></div>').join('');
+  }catch(e){}
+ }
  panel('rooms',
+  (orphan?'<div class="pSec">OWNERLESS ROOMS</div>'+
+   '<div class="pDim">Nobody owns these -- their owner was deleted. Until one is '+
+   'adopted, its name, retention and publicity cannot be changed by anyone. Adopting '+
+   'makes it yours; the audit keeps the record.</div>'+orphan:'')+
   '<div class="pSec">YOUR ROOMS</div>'+mineHtml+
   '<div class="pRow"><input id="newRoom" placeholder="new room name"><button id="mkRoom">create</button></div>'+
   (shared?'<div class="pSec">SHARED WITH YOU &mdash; OWNER &rarr; ROOM</div>'+shared:'')+
   '<div class="pSec">PUBLIC &mdash; OWNER &rarr; ROOM</div>'+pub);
+ for(const b of document.querySelectorAll('[data-adopt]'))b.onclick=async()=>{
+  try{await api('/rooms/'+b.dataset.adopt+'/owner',{method:'PATCH',body:'{}'});
+   toast(b.dataset.aname+' is yours now',true);openRooms();}catch(e){toast(e.message);}};
  $('mkRoom').onclick=async()=>{
   try{await api('/rooms',{method:'POST',body:JSON.stringify({name:$('newRoom').value.trim()})});
    openRooms();}catch(e){toast(e.message);}};

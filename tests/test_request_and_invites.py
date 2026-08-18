@@ -224,7 +224,7 @@ def test_the_migration_adds_the_two_tables_and_widens_the_audit_check(tmp_path):
     db = str(tmp_path / "v29.db")
     conn = store.connect(db)
     store.migrate(conn, db)
-    assert store._version(conn) == 30
+    assert store._version(conn) == store.SCHEMA_VERSION
     # the widened CHECK takes the new verbs (a v29 db would refuse them)
     u = store.setup_first_admin(conn, "travis", "hunter2hunter2")
     for action in ("request", "approve", "deny", "invite"):
