@@ -172,6 +172,23 @@ command inside longer speech is text ("I said stop yesterday" is a sentence).
 Gate: each row of the table round-trips; the near-misses ("sent", "stop it")
 are text.
 
+**Slice 4 as built (0.2.124, pre-ruled 11355 s5; measured 2026-08-18 on the
+eval box, Chrome).** `earCommand(text)` is pure: case-fold, drop leading and
+trailing punctuation, collapse whitespace; the whole take must equal one of
+`send` `cancel` `stop` `reply` `voice on` `voice off`, or `room <name>`;
+nothing fuzzy. Every take from either control lands through `earHeard`: a
+command runs in `earRun` and is never appended; anything else is text. `earRun`
+is the ONE place the ear acts on the page and the spoken `send` is the ONE way
+the ear ever sends -- the human said the word; an empty box is a no-op with a
+toast; `cancel` clears the box; `stop` is the stop button; `reply` needs a
+selected message (none -> a toast); `room <name>` switches by exact name,
+case-folded (unknown -> a toast); `voice on/off` is the toggle. Verified in the
+page: the table round-trips; `sent`, `stop it`, `Stop, please`, `send now`,
+`I said stop yesterday`, `room` are text; `Send.` / `SEND!` / ` send ` are the
+command; a spoken `send` with text in the box posted message 29 on the eval box
+and emptied the box. Also in this slice (architect 11374): a microphone that
+dies mid-take turns listening off / ends the talk take -- the track's `ended`.
+
 **Slice 5 -- wake word.** "reveille" (openWakeWord, on-device: in the page via
 ONNX Runtime Web, or on the STT host if the page cannot carry it). Without the
 word the room is not listening to the human; the word arms slice 2's

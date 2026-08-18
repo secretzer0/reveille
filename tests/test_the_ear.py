@@ -217,15 +217,21 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     assert ear.count("fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',") == 2 and \
         ear.count("headers:{'content-type':'audio/wav'},body:take") == 2
     assert "const take=wavBlob(pcm,16000);" in ear, "the VAD hands 16 kHz float; the wire is the same 16 kHz WAV"
-    assert ear.count("earLand(d.text||'');") == 2 and UI.count("function earLand(text){") == 1
+    assert ear.count("earHeard(d.text||'');") == 2 and UI.count("function earLand(text){") == 1, \
+        "every take lands through earHeard: a command runs, anything else is text"
     assert "if(typeof listenStop==='function')listenStop();" in ear and "if(listenVad||vRec)return;" in ear, \
         "one ear at a time"
     land = ear[ear.index("function earLand(text){"):]
     land = land[:land.index("\n}\n")]
     assert "const b=$('body');" in land and "b.value=had+" in land and \
         "b.setSelectionRange(b.value.length,b.value.length);" in land
+    # THE ONE WAY THE EAR EVER SENDS is the spoken "send" inside earRun (slice 4,
+    # 11355 s5) -- the human said the word. Nowhere else in the ear.
+    run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
+    rest = ear.replace(run, "")
     for forbidden in ("send(", "$('send')", "sendMsg", "requestSubmit", ".submit("):
-        assert forbidden not in ear, f"the ear must never send ({forbidden})"
+        assert forbidden not in rest, f"the ear must never send outside earRun ({forbidden})"
+    assert run.count("requestSubmit") == 1 and "if(!$('body').value.trim()){toast('nothing to send');return;}" in run
     assert ear.count("try{vCtxUp();}catch(e){}") == 2, "either mic gesture doubles as the audio unlock"
 
 
@@ -277,3 +283,29 @@ def test_the_vad_ships_with_the_page_from_a_table(tmp_path):
     sums = pathlib.Path(daemon._UI_PACKAGED, "vad", "SHA256SUMS").read_text()
     for name in daemon._VAD_FILES:
         assert name in sums
+
+
+def test_voice_commands_are_a_fixed_grammar_on_the_whole_final_transcript():
+    """DES-014 slice 4 (pre-ruled 11355 s5): the table, exact words, case-folded,
+    trailing punctuation dropped; a command take is consumed, not appended;
+    near-misses are text; "send" on an empty box is a no-op; a dead mic ends a
+    take (architect 11374)."""
+    ear = UI[UI.index("const EAR_COMMANDS="):UI.index("async function openVoices(){")]
+    assert "const EAR_COMMANDS=['send','cancel','stop','reply','voice on','voice off'];" in ear
+    assert "const m=/^room (.+)$/.exec(t);" in ear and "return {cmd:'room',arg:m[1]};" in ear
+    assert ".toLowerCase().replace(/[\\s.!?,;:]+$/,'')" in ear, "case-folded, trailing punctuation dropped"
+    assert "if(EAR_COMMANDS.includes(t))return {cmd:t};" in ear and "return null;" in ear, "exact words, nothing fuzzy"
+    heard = ear[ear.index("function earHeard(text){"):ear.index("function earLand(text){")]
+    assert "if(c){earRun(c);return;}" in heard and "earLand(text);" in heard, "a command is consumed, text lands"
+    run = ear[ear.index("function earRun(c){"):ear.index("function earHeard(text){")]
+    for row in ("case 'send':", "case 'cancel':", "case 'stop':{vStop();vDone();return;}", "case 'reply':",
+                "case 'room':", "case 'voice on':{if(!voiceOn)toggleVoice();return;}",
+                "case 'voice off':{if(voiceOn)toggleVoice();return;}"):
+        assert row in run, row
+    assert "toast('select a message to reply to')" in run and "toast('no room named" in run
+    assert "pickRoom(r.id)" in run and "(x.name||'').toLowerCase()===c.arg" in run, "room by exact name"
+    # A dead mic ends the take / turns listening off.
+    whole = UI[UI.index("let talkBusy=false;"):UI.index("async function openVoices(){")]
+    assert "for(const t of st.getAudioTracks())t.addEventListener('ended',listenStop);return st;" in whole
+    assert "for(const t of vRec.stream.getAudioTracks())t.addEventListener('ended',()=>talkStop());" in whole
+
