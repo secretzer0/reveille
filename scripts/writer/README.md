@@ -18,7 +18,7 @@ Order of operations, each a script here:
    flag set, start the server, measure time-to-first-sentence and tok/s with
    the writer's own prompt shape, stop it. The FIRST-SOUND budget is 2.0 s
    send-to-sound (ruled 11036); the writer's share is `REVEILLE_SCRIPT_TIMEOUT`
-   = time to first sentence, 1.5 s. A quant that misses it is not the pin; if
+   = time to first sentence, 2.5 s (11549; was 1.5). A quant that misses it is not the pin; if
    none makes it, a smaller Qwen3.8 sibling is (the role does not need 27B).
 4. `llama-server.service` -- the systemd unit for the chosen pin; edit MODEL and
    FLAGS from the bench, `systemctl enable --now llama-server`.

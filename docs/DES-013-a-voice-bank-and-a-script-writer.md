@@ -189,8 +189,8 @@ current, holder)`:
   `.part` under ONE header — every subsequent WAV header stripped, the same sample
   rate asserted, or refuse and fall to terse. The `script` frame fires when the first
   sentence closes; the row is written when the script ends. `REVEILLE_SCRIPT_TIMEOUT`
-  is **time to first sentence** (default 1.5 s); a miss speaks the terse text now, no
-  row, no frame. Thinking off / effort low. If the pinned model cannot make the budget
+  is **time to first sentence** (default 2.5 s since ruling 11549 -- was 1.5 s; see
+  the measurement below); a miss speaks the terse text now, no row, no frame. Thinking off / effort low. If the pinned model cannot make the budget
   on the P40s, a smaller Qwen3.8 sibling is the pin — the role does not need 27B; the
   number decides.
 - Request: `{model, messages:[system, user], max_tokens: 300, temperature: 0.5,
@@ -245,6 +245,17 @@ current, holder)`:
   (1.5 ms) per char SHOWN -- 700 chars ~2.5 s, 5000 ~9 s, 9000 ~15 s. The ear and the
   voices are unaffected; the first-sound rule for SHORT messages stands as ruled. The
   second bench (vLLM AWQ-Int4 TP=2, 11322/11340) may lower the slope; the number decides.
+  **Measured on the live pair 2026-08-18 (11548, ruled 11549):** the hybrid Qwen3.8
+  (GDN + attention) makes vLLM force one block of 1568 tokens ("Setting attention
+  block size to 1568 tokens to ensure that attention page size is >= mamba page
+  size"), and prefix caching is whole-block only -- so every prompt under 1568 tokens
+  gets 0% hits by construction (vllm issue #40696), and the frame + persona (~500-600
+  tokens) prefill on every call. Prefill is ~730 tok/s flat: 0.83 s to first token at
+  2382 prompt chars, 1.03 s at 3072, 1.18 s at 3407; the first SENTENCE closes at
+  1.4-2.2 s on a short message. So the flat budget is **2.5 s** (was 1.5 s -- a coin
+  flip that fell to terse on most short messages once clicks queued behind it). The
+  frame is ~400 tokens (~0.55 s of that): a frame diet to <= 250 tokens keeping every
+  rule is a measured experiment for later, judged by ear on ten real messages.
 - Persona draft: `POST /voices/{id}/persona/draft {hint}` → `{persona}` (503 when the
   writer is off). **Binding:** this is the ONLY place writer output becomes durable
   text a human edits — behind an explicit button, never automatic; the user edits and

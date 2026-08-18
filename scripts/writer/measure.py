@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Measure a running llama-server the way the broker will use it (DES-013 s8):
-time to FIRST SENTENCE (the writer's budget, REVEILLE_SCRIPT_TIMEOUT 1.5 s) and
+time to FIRST SENTENCE (the writer's budget, REVEILLE_SCRIPT_TIMEOUT 2.5 s) and
 tokens/s, over the writer's own prompt shape, streaming, thinking off.
 
   measure.py --url http://127.0.0.1:8080 [--model writer] [--n 8]
@@ -68,7 +68,7 @@ def main():
     ap.add_argument("--url", required=True)
     ap.add_argument("--model", default="writer")
     ap.add_argument("--n", type=int, default=8)
-    ap.add_argument("--budget", type=float, default=1.5)
+    ap.add_argument("--budget", type=float, default=2.5)
     a = ap.parse_args()
     one(a.url, a.model, *SAMPLES[0], a.budget)          # warm
     firsts, tps = [], []

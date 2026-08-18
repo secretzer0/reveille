@@ -225,6 +225,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.142 THE FLAT SCRIPT BUDGET IS 2.5 s (ruling 11549; DES-013 s5 amended with
+the numbers): on the hybrid Qwen3.8 the engine forces a 1568-token block, so
+prefix caching never pays below it -- frame + persona (~500-600 tok) prefill
+on every call at ~730 tok/s, ~0.55 s of the ~1.0 s to first token, first
+sentence 1.4-2.2 s on short messages. 1.5 s + slope was a coin flip; 2.5 s +
+slope is not. REVEILLE_SCRIPT_TIMEOUT still overrides. Bus tools unchanged.
 0.2.141 VOICE IS REMEMBERED, PER BROWSER (operator 11442, ruling 11444; DES-009
 s8.3 amended). localStorage.revVoice; a load ARMS it -- the button reads
 "voice: tap to resume", the first pointerdown/keydown anywhere flips it on
@@ -524,7 +530,7 @@ finishes in-line before the next item. Bus tools unchanged.
 (an OpenAI-compatible /v1/chat/completions -- llama-server; off by default,
 the broker never loads a model) and turns a message from a speaker whose bank
 voice carries a PERSONA into a short in-character script, STREAMED: the first
-sentence must close inside REVEILLE_SCRIPT_TIMEOUT (1.5 s) or the terse text
+sentence must close inside REVEILLE_SCRIPT_TIMEOUT (2.5 s) or the terse text
 speaks now; sentences are spoken as they close into one wav; the script is
 kept beside the message (pencil icon; GET /script/<mid>) and the `script`
 frame tells the web feed. LISTENER GATE: the browser tells the feed socket
@@ -6189,7 +6195,7 @@ def main():
             _script_on = True
             _script_url, _script_token = s_url, s_token
             _script_model = os.environ.get("REVEILLE_SCRIPT_MODEL", "")
-            first = float(os.environ.get("REVEILLE_SCRIPT_TIMEOUT") or "1.5")
+            first = float(os.environ.get("REVEILLE_SCRIPT_TIMEOUT") or "2.5")   # 11549: measured, see DES-013 s5
             _plaintext_banner(s_url, lan_ok, "the script writer")
             threading.Thread(target=_script_worker, args=(s_url, _script_model, s_token, first),
                              name="script", daemon=True).start()
