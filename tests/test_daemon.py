@@ -1059,9 +1059,12 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     #     ADAPTS (operator 11408, LTE): starts at V_LEAD, doubles on every underrun
     #     after the first buffer, capped at V_LEAD_MAX -- a jitter buffer that grows
     #     only where the link earns it, and never taxes first sound on a good link.
-    assert "const V_LEAD=0.05;" in player and "const V_LEAD_MAX=2.0;" in player
-    assert "if(next<now){if(started){lead=Math.min(V_LEAD_MAX,lead*2);vDiag.underruns++;vDiag.lead=lead;}next=now+lead;}" in player
-    assert "started=false,lead=V_LEAD;" in player, "each utterance starts at the small lead"
+    assert "const V_LEAD=0.05;" in player and "const V_LEAD_MAX=2.0;" in player and "let vLead=V_LEAD;" in player
+    assert "if(next<now){if(started){vLead=Math.min(V_LEAD_MAX,vLead*2);vDiag.underruns++;vDiag.lead=vLead;}next=now+vLead;}" in player
+    # Carried across utterances (architect 11419): a bad link earns it once, a
+    # clean utterance halves it back toward V_LEAD -- never re-learned per message.
+    assert "if(started&&!vDiag.underruns){vLead=Math.max(V_LEAD,vLead/2);vDiag.lead=vLead;}" in player
+    assert "lead=V_LEAD;" not in player.replace("let vLead=V_LEAD;", ""), "no per-utterance reset"
     assert "if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}" in player
     # 5. Live arrivals only: the speak call hangs off the socket's AUDIO case (the
     #    frame that says a first byte exists -- DES-009 section 2 as amended, ruling

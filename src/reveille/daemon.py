@@ -225,11 +225,12 @@ its CHANGES section says what changed and how to use it.
 
 CHANGES = """
 0.2.130 THE PLAYER'S LEAD ADAPTS (operator 11408: LTE stuttered on a live
-message that was still being made). Each utterance starts 50 ms ahead as
-before, and every underrun after the first buffer doubles the lead, up to
-2 s: a jitter buffer that grows only where the link earns it, one gap at a
-time, and never taxes first sound on a good link. The voice button's title
-now counts underruns and shows the lead. Bus tools unchanged.
+message that was still being made). The page carries one lead across
+utterances: 50 ms on a good link as before; every underrun after the first
+buffer doubles it, up to 2 s; an utterance with no underrun halves it back
+-- a jitter buffer the link earns once, one gap at a time, and gives back
+as it improves (architect 11419). The voice button's title counts underruns
+and shows the lead. Bus tools unchanged.
 0.2.129 TWO NITS. The iOS on-screen decoder diagnostic (a toast after
 every utterance, 0.2.117, kept "until iOS sounds") is gone -- iOS sounds
 (operator 11401); the numbers stay in the voice button's title. /version

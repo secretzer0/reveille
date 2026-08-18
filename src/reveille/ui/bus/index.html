@@ -1335,6 +1335,8 @@ function vMark(n){
 // joiners are not blasted (vPush is fed by the live socket only).
 const V_LEAD=0.05;         // seconds ahead of "now" a late chunk is re-anchored to
 const V_LEAD_MAX=2.0;      // a link that keeps arriving late earns a jitter buffer up to this (operator 11408, LTE)
+let vLead=V_LEAD;          // the lead the LINK has earned, carried across utterances (architect 11419): doubles on an
+                           // underrun, halves (floor V_LEAD) after an utterance with none -- a message never re-learns it
 let vCtl=null;             // the utterance in flight: {srcs, ab(AbortController)}
 let vLast=null;            // {id, firstAt}: when the utterance first sounded (a gate reads it)
 let vDec=null;             // the one Opus decoder (WASM), reset per utterance
@@ -1450,11 +1452,13 @@ async function vPlay(id,url){
  // fetch has ended AND the last scheduled buffer ended; a stream that decoded
  // nothing is done at once. All events, no timers.
  // THE LEAD ADAPTS (operator 11408: LTE stuttered on a live, in-flight message):
- // it starts at V_LEAD so first sound is not taxed on a good link, and every
- // underrun AFTER the first buffer doubles it, up to V_LEAD_MAX -- a jitter
- // buffer that grows only where the link earns it, one gap at a time.
- const demux=vDemuxer();let dec=null,next=0,pending=0,ended=false,started=false,lead=V_LEAD;
- vDiag.lib=!!window['opus-decoder'];vDiag.frames=vDiag.decoded=vDiag.scheduled=vDiag.errors=vDiag.underruns=0;vDiag.lead=lead;
+ // the page carries vLead across utterances -- a good link sits at V_LEAD and
+ // first sound is not taxed; every underrun AFTER the first buffer doubles it,
+ // up to V_LEAD_MAX; an utterance with no underrun halves it back toward
+ // V_LEAD -- a jitter buffer the link earns once, one gap at a time, and gives
+ // back as it improves (architect 11419).
+ const demux=vDemuxer();let dec=null,next=0,pending=0,ended=false,started=false;
+ vDiag.lib=!!window['opus-decoder'];vDiag.frames=vDiag.decoded=vDiag.scheduled=vDiag.errors=vDiag.underruns=0;vDiag.lead=vLead;
  vDiag.ctx=ctx.state;vDiag.rate=ctx.sampleRate;
  const finish=()=>{if(vCtl===ctl&&ended&&pending===0){
   if(vDiag.frames&&!vDiag.scheduled)toast('audio: decoded nothing from '+vDiag.frames+' frames');
@@ -1477,13 +1481,14 @@ async function vPlay(id,url){
    const ab=ctx.createBuffer(1,samplesDecoded,sampleRate);ab.copyToChannel(channelData[0],0);
    const src=ctx.createBufferSource();src.buffer=ab;src.connect(ctx.destination);
    const now=ctx.currentTime;
-   if(next<now){if(started){lead=Math.min(V_LEAD_MAX,lead*2);vDiag.underruns++;vDiag.lead=lead;}next=now+lead;}
+   if(next<now){if(started){vLead=Math.min(V_LEAD_MAX,vLead*2);vDiag.underruns++;vDiag.lead=vLead;}next=now+vLead;}
    src.onended=()=>{pending--;finish();};
    pending++;ctl.srcs.push(src);src.start(next);
    if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}
    next+=ab.duration;
   }
  }catch(e){if(vCtl===ctl){toast('audio: '+(e.message||e));return vDone();}return;}
+ if(started&&!vDiag.underruns){vLead=Math.max(V_LEAD,vLead/2);vDiag.lead=vLead;}   // a clean utterance gives lead back
  ended=true;finish();
 }
 
