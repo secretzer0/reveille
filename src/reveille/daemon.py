@@ -225,6 +225,12 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.143 A MICROPHONE REFUSAL NAMES THE PLACE (operator 11559: iPhone, "The
+request is not allowed by the user agent or the platform..."). getUserMedia
+runs inside the tap, so NotAllowedError is the phone's answer: the browser
+app has no microphone from the OS, or the site is blocked in the browser.
+The toast now says where (iPhone: Settings > Safari/Chrome > Microphone; the
+site's permission; then reload) instead of quoting WebKit. Bus tools unchanged.
 0.2.142 THE FLAT SCRIPT BUDGET IS 2.5 s (ruling 11549; DES-013 s5 amended with
 the numbers): on the hybrid Qwen3.8 the engine forces a 1568-token block, so
 prefix caching never pays below it -- frame + persona (~500-600 tok) prefill

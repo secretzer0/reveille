@@ -3620,13 +3620,28 @@ function wavBlob(pcm,rate){
 // wire; POST /stt returns the words; they are APPENDED to the textarea with the
 // caret at the end and focus in the box. INVARIANT: the human is the author --
 // this code never calls send. The mic gesture doubles as the audio unlock.
+// THE MIC REFUSAL NAMES THE PLACE (operator 11559, iPhone/Chrome: "The request is not
+// allowed by the user agent or the platform in the current context, possibly
+// because the user denied permission"). getUserMedia is called inside the tap, so
+// a NotAllowedError is the phone's answer, not the page's: the browser app has no
+// microphone permission from the OS, or this site is blocked in the browser. Say
+// where to look; the raw WebKit sentence sends nobody anywhere.
+function micWhy(e){
+ const ios=/iP(hone|ad|od)/.test(navigator.userAgent);
+ if(e&&e.name==='NotAllowedError')
+  return 'microphone: this browser may not use it. '+(ios
+   ?'iPhone: Settings > (Safari or Chrome) > Microphone must be on, and the site must be allowed (Safari: aA > Website Settings; Chrome: ... > Settings > Content Settings). Then reload.'
+   :'allow the microphone for this site in the address bar and reload.');
+ if(e&&e.name==='NotFoundError')return 'microphone: no input device found';
+ return 'microphone: '+((e&&e.message)||e);
+}
 let talkBusy=false;
 async function talkStart(){
  if(vRec||talkBusy)return;
  if(typeof listenStop==='function')listenStop();   // one ear at a time: holding talk ends hands-free
  try{vCtxUp();}catch(e){}
  try{await vRecStart();}
- catch(e){toast('microphone: '+(e.message||e));return;}
+ catch(e){toast(micWhy(e));return;}
  for(const t of vRec.stream.getAudioTracks())t.addEventListener('ended',()=>talkStop());   // a dead mic ends the take
  $('mic').classList.add('on');$('mic').setAttribute('aria-pressed','true');
  const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
@@ -3715,7 +3730,7 @@ async function listenStart(){
     for(const t of st.getAudioTracks())t.addEventListener('ended',listenStop);return st;},
   });
   await v.start();
- }catch(e){listenPaint('');toast('microphone: '+(e.message||e));return;}
+ }catch(e){listenPaint('');toast(micWhy(e));return;}
  listenVad=v;listenPaint('listening');
 }
 function listenStop(){
