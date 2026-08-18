@@ -133,6 +133,22 @@ SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut
 # it. Not the repo version: the broker's identity does not depend on it and it
 # must not be rebuilt on every bump. Move the pin, bump this tag
 # (image-pin-check enforces the pair).
+# THIS BOX'S OWN DEPLOY SETTINGS, IF IT HAS ANY (operator, 2026-08-18: "these
+# are not persisted in an env or conf file"). Every `make up` had to carry
+# SERVER_DATA and PROXY_SITE by hand, and the defaults below are not harmless
+# if one is forgotten: PROXY_SITE falls back to :80, which means no hostname,
+# no automatic HTTPS, and an EMPTY public origin -- so the OIDC redirect URI
+# stops matching what the providers were registered with and the session cookie
+# loses its __Host- prefix. That is the same failure family as the upstreams
+# that lived only in a shell (0.2.167), one layer up, and it deserves the same
+# answer: a file the box keeps.
+#
+# Included BEFORE the defaults so its values win over them; `make VAR=x up` and
+# a scratch invocation still win over the file. Absent file = today's defaults,
+# unchanged, so a fresh clone behaves exactly as before.
+DEPLOY_CONF ?= $(HOME)/.reveille/deploy.env
+-include $(DEPLOY_CONF)
+
 TTS_IMAGE ?= reveille-tts:0.2.3
 TTS_UPSTREAM := $(shell cat docker/tts.upstream)
 SERVER_DATA  ?= $(HOME)/reveille
@@ -253,6 +269,12 @@ up:
 	@REVEILLE_AGENT_IMAGE=$(AGENT_IMAGE) uv run --quiet python scripts/reveille_launch.py \
 		upgrade --all --idle --image $(AGENT_IMAGE) || true
 	@echo "reveille up: proxy $(PROXY_SITE) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
+	@# WHERE THOSE TWO CAME FROM. A deploy that silently used a default for
+	@# PROXY_SITE would answer on :80 with no public origin and break the doors,
+	@# so the run says whether this box has a settings file or is defaulting.
+	@if [ -f "$(DEPLOY_CONF)" ]; then echo "  settings: $(DEPLOY_CONF)"; \
+	else echo "  settings: NONE -- $(DEPLOY_CONF) does not exist, so SERVER_DATA and"; \
+	     echo "            PROXY_SITE came from this command line or the defaults."; fi
 
 # `make up` with the working tree's UI mounted LIVE (docker/compose.dev.yml):
 # edit src/reveille/ui/bus/index.html, refresh, done -- no rebuild. Same

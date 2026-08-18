@@ -268,6 +268,19 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.170 THE BOX KEEPS ITS OWN DEPLOY SETTINGS (operator, 2026-08-18: "these
+are not persisted in an env or other conf file"). SERVER_DATA and PROXY_SITE
+had to be typed on every `make up`, and their defaults are not harmless if one
+is forgotten: PROXY_SITE falls back to :80, which means no hostname, no
+automatic HTTPS and an EMPTY public origin -- so the OIDC redirect URI stops
+matching what Google and GitHub were registered with, and the session cookie
+loses its __Host- prefix. Same family as the upstreams that lived only in a
+shell (0.2.167), one layer up. The Makefile now optionally includes
+$(HOME)/.reveille/deploy.env (override with DEPLOY_CONF), read BEFORE the
+defaults so the file wins over them while `make VAR=x up` still wins over the
+file; an absent file leaves today's behaviour exactly as it was. Every `make
+up` prints which settings file it used, or says NONE -- a deploy running on a
+default it was never told about is the thing that must not be silent.
 0.2.169 A TURN CLEARS THE POKE -- AN AGENT MID-TURN STOPPED GOING DEAF (live
 defect 2026-08-18, read out of this broker's own log). The wake gate allows
 ONE outstanding ring per agent and swallows the rest until inbox() answers it,
