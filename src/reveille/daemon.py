@@ -224,6 +224,16 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.137 NOTHING IN THE FEED IS WIDER THAN THE FEED (operator 11478, rulings
+11480/11483 B). Fluid, no device pixels: the message column may shrink
+(min-width:0), any token may break (overflow-wrap:anywhere on body, head,
+markdown), code scrolls inside its own box, the feed never scrolls
+sideways (overflow-x hidden, touch-action pan-y), and on a phone the page
+itself cannot rubber-band sideways; the "latest" pill sits above the feed
+instead of on the message box; the Settings close X stays on the card.
+Measured (iPhone 14 + Pixel 7, both orientations, a 200-char token, a
+300-char subject and a code block): feed scrollWidth == clientWidth and
+document scrollWidth == innerWidth everywhere. Bus tools unchanged.
 0.2.136 THE ABANDONED WARNING NAMES FFMPEG'S CAUSE: the stderr reader is
 joined before its words are read (a slow runner read them early -> "no
 output"). Bus tools unchanged.
