@@ -224,6 +224,15 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.131 THE PAGE FITS A PHONE (operator 11439: "almost unusable" in Chrome
+or Safari on a phone). Below 760px the rail -- rooms, agents filter,
+settings, logout -- is a drawer behind a menu button in the top bar (it
+was display:none, so a phone could not change room or sign out); the top
+bar and the composer's control row wrap instead of pushing Send off the
+right edge; every input is 16px, under which iOS Safari zooms the page on
+focus and leaves it there. Measured with iPhone 15 emulation: nothing
+wider than the viewport, Send at x<393. Nothing changes above 760px. Bus
+tools unchanged.
 0.2.130 THE PLAYER'S LEAD ADAPTS (operator 11408: LTE stuttered on a live
 message that was still being made). The page carries one lead across
 utterances: 50 ms on a good link as before; every underrun after the first

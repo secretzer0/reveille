@@ -1264,3 +1264,15 @@ def test_the_plaintext_banner_names_a_host_once_and_never_loopback(monkeypatch, 
     out = capsys.readouterr().out
     assert out.count("PLAINTEXT ON YOUR LAN") == 3 and "127.0.0.1" not in out
 
+
+
+def test_the_page_fits_a_phone():
+    """0.2.131 (operator 11439): below 760px the rail is a drawer behind a menu
+    button, the composer's control row wraps, and inputs are 16px so iOS Safari
+    does not zoom on focus. Each is a string a redesign could quietly drop."""
+    mobile = PAGE[PAGE.index("@media(max-width:760px)"):]
+    mobile = mobile[:mobile.index("</style>")]
+    assert 'id="railBtn"' in PAGE and "body.railOpen #rail{display:flex}" in mobile
+    assert ".cbottom{flex-wrap:wrap" in mobile and "#top{flex-wrap:wrap" in mobile
+    assert "#composer input,#composer textarea,#filter{font-size:16px}" in mobile
+    assert "$('railBtn').onclick" in PAGE and "classList.toggle('railOpen')" in PAGE
