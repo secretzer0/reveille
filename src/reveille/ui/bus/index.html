@@ -3040,6 +3040,14 @@ async function openMaterialize(name){
  // agent's rooms would be a demotion wearing a move's clothes. Still ticks, not
  // a fixed list -- the mint attaches exactly what is ticked here.
  const has=new Set((agTokRooms&&agTokRooms[name])||[]);
+ const roles=(agMeta&&agMeta.roles)||[];
+ // ROOMS THAT CANNOT TRAVEL ARE NAMED, NEVER DROPPED QUIETLY (ruled 11902).
+ // The mint attaches exactly what is ticked, so anything the identity holds
+ // that this screen cannot offer -- a room you no longer reach -- would
+ // otherwise vanish from its reach with nothing said. Silence there is a
+ // demotion the mover did not choose and the owner cannot see.
+ const visible=new Set(rooms.map(r=>r.id));
+ const unreachable=[...has].filter(id=>!visible.has(id));
  openAgDlg(
   '<div class="pRow"><b id="agDlgTitle">Move '+esc(name)+' here</b></div>'+
   '<div class="pAsk">'+esc(name)+' is alive on another machine. This mints ONE '+
@@ -3054,17 +3062,44 @@ async function openMaterialize(name){
     (has.has(r.id)?' checked':'')+'> '+esc(r.name)+'</label>').join('')
    :'<span class="pDim">no rooms -- a body with none reaches nothing</span>')+
    '</div>'+
+  '<div id="agmLost" class="pDim"></div>'+
+  // A CONTAINER BODY BOOTS FROM A ROLE PROMPT. The launcher refuses without
+  // one -- "an agent provisioned without one boots with no CLAUDE.md role
+  // block and knows what it is only from its bus name" -- and that refusal is
+  // right, so the choice belongs on this screen rather than as a surprise
+  // after the click. The identity's memories, lessons and history are NOT in
+  // this prompt: they travel with the id, whatever role the new body wears.
+  '<div class="pRow"><select id="agmRole" aria-label="role template">'+
+   '<option value="">pick a role for the new body</option>'+
+   roles.map(r=>'<option value="'+esc(r)+'">'+esc(r)+'</option>').join('')+
+   '</select></div>'+
   '<div class="pRow"><input id="agmRepo" aria-label="repo URL" '+
    'placeholder="repo URL (blank = your profile default)"></div>'+
   '<div class="pRow"><button id="agmGo">move it here</button> '+
    '<button id="agmNo">cancel</button></div>'+
   '<div id="agmStatus" class="pDim"></div>','#agmGo');
  $('agmNo').onclick=closeAgDlg;
+ // Live, because the answer changes with every tick: what this move would
+ // take away from the identity's reach, by name.
+ const lost=()=>{
+  const off=[...has].filter(id=>visible.has(id)&&
+    !document.querySelector('#agmRooms input[value="'+CSS.escape(id)+'"]:checked'));
+  const names=off.concat(unreachable).map(id=>roomName(id)||id);
+  $('agmLost').textContent=names.length
+   ? 'WILL NOT TRAVEL: '+names.join(', ')+
+     ' -- the new body will not reach '+(names.length>1?'those rooms':'that room')+
+     (unreachable.length?' (some are rooms you no longer hold, so this screen cannot carry them)':'')
+   : '';
+ };
+ lost();
+ for(const c of document.querySelectorAll('#agmRooms input'))c.addEventListener('change',lost);
  $('agmGo').onclick=async()=>{
   const st=$('agmStatus');
   const picked=[...document.querySelectorAll('#agmRooms input:checked')]
    .map(c=>c.value);
   if(!picked.length){toast('tick at least one room -- a body with none reaches nothing');return;}
+  if(!$('agmRole').value){toast('pick a role -- a container body boots its CLAUDE.md from it, '+
+   'and the launcher refuses an agent that would know itself only by its bus name');return;}
   try{
    st.textContent='minting and starting the new body...';
    // NO CREATE FLAG HERE: this attaches to the identity that already exists.
@@ -3072,7 +3107,8 @@ async function openMaterialize(name){
    // by that name" -- correctly, because bringing a new being into the world
    // is a different act from moving one (DES-011 s2, ruling 10896).
    await lapi('/agents',{method:'POST',body:JSON.stringify({
-    agent:name,rooms:picked,repo_url:$('agmRepo').value.trim()})});
+    agent:name,rooms:picked,role:$('agmRole').value,
+    repo_url:$('agmRepo').value.trim()})});
    st.textContent='container up; waiting for it to reach the bus...';
    for(let i=0;i<60;i++){
     await new Promise(r=>setTimeout(r,2000));
