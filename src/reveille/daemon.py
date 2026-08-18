@@ -224,6 +224,11 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.129 TWO NITS. The iOS on-screen decoder diagnostic (a toast after
+every utterance, 0.2.117, kept "until iOS sounds") is gone -- iOS sounds
+(operator 11401); the numbers stay in the voice button's title. /version
+names a LAN plaintext host once however many upstreams reach it, and never
+names loopback (that is this host, no allowance used). Bus tools unchanged.
 0.2.128 THE BUS DOCTRINE IS AT THE CORE (operator 11397, ruled 11402):
 agents write ULTRA-TERSE -- fragments, no articles or filler, ids/numbers/
 names exact, code and errors quoted verbatim; write for AGENTS, never for
@@ -5590,8 +5595,12 @@ def _plaintext_banner(url, lan_ok, what):
     """The operator chose plaintext to a LAN host: say so at boot, by name, and
     remember it for /version -- an allowance that announces itself."""
     host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if lan_ok and urllib.parse.urlparse(url).scheme != "https" and _lan_host(host):
-        _plaintext_hosts.append(host)
+    # Loopback is this host, not the LAN -- no allowance was used, nothing to
+    # name; and one host reached by two upstreams is named once.
+    if lan_ok and urllib.parse.urlparse(url).scheme != "https" and _lan_host(host) \
+            and not ipaddress.ip_address(host).is_loopback:
+        if host not in _plaintext_hosts:
+            _plaintext_hosts.append(host)
         print(f"PLAINTEXT ON YOUR LAN: {what} at {host} is reached in the clear because "
               f"REVEILLE_LAN_PLAINTEXT=1 -- your wire, your call; /version names it.",
               flush=True)
