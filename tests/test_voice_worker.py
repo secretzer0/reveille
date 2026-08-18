@@ -708,10 +708,9 @@ def test_the_boot_sweep_unlinks_terse_renditions_that_became_durable_before_1147
     conn.execute("INSERT INTO voice_assignments(room_id, speaker, voice_id, set_by, ts_ns) "
                  "VALUES('r1','agent:a1','worf','room',1),('r1','agent:a2','data','room',1)")
     ids = []
-    for sender, aid in (("worf", "a1"), ("worf", "a1"), ("t", None), ("data", "a2")):
-        r = store.send(conn, sender, "*", "hello", room="r1")
+    for who in ("agent:a1", "agent:a1", "user:u1", "agent:a2"):
+        r = store.send(conn, who, "*", "hello", room="r1")
         mid = r["id"] if isinstance(r, dict) else r
-        conn.execute("UPDATE messages SET sender_agent_id=? WHERE id=?", (aid, mid))
         ids.append(mid)
     conn.commit()
     terse, scripted, human, nopersona = ids

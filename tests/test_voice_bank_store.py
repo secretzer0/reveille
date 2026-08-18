@@ -47,7 +47,7 @@ def world(c):
 # ---- schema ------------------------------------------------------------------
 
 def test_v23_lays_the_three_tables_and_v24_the_sample_and_the_chain_reaches_it(tmp_path):
-    assert store.SCHEMA_VERSION == 27
+    assert store.SCHEMA_VERSION >= 27
     assert store._UPGRADES[22] == "_upgrade_v22" and store._UPGRADES[23] == "_upgrade_v23"
     assert store._UPGRADES[24] == "_upgrade_v24"
     c = db()
@@ -213,7 +213,7 @@ def test_voice_put_replaces_in_place_and_the_bank_is_capped():
 def test_the_script_row_dies_with_the_message_and_flags_the_listing():
     c = db()
     admin, user, r1, r2, a1, a2 = world(c)
-    m = store.send(c, "picard", "*", "terse", room=r1["id"])
+    m = store.send(c, f"agent:{a1['id']}", "*", "terse", room=r1["id"])
     store.script_put(c, m["id"], "In character.", "picard", "qwen", 1234)
     rows = store._with_artifacts(c, [{"id": m["id"]}])
     assert rows[0]["has_script"] is True and rows[0]["has_audio"] is False

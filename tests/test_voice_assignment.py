@@ -29,9 +29,16 @@ def test_the_speaker_key_comes_from_the_credential_and_nowhere_else():
     assert K(daemon.Principal(kind="agent", name="picard", user_id="u1", agent_id="a1")) == "agent:a1"
     assert K(daemon.Principal(kind="agent", name="picard", user_id="u1")) is None
     assert K(daemon.Principal(kind="user", name="travis", user_id="u1")) == "user:u1"
-    # The ONE derivation: the send paths and the routes call this function.
+    # The ONE derivation: the send paths and the routes call this function --
+    # and since DES-011 s6.1(b) it is the identity the store keys on too, so
+    # no other spelling of "who" reaches the store from the daemon.
     src = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "daemon.py")).read()
-    assert src.count(", speaker_key(p)") == 2, "both send paths pass the key (through _voice_of_send)"
+    import re
+    calls = [m.end() for m in re.finditer(r"\n\s+_voice_of_send\(", src)]
+    assert len(calls) == 2 and all("speaker_key(p)" in src[i:i + 200] for i in calls), \
+        "both send paths pass the key (through _voice_of_send)"
+    assert "agent_id_for(" not in src.replace("never from agent_id_for(name)", ""), \
+        "no name-derived identity in the daemon"
 
 
 def test_a_bound_token_carries_its_agent_id_into_the_principal(tmp_path, monkeypatch):

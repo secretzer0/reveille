@@ -2075,8 +2075,7 @@ for(const id of ['hSince','hUntil'])
 $('inner').addEventListener('click',async e=>{
  const d=e.target.closest('.del');
  if(d){
-  const r=await fetch('/message/'+d.dataset.del+qs()+'&from='+encodeURIComponent(myName),
-    {method:'DELETE'});
+  const r=await fetch('/message/'+d.dataset.del+qs(),{method:'DELETE'});
   if(!r.ok){
    const err=JSON.parse(await r.text());
    if(err.readers?.length)
@@ -2133,7 +2132,7 @@ $('composer').addEventListener('submit',async e=>{
   // No page-all flag any more: a broadcast from this composer IS a person
   // paging the room and always wakes it. The control this replaced could not
   // be kept on -- it hid whenever a recipient was selected and reset on send.
-  const payload={from:myName,to,subject:$('subject').value.trim(),body};
+  const payload={to,subject:$('subject').value.trim(),body};
   if(attachments.length)payload.attachments=attachments.slice();
   if(replyTo)payload.reply_to=replyTo;
   const r=await fetch('/send'+qsFor(rid),{method:'POST',headers:{'content-type':'application/json'},

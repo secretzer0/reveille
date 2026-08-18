@@ -226,6 +226,29 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.150 DELIVERY BY ID (DES-011 6.1(b), EPIC-001 S1; ruling 10983). Schema
+v28, rebuilt in one transaction with a `.pre-v28-<ns>.bak` beside the db:
+members keyed (room_id, principal) with the ROOM-NAME beside it, unique per
+room among live rows; reads keyed (message_id, principal). principal is the
+DES-013 speaker key -- agent:<id> for a body holding a bound token, user:<id>
+for a person -- derived from the credential, never from a name. send() takes
+the principal, writes under the room-name and stamps both identities;
+inbox/ack/receipts/deafness/prune key on the id, so a RENAME orphans nothing
+(gate 9.1: store.rename_agent, PATCH /identities/<id> {name}, owner or
+admin; the rename log closes and opens rows). join() assigns the room-name
+(DES-011 s2): the bare name, or <owner>-<name> when another owner's live
+agent holds it in that room -- fixed for the membership, kept on re-join,
+refused naming both when the alias is held too; a stale holder is reaped
+on the spot; the join tool answers `as` per room and presence carries the
+principal (gate 9.3: two owners' architect in one room, each room-name
+reaching only its holder). Migration: members re-keyed from agent_id / the
+token / the web tag / the succession clock, unresolvable rows dropped and
+printed; reads re-keyed the same way plus the catch-up receipts join()
+would have written for a re-minted successor (measured: without them three
+re-minted agents would wake to 1617 instead of 321 unread). Bus tools: join
+returns `as`; send/inbox/ack unchanged on the wire; the web page no longer
+sends `from` (the credential is the sender). Wake registration still keys on
+the token+name pair: an ALIASED agent's ring lands in 6.1(c).
 0.2.149 THE RECIPIENT PLANE LEARNS THE IDENTITY (DES-011 6.1(a), EPIC-001
 S1; ruling 10983). Schema v27, additive, one transaction, snapshot
 `broker.db.pre-v27-<ns>.bak` beside the db: messages.recipient_agent_id
@@ -3705,7 +3728,7 @@ def _acting(request) -> Principal:
     return _act(_me(request))
 
 
-def _seen(name, rooms, token_id=None):
+def _seen(principal, name, rooms, token_id=None):
     """Heartbeat -- and RE-ADMIT where the membership is gone.
 
     It used to be "heartbeat if joined; no-op otherwise", and the no-op was the
@@ -3718,7 +3741,7 @@ def _seen(name, rooms, token_id=None):
     absence heals here, on the next authenticated call, in every room the token
     holds."""
     with contextlib.suppress(store.BusError):
-        if store.touch(_conn, name, rooms) < len(rooms):
+        if store.touch(_conn, principal, rooms) < len(rooms):
             back = store.readmit(_conn, name, tag=name, rooms=rooms,
                                  token_id=token_id)
             if back:
@@ -3752,7 +3775,10 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
 
     Replays only the last 15 min of backlog (use history(since=...) to recall further
     back, only when explicitly asked); fresh=True skips the backlog.
-    Returns {name, wake_url, rooms, skipped, unread, version}. `version` is the
+    Returns {name, wake_url, rooms, skipped, unread, version}. Each room carries
+    `as`: what THAT room calls you -- your own name, or <owner>-<name> when
+    another owner's agent already held it there (DES-011 s2); address yourself
+    and read presence by it. `version` is the
     BROKER's version, reported here because boot is where you already ask -- the
     broker never announces itself on the bus. Differs from the last one you saw?
     Re-read usage(): its CHANGES section says what moved."""
@@ -3763,19 +3789,24 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
         raise store.AccessError(f"no access to room {room}")
     targets = [room] if room else list(p.rooms)
     # The bare call reads what leave() wrote; the named call overrides it.
-    left = set() if room else store.left_rooms(_conn, p.name, targets)
+    left = set() if room else store.left_rooms(_conn, speaker_key(p), targets)
     skipped = [{"id": r, "name": p.rooms[r]} for r in targets if r in left]
+    called = {}
     for rid in targets:
         if rid in left:
             continue
-        store.join(_conn, p.name, tag=p.name, room_id=rid, token_id=p.token_id,
-                   fresh=fresh, url=url or None, clear_leave=bool(room))
+        # join() answers with the ROOM-NAME it assigned (DES-011 s2): your own
+        # name, or <owner>-<name> where another owner's agent already holds it.
+        called[rid] = store.join(_conn, p.name, tag=p.name, room_id=rid,
+                                 token_id=p.token_id, fresh=fresh, url=url or None,
+                                 clear_leave=bool(room))
         _push_presence(rid)     # an AGENT arriving is the same room event
-    unread = len(store.inbox(_conn, p.name, p.rooms))
+    unread = len(store.inbox(_conn, speaker_key(p), p.rooms))
     # `rooms` is what you are IN, so a skipped room must not appear in both lists --
     # a join report that shows a room as joined and skipped at once is the silence
-    # this change exists to end, dressed as an answer.
-    rooms = [{"id": r, "name": n} for r, n in p.rooms.items()
+    # this change exists to end, dressed as an answer. Each carries `as`: what
+    # this room calls you -- address yourself and read presence by it.
+    rooms = [{"id": r, "name": n, "as": called.get(r, p.name)} for r, n in p.rooms.items()
              if r not in {s["id"] for s in skipped}]
     # A COUNT, not the pack: joining stays cheap, brief() pulls the pack on demand.
     scopes = ["global"] + list(p.rooms)
@@ -4016,10 +4047,10 @@ async def send(to: str, body: str, subject: str = "",
     ring the room -- a wake is a human gesture). Returns {id, thread_id, parents,
     delivered_to}."""
     p = _acting(ctx.request_context.request)
-    _seen(p.name, p.rooms, p.token_id)
+    _seen(speaker_key(p), p.name, p.rooms, p.token_id)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))
-    res = store.send(_conn, p.name, to, body, subject=subject, reply_to=reply_to,
+    res = store.send(_conn, speaker_key(p), to, body, subject=subject, reply_to=reply_to,
                      attachments=attachments, room=rid)
     # DO NOT "FIX" THIS LINE. An AGENT broadcast never wakes, and this is the
     # ONLY thing terminating an agent-agent broadcast loop: every broadcast
@@ -4029,16 +4060,17 @@ async def send(to: str, body: str, subject: str = "",
     # web plane rings on broadcast because a human paging a room is a gesture
     # with a person behind it; nothing here can loop.
     woke = res["wake"] if to != store.BROADCAST else []
-    _notify(rid, woke, res["id"], p.name, subject)
+    me = res["sender"]          # the ROOM-NAME the store wrote (alias if in force)
+    _notify(rid, woke, res["id"], me, subject)
     _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
                           # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
-                "parents": res["parents"], "from": p.name, "to": to, "subject": subject,
+                "parents": res["parents"], "from": me, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": attachments or [], "ts_ns": time.time_ns()})
-    _voice_of_send(res["id"], rid, p.name, subject, body, speaker_key(p), attachments)
+    _voice_of_send(res["id"], rid, me, subject, body, speaker_key(p), attachments)
     log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s woke=%s",
-             p.name, to, p.rooms.get(rid), res["thread_id"], res["id"],
+             me, to, p.rooms.get(rid), res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
     return {"id": res["id"], "thread_id": res["thread_id"], "room": rid,
             "parents": res["parents"], "delivered_to": res["wake"]}
@@ -4051,11 +4083,11 @@ async def inbox(ctx: Context = None) -> dict:
     came from. Non-destructive: ack(message_ids) when processed."""
     p = _me(ctx.request_context.request)
     if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
-        _seen(p.name, p.rooms, p.token_id)
+        _seen(speaker_key(p), p.name, p.rooms, p.token_id)
     # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
     # this one call covers every room, so one ring was the right number.
     _poke_pending.pop((p.token_id, p.name), None)
-    msgs = store.inbox(_conn, p.name, p.rooms)
+    msgs = store.inbox(_conn, speaker_key(p), p.rooms)
     log.info("%s inbox -> %s unread across %s room(s)", p.name, len(msgs), len(p.rooms))
     return {"messages": msgs}
 
@@ -4066,7 +4098,7 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
     or not addressed to you are ignored, not fatal -- an ack is a batch and one stale
     id must not fail the rest. Returns {acked, ignored}."""
     p = _acting(ctx.request_context.request)
-    out = store.ack(_conn, p.name, message_ids, p.rooms)
+    out = store.ack(_conn, speaker_key(p), message_ids, p.rooms)
     log.info("%s ack %s (ignored %s)", p.name, out["acked"], len(out["ignored"]))
     return out
 
@@ -4195,7 +4227,7 @@ async def history(keywords: str = "", since: str = "", until: str = "",
     graph()/thread() or an id to trace() to expand the reply DAG."""
     p = _me(ctx.request_context.request)
     if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
-        _seen(p.name, p.rooms, p.token_id)
+        _seen(speaker_key(p), p.name, p.rooms, p.token_id)
     msgs = store.search(
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
@@ -4241,11 +4273,11 @@ async def leave(room: str = "", ctx: Context = None) -> str:
         # A VERB THAT ONLY REDUCES ACCESS NEEDS NO ACCESS (11337): a room this
         # token no longer reaches but is still listed in is left, not refused --
         # the refusal was what made a revoked reach a ghost membership.
-        store.leave_listed(_conn, p.name, p.token_id, room)
+        store.leave_listed(_conn, speaker_key(p), p.token_id, room)
         _push_presence(room)
         log.info("%s left %s (no longer reachable; listed row cleared)", p.name, room)
         return f"left: {p.name}"
-    store.leave(_conn, p.name, targets)
+    store.leave(_conn, speaker_key(p), targets)
     for rid in targets:
         _push_presence(rid)
     log.info("%s left %s room(s)", p.name, len(targets))
@@ -4319,7 +4351,8 @@ async def wake_ws(ws: WebSocket):
         log.warning("%s wake rejected: no_rooms (unringable by construction)", name)
         return
     key = (tok["id"], name)
-    _seen(name, rooms, tok["id"])
+    principal = store.agent_principal(tok["agent_id"]) if tok.get("agent_id") else ""
+    _seen(principal, name, rooms, tok["id"])
     log.info("%s wake connected (%s room(s))", name, len(rooms))
     q: asyncio.Queue = asyncio.Queue()
     # DES-003 2.3: one wake attachment per agent -- a SECOND attachment
@@ -4341,7 +4374,7 @@ async def wake_ws(ws: WebSocket):
         # every waked respawn -- at a 15s reconnect backoff, a flapping broker rings
         # the whole fleet every 15 seconds. It also buys nothing: "hear it now" is a
         # property of the SEND path, and a backlog broadcast is by definition not now.
-        unread = store.inbox(_conn, name, rooms)
+        unread = store.inbox(_conn, principal, rooms)
         backlog = [m for m in unread if m["to"] != store.BROADCAST]
         if backlog and _poke_ok(key):
             _poke_pending[key] = time.time_ns()
@@ -4371,7 +4404,7 @@ async def wake_ws(ws: WebSocket):
             if gone:
                 break
             if recv in done:  # client data = its heartbeat; keep the agent LIVE
-                _seen(name, rooms, tok["id"])
+                _seen(principal, name, rooms, tok["id"])
                 continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
@@ -4392,7 +4425,7 @@ async def wake_ws(ws: WebSocket):
             if not _poke_ok(key):
                 continue
             _poke_pending[key] = time.time_ns()
-            unread = store.inbox(_conn, name, rooms)
+            unread = store.inbox(_conn, principal, rooms)
             n = len(unread)
             direct = sum(1 for m in unread if m["to"] != store.BROADCAST)
             # The newest fact carried by this ring (coalesced rings keep the
@@ -4507,13 +4540,14 @@ async def presence_http(request):
     p = _principal(request)
     rooms = _scope(request, p)
     me = request.query_params.get("me") or ""
-    if me and rooms:  # the poll doubles as the web identity's heartbeat, so it shows live
+    if me and rooms and p.kind == "user":
+        # the poll doubles as the web identity's heartbeat, so it shows live
         with contextlib.suppress(store.BusError):
             rid = next(iter(rooms))
-            if store.known(_conn, me, [rid]):
-                store.touch(_conn, me, [rid])
+            if store.known(_conn, speaker_key(p), [rid]):
+                store.touch(_conn, speaker_key(p), [rid])
             else:
-                store.join(_conn, me, tag=f"web:{me}", room_id=rid, fresh=True)
+                store.join(_conn, p.name, tag=f"web:{p.name}", room_id=rid, fresh=True)
     agents = store.presence(_conn, rooms)
     _annotate_deafness(agents, rooms)
     _annotate_activity(agents, rooms)
@@ -4536,24 +4570,25 @@ async def send_http(request):
     the one being read; cross-room paging stays the deliberate BLAST button.
     Agents get the opposite rule on the MCP tool, which is what keeps broadcast
     storms impossible.
-    Unknown senders are auto-joined; an existing agent's name is used as-is."""
+    The sender is the credential (DES-011 s6.1(b)): a person writes as the
+    person (auto-joined to the room), an agent on this route as its identity."""
     p = _act(_principal(request))
     try:
         d = await request.json()
     except ValueError:
         return JSONResponse({"error": "bad json"}, status_code=400)
-    sender = (d.get("from") or p.name).strip()
     to = (d.get("to") or store.BROADCAST).strip()
     body = d.get("body") or ""
     if not body:
         return JSONResponse({"error": "empty body"}, status_code=400)
     rid = store.resolve_send_room(_scope(request, p), room=d.get("room") or None,
                                   parent_room=_parent_room(d.get("reply_to")))
-    if not store.known(_conn, sender, [rid]):
-        store.join(_conn, sender, tag=f"web:{sender}", room_id=rid)
-    res = store.send(_conn, sender, to, body,
+    if p.kind == "user" and not store.known(_conn, speaker_key(p), [rid]):
+        store.join(_conn, p.name, tag=f"web:{p.name}", room_id=rid)
+    res = store.send(_conn, speaker_key(p), to, body,
                      subject=d.get("subject") or "", reply_to=d.get("reply_to"),
                      attachments=d.get("attachments"), room=rid)
+    sender = res["sender"]
     # A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. This is
     # the web plane, so a broadcast here is a person paging the room and always
     # rings -- no parameter, no checkbox. `shout` is retired: it existed since
@@ -5435,17 +5470,16 @@ async def delete_http(request):
     """DELETE /message/<mid>?from=<name> -- retract your own message if NOBODY has
     read or replied to it yet (the mistaken-broadcast eraser). Room-scoped."""
     p = _act(_principal(request))
-    sender = request.query_params.get("from") or p.name
     mid = int(request.path_params["mid"])
     try:
-        store.delete_if_unseen(_conn, mid, sender, p.rooms)
+        store.delete_if_unseen(_conn, mid, speaker_key(p), p.rooms)
     except store.BusError as e:
         return JSONResponse({"error": str(e),
-                             "readers": store.readers(_conn, mid, exclude=sender)},
+                             "readers": store.readers(_conn, mid, exclude=speaker_key(p))},
                             status_code=409)
     for rid in p.rooms:
         _feed_push(rid, {"event": "deleted", "id": mid})
-    log.info("%s retracted message %s (unseen)", sender, mid)
+    log.info("%s retracted message %s (unseen)", p.name, mid)
     return JSONResponse({"deleted": mid})
 
 
@@ -5510,8 +5544,8 @@ async def feed_ws(ws: WebSocket):
     rid = _feed[q][0]
     if rid and p.kind == "user":
         with contextlib.suppress(store.BusError):
-            if store.known(_conn, p.name, [rid]):
-                store.touch(_conn, p.name, [rid])
+            if store.known(_conn, speaker_key(p), [rid]):
+                store.touch(_conn, speaker_key(p), [rid])
             else:
                 store.join(_conn, p.name, tag=f"web:{p.name}", room_id=rid, fresh=True)
     # ...and ARRIVING is a room event, pushed at the instant it happens.
@@ -5630,7 +5664,7 @@ async def logout_http(request):
     with contextlib.suppress(Exception):
         p = _principal(request)
         if p and p.name:
-            store.leave(_conn, p.name, list(p.rooms))
+            store.leave(_conn, speaker_key(p), list(p.rooms))
     store.delete_session(_conn, request.cookies.get(COOKIE))
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(COOKIE, path="/")
@@ -5799,6 +5833,30 @@ async def agent_footprint_http(request):
 
 
 @_guard
+@_guard
+async def rename_agent_http(request):
+    """PATCH /identities/<agent_id> {"name": ...} -- rename an identity (DES-011
+    s5/s6.1(b)): the label moves, nothing else does; mail in flight still lands
+    (delivery keys on the id). Owner or admin. Answers {name, rooms: {room_id:
+    room-name}} -- the room-name is the alias where the new name was held."""
+    p = _user_principal(request)
+    aid = request.path_params["aid"]
+    row = _conn.execute("SELECT owner_id FROM agents WHERE id=?", (aid,)).fetchone()
+    if not row:
+        return JSONResponse({"error": "no such identity"}, status_code=404)
+    if row["owner_id"] != p.user_id and not p.is_admin:
+        raise store.AccessError("not your agent")
+    try:
+        d = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    out = store.rename_agent(_conn, aid, (d.get("name") or "").strip())
+    for rid in out["rooms"]:
+        _push_presence(rid)
+    log.info("%s renamed identity %s -> %s (rooms: %s)", p.name, aid, out["name"], out["rooms"])
+    return JSONResponse(out)
+
+
 async def prune_agent_http(request):
     """DELETE /agents/<name>?room=<rid> -- erase an agent's trace from a room. Survivors
     that replied to it are reparented to their thread root, never cascade-deleted."""
@@ -6166,6 +6224,7 @@ def build_app():
                   methods=["DELETE"]),
             Route("/agents/{name}/footprint", agent_footprint_http, methods=["GET"]),
             Route("/agents/{name}", prune_agent_http, methods=["DELETE"]),
+            Route("/identities/{aid}", rename_agent_http, methods=["PATCH"]),
             Route("/tokens", tokens_http, methods=["GET", "POST"]),
             Route("/tokens/{tid}", token_http, methods=["PATCH", "DELETE"]),
             Route("/memories", memories_http),

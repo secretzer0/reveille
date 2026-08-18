@@ -148,7 +148,7 @@ def test_no_merge_record_beside_the_db_means_no_folds(tmp_path):
 
 def test_the_step_is_in_the_chain():
     assert store._UPGRADES[26] == "_upgrade_v26"
-    assert store.SCHEMA_VERSION == 27
+    assert store.SCHEMA_VERSION >= 27
 
 
 # ---- the writers move with the schema ---------------------------------------
@@ -159,9 +159,9 @@ def test_send_stamps_the_recipient_identity_from_the_room_name(tmp_path):
     aid = conn.execute("SELECT agent_id FROM tokens WHERE id=?", (tok["id"],)).fetchone()[0]
     store.join(conn, "worker", "worker", ROOM, token_id=tok["id"])
     store.join(conn, "tmelhiser", "web:tmelhiser", ROOM)
-    to_agent = store.send(conn, "tmelhiser", "worker", "hi", room=ROOM)["id"]
-    to_human = store.send(conn, "worker", "tmelhiser", "hi", room=ROOM)["id"]
-    bcast = store.send(conn, "worker", "*", "hi", room=ROOM)["id"]
+    to_agent = store.send(conn, "user:u1", "worker", "hi", room=ROOM)["id"]
+    to_human = store.send(conn, f"agent:{aid}", "tmelhiser", "hi", room=ROOM)["id"]
+    bcast = store.send(conn, f"agent:{aid}", "*", "hi", room=ROOM)["id"]
     assert rid(conn, to_agent) == aid
     assert rid(conn, to_human) is None
     assert rid(conn, bcast) is None
