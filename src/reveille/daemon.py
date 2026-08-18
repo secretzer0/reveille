@@ -268,6 +268,24 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.171 A NATIVE AGENT ALWAYS GETS ITS DOCTRINE, AND ONLY ITS BLOCK IS
+MANAGED (red-shirt, live 2026-08-18; ruled by the operator 11879). The hive is
+PULLED, never pushed: lessons(), brief() and inbox() are tools an agent must
+CALL, and what tells it to call them is the CLAUDE.md in its own directory.
+`reveille init` did ship a starter one -- on the WIZARD path only, which the
+web-mint-then-paste install never takes, and with the password door closed
+that is the only way to install a native agent. So the first agent installed
+that way (reveille-red-shirt) came up with a bus connection, a Stop hook and
+no boot ritual, no ack protocol and no idea that an agent's broadcast wakes
+nobody. Now init writes the doctrine on EVERY path, and writes it as a
+DELIMITED BLOCK between `<!-- reveille:begin ... -->` and `<!-- reveille:end
+-->`: a directory with no CLAUDE.md gets one containing the block, a file that
+already has the markers has that block REWRITTEN in place, and a human's own
+CLAUDE.md gets the block appended once -- every byte outside the markers
+survives, in place, forever. The block carries the version that wrote it, so a
+later boot can tell whether what it is reading is current, and it now states
+the rule red-shirt lacked: a unicast wakes its recipient, YOUR broadcast does
+not. init reports which of created/updated/appended/unchanged happened.
 0.2.170 THE BOX KEEPS ITS OWN DEPLOY SETTINGS (operator, 2026-08-18: "these
 are not persisted in an env or other conf file"). SERVER_DATA and PROXY_SITE
 had to be typed on every `make up`, and their defaults are not harmless if one
