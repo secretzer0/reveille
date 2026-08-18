@@ -2406,7 +2406,7 @@ def _delete_messages(conn, ids):
             # Both names: the .part is the record of an in-flight synthesis, and
             # a worker whose rename then finds no .part fails closed -- no .wav
             # lands for a deleted message, with no second code path.
-            for name in (f"tts-{mid}.webm", f"tts-{mid}.webm.part"):
+            for name in (f"tts-{mid}.webm", f"tts-{mid}.webm.part", f"tts-{mid}.m4a", f"tts-{mid}.m4a.part"):
                 with contextlib.suppress(OSError):
                     os.unlink(os.path.join(AUDIO_DIR, name))
 

@@ -239,6 +239,21 @@ the terse text is the record and is always rendered beside or under the script
 `has_audio` is a per-row `os.path.exists` on `tts-<id>.wav` / `.part` at list time —
 fine at 300 rows; said in a comment, and moved on.
 
+**Amended 2026-08-18 (0.2.126, ruling 11383 for DES-015): the same utterance has a
+SECOND REPRESENTATION, `tts-<id>.m4a` (AAC-LC 48 kbit/s mono in MP4, `moov` up
+front), because a native shell's audio stack plays AAC and not WebM/Opus.** Made by
+the worker from the finished `.webm` with the ffmpeg this box already owns, AFTER
+the `audio` announcement (first sound owes it nothing; ~50-100 ms per utterance),
+written as `.m4a.part` and renamed, and named on the feed as its own frame
+`{"event":"audio_m4a","id":mid}` so a shell knows when to fetch (the page ignores
+frames it does not know). `GET /audio/<mid>.m4a` mirrors the `.webm` route's
+authorization (the message's room; `?room=` ignored) with TWO states, not three -- an
+MP4 is not tailed: complete → the file as `audio/mp4`; anything else → 404. The pair
+is one utterance: `_delete_messages` unlinks both and both `.part`s; the startup
+sweep takes both `.part` kinds; a failed `.m4a` is logged and the `.webm` stands.
+Not a private endpoint: the web has the file too and may drop its WASM decoder for
+it one day.
+
 ## 7. The client
 
 - `render(m)` head gains `.play` (▶, when `has_audio`) and `.scr` (✎, when

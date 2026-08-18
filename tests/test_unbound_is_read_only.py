@@ -171,5 +171,5 @@ def test_every_act_tool_and_mutating_route_wears_the_gate():
                  "audio_make_http"):
         assert "_act(_principal(request))" in routes[name], f"{name} mutates: wrap the principal in _act"
     for name in ("messages_http", "search_http", "presence_http", "voices_http", "audio_http",
-                 "script_http", "files_http", "voice_clip_get_http", "room_voices_http"):
+                 "audio_m4a_http", "script_http", "files_http", "voice_clip_get_http", "room_voices_http"):
         assert "_act(" not in routes[name], f"{name} is a read and must stay open"
