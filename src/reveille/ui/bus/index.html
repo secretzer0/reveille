@@ -3048,6 +3048,12 @@ async function openMaterialize(name){
  // demotion the mover did not choose and the owner cannot see.
  const visible=new Set(rooms.map(r=>r.id));
  const unreachable=[...has].filter(id=>!visible.has(id));
+ // ONLY WHERE YOU AND IT ALREADY MEET (operator 11913). A move offers the
+ // INTERSECTION of your rooms and the agent's, never your whole list: a body
+ // swap is not the place to hand an agent reach it never had. Granting reach
+ // is the Tokens tab, deliberately, where that is the entire point of the
+ // screen and the act reads as what it is.
+ const offer=rooms.filter(r=>has.has(r.id));
  openAgDlg(
   '<div class="pRow"><b id="agDlgTitle">Move '+esc(name)+' here</b></div>'+
   '<div class="pAsk">'+esc(name)+' is alive on another machine. This mints ONE '+
@@ -3057,10 +3063,11 @@ async function openMaterialize(name){
   'now is superseded in the same transaction -- that body goes dark on its next '+
   'call and cannot act afterwards. Files on the other machine do NOT travel; '+
   'anything uncommitted there stays there.</div>'+
-  '<div class="pChips" id="agmRooms">'+(rooms.length?rooms.map(r=>
-    '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"'+
-    (has.has(r.id)?' checked':'')+'> '+esc(r.name)+'</label>').join('')
-   :'<span class="pDim">no rooms -- a body with none reaches nothing</span>')+
+  '<div class="pChips" id="agmRooms">'+(offer.length?offer.map(r=>
+    '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'" checked> '+
+    esc(r.name)+'</label>').join('')
+   :'<span class="pDim">you and '+esc(name)+' share no room -- nothing to carry, '+
+    'so there is nothing to move. Give it a room in the Tokens tab first.</span>')+
    '</div>'+
   '<div id="agmLost" class="pDim"></div>'+
   // A CONTAINER BODY BOOTS FROM A ROLE PROMPT. The launcher refuses without
