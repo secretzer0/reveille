@@ -124,6 +124,59 @@ configured); a fresh instance with providers configured and no users makes the
 FIRST federated signup the admin -- printed at boot and in the audit log so it
 is never a surprise.
 
+### 6a. RULED (amendment, rulings 11701-11709): request pool + one-time invites
+
+`REVEILLE_SIGNUP` gains a fourth value, `request`: anyone may knock, a human
+decides. The knock is a ROW, never a user -- no half-account exists, so a
+pending stranger reserves no name, holds no session, and cannot appear
+anywhere a user can.
+
+- `signup_requests(provider, subject)` PK: email + `email_verified`,
+  display_name, avatar_url, login, optional `note` (<= 280 chars, typed on the
+  card before the door), `state` pending|denied, requested/decided stamps,
+  `decided_by`.
+- §5.2 STAYS ABOVE THE POLICY. A known door signs in; an unknown door whose
+  provider-VERIFIED email belongs to exactly one live user links and signs in.
+  Those are proof of the same person, not a stranger. Only when neither
+  applies does the policy run, and `request` files the row.
+- The page is ONE line -- `/ui?requested=1`, "request received, an admin
+  reviews it" -- identical for a fresh ask, a pending one and a denied one. A
+  stranger never learns which, and there is nothing to retry.
+- Admin queue in the Users tab (`GET /users/requests?state=pending|denied|all`,
+  `POST /users/requests/<p>/<sub>/<approve|deny|undeny|forget>`, admin only):
+  approve = `create_user` + `link_identity` + audit + the row consumed, ONE
+  transaction; deny = kept (so the next visit is silent, not a fresh ask),
+  reversible with undeny, erasable with forget.
+- `invites(code_hash PK, created_by, created_ns, note, used_by, used_ns)`:
+  128-bit urlsafe code shown ONCE at creation, stored only as a sha256 -- a
+  leaked database is not a pile of working invitations. Good for any email
+  through any door, single-use, revocable while unused, no expiry. A used code
+  is never deleted: it is the record of who came in.
+- Redemption: an invite field on the login card (and `/ui?invite=CODE`
+  prefills it); the code and note ride the OIDC marker through the provider
+  round-trip -- they never reach the provider. Under `request` a valid code
+  creates the account at once (audit `invite`); under `closed` a valid code is
+  the ONLY way in; under `open` no code is consulted -- nobody spends a code
+  they did not need. `_invite_consume` burns it inside the same transaction as
+  the account (`UPDATE ... WHERE used_ns IS NULL` is the race gate: two
+  simultaneous redemptions, one winner).
+- Notification: the broker logs the ask and nudges every watching feed
+  (`signup_requests` frame) so the Users tab count is live. No email exists,
+  and nothing a STRANGER does may write to the bus.
+- Audit verbs widen to `request|approve|deny|invite` beside
+  `signup|link|unlink` (schema v30 rebuilds `identity_audit` for the CHECK;
+  rows copied verbatim).
+
+Gates (`tests/test_request_and_invites.py`): a request files a row and no user
+and no session, and the page never says which state it is; the queue is
+admin-only; approve makes exactly one account + one door + one audit line and
+the door then signs in; deny is quiet, undeny restores, forget erases; a code
+is one-use, shown once, hashed at rest, and a burned or revoked or bogus code
+falls back to the ordinary path rather than erroring; `closed` + code is
+invite-only; `open` ignores codes; §5.2 still runs above the policy; the
+migration adds both tables and takes the new verbs; two racing redemptions
+burn one code only.
+
 ## 7. RULED: sessions, tokens, cookies
 
 - Session = the existing server-side `sessions` table and `rev_session` cookie

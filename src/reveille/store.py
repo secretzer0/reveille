@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -162,12 +162,43 @@ CREATE TABLE IF NOT EXISTS oidc_state (
 -- Every link / unlink / federated signup, durable (DES-018 s5).
 CREATE TABLE IF NOT EXISTS identity_audit (
     id       INTEGER PRIMARY KEY,
-    action   TEXT NOT NULL CHECK (action IN ('signup','link','unlink')),
+    action   TEXT NOT NULL CHECK (action IN ('signup','link','unlink',
+                                             'request','approve','deny','invite')),
     provider TEXT NOT NULL,
     subject  TEXT NOT NULL,
     user_id  TEXT NOT NULL,
     actor    TEXT NOT NULL,
     ts_ns    INTEGER NOT NULL
+);
+-- DES-018 s6 amendment (ruling 11709): a stranger's REQUEST is not a user.
+-- No user row exists until an admin approves, so a pending request reserves
+-- no name, holds no session and cannot be a half-user anywhere else.
+CREATE TABLE IF NOT EXISTS signup_requests (
+    provider       TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    email          TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    display_name   TEXT,
+    avatar_url     TEXT,
+    login          TEXT,
+    note           TEXT,
+    state          TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending','denied')),
+    requested_ns   INTEGER NOT NULL,
+    decided_ns     INTEGER,
+    decided_by     TEXT,
+    PRIMARY KEY (provider, subject)
+);
+-- One-time invite codes. The code itself is shown ONCE at creation and stored
+-- only as a hash -- same discipline as a token: a leaked database is not a
+-- pile of working invitations.
+CREATE TABLE IF NOT EXISTS invites (
+    code_hash  TEXT PRIMARY KEY,
+    created_by TEXT NOT NULL,
+    created_ns INTEGER NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    used_by    TEXT,
+    used_ns    INTEGER
 );
 -- A room name is unique per owner, not globally: two users may each own a
 -- "Reveille". The UI disambiguates by showing "owner -> room", which is exactly
@@ -1699,7 +1730,8 @@ CREATE TABLE IF NOT EXISTS oidc_state (
 );
 CREATE TABLE IF NOT EXISTS identity_audit (
     id       INTEGER PRIMARY KEY,
-    action   TEXT NOT NULL CHECK (action IN ('signup','link','unlink')),
+    action   TEXT NOT NULL CHECK (action IN ('signup','link','unlink',
+                                             'request','approve','deny','invite')),
     provider TEXT NOT NULL,
     subject  TEXT NOT NULL,
     user_id  TEXT NOT NULL,
@@ -1708,6 +1740,62 @@ CREATE TABLE IF NOT EXISTS identity_audit (
 );
 """)
         conn.execute("PRAGMA user_version=29")
+
+
+def _upgrade_v29(conn, db_path):
+    """v29 -> v30 (DES-018 s6 amendment): signup_requests + invites, and
+    identity_audit's action CHECK widened to the four new verbs (request,
+    approve, deny, invite). The CHECK is the one NON-additive part: sqlite
+    cannot alter a constraint, so the table is rebuilt in the same
+    transaction -- rows copied verbatim, ids preserved."""
+    with tx(conn):
+        _exec_script(conn, """
+ALTER TABLE identity_audit RENAME TO identity_audit_old;
+CREATE TABLE identity_audit (
+    id       INTEGER PRIMARY KEY,
+    action   TEXT NOT NULL CHECK (action IN ('signup','link','unlink',
+                                             'request','approve','deny','invite')),
+    provider TEXT NOT NULL,
+    subject  TEXT NOT NULL,
+    user_id  TEXT NOT NULL,
+    actor    TEXT NOT NULL,
+    ts_ns    INTEGER NOT NULL
+);
+INSERT INTO identity_audit(id, action, provider, subject, user_id, actor, ts_ns)
+  SELECT id, action, provider, subject, user_id, actor, ts_ns FROM identity_audit_old;
+DROP TABLE identity_audit_old;
+-- DES-018 s6 amendment (ruling 11709): a stranger's REQUEST is not a user.
+-- No user row exists until an admin approves, so a pending request reserves
+-- no name, holds no session and cannot be a half-user anywhere else.
+CREATE TABLE IF NOT EXISTS signup_requests (
+    provider       TEXT NOT NULL,
+    subject        TEXT NOT NULL,
+    email          TEXT,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    display_name   TEXT,
+    avatar_url     TEXT,
+    login          TEXT,
+    note           TEXT,
+    state          TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending','denied')),
+    requested_ns   INTEGER NOT NULL,
+    decided_ns     INTEGER,
+    decided_by     TEXT,
+    PRIMARY KEY (provider, subject)
+);
+-- One-time invite codes. The code itself is shown ONCE at creation and stored
+-- only as a hash -- same discipline as a token: a leaked database is not a
+-- pile of working invitations.
+CREATE TABLE IF NOT EXISTS invites (
+    code_hash  TEXT PRIMARY KEY,
+    created_by TEXT NOT NULL,
+    created_ns INTEGER NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    used_by    TEXT,
+    used_ns    INTEGER
+);
+""")
+        conn.execute("PRAGMA user_version=30")
 
 
 def _upgrade_v24(conn, db_path):
@@ -1830,7 +1918,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2199,12 +2287,21 @@ def derive_user_name(conn, hint):
     return name
 
 
+SIGNUP_POLICIES = ("open", "request", "closed")   # or a domain list; see below
+
+
 def signup_allowed(policy, email, verified):
-    """REVEILLE_SIGNUP: 'open' | 'closed' | 'dom1,dom2' (only VERIFIED emails in
-    those domains may create accounts). Returns (ok, why)."""
+    """REVEILLE_SIGNUP: 'open' | 'request' | 'closed' | 'dom1,dom2' (only
+    VERIFIED emails in those domains may create accounts). Returns (ok, why).
+
+    `request` never creates an account here: federated_login turns it into a
+    signup_requests row before this is consulted, so reaching it means the
+    caller asked whether a bare signup may proceed -- it may not."""
     policy = (policy or "open").strip().lower()
     if policy == "open":
         return True, ""
+    if policy == "request":
+        return False, "REQUEST"
     if policy == "closed":
         return False, "signup is closed on this broker -- ask an admin for an invite"
     domains = {d.strip().lstrip("@") for d in policy.split(",") if d.strip()}
@@ -2213,9 +2310,165 @@ def signup_allowed(policy, email, verified):
     return True, ""
 
 
-def federated_login(conn, provider, profile, signup_policy="open", actor="web"):
+# ---- DES-018 s6 amendment (ruling 11709): request pool + one-time invites -----
+
+REQUESTED = "REQUESTED"      # federated_login's answer when a request was filed
+NOTE_MAX = 280
+
+
+def request_get(conn, provider, subject):
+    r = conn.execute("SELECT * FROM signup_requests WHERE provider=? AND subject=?",
+                     (provider, str(subject))).fetchone()
+    return dict(r) if r else None
+
+
+def requests_list(conn, state="pending"):
+    """The admin's queue. `state` None lists every request, decided included."""
+    sql = "SELECT * FROM signup_requests"
+    args = []
+    if state:
+        sql += " WHERE state=?"
+        args = [state]
+    return [dict(r) for r in conn.execute(sql + " ORDER BY requested_ns DESC", args)]
+
+
+def request_file(conn, provider, profile, note="", actor="door"):
+    """Record a stranger's ask. Idempotent per door: a second visit refreshes
+    the profile and leaves the state alone -- a pending row stays pending, a
+    denied row stays denied (the page reads identically either way, so a
+    stranger cannot learn which they are)."""
+    subject = str(profile["subject"])
+    now = time.time_ns()
+    cur = request_get(conn, provider, subject)
+    with tx(conn):
+        if cur:
+            conn.execute(
+                "UPDATE signup_requests SET email=?, email_verified=?, display_name=?, "
+                "avatar_url=?, login=? WHERE provider=? AND subject=?",
+                (_email(profile.get("email")), 1 if profile.get("email_verified") else 0,
+                 profile.get("display_name"), profile.get("avatar_url"),
+                 profile.get("login"), provider, subject))
+        else:
+            conn.execute(
+                "INSERT INTO signup_requests(provider, subject, email, email_verified, "
+                "display_name, avatar_url, login, note, state, requested_ns) "
+                "VALUES(?,?,?,?,?,?,?,?, 'pending', ?)",
+                (provider, subject, _email(profile.get("email")),
+                 1 if profile.get("email_verified") else 0, profile.get("display_name"),
+                 profile.get("avatar_url"), profile.get("login"),
+                 (note or "")[:NOTE_MAX], now))
+            _identity_audit(conn, "request", provider, subject, "", actor)
+    return request_get(conn, provider, subject)
+
+
+def request_approve(conn, provider, subject, actor):
+    """One transaction: the account, its first door, the audit line, and the
+    request row gone. Nothing half-made if any step fails."""
+    req = request_get(conn, provider, subject)
+    if not req:
+        raise NotFound("no such request")
+    if identity_get(conn, provider, subject):
+        raise BusError("that door already belongs to an account")
+    profile = {"subject": subject, "email": req["email"],
+               "email_verified": req["email_verified"], "display_name": req["display_name"],
+               "avatar_url": req["avatar_url"], "login": req["login"], "raw": {}}
+    hint = req["login"] or req["email"] or req["display_name"] or provider
+    name = derive_user_name(conn, hint)
+    uid = _uuid()
+    now = time.time_ns()
+    with tx(conn):
+        conn.execute("INSERT INTO users(id, name, pw_hash, role, created_ns) VALUES(?,?,?,?,?)",
+                     (uid, name, OIDC_PW, "user", now))
+        _identity_upsert(conn, provider, profile, uid, now)
+        _identity_audit(conn, "approve", provider, subject, uid, actor)
+        conn.execute("DELETE FROM signup_requests WHERE provider=? AND subject=?",
+                     (provider, str(subject)))
+    return {"id": uid, "name": name, "role": "user"}
+
+
+def request_deny(conn, provider, subject, actor):
+    """Denied rows are KEPT: the next visit through that door shows the same
+    neutral page instead of filing a fresh ask, so a denial is quiet and does
+    not become a queue the admin has to re-decide. request_forget() erases."""
+    if not request_get(conn, provider, subject):
+        raise NotFound("no such request")
+    with tx(conn):
+        conn.execute("UPDATE signup_requests SET state='denied', decided_ns=?, decided_by=? "
+                     "WHERE provider=? AND subject=?",
+                     (time.time_ns(), actor, provider, str(subject)))
+        _identity_audit(conn, "deny", provider, subject, "", actor)
+
+
+def request_undeny(conn, provider, subject, actor):
+    """A denial reversed: back into the pending queue, to be approved."""
+    if not request_get(conn, provider, subject):
+        raise NotFound("no such request")
+    conn.execute("UPDATE signup_requests SET state='pending', decided_ns=NULL, "
+                 "decided_by=? WHERE provider=? AND subject=?",
+                 (actor, provider, str(subject)))
+
+
+def request_forget(conn, provider, subject, actor):
+    """Erase the row. The same door may then ask again from scratch."""
+    if not request_get(conn, provider, subject):
+        raise NotFound("no such request")
+    conn.execute("DELETE FROM signup_requests WHERE provider=? AND subject=?",
+                 (provider, str(subject)))
+
+
+def invite_create(conn, created_by, note=""):
+    """Mint a one-time code. The CODE is returned once and never stored -- only
+    its hash -- so this answer is the only copy that will ever exist."""
+    code = secrets.token_urlsafe(16)
+    conn.execute("INSERT INTO invites(code_hash, created_by, created_ns, note) VALUES(?,?,?,?)",
+                 (_sha(code), created_by, time.time_ns(), (note or "")[:NOTE_MAX]))
+    return {"code": code, "note": (note or "")[:NOTE_MAX]}
+
+
+def invite_list(conn):
+    """Open codes first, then used ones. The code itself is not here to show."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT i.code_hash, i.created_by, i.created_ns, i.note, i.used_by, i.used_ns, "
+        "cb.name AS created_by_name, ub.name AS used_by_name FROM invites i "
+        "LEFT JOIN users cb ON cb.id=i.created_by LEFT JOIN users ub ON ub.id=i.used_by "
+        "ORDER BY (i.used_ns IS NOT NULL), i.created_ns DESC")]
+    return rows
+
+
+def invite_valid(conn, code):
+    """Is this code an UNUSED invite? Returns the row or None. Never raises on a
+    wrong code: a bad code and no code are the same thing to a stranger."""
+    if not code:
+        return None
+    r = conn.execute("SELECT * FROM invites WHERE code_hash=? AND used_ns IS NULL",
+                     (_sha(code),)).fetchone()
+    return dict(r) if r else None
+
+
+def invite_revoke(conn, code_hash, actor):
+    """Withdraw an unused code. A used one stays as the record of who came in."""
+    n = conn.execute("DELETE FROM invites WHERE code_hash=? AND used_ns IS NULL",
+                     (code_hash,)).rowcount
+    if not n:
+        raise NotFound("no such open invite")
+
+
+def _invite_consume(conn, code, user_id, now):
+    """Burn the code inside the caller's transaction. The UPDATE ... WHERE
+    used_ns IS NULL is the race gate: two callbacks redeeming one code at the
+    same instant, only one row changes and the loser is refused."""
+    n = conn.execute("UPDATE invites SET used_by=?, used_ns=? WHERE code_hash=? "
+                     "AND used_ns IS NULL", (user_id, now, _sha(code))).rowcount
+    if not n:
+        raise AuthError("that invite code has already been used")
+
+
+def federated_login(conn, provider, profile, signup_policy="open", actor="web",
+                    invite=None, note=""):
     """s5/s6, the one rule for a NOT-signed-in callback. Returns
-    {"user": {...}, "how": known|linked|signup, "banner": name-or-None}.
+    {"user": {...}, "how": known|linked|signup|invite, "banner": name-or-None},
+    or the string REQUESTED when the policy is `request` and the stranger's ask
+    was filed instead (the caller shows the neutral page; no session is made).
 
     known: (provider, subject) is a door -> that person (a tombstoned person is
     refused: their doors do not become someone else's). linked: unknown door,
@@ -2251,8 +2504,17 @@ def federated_login(conn, provider, profile, signup_policy="open", actor="web"):
     if len(matches) > 1 or other:
         raise AuthError(f"an account with {email} already exists here -- sign in with the "
                         f"door you used before, then add {provider} in your profile")
+    # A valid invite is an admin's decision made in advance: it admits the
+    # bearer wherever the policy would refuse, and is burned in the same
+    # transaction as the account it creates. Where signup is already allowed
+    # the code is not consulted at all -- under `open` nobody should spend a
+    # code they did not need.
     ok, why = signup_allowed(signup_policy, email, verified)
-    if not ok:
+    inv = None if ok else invite_valid(conn, invite)
+    if not ok and not inv:
+        if why == "REQUEST":
+            request_file(conn, provider, profile, note=note, actor=actor)
+            return REQUESTED
         raise AuthError(why)
     hint = profile.get("login") or email or profile.get("display_name") or provider
     name = derive_user_name(conn, hint)
@@ -2264,9 +2526,15 @@ def federated_login(conn, provider, profile, signup_policy="open", actor="web"):
         if first:
             conn.execute("UPDATE rooms SET owner_id=? WHERE owner_id IS NULL", (uid,))
         _identity_upsert(conn, provider, profile, uid, now)
-        _identity_audit(conn, "signup", provider, subject, uid, actor)
+        if inv:
+            _invite_consume(conn, invite, uid, now)
+        _identity_audit(conn, "invite" if inv else "signup", provider, subject, uid, actor)
+        # An accepted invite settles any earlier ask through the same door.
+        conn.execute("DELETE FROM signup_requests WHERE provider=? AND subject=?",
+                     (provider, subject))
     return {"user": {"id": uid, "name": name, "role": "admin" if first else "user"},
-            "how": "signup", "banner": name, "first_admin": first}
+            "how": "invite" if inv else "signup", "banner": name, "first_admin": first,
+            "invited_by": inv["created_by"] if inv else None}
 
 
 def oidc_state_get(conn, key):

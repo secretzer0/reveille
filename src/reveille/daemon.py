@@ -246,6 +246,25 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.154 KNOCK, OR CARRY A KEY (DES-018 s6a, rulings 11701-11709). Schema v30:
+signup_requests + invites, and identity_audit's CHECK widened to
+request|approve|deny|invite (the table is rebuilt, rows copied). New signup
+policy REVEILLE_SIGNUP=request: an unknown door with no s5.2 verified-email
+link files a REQUEST ROW -- never a half-user -- and the person sees one
+neutral line, the same whether the ask is new, pending or denied. Admins
+decide in the Users tab: GET /users/requests, POST
+/users/requests/<p>/<sub>/<approve|deny|undeny|forget>; approve is
+create_user + link_identity + audit + row consumed in ONE transaction. Invite
+codes ride the same surface: POST /invites mints a 128-bit code shown ONCE
+and stored only as a hash, good for any email through any door, single-use
+(burned in the same transaction as the account it creates, so two racing
+redemptions have one winner), revocable while unused, listed with who used it.
+The code and an optional 280-char note are typed on the login card (or
+prefilled by /ui?invite=CODE) and ride the OIDC marker through the provider
+round-trip -- never to the provider. Under `request` a valid code admits at
+once; under `closed` a valid code is the ONLY way in; under `open` no code is
+consulted. s5.2 still runs ABOVE the policy: a known door signs in, and an
+unknown door with a verified email held by exactly one live user links.
 0.2.153 THE HUMAN SURFACE (DES-011 6.1(c), EPIC-001 S2 item 3). The wake
 registry and the poke gate are keyed on the TOKEN alone, not (token, name):
 an agent aliased <owner>-<name> in a room registered under one name while
@@ -5929,6 +5948,12 @@ async def auth_login_http(request):
         _user_principal(request)          # must be signed in to link
     data, sid = _oidc_marker(request)
     data["intent"] = "link" if link else "login"
+    # The invite code and the "why I want in" note ride the marker through the
+    # provider round-trip: they are the browser's, they never reach the
+    # provider, and a code in a query string the user can re-share is the whole
+    # point of it being single-use.
+    data["invite"] = (request.query_params.get("invite") or "")[:64]
+    data["note"] = (request.query_params.get("note") or "")[:store.NOTE_MAX]
     client = _oidc.create_client(name)
     kw = {}
     hint = request.query_params.get("login_hint")
@@ -5971,9 +5996,18 @@ async def auth_callback_http(request):
         log.info("%s linked a %s door", p.name, name)
         return _oidc_marker_drop(RedirectResponse("/ui#doors", status_code=303), request, sid)
     try:
-        out = store.federated_login(_conn, name, profile, _signup_policy, actor=f"door:{name}")
+        out = store.federated_login(_conn, name, profile, _signup_policy,
+                                    actor=f"door:{name}", invite=data.get("invite"),
+                                    note=data.get("note"))
     except store.AuthError as e:
         return _oidc_fail(request, str(e), sid)
+    if out is store.REQUESTED:
+        # No session, no account, one neutral page -- and it reads the same for
+        # a fresh ask, a pending one and a denied one, so nobody learns which.
+        log.info("signup request via %s door awaiting an admin", name)
+        _ring_admins_about_requests()
+        return _oidc_marker_drop(RedirectResponse("/ui?requested=1", status_code=303),
+                                 request, sid)
     u = out["user"]
     secret = store.rotate_session(_conn, request.cookies.get(_cookie_name()), u["id"])
     log.info("%s signed in with %s (%s)%s", u["name"], name, out["how"],
@@ -5985,9 +6019,87 @@ async def auth_callback_http(request):
 
 async def auth_doors_http(_request):
     """GET /auth/doors -> the configured providers + signup policy, no session
-    needed: the login card asks before anyone is signed in."""
-    return JSONResponse({"doors": [{"name": n, "label": PROVIDERS[n]["label"]} for n in _oidc_doors],
-                         "signup": _signup_policy, "password": True})
+    needed: the login card asks before anyone is signed in. `invite` says
+    whether to offer the code field; `note` whether to offer the textarea."""
+    return JSONResponse({"doors": [{"name": n, "label": PROVIDERS[n]["label"]}
+                                   for n in _oidc_doors],
+                         "signup": _signup_policy, "password": True,
+                         "invite": _signup_policy in ("request", "closed"),
+                         "note": _signup_policy == "request"})
+
+
+def _ring_admins_about_requests():
+    """A new ask is visible without anyone reloading: the Users tab badge comes
+    from /users/requests, and every watching admin's feed is nudged. No email
+    exists to send, and no bus message is written -- a stranger must not be able
+    to make the bus talk."""
+    n = len(store.requests_list(_conn, "pending"))
+    for q, (room, _name) in list(_feed.items()):
+        with contextlib.suppress(Exception):
+            q.put_nowait({"event": "signup_requests", "pending": n, "room": room})
+
+
+@_guard
+async def requests_http(request):
+    """GET /users/requests -> the admin queue (pending by default, ?state=denied
+    or ?state=all)."""
+    p = _user_principal(request)
+    if not p.is_admin:
+        raise store.AccessError("admin only")
+    state = request.query_params.get("state") or "pending"
+    rows = store.requests_list(_conn, None if state == "all" else state)
+    return JSONResponse({"requests": rows,
+                         "pending": len(store.requests_list(_conn, "pending"))})
+
+
+@_guard
+async def request_decide_http(request):
+    """POST /users/requests/<provider>/<subject>/<approve|deny|undeny|forget>."""
+    p = _user_principal(request)
+    if not p.is_admin:
+        raise store.AccessError("admin only")
+    provider, subject = request.path_params["provider"], request.path_params["subject"]
+    verb, actor = request.path_params["verb"], f"web:{p.name}"
+    if verb == "approve":
+        u = store.request_approve(_conn, provider, subject, actor)
+        log.info("%s approved the %s request -> %s", p.name, provider, u["name"])
+        return JSONResponse({"ok": True, "user": u})
+    if verb == "deny":
+        store.request_deny(_conn, provider, subject, actor)
+    elif verb == "undeny":
+        store.request_undeny(_conn, provider, subject, actor)
+    elif verb == "forget":
+        store.request_forget(_conn, provider, subject, actor)
+    else:
+        raise store.NotFound(f"no such action: {verb}")
+    log.info("%s %s the %s request", p.name, verb, provider)
+    return JSONResponse({"ok": True})
+
+
+@_guard
+async def invites_http(request):
+    """GET /invites -> the codes (hashes, who, when, used by whom).
+    POST /invites {note} -> mints one and returns the CODE, the only time it
+    is ever shown."""
+    p = _user_principal(request)
+    if not p.is_admin:
+        raise store.AccessError("admin only")
+    if request.method == "GET":
+        return JSONResponse({"invites": store.invite_list(_conn)})
+    d = await request.json()
+    out = store.invite_create(_conn, p.user_id, (d.get("note") or ""))
+    log.info("%s minted an invite code", p.name)
+    return JSONResponse(out)
+
+
+@_guard
+async def invite_revoke_http(request):
+    """DELETE /invites/<code_hash> -- withdraw an UNUSED code."""
+    p = _user_principal(request)
+    if not p.is_admin:
+        raise store.AccessError("admin only")
+    store.invite_revoke(_conn, request.path_params["code_hash"], f"web:{p.name}")
+    return JSONResponse({"ok": True})
 
 
 @_guard
@@ -6550,6 +6662,11 @@ def build_app():
             Route("/auth/{provider}/login", auth_login_http),
             Route("/auth/{provider}/callback", auth_callback_http),
             Route("/me/identities/{provider}/{subject}", unlink_http, methods=["DELETE"]),
+            Route("/users/requests", requests_http),
+            Route("/users/requests/{provider}/{subject}/{verb}", request_decide_http,
+                  methods=["POST"]),
+            Route("/invites", invites_http, methods=["GET", "POST"]),
+            Route("/invites/{code_hash}", invite_revoke_http, methods=["DELETE"]),
             Route("/me", me_http),
             Route("/users", users_http, methods=["GET", "POST"]),
             Route("/users/{uid}", user_http, methods=["PATCH", "DELETE"]),
