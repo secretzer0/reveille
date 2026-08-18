@@ -59,7 +59,7 @@ from datetime import datetime, timezone
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
-from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response,
                                  StreamingResponse)
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -209,6 +209,14 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.123 THE EAR, SLICE 2: HANDS-FREE (DES-014, ruling 11355). A `listen`
+toggle beside `talk`: while it is on, a page-side voice-activity detector
+(Silero VAD v5 in WASM, shipped with the page under /ui/vad/ -- no CDN)
+cuts what you say into takes and each goes through the same POST /stt;
+silence of 3 s closes a take, a 30 s cap closes and reopens it, noise
+below the detector's threshold sends nothing, a hidden tab or a mic error
+turns it off, and the words land in the compose box for you to send.
+Push-to-talk stays. Bus tools unchanged.
 0.2.122 A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357; DES-013
 section 5 amended). The writer performs AGENTS -- text-first speakers that
 need a mouth. A signed-in human's message is spoken exactly as typed or
@@ -5308,6 +5316,30 @@ async def opus_decoder_http(_request):
                              headers={"Cache-Control": "public, max-age=86400"})
 
 
+# The page-side VAD (DES-014 slice 2, ruling 11355: ships WITH the page, no
+# CDN): Silero VAD v5 via vad-web on onnxruntime-web (WASM). The name comes
+# from the request but is only ever a KEY into this table -- an unknown name
+# is a 404, never a path. scripts/vendor-vad pins the versions and the sums.
+_VAD_FILES = {
+    "vad.bundle.min.js": "application/javascript",
+    "vad.worklet.bundle.min.js": "application/javascript",
+    "ort.wasm.min.js": "application/javascript",
+    "ort-wasm-simd-threaded.mjs": "application/javascript",
+    "ort-wasm-simd-threaded.wasm": "application/wasm",
+    "silero_vad_v5.onnx": "application/octet-stream",
+}
+
+
+async def vad_asset_http(request):
+    """GET /ui/vad/<name> -> one of the six vendored VAD files, by table."""
+    name = request.path_params["name"]
+    media = _VAD_FILES.get(name)
+    if media is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    data = pathlib.Path(_ui_override() or _UI_PACKAGED, "vad", name).read_bytes()
+    return Response(data, media_type=media, headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def chat_http(_request):
     page = _ui_read("index.html").replace(
         "<!--NAVLINK-->", nav_link_html(os.environ.get("REVEILLE_NAV_LABEL", ""),
@@ -5363,6 +5395,7 @@ def build_app():
             Route("/usage", usage_http),
             Route("/ui", chat_http),
             Route("/ui/opus-decoder.js", opus_decoder_http),
+            Route("/ui/vad/{name}", vad_asset_http),
             Route("/setup", setup_http, methods=["POST"]),
             Route("/login", login_http, methods=["POST"]),
             Route("/logout", logout_http, methods=["POST"]),

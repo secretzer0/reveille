@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Vendor the page-side VAD (DES-014 slice 2): Silero VAD v5 via @ricky0123/vad-web,
+# on onnxruntime-web (WASM, single-threaded). Pinned versions; the files land in
+# src/reveille/ui/bus/vad/ and ship with the page (no CDN, ruling 11355). Re-run
+# to bump: change the two versions, run, commit the files with the bump.
+set -euo pipefail
+VAD_WEB=0.0.30
+ORT_WEB=1.22.0          # the version vad-web's own docs pair with
+dst=$(cd "$(dirname "$0")/.." && pwd)/src/reveille/ui/bus/vad
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+curl -sL "https://registry.npmjs.org/@ricky0123/vad-web/-/vad-web-$VAD_WEB.tgz" | tar xz -C "$tmp"
+mv "$tmp/package" "$tmp/vad"
+curl -sL "https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-$ORT_WEB.tgz" | tar xz -C "$tmp"
+mv "$tmp/package" "$tmp/ort"
+mkdir -p "$dst"
+cp "$tmp/vad/dist/bundle.min.js"             "$dst/vad.bundle.min.js"
+cp "$tmp/vad/dist/vad.worklet.bundle.min.js" "$dst/vad.worklet.bundle.min.js"
+cp "$tmp/vad/dist/silero_vad_v5.onnx"        "$dst/silero_vad_v5.onnx"
+cp "$tmp/ort/dist/ort.wasm.min.js"           "$dst/ort.wasm.min.js"
+cp "$tmp/ort/dist/ort-wasm-simd-threaded.mjs"  "$dst/ort-wasm-simd-threaded.mjs"
+cp "$tmp/ort/dist/ort-wasm-simd-threaded.wasm" "$dst/ort-wasm-simd-threaded.wasm"
+{ echo "# vad-web $VAD_WEB (MIT), onnxruntime-web $ORT_WEB (MIT); Silero VAD v5 (MIT). scripts/vendor-vad."
+  (cd "$dst" && sha256sum vad.bundle.min.js vad.worklet.bundle.min.js silero_vad_v5.onnx ort.wasm.min.js ort-wasm-simd-threaded.mjs ort-wasm-simd-threaded.wasm); } > "$dst/SHA256SUMS"
+cat "$dst/SHA256SUMS"; du -sh "$dst"
