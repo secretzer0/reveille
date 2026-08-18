@@ -10,6 +10,9 @@ on:
 jobs:
   gate:
     runs-on: ubuntu-latest
+    # A healthy gate is about a minute; anything past ten is a hung runner,
+    # not a slow test -- die and be re-run, never sit for half an hour.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
@@ -17,8 +20,18 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv sync
       # THE WIRE IS WEBM/OPUS (DES-009 section 2): the worker and audition gates
-      # run the same ffmpeg the server image carries; the runner has none.
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+      # need an ffmpeg with libopus + aac; the runner has none. apt on a hosted
+      # runner hangs on Azure's mirror (two gates lost 20+ min to it), so the
+      # binary is a pinned static build from GitHub's own CDN, cached by tag:
+      # a hit is a few seconds, a miss is one download, and no apt at all.
+      - uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-autobuild-2026-08-17-13-05-linux64
+      - run: |
+          [ -x ~/ffmpeg/ffmpeg ] || { mkdir -p ~/ffmpeg && curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-17-13-05/ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1.tar.xz | tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'; }
+          echo "$HOME/ffmpeg" >> "$GITHUB_PATH"
+          ~/ffmpeg/ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
       - run: uv run pytest tests/ -q
       - run: uv run ruff check src tests scripts
       # base...head over the whole PR range: a stacked slice whose parent
