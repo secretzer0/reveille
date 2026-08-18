@@ -246,6 +246,18 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.162 WHAT IS WAITING IN THE OTHER ROOMS (EPIC-001 #6; DES-016 s2's
+promise). Schema v32 adds room_seen: ONE high-water mark per (person, room),
+not a receipt per message -- agents ack what was addressed to them, a person
+reads a room, and those are different questions. Reading the room IS the
+mark: the backlog fetch a page makes for the room it is showing moves it, so
+there is no second call to forget. /me carries {"unread": {room_id: count}}
+-- messages newer than the mark, never your own; never opened counts
+everything, which is what a new person has waiting. The phone's room sheet
+badges each room and the desktop me-card shows one number for everywhere
+else; the room you are looking at never wears a badge. Counts refresh on the
+15 s poll the page already runs and when the sheet opens -- the feed socket
+carries one room, so it cannot tick the others.
 0.2.161 RECORD A CLIP (DES-017 slice 2, EPIC-001 #5). A clip button beside
 talk and listen: it records with the EAR'S OWN recorder (one capture path on
 the page, one silence refusal), caps at 60 s by CLOSING the take rather than
@@ -4671,8 +4683,17 @@ async def messages_http(request):
     p = _principal(request)
     since_id = int(request.query_params.get("since_id") or 0)
     limit = int(request.query_params.get("limit") or 200)
-    return JSONResponse({"messages": store.tail(_conn, since_id=since_id, limit=limit,
-                                                rooms=_scope(request, p))})
+    rooms = _scope(request, p)
+    msgs = store.tail(_conn, since_id=since_id, limit=limit, rooms=rooms)
+    # READING THE ROOM IS THE MARK (EPIC-001 #6). A person fetches a backlog
+    # only for the room they are looking at, so the newest id handed over here
+    # is exactly how far they have read -- no second call, nothing to forget
+    # to send. Agents keep per-message receipts; they ack what was addressed
+    # to them, which is a different question from "how far have I read".
+    if p.kind == "user" and msgs and len(rooms) == 1:
+        store.mark_room_seen(_conn, store.user_principal(p.user_id), next(iter(rooms)),
+                             max(m["id"] for m in msgs))
+    return JSONResponse({"messages": msgs})
 
 
 @_guard
@@ -6225,6 +6246,8 @@ async def me_http(request):
                   for r in store.list_rooms(_conn, p.user_id)],
         "member": store.member_rooms(_conn, p.user_id),
         "public": store.public_rooms(_conn, exclude_owner=p.user_id),
+        # EPIC-001 #6: what is waiting in each room this person can reach.
+        "unread": store.unread_by_room(_conn, store.user_principal(p.user_id), p.rooms),
     })
 
 

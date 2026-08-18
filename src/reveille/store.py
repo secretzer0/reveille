@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -199,6 +199,17 @@ CREATE TABLE IF NOT EXISTS invites (
     note       TEXT NOT NULL DEFAULT '',
     used_by    TEXT,
     used_ns    INTEGER
+);
+-- EPIC-001 #6: how far a PERSON has read in each room. Agents have read
+-- receipts per message (they must ack what was addressed to them); a person
+-- reads a room, so one high-water mark per (principal, room) is the whole
+-- story -- and it stays one row however long the room gets.
+CREATE TABLE IF NOT EXISTS room_seen (
+    principal   TEXT NOT NULL,
+    room_id     TEXT NOT NULL,
+    last_msg_id INTEGER NOT NULL,
+    ts_ns       INTEGER NOT NULL,
+    PRIMARY KEY (principal, room_id)
 );
 -- A room name is unique per owner, not globally: two users may each own a
 -- "Reveille". The UI disambiguates by showing "owner -> room", which is exactly
@@ -1821,6 +1832,28 @@ CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
         conn.execute("PRAGMA user_version=31")
 
 
+def _upgrade_v31(conn, db_path):
+    """v31 -> v32 (EPIC-001 #6): room_seen, one high-water mark per person and
+    room. Additive: one empty table, nothing existing is read or rewritten. An
+    absent row means "never opened", and the count starts from the room's
+    oldest message -- which is what a new person sees."""
+    with tx(conn):
+        _exec_script(conn, """
+-- EPIC-001 #6: how far a PERSON has read in each room. Agents have read
+-- receipts per message (they must ack what was addressed to them); a person
+-- reads a room, so one high-water mark per (principal, room) is the whole
+-- story -- and it stays one row however long the room gets.
+CREATE TABLE IF NOT EXISTS room_seen (
+    principal   TEXT NOT NULL,
+    room_id     TEXT NOT NULL,
+    last_msg_id INTEGER NOT NULL,
+    ts_ns       INTEGER NOT NULL,
+    PRIMARY KEY (principal, room_id)
+);
+""")
+        conn.execute("PRAGMA user_version=32")
+
+
 def _upgrade_v24(conn, db_path):
     """v24 -> v25: voices.personal -- a voice that exists only for its uploader
     (ruling 11155). Additive column; existing voices are bank voices."""
@@ -1941,7 +1974,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29, 30)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -4679,6 +4712,37 @@ def delete_if_unseen(conn, message_id, principal, rooms):
         if conn.execute("SELECT 1 FROM links WHERE parent_id=?", (message_id,)).fetchone():
             raise BusError("already replied to -- cannot retract")
         _delete_messages(conn, [message_id])
+
+
+def mark_room_seen(conn, principal, room_id, last_msg_id):
+    """A person has read this room up to `last_msg_id`. Monotonic: a late
+    answer from a slow tab cannot walk the mark backwards and resurrect unread
+    counts somebody already cleared."""
+    conn.execute(
+        "INSERT INTO room_seen(principal, room_id, last_msg_id, ts_ns) VALUES(?,?,?,?) "
+        "ON CONFLICT(principal, room_id) DO UPDATE SET "
+        "last_msg_id=MAX(last_msg_id, excluded.last_msg_id), ts_ns=excluded.ts_ns",
+        (principal, room_id, int(last_msg_id), time.time_ns()))
+
+
+def unread_by_room(conn, principal, rooms):
+    """{room_id: count} for a PERSON: messages newer than their mark in each
+    room, not counting their own. Never opened = everything counts, which is
+    what a new person actually has waiting. One query, no per-message rows."""
+    rooms = list(rooms or [])
+    if not rooms:
+        return {}
+    name = _identity_name(conn, principal) or ""
+    marks = {r["room_id"]: r["last_msg_id"] for r in conn.execute(
+        f"SELECT room_id, last_msg_id FROM room_seen WHERE principal=? "
+        f"AND room_id IN ({_ph(rooms)})", [principal] + rooms)}
+    out = {}
+    for rid in rooms:
+        out[rid] = conn.execute(
+            "SELECT count(*) FROM messages WHERE room=? AND id>? "
+            "AND NOT (sender=? AND sender_agent_id IS NULL)",
+            (rid, marks.get(rid, 0), name)).fetchone()[0]
+    return out
 
 
 def ack(conn, principal, message_ids, rooms):
