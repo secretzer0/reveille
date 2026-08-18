@@ -168,6 +168,13 @@ COMPOSE_EXTRA =
 # (measured 2026-08-13: compose_gate took the live bus down for ~15 minutes).
 # Scratch invocations MUST override this; the default is the live project.
 COMPOSE_PROJECT ?= reveille
+# THE UPSTREAMS ARE NOT SET HERE, DELIBERATELY (operator + architect 11825,
+# after the 2026-08-18 outage). Their home is $(SERVER_DATA)/reveille.env,
+# which every recreate reads; compose passes them through only when the shell
+# has them, so an export or `REVEILLE_STT_URL=... make up` still overrides the
+# file for one run. Defaulting them HERE would put this deployment's LAN in the
+# repo and would silently outrank the operator's own file -- which is the
+# failure being fixed, wearing different clothes.
 COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
   REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
   PROXY_IMAGE=$(PROXY_IMAGE) PROXY_SITE=$(PROXY_SITE) REVEILLE_PUBLIC_URL=$(PUBLIC_URL) \

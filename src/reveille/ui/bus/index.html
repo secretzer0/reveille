@@ -3701,6 +3701,14 @@ async function openTokens(){
   '-- is refused, because a token that is not an agent cannot act as one.</div>'+rows+
   '<div class="pRow"><input id="newTok" placeholder="label (e.g. fleet)">'+
   '<input id="newTokName" placeholder="agent name -- this token IS that agent">'+
+  // BRINGING A NEW BEING INTO THE WORLD IS A TICK, NEVER A TYPO (DES-011 s2,
+  // ruling 10896). A bound mint ATTACHES to an existing identity; without this
+  // box the panel could only ever attach, so a NATIVE agent that does not exist
+  // yet had no door at all here -- and with password sign-in closed, `reveille
+  // init --login` is not one either. Ticked, the mint declares creation and the
+  // broker refuses a name this account already holds live.
+  '<label class="chip" title="this name has no agent yet -- create the identity">'+
+  '<input type="checkbox" id="newTokNew"> this is a NEW agent</label>'+
   '<label class="chip" title="a credential for scripts and curl: reads only, never acts">'+
   '<input type="checkbox" id="newTokRO"> read-only (no agent)</label>'+
   '<select id="newTokTier"><option value="state">memory: state (default)</option>'+
@@ -3727,7 +3735,7 @@ async function openTokens(){
    toast('name the agent this token is, or tick read-only (no agent)');return;}
   try{const t=await api('/tokens',{method:'POST',body:JSON.stringify({label:$('newTok').value.trim(),
     agent_name:$('newTokRO').checked?'':agentName,mem_tier:$('newTokTier').value,
-    rooms:picked})});
+    rooms:picked,create:$('newTokNew').checked})});
    // Shown once, deliberately: only the hash is stored, so there is no second chance.
    panel('tokens',
     '<div class="pSec">TOKEN CREATED</div>'+
@@ -3745,7 +3753,12 @@ async function openTokens(){
     '<div class="pRow"><button id="copyInstall" hidden>copy the install command</button>'+
     '<button id="backTok">done</button></div>');
    $('backTok').onclick=openTokens;
-   wireInstallCopy(t);}catch(e){toast(e.message);}};
+   wireInstallCopy(t);}
+  catch(e){
+   // The broker's refusal is written for every client; here it names a
+   // parameter the person cannot see. Point at the box on THIS screen instead.
+   toast(String(e.message).replace('Pass create=true to deliberately create a new agent.',
+    "Tick \u201cthis is a NEW agent\u201d and generate again."));}};
  for(const b of document.querySelectorAll('[data-rev]'))b.onclick=()=>{
   confirming={kind:'revoke',id:b.dataset.rev};openTokens();};
  if(confirming&&confirming.kind==='revoke')wireAsk(async()=>{

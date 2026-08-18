@@ -268,6 +268,29 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.167 A NEW AGENT CAN BE BORN FROM THE PAGE, AND A SETTING STOPS LIVING IN
+A SHELL (operator, 2026-08-18). Two holes, both found walking a body-swap
+test. (1) The Tokens tab could only ATTACH to an identity that already
+existed -- creation was a parameter no screen sent -- and with the password
+door closed `reveille init --login` is not a door either, so a NATIVE agent
+that did not exist yet could not be brought into the world at all. The mint
+form gains one tick, "this is a NEW agent", which is the only site that
+declares creation; the broker still refuses a name this account already holds
+live, and the refusal now points at the tick instead of naming a parameter
+the reader cannot see. `reveille init --login` against a broker whose
+password door is shut stops saying "login failed" and names the open door and
+the exact three-variable command to run after minting there. (2) The three upstreams
+-- voices, the ear, the script writer -- their models and the LAN-plaintext
+flag that permits them lived only in whatever shell last ran the deploy, so
+the first container recreate that did not carry them turned all three OFF at
+once and the only tell was a missing line in /version. Measured cause: a
+compose `environment` entry BEATS `env_file`, and BOTH `KEY: ${VAR:-}` and a
+bare `KEY:` put an EMPTY value on the container when the shell has none -- so
+those entries had been silently overriding the operator's own reveille.env
+all along. They are gone from `environment` entirely: every upstream setting
+(plus the upload cap) now comes from $SERVER_DATA/reveille.env and nowhere
+else, read on every recreate, with the file's own comment block naming each
+one. Unset there still means the feature is off, exactly as before.
 0.2.166 AN EMPTY ENVIRONMENT VARIABLE MEANS ITS DEFAULT (live defect,
 2026-08-18). 0.2.163 read its upload cap as int(os.environ.get(NAME, "25")),
 which is correct only when an unset variable is ABSENT. A deploy passes every

@@ -61,38 +61,41 @@ services:
       - ${SERVER_DATA:?set SERVER_DATA explicitly -- an inherited HOME here once nearly deployed an EMPTY database}:/data
     environment:
       REVEILLE_AGENTS_PATH: ${AGENTS_PATH:-/agents}
-      # DES-009: the voice worker's address, BY NAME on this network. Unset by
-      # default, and unset means no voice worker at all -- so a deploy that has
-      # not built the model image behaves exactly as it did before voices existed.
-      REVEILLE_TTS_URL: ${REVEILLE_TTS_URL:-}
-      REVEILLE_TTS_TOKEN: ${REVEILLE_TTS_TOKEN:-}
-      # DES-013: the script writer's address, the same shape (unset = no writer),
-      # and the one flag that lets EITHER upstream be a plaintext host on the
-      # operator's own LAN (ruling 11036) -- the daemon refuses without it and
-      # names it; the deploy passes it through or the refusal stands.
-      REVEILLE_SCRIPT_URL: ${REVEILLE_SCRIPT_URL:-}
-      REVEILLE_SCRIPT_MODEL: ${REVEILLE_SCRIPT_MODEL:-}
-      REVEILLE_SCRIPT_TIMEOUT: ${REVEILLE_SCRIPT_TIMEOUT:-}
-      REVEILLE_SCRIPT_TOKEN: ${REVEILLE_SCRIPT_TOKEN:-}
-      REVEILLE_LAN_PLAINTEXT: ${REVEILLE_LAN_PLAINTEXT:-}
-      # DES-014: the ear (speech to text), the third upstream, same shape.
-      REVEILLE_STT_URL: ${REVEILLE_STT_URL:-}
-      REVEILLE_STT_TOKEN: ${REVEILLE_STT_TOKEN:-}
-      REVEILLE_STT_MODEL: ${REVEILLE_STT_MODEL:-}
-      REVEILLE_STT_TIMEOUT: ${REVEILLE_STT_TIMEOUT:-}
+      # THE UPSTREAM SETTINGS ARE NOT LISTED HERE, AND THAT IS THE FIX (live
+      # outage 2026-08-18). Measured on this deployment's own docker compose:
+      # an `environment` entry BEATS `env_file` -- both `KEY: ${VAR:-}` and a
+      # bare `KEY:` put an EMPTY value on the container when the shell has none,
+      # so either spelling silently overrode the operator's reveille.env. The
+      # day a deploy ran from a shell that did not carry them, voices, the ear
+      # and the script writer went off at once and the only tell was a missing
+      # line in /version. A setting that lives in a shell's memory is not a
+      # setting. So DES-009 (voices), DES-013 (the script writer), DES-014 (the
+      # ear), their models/tokens/timeouts, the LAN-plaintext flag of ruling
+      # 11036 and the upload cap all come from the env_file below and from
+      # nowhere else -- one home, read on every recreate. Unset there still
+      # means the feature is off, exactly as before.
       # DES-018: the public origin -- builds the exact redirect URI the
       # providers were registered with, and turns the session cookie into
       # __Host- + Secure when it is https. Derived from PROXY_SITE by make.
       REVEILLE_PUBLIC_URL: ${REVEILLE_PUBLIC_URL:-}
-      # DES-017 s5: how big an upload may be, in MB (default 25). One number,
-      # read at boot, printed in /version -- raise it for video, no rebuild.
-      REVEILLE_UPLOAD_MAX_MB: ${REVEILLE_UPLOAD_MAX_MB:-}
     # DES-018 s4: the provider credentials live in ONE file beside the data,
     # never in this file, the Makefile, git or the bus:
     #   $SERVER_DATA/reveille.env   (mode 600)
     #     REVEILLE_OIDC_GOOGLE_ID=... / _SECRET, _GITHUB_, _MICROSOFT_
     #     REVEILLE_SIGNUP=open|closed|mythos.org,other.org   (optional)
     #     REVEILLE_UPLOAD_MAX_MB=200                          (optional)
+    # and, since 0.2.167, this deployment's SETTINGS as well -- they are not
+    # secrets, they are here because this file is the one thing every recreate
+    # reads:
+    #     REVEILLE_TTS_URL=      (voices; unset = no voice worker)
+    #     REVEILLE_STT_URL=      REVEILLE_STT_MODEL=      (the ear)
+    #     REVEILLE_SCRIPT_URL=   REVEILLE_SCRIPT_MODEL=   (the script writer)
+    #     REVEILLE_LAN_PLAINTEXT=1   (permits a plaintext LAN upstream, 11036)
+    #     REVEILLE_TTS_TOKEN=  REVEILLE_STT_TOKEN=  REVEILLE_SCRIPT_TOKEN=
+    #       (only if an upstream wants one -- these ARE secrets)
+    #     REVEILLE_STT_TIMEOUT=  REVEILLE_SCRIPT_TIMEOUT=  (seconds, optional)
+    # To change one for a single run, edit the line and `make up`; there is no
+    # shell that can quietly outrank this file any more.
     # Absent file = no doors; a provider without an ID is simply not a door.
     env_file:
       - path: ${SERVER_DATA}/reveille.env
