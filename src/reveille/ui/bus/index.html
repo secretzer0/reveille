@@ -684,9 +684,27 @@
  .pick.bcastRow{border-bottom:1px solid var(--line);margin-bottom:.25rem;padding-bottom:.45rem}
 
  .row.active{background:var(--hover);outline:1px solid var(--gold)}
+ /* ---- a phone (operator 11439: "almost unusable"). Below 760px the rail is
+    a drawer behind a menu button (it held rooms, settings, logout and the agent
+    filter -- hidden, the page had no way to change room or sign out), the top
+    bar and the composer's control row wrap instead of pushing Send off the
+    right edge, and every input is 16px so iOS Safari stops zooming the page on
+    focus and leaving it there. Nothing changes above 760px. */
+ #railBtn{display:none;background:none;border:1px solid var(--line);color:var(--dim);
+  border-radius:7px;padding:.3rem .6rem;cursor:pointer;font:inherit;font-size:1rem;line-height:1}
  @media(max-width:760px){
   body{grid-template-columns:1fr}
-  #rail{display:none}
+  #rail{display:none;position:fixed;inset:0 22% 0 0;z-index:40;box-shadow:4px 0 24px #0009}
+  body.railOpen #rail{display:flex}
+  #railBtn{display:inline-block}
+  #top{flex-wrap:wrap;gap:.45rem;padding:.45rem .6rem}
+  #filter{flex:1 1 9rem;max-width:none;min-width:0}
+  #voice,#histBtn{white-space:nowrap}
+  #composerWrap{padding:.5rem .5rem .6rem}
+  #composer{margin:0}
+  .cbottom{flex-wrap:wrap;gap:.4rem}
+  #kbdHint{display:none}
+  #composer input,#composer textarea,#filter{font-size:16px}
   .crow{flex-wrap:wrap}
  }
 </style></head><body>
@@ -730,6 +748,8 @@
 <div id="main">
 <div id="chatWell">
  <div id="top">
+  <button type="button" id="railBtn" aria-label="menu: rooms, agents, settings"
+   title="rooms, agents, settings">&#9776;</button>
   <input id="filter" placeholder="Filter messages&hellip;">
   <span id="filterState" title="clear agent filter"></span>
   <!-- DES-009 commit 3. The toggle IS the browser's autoplay gesture, which is why
@@ -794,7 +814,7 @@
      title="hands-free only: 5 s after your words land, they are sent -- say cancel or type to stop it"><input type="checkbox" id="autosend"> auto-send</label>
     <button type="button" id="attachBtn">+ attach</button>
     <span id="attchips"></span>
-    <span class="khint">Ctrl+Enter to send</span>
+    <span class="khint" id="kbdHint">Ctrl+Enter to send</span>
     <button id="send" type="submit">Send</button>
    </div>
   </form>
@@ -1050,6 +1070,10 @@ function paintMe(){
   : 'settings, logout';
 }
 $('meCard').onclick=e=>{e.stopPropagation();$('meMenu').classList.toggle('on');};
+// The phone drawer (see the max-width:760px rules): the button opens it, any tap on
+// the main column closes it -- picking a room or a tab lands you back on the page.
+$('railBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('railOpen');};
+$('main').addEventListener('click',e=>{if(!e.target.closest('#railBtn'))document.body.classList.remove('railOpen');},true);
 $('miSettings').onclick=()=>{$('meMenu').classList.remove('on');openRooms();};
 // Logout is the panel's sign-out, reached without opening the panel: same one call, same
 // reload. The reload is what clears every in-page trace of the session.
