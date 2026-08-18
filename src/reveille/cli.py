@@ -560,10 +560,16 @@ def sync_claude_md(workdir, name, agent_type, version=__version__):
         sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
         path.write_text(text + sep + block)
         return path, "appended"
-    cur = text[i:j + len(DOCTRINE_END) + 1]
-    if cur == block:
+    # WHERE THE BLOCK ENDS, MEASURED (architect nit on #123): the end marker
+    # plus its newline IF there is one. Assuming the newline eats the first byte
+    # after the marker in a hand-edited file -- and this whole design exists to
+    # promise that nothing outside the markers is ever touched.
+    end = j + len(DOCTRINE_END)
+    if text[end:end + 1] == "\n":
+        end += 1
+    if text[i:end] == block:
         return path, "unchanged"
-    path.write_text(text[:i] + block + text[j + len(DOCTRINE_END) + 1:])
+    path.write_text(text[:i] + block + text[end:])
     return path, "updated"
 
 

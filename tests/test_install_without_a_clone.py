@@ -508,6 +508,15 @@ def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
     assert cli.sync_claude_md(mine.parent, "x", "devops")[1] == "unchanged"
     assert cli.sync_claude_md(mine.parent, "x", "senior-dev")[1] == "updated"
     assert "never touch this line" in mine.read_text(), "outside the markers is theirs"
+    # NO NEWLINE AFTER THE END MARKER, which a hand edit can produce: the byte
+    # right after it is the agent's and must survive an update (architect nit).
+    hand = tmp_path / "hand"
+    hand.mkdir()
+    (hand / "CLAUDE.md").write_text(
+        cli.doctrine_block("x", "devops") .rstrip("\n") + "TAIL-KEEP-ME\n")
+    _, what = cli.sync_claude_md(hand, "x", "architect")
+    assert what == "updated"
+    assert "TAIL-KEEP-ME" in (hand / "CLAUDE.md").read_text()
 
 
 def daemon_routes():
