@@ -220,6 +220,22 @@ without it); off with listen off. One sound only -- a second "start" tick is
 what people turn off. Gate: `earconRing()` is called only from the listen chain,
 after `earHeard` returned true; `talkStop`'s path never calls it.
 
+**The degenerate take (0.2.145; operator 11569, ruling 11572; s4/s5 amended).**
+Whisper answers a non-speech take with a hallucination -- "oh, oh, oh, ..." 118
+times, verbatim from the operator's phone -- and hands-free auto-send shipped
+it. So the broker asks the upstream for `verbose_json` and returns whisper's own
+numbers beside the text: `compression_ratio` (len(bytes) / len(zlib(bytes)) over
+the whole take -- whisper's heuristic, computed with the same zlib, in
+`stt_take_stats`), and, only when the segments carry them, the max
+`no_speech_prob` and the min `avg_logprob`. The PAGE decides, once, in
+`earHeard` after the command match and before `earLand`: a take is DROPPED when
+`compression_ratio > 2.4`, or `no_speech_prob > 0.6`, or `avg_logprob < -1.0`, or
+its text equals the previous take. Dropped means `console.debug` and nothing
+else -- no bell, no post, no stub in the box; the raw take waits in DES-017's
+ten-minute hold for forensics. Commands are matched first, so "send" said twice
+is two sends. Gate: `tests/test_the_ear.py` runs the page's function under node
+with the 11569 body as the fixture.
+
 **Slice 5 -- wake word.** "reveille" (openWakeWord, on-device: in the page via
 ONNX Runtime Web, or on the STT host if the page cannot carry it). Without the
 word the room is not listening to the human; the word arms slice 2's
