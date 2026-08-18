@@ -2664,10 +2664,20 @@ def build_api(auth_url):
         name = request.path_params["agent"]
         verb = request.path_params["verb"]
         if verb == "upgrade":
-            # Ruling 11600: the OWNER's session (guarded + _known_agent inside)
+            # Ruling 11600: the OWNER's session (guarded; _known_agent inside)
             # upgrades to the launcher's default image, token carried from the
             # container -- the answer names images only, never the credential.
-            out = upgrade_agent(conn, p["user"], name, DEFAULT_IMAGE)
+            # OFF THE LOOP (review 11609): docker stop + wait_healthy is up to
+            # two minutes, and provision deliberately never blocks the loop that
+            # serves every user's /agents poll -- so this runs in a thread with
+            # its OWN connection (sqlite is per-thread); the answer still waits.
+            def _upgrade_owned(user, agent):
+                c = _db()
+                try:
+                    return upgrade_agent(c, user, agent, DEFAULT_IMAGE)
+                finally:
+                    c.close()
+            out = await asyncio.to_thread(_upgrade_owned, p["user"], name)
             return JSONResponse({"upgraded": name, "from": out["from"], "to": out["to"]})
         if verb not in ("start", "stop"):
             raise LaunchError(f"unknown verb {verb!r}")

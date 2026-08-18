@@ -390,7 +390,12 @@ file (0600) stays rejected. Consequences, all built as `upgrade_agent`:
   and the record's image updated (`UPGRADE` on the audit line).
 - The same agent: data-root inode equal; `Config.Env` set-equal on every
   `REVEILLE_*` name+value and `ANTHROPIC_MODEL` (image-derived variables may
-  change); same repo, boot command, network, quotas.
+  change); same repo, boot command, network, quotas. Corollary: the agent image
+  must never BAKE a `REVEILLE_*` ENV (the Dockerfile has none) -- an image that
+  did would make every upgrade to it read as "carried env differs" and roll back.
+- Over HTTP the upgrade runs off the event loop (a thread with its own db
+  connection): docker stop plus the health wait is up to two minutes, and the
+  loop serves every user's `/agents`. The answer still waits for from -> to.
 - A purged container (no env to read) is today's prompt path, verbatim
   (`new --replace` / the Agents form). A token the broker refuses (401/403 on
   presence) is refused: "token dead, re-provision" -- a dead credential is never

@@ -221,7 +221,9 @@ def test_behind_walks_the_records_only_and_the_surfaces_exist(world):
     assert [r["agent"] for r in rl.behind_image(w.conn, "reveille-agent:0.2.19")] == ["scout"]
     src = pathlib.Path(rl.__file__).read_text()
     assert 'sub.add_parser("upgrade"' in src and 'sub.add_parser("behind"' in src
-    assert 'if verb == "upgrade":' in src and 'upgrade_agent(conn, p["user"], name, DEFAULT_IMAGE)' in src
+    assert 'if verb == "upgrade":' in src and 'out = await asyncio.to_thread(_upgrade_owned, p["user"], name)' in src, \
+        "off the loop (11609): a two-minute upgrade must not stall every user's /agents"
+    assert "return upgrade_agent(c, user, agent, DEFAULT_IMAGE)" in src and "c = _db()" in src, "its own connection"
     assert '"upgraded": name, "from": out["from"], "to": out["to"]' in src, "the HTTP answer names images, never the token"
     mk = (pathlib.Path(rl.__file__).resolve().parent.parent / "Makefile").read_text()
     assert "scripts/reveille_launch.py behind" in mk, "make up names what is behind"
