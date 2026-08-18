@@ -268,6 +268,20 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.173 THE MOVE ASKS FOR WHAT IT NEEDS, AND NAMES WHAT IT COSTS (operator's
+first real click on 0.2.172; ruling 11902). Two things the move dialog got
+wrong. (1) It sent no role, and the launcher refuses a container with none --
+"an agent provisioned without one boots with no CLAUDE.md role block and knows
+what it is only from its bus name" -- so the operator's click ended in a
+refusal it could have asked about first. The dialog now picks a role, refuses
+before the POST if none is chosen, and says why: a container body writes its
+CLAUDE.md from that prompt, while the identity's memories, lessons and history
+travel with the id whatever role the new body wears. (2) The mint attaches
+exactly the rooms ticked, so anything unticked -- or any room the mover no
+longer holds, which this screen cannot offer at all -- would have left the
+identity's reach with nothing said. Now the dialog names them, live, per tick:
+"WILL NOT TRAVEL: <rooms>". No silent narrowing: a move that quietly shrinks
+an agent's reach is a demotion nobody chose.
 0.2.172 A BODY SWAP IS A CLICK, NOT AN SSH SESSION, AND ONLY OF YOUR OWN
 AGENT (operator 11883; DES-011 s2.1; owner scoping per architect review). Moving an agent to another machine was ruled a bare attach -- mint on
 the live name, the previous body's credential superseded in the same

@@ -99,3 +99,24 @@ def test_the_page_offers_one_verb_on_it_and_says_what_it_costs():
         assert phrase in dlg, phrase
     assert "lapi('/agents'" in dlg, "the launcher mints server-side; the browser never holds it"
     assert "REVEILLE_TOKEN" not in dlg and "secret" not in dlg
+
+
+def test_the_move_asks_for_the_role_the_new_body_needs():
+    """Measured on the operator's own click: the launcher REFUSES a container
+    with no role prompt ("boots with no CLAUDE.md role block and knows what it
+    is only from its bus name"), and the refusal is right -- so the choice
+    belongs on the screen, not as a surprise after the button."""
+    dlg = PAGE[PAGE.index("async function openMaterialize"):PAGE.index("async function openCreate")]
+    assert "id=\"agmRole\"" in dlg and "role:$('agmRole').value" in dlg
+    assert "pick a role" in dlg, "refused before the POST, in words the reader can act on"
+
+
+def test_the_move_names_every_room_that_will_not_travel():
+    """Ruled 11902: no silent narrowing. The mint attaches exactly what is
+    ticked, so an unticked room -- or one the mover no longer holds and this
+    screen cannot offer -- must be named before the click, not discovered
+    afterwards as an agent that stopped answering somewhere."""
+    dlg = PAGE[PAGE.index("async function openMaterialize"):PAGE.index("async function openCreate")]
+    assert "WILL NOT TRAVEL" in dlg
+    assert "unreachable" in dlg, "rooms the mover cannot hold are counted too"
+    assert "addEventListener('change',lost)" in dlg, "it answers per tick, not once"
