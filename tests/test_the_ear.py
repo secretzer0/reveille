@@ -4,6 +4,7 @@ tokens have no microphone, and the config refusal is the one every upstream
 wears. Driven in-process against a stub /v1/audio/transcriptions.
 """
 import asyncio
+import pathlib
 import http.server
 import io
 import json
@@ -196,31 +197,83 @@ UI = open(os.path.join(os.path.dirname(__file__), "..", "src", "reveille", "ui",
 
 
 def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
-    """DES-014 section 4: hidden until the ear is on; hold on a pointer, tap
-    to start/stop on touch; the ONE recorder; POST /stt as audio/wav; the words
-    APPEND to the textarea, caret at the end; the handler never touches send."""
+    """DES-014 section 4 + slice 2 (ruling 11355): hidden until the ear is on;
+    the mic is a LISTENING TOGGLE over a page-side VAD; every take goes through
+    the ONE POST /stt as audio/wav; the words APPEND to the textarea, caret at
+    the end; the handler never touches send."""
     assert '<button type="button" id="mic" hidden aria-pressed="false"' in UI
     assert "if($('mic'))$('mic').hidden=!(me&&me.ear);" in UI, "the mic exists only where the ear does"
-    ear = UI[UI.index("let earBusy=false;"):UI.index("async function openVoices(){")]
+    ear = UI[UI.index("let talkBusy=false;"):UI.index("async function openVoices(){")]
+    # PUSH TO TALK (slice 1, kept -- operator 11364): the shared recorder, hold on
+    # a pointer, tap-toggle on touch, 60 s at a time, silence refused before the wire.
     assert "await vRecStart();" in ear and "const r=vRecStop();" in ear, "the shared recorder"
     assert UI.count("function vRecStart(){") == 1 and UI.count("function vRecStop(){") == 1
-    assert "if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}" in ear, \
-        "a silent take is refused before the wire"
-    assert "fetch('/stt'+qs(),{method:'POST',credentials:'same-origin'," in ear and \
-        "headers:{'content-type':'audio/wav'},body:take" in ear
-    # 16 kHz to the ear (ruling 11333): the browser's own resampler, before the wire.
-    assert "take=await earResample(r.blob,rate);" in ear
-    assert "new OfflineAudioContext(1,Math.ceil(n*16000/rate),16000)" in ear and "return wavBlob(pcm,16000);" in ear
-    assert "earLand(d.text||'');" in ear
+    assert "if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}" in ear
+    assert "if(e.pointerType==='touch'){touchToggle=true;return;}" in ear
+    assert "m.setPointerCapture(e.pointerId);talkStart();" in ear
+    assert "if(sec>=60){talkStop();return;}" in ear, "the ear takes 60 s at a time"
+    assert "take=await talkResample(r.blob,rate);" in ear and "return wavBlob(pcm,16000);" in ear
+    # BOTH controls post to the ONE route as audio/wav and land through the ONE earLand.
+    assert ear.count("fetch('/stt'+qs(),{method:'POST',credentials:'same-origin',") == 2 and \
+        ear.count("headers:{'content-type':'audio/wav'},body:take") == 2
+    assert "const take=wavBlob(pcm,16000);" in ear, "the VAD hands 16 kHz float; the wire is the same 16 kHz WAV"
+    assert ear.count("earLand(d.text||'');") == 2 and UI.count("function earLand(text){") == 1
+    assert "if(typeof listenStop==='function')listenStop();" in ear and "if(listenVad||vRec)return;" in ear, \
+        "one ear at a time"
     land = ear[ear.index("function earLand(text){"):]
     land = land[:land.index("\n}\n")]
     assert "const b=$('body');" in land and "b.value=had+" in land and \
         "b.setSelectionRange(b.value.length,b.value.length);" in land
     for forbidden in ("send(", "$('send')", "sendMsg", "requestSubmit", ".submit("):
         assert forbidden not in ear, f"the ear must never send ({forbidden})"
-    # Pointer: hold; touch: toggle; keyboard: space/enter toggles.
-    assert "if(e.pointerType==='touch'){touchToggle=true;return;}" in ear
-    assert "m.setPointerCapture(e.pointerId);earStart();" in ear
-    assert "if(touchToggle){if(vRec)earStop();else earStart();return;}" in ear
-    assert "if(sec>=60){earStop();return;}" in ear, "the ear takes 60 s at a time"
-    assert "try{vCtxUp();}catch(e){}" in ear, "the mic gesture doubles as the audio unlock"
+    assert ear.count("try{vCtxUp();}catch(e){}") == 2, "either mic gesture doubles as the audio unlock"
+
+
+def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
+    """Ruling 11355, binding for slice 2: toggle per tab, never persisted; audio
+    leaves the page only for a VAD-closed take; silence closes a take at 3 s;
+    a hard cap of 30 s closes-and-reopens; hidden tab / page gone / mic error =
+    OFF; the model ships with the page (no CDN)."""
+    ear = UI[UI.index("const EAR_SILENCE_MS="):UI.index("async function openVoices(){")]
+    assert '<button type="button" id="listen" hidden aria-pressed="false"' in UI
+    assert "if($('listen'))$('listen').hidden=!(me&&me.ear);" in UI, "the toggle exists only where the ear does"
+    assert "const EAR_SILENCE_MS=3000;" in ear and "redemptionMs:EAR_SILENCE_MS" in ear
+    assert "const EAR_TAKE_CAP_MS=30000;" in ear and "setTimeout(listenCap,EAR_TAKE_CAP_MS)" in ear
+    assert "submitUserSpeechOnPause:true," in ear and "await v.pause();if(listenVad===v)await v.start();" in ear, \
+        "the cap closes the open take (pause submits it) and reopens"
+    assert "onSpeechEnd:audio=>{clearTimeout(listenCapTimer);listenPaint('listening');listenTake(audio);}" in ear, \
+        "only a VAD-closed take becomes a request"
+    assert "m.addEventListener('click',()=>{if(listenVad)listenStop();else listenStart();});" in ear
+    assert "document.addEventListener('visibilitychange',()=>{if(document.hidden)listenStop();});" in ear
+    assert "window.addEventListener('pagehide',listenStop);" in ear
+    assert "toast('microphone: '+(e.message||e));return;}" in ear, "a mic error leaves listening OFF"
+    assert "m.classList.toggle('on',!!listenVad);m.setAttribute('aria-pressed',listenVad?'true':'false');" in ear
+    for persisted in ("localStorage", "sessionStorage", "document.cookie"):
+        assert persisted not in ear, "listening is per tab, never persisted"
+    assert "baseAssetPath:'/ui/vad/',onnxWASMBasePath:'/ui/vad/'" in ear and "model:'v5'" in ear
+    assert "cdn." not in UI.lower() and "jsdelivr" not in UI, "the model ships with the page"
+    assert '<script src="/ui/vad/ort.wasm.min.js"></script>' in UI and \
+        '<script src="/ui/vad/vad.bundle.min.js"></script>' in UI
+    assert "let listenChain=Promise.resolve();" in ear and "listenChain=listenChain.then(async()=>{" in ear, \
+        "takes post one at a time -- the broker holds one slot"
+
+
+def test_the_vad_ships_with_the_page_from_a_table(tmp_path):
+    """/ui/vad/<name>: six files by table, right media types, an unknown name is
+    a 404 and never a path; the sums file pins what was vendored."""
+    from starlette.requests import Request
+    def get(name):
+        req = Request({"type": "http", "method": "GET", "path": f"/ui/vad/{name}", "headers": [],
+                       "query_string": b"", "path_params": {"name": name}})
+        return asyncio.run(daemon.vad_asset_http(req))
+    for name, media in daemon._VAD_FILES.items():
+        r = get(name)
+        assert r.status_code == 200 and r.media_type == media and len(r.body) > 1000, name
+        assert r.headers["cache-control"] == "public, max-age=86400"
+    assert set(daemon._VAD_FILES) == {"vad.bundle.min.js", "vad.worklet.bundle.min.js", "ort.wasm.min.js",
+                                      "ort-wasm-simd-threaded.mjs", "ort-wasm-simd-threaded.wasm",
+                                      "silero_vad_v5.onnx"}
+    assert get("../index.html").status_code == 404 and get("SHA256SUMS").status_code == 404
+    sums = pathlib.Path(daemon._UI_PACKAGED, "vad", "SHA256SUMS").read_text()
+    for name in daemon._VAD_FILES:
+        assert name in sums

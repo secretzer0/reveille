@@ -690,9 +690,12 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
         assigned[expr] = assigned.get(expr, 0) + 1
     assert assigned == {"frameSrc": 1}, \
         f"a URL property assignment appeared: {assigned} -- route it through a check"
-    # THE ONE SCRIPT SRC is a fixed path this page ships with (the vendored Opus
-    # decoder, served by the broker from its own route table), never built.
-    assert PAGE.count("<script src=") == 1 and '<script src="/ui/opus-decoder.js"></script>' in PAGE
+    # EVERY SCRIPT SRC is a fixed, site-relative path this page ships with (the
+    # vendored Opus decoder; the vendored VAD runtime + model, DES-014 slice 2),
+    # served by the broker from its own route table, never built, never a CDN.
+    srcs = re.findall(r'<script src="([^"]*)"></script>', PAGE)
+    assert srcs == ["/ui/opus-decoder.js", "/ui/vad/ort.wasm.min.js", "/ui/vad/vad.bundle.min.js"], srcs
+    assert PAGE.count("<script src=") == len(srcs)
     assert "const PATH_URL_RE=/^\\/[^/\\\\]/;" in PAGE, \
         "an assigned URL must be site-relative: // leaves the origin, \\ is the same trick"
     assert "function frameSrc(u){return PATH_URL_RE.test(u||'')?u:'about:blank';}" in PAGE, \
