@@ -225,6 +225,16 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.144 THE PHONE PAGE, SLICE 2 (DES-016 s2, rulings 11443/11447/11456/11483 B;
+operator 11439/11478). One block, narrow OR short (max-width 640 / max-height
+480 -- a phone on its side): a header bar (room name = the sheet with rooms,
+agents, me; voice; find = filter + history; me = settings/logout), the rail as
+a sheet with a room list, the composer as box + Send behind "+" (talk, listen,
+auto-send, attach, to, subject), a denser feed with the row's tools on tap, a
+hairline between senders, 44 px targets, 16px inputs, 100dvh. Above the block
+the desktop is pixel-identical (mobile-shots prints the desktop shot); the
+composer rows and the top bar wrap at every width so a 664-wide well never
+pushes Send off the glass. Bus tools unchanged.
 0.2.143 A MICROPHONE REFUSAL NAMES THE PLACE (operator 11559: iPhone, "The
 request is not allowed by the user agent or the platform..."). getUserMedia
 runs inside the tap, so NotAllowedError is the phone's answer: the browser

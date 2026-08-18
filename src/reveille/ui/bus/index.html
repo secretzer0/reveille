@@ -291,7 +291,7 @@
  .toast.info{border-color:var(--gold)}
  @keyframes toastin{from{opacity:0;transform:translateY(-8px)}to{opacity:1}}
  #top{display:flex;align-items:center;gap:.7rem;padding:.55rem 1.1rem;
-  border-bottom:1px solid var(--line);background:var(--bg)}
+  border-bottom:1px solid var(--line);background:var(--bg);flex-wrap:wrap}
  #filter{flex:1;max-width:26rem;background:var(--rail);border:1px solid var(--line);
   color:var(--fg);padding:.38rem .8rem;border-radius:7px;font:inherit;font-size:.86rem}
  #filter:focus{outline:none;border-color:var(--gold)}
@@ -430,10 +430,13 @@
  #composerWrap{border-top:1px solid var(--line);background:var(--bg);padding:.8rem 1.1rem 1rem}
  #composer{max-width:none;margin:0 1.1rem;background:var(--card);border:1px solid var(--line);
   border-radius:12px;padding:.55rem .9rem .6rem;display:flex;flex-direction:column;gap:.15rem}
+ /* Both rows WRAP at every width (DES-016 s2): a 664-wide phone in landscape is
+    above the phone breakpoint and gets this layout with 432 px of well -- Send
+    must fold under, never off the glass. Nothing wraps where there is room. */
  .ctop{display:flex;gap:.7rem;align-items:center;border-bottom:1px solid var(--line);
-  padding-bottom:.45rem}
+  padding-bottom:.45rem;flex-wrap:wrap}
  .cbottom{display:flex;align-items:center;gap:.6rem;padding-top:.4rem;
-  border-top:1px solid var(--line)}
+  border-top:1px solid var(--line);flex-wrap:wrap}
  #composer input,#composer textarea{background:none;border:0;color:var(--fg);font:inherit}
  #composer input:focus,#composer textarea:focus{outline:none}
  #replyChip{display:none;color:var(--gold);font-size:.78rem;border:1px solid var(--gold);
@@ -696,32 +699,85 @@
  .pick.bcastRow{border-bottom:1px solid var(--line);margin-bottom:.25rem;padding-bottom:.45rem}
 
  .row.active{background:var(--hover);outline:1px solid var(--gold)}
- /* ---- a phone (operator 11439: "almost unusable"). Below 760px the rail is
-    a drawer behind a menu button (it held rooms, settings, logout and the agent
-    filter -- hidden, the page had no way to change room or sign out), the top
-    bar and the composer's control row wrap instead of pushing Send off the
-    right edge, and every input is 16px so iOS Safari stops zooming the page on
-    focus and leaving it there. Nothing changes above 760px. */
- #railBtn{display:none;background:none;border:1px solid var(--line);color:var(--dim);
-  border-radius:7px;padding:.3rem .6rem;cursor:pointer;font:inherit;font-size:1rem;line-height:1}
- @media(max-width:760px){
+ /* ---- a phone (operator 11439: "almost unusable"; 11478 "very very bad"). */
+ /* DES-016 s2 (rulings 11443/11447/11456/11483 B): ONE breakpoint, 640 px, and it
+    replaces the 760 block, never joins it. Under it the rail is a SHEET behind the
+    room name in a header bar (room name / voice / find / me), the composer is box +
+    Send behind a "+", the feed is denser, every finger target is >= 44 px, inputs
+    are 16px, and the well is 100dvh -- the glass, not the layout viewport under
+    iOS's bars. Fluid throughout: no device pixels in the layout rules; every
+    dimension is em/rem/percent (11483 B). Above 640 px nothing changes -- the .ph
+    controls do not exist there (display:none in the base rules). The same block
+    also takes a SHORT viewport (<= 480 px tall): a phone on its side is 664-932
+    wide and 360-430 tall, above the width cut and with no room for a rail and a
+    full composer -- both orientations must work (operator 11456). */
+ .ph{display:none}
+ @media(max-width:640px),(max-height:480px){   /* a phone on its side is short, not narrow (11456) */
+  html,body{height:100dvh;overflow-x:hidden;overscroll-behavior-x:none}  /* the well is the glass; no sideways rubber-band */
   body{grid-template-columns:1fr}
-  #rail{display:none;position:fixed;inset:0 22% 0 0;z-index:15;box-shadow:4px 0 24px #0009}
-  body.railOpen #rail{display:flex}
-  #railBtn{display:inline-block}
-  #top{flex-wrap:wrap;gap:.45rem;padding:.45rem .6rem}
-  #filter{flex:1 1 9rem;max-width:none;min-width:0}
-  #voice,#histBtn{white-space:nowrap}
-  #composerWrap{padding:.5rem .5rem .6rem}
-  #composer{margin:0}
-  .cbottom{flex-wrap:wrap;gap:.4rem}
-  .ctop{flex-wrap:wrap}
-  #subject{min-width:0;flex:1 1 8rem}                /* mobile-shots: 320-360 wide put the subject box past the glass */
-  #kbdHint{display:none}
-  #composer input,#composer textarea,#filter{font-size:16px}
-  #jump{bottom:auto;top:5.2rem;right:.8rem}          /* off the message box (operator 11478 picture) */
-  html,body{overflow-x:hidden;overscroll-behavior-x:none}  /* no sideways rubber-band of the page itself */
   #main{max-width:100vw}
+  /* THE SHEET: the rail (agents, me card, and on a phone the room list) slides in
+     over the well; behind everything modal (z 15 < the panel's), and any tap on
+     the well or a pick closes it. */
+  #rail{display:none;position:fixed;inset:0 18% 0 0;z-index:15;box-shadow:.25rem 0 1.5rem #0009;overflow-y:auto}
+  body.railOpen #rail{display:flex}
+  #phRooms{display:block;padding:.4rem .6rem .2rem;border-bottom:1px solid var(--line)}
+  #phRooms h2{font-size:.68rem;letter-spacing:.14em;color:var(--faint);margin:.3rem .3rem .2rem}
+  #phRooms .phRoom{display:flex;align-items:center;gap:.5rem;min-height:2.75rem;padding:0 .5rem;
+   border-radius:.5rem;color:var(--dim);cursor:pointer;font-size:.9rem}
+  #phRooms .phRoom.sel{color:var(--gold);background:var(--hover)}
+  #phRooms .phRoom .rDot{width:.5rem;height:.5rem;border-radius:50%;background:currentColor;flex:none}
+  /* THE HEADER BAR: room name (tap = the sheet), voice, find (filter + history), me. */
+  #top{gap:.35rem;padding:.3rem .5rem}
+  #top>button.ph{display:inline-flex;align-items:center;justify-content:center;background:none;border:1px solid var(--line);color:var(--dim);cursor:pointer;font:inherit}
+  #roomBtn{flex:1 1 8rem;min-width:0;min-height:2.75rem;background:none;border:1px solid var(--line);
+   color:var(--fg);border-radius:.5rem;padding:0 .7rem;font:inherit;font-weight:700;font-size:1rem;
+   text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;line-height:2.75rem}
+  #roomBtn .chev{color:var(--faint);font-size:.7em;margin-left:.4em}
+  #top>#roomBtn{justify-content:flex-start}
+  #voice,#vstop,#toolsBtn,#meBtn{min-height:2.75rem;min-width:2.75rem;padding:0 .7rem;white-space:nowrap;
+   font-size:.9rem;border-radius:.5rem}
+  #filter,#filterState,#histBtn{display:none}
+  body.toolsOpen #filter{display:block;flex:1 1 100%;max-width:none;min-width:0;min-height:2.75rem}
+  body.toolsOpen #histBtn{display:inline-block;min-height:2.75rem}
+  body.toolsOpen #filterState:not(:empty){display:inline}
+  #phMenu{position:absolute;right:.5rem;top:3.4rem;z-index:20;background:var(--card);
+   border:1px solid var(--line);border-radius:.6rem;padding:.3rem;box-shadow:0 .5rem 2rem rgba(0,0,0,.45)}
+  #phMenu.on{display:block}
+  #phMenu .mi{min-height:2.75rem;display:flex;align-items:center;font-size:.95rem;padding:0 1rem}
+  /* THE COMPOSER: box + Send. Everything else waits behind "+" -- talk and listen
+     first, they are what a phone wants (DES-014 unchanged: same buttons, same
+     functions, only where they live). A reply in flight opens the row itself. */
+  #composerWrap{padding:.4rem .5rem .5rem}
+  #composer{margin:0}
+  .ctop{display:none}
+  #composer.more .ctop{display:flex;gap:.4rem}
+  #subject{min-width:0;flex:1 1 8rem;min-height:2.75rem}
+  #toBtn{min-height:2.75rem}
+  .cbottom{gap:.4rem}
+  .cbottom .ph{display:inline-flex;align-items:center;justify-content:center}
+  #composer:not(.more) .cbottom>:not(#moreBtn):not(#send):not(#attchips){display:none}
+  #mic{order:1}#micState{order:2}#listen{order:3}#listenState{order:4}#autosendWrap{order:5}
+  #attachBtn{order:6}#attchips{order:7}#moreBtn{order:8;margin-left:auto}#send{order:9}
+  #kbdHint{display:none}
+  #mic,#listen,#attachBtn,#send,#moreBtn{min-height:2.75rem}
+  #moreBtn{min-width:2.75rem;background:none;border:1px solid var(--line);color:var(--dim);
+   border-radius:2em;font:inherit;font-size:1.3rem;line-height:1;cursor:pointer;padding:0 .8rem}
+  #composer.more #moreBtn{color:var(--gold);border-color:var(--gold)}
+  #composer input,#composer textarea,#filter{font-size:16px}
+  #body{min-height:3.2em}                            /* the feed keeps its room; the box grows as you type (resize stays) */
+  #jump{bottom:auto;top:4rem;right:.8rem}          /* off the message box (operator 11478 picture) */
+  /* THE FEED, denser: a smaller avatar, one-line head, id/thread/delete/audio on the
+     row's tap (never hover -- there is none), a hairline where the sender changes. */
+  .row{grid-template-columns:1.6rem 1fr;gap:.5rem;padding:.2rem .5rem}
+  .avatar{width:1.6rem;height:1.6rem;font-size:.6rem;border-radius:.4rem}
+  .row:not(.cont){border-top:1px solid var(--line)}
+  .head{flex-wrap:nowrap;overflow:hidden;gap:.4rem}
+  .head .who,.head .toname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .head time{white-space:nowrap;margin-left:auto}
+  .head .mid,.head .del{display:none}
+  .row.active .mid,.row.active .del{display:inline;opacity:1}
+  .row.active .play,.row.active .scr{opacity:1}
   #panTabs{flex-wrap:wrap;padding-right:2.4rem;position:relative}
   #panX{position:absolute;right:.4rem;top:.35rem}   /* the close X was 18 px past the card edge at 390 */
   .crow{flex-wrap:wrap}
@@ -730,6 +786,7 @@
 <nav id="rail">
  <div id="brand"><h1>REVEILLE</h1>
   <small><span id="status"></span><span id="ver">bus</span></small></div>
+ <div id="phRooms" class="ph"></div>
  <!--NAVLINK-->
  <!--AGENTSNAV-->
  <h2>AGENTS</h2>
@@ -767,8 +824,10 @@
 <div id="main">
 <div id="chatWell">
  <div id="top">
-  <button type="button" id="railBtn" aria-label="menu: rooms, agents, settings"
-   title="rooms, agents, settings">&#9776;</button>
+  <!-- DES-016 s2: the phone's header bar. The room name opens the sheet (rooms,
+       agents, me); "find" reveals the filter and history; "me" is settings/logout.
+       .ph = phone only: none of these exist above 640 px. -->
+  <button type="button" id="roomBtn" class="ph" title="rooms, agents, settings"></button>
   <input id="filter" placeholder="Filter messages&hellip;">
   <span id="filterState" title="clear agent filter"></span>
   <!-- DES-009 commit 3. The toggle IS the browser's autoplay gesture, which is why
@@ -783,6 +842,14 @@
   <button type="button" id="vstop" hidden aria-label="stop speaking"
    title="stop what is sounding; the next queued message follows">&#9632; stop</button>
   <button id="histBtn" title="search the entire bus log">history</button>
+  <button type="button" id="toolsBtn" class="ph" aria-label="filter and history"
+   title="filter messages, search history">find</button>
+  <button type="button" id="meBtn" class="ph" aria-label="settings, logout"
+   title="settings, logout">&#9881;</button>
+  <div id="phMenu" class="ph">
+   <div class="mi" id="phSettings">Settings</div>
+   <div class="mi" id="phLogout">Logout</div>
+  </div>
  </div>
  <div id="histBar">
   <div class="hf"><label>Quick range</label>
@@ -834,6 +901,8 @@
     <button type="button" id="attachBtn">+ attach</button>
     <span id="attchips"></span>
     <span class="khint" id="kbdHint">Ctrl+Enter to send</span>
+    <button type="button" id="moreBtn" class="ph" aria-expanded="false"
+     title="to, subject, talk, listen, auto-send, attach">+</button>
     <button id="send" type="submit">Send</button>
    </div>
   </form>
@@ -1090,15 +1159,29 @@ function paintMe(){
  // It used to appear only with 2+ rooms, back when the card jumped straight to the room
  // list; pointing it at a menu that is sometimes absent would be the lie.
  $('meRoom').innerHTML=esc(r?r.name:'no room')+'<span class="chev">&#9660;</span>';
+ // The phone's header and sheet (DES-016 s2), from the SAME rooms: one source, two
+ // views. Picking closes the sheet -- you asked for the room, not the list.
+ $('roomBtn').innerHTML=esc(r?r.name:'no room')+'<span class="chev">&#9660;</span>';
+ $('phRooms').innerHTML=rooms.length?'<h2>ROOMS</h2>'+rooms.map(x=>'<div class="phRoom'+(x.id===room?' sel':'')+
+  '" data-phroom="'+x.id+'"><span class="rDot"></span>'+esc(x.name)+'</div>').join(''):'';
+ for(const b of $('phRooms').querySelectorAll('[data-phroom]'))
+  b.onclick=()=>{document.body.classList.remove('railOpen');if(b.dataset.phroom!==room)pickRoom(b.dataset.phroom);};
  $('meCard').title=rooms.length>1
   ? 'settings, logout -- rooms ('+rooms.length+' available) are the first tab of Settings'
   : 'settings, logout';
 }
 $('meCard').onclick=e=>{e.stopPropagation();$('meMenu').classList.toggle('on');};
-// The phone drawer (see the max-width:760px rules): the button opens it, any tap on
-// the main column closes it -- picking a room or a tab lands you back on the page.
-$('railBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('railOpen');};
-$('main').addEventListener('click',e=>{if(!e.target.closest('#railBtn'))document.body.classList.remove('railOpen');},true);
+// The phone sheet (the max-width:640px rules, DES-016 s2): the room name opens it,
+// any tap on the main column closes it -- picking a room or a tab lands you back on
+// the page.
+$('roomBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('railOpen');};
+$('toolsBtn').onclick=e=>{e.stopPropagation();const on=document.body.classList.toggle('toolsOpen');if(on)$('filter').focus();};
+$('meBtn').onclick=e=>{e.stopPropagation();$('phMenu').classList.toggle('on');};
+$('phSettings').onclick=()=>{$('phMenu').classList.remove('on');$('miSettings').click();};
+$('phLogout').onclick=()=>{$('phMenu').classList.remove('on');$('miLogout').click();};
+document.addEventListener('click',e=>{if(!e.target.closest('#meBtn'))$('phMenu').classList.remove('on');});
+$('moreBtn').onclick=()=>{const on=$('composer').classList.toggle('more');$('moreBtn').setAttribute('aria-expanded',on?'true':'false');};
+$('main').addEventListener('click',e=>{if(!e.target.closest('#roomBtn'))document.body.classList.remove('railOpen');},true);
 $('brand').addEventListener('click',()=>document.body.classList.remove('railOpen'));
 // Picking Settings or Logout from the drawer closes it: the panel is what you
 // asked for, and mobile-shots found the drawer (z 40 then) sitting ON the panel.
@@ -1702,6 +1785,7 @@ async function loadBacklog(reset){
 function busy(on){$('spin').classList.toggle('on',!!on);}
 
 function updateReplyChip(){
+ if(replyTo){$('composer').classList.add('more');$('moreBtn').setAttribute('aria-expanded','true');}   // a phone shows the reply chip's row (DES-016 s2)
  $('replyChip').className=replyTo?'on':'';
  $('replyChip').textContent=replyTo?('reply \u2192 #'+replyTo+'  \u2715'):'';
  updateBlast();

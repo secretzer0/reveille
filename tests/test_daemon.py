@@ -1288,15 +1288,41 @@ def test_the_plaintext_banner_names_a_host_once_and_never_loopback(monkeypatch, 
 
 
 def test_the_page_fits_a_phone():
-    """0.2.131 (operator 11439): below 760px the rail is a drawer behind a menu
-    button, the composer's control row wraps, and inputs are 16px so iOS Safari
-    does not zoom on focus. Each is a string a redesign could quietly drop."""
-    mobile = PAGE[PAGE.index("@media(max-width:760px)"):]
+    """DES-016 s2 (rulings 11443/11447/11456/11483 B), replacing 0.2.131's drawer:
+    ONE breakpoint at 640 px; the rail is a SHEET behind the room name in a header
+    bar (room / voice / find / me); the composer is box + Send behind a "+" with
+    talk and listen first; feed density; every finger target >= 2.75rem (44 px at
+    16px); inputs 16px so iOS does not zoom; the well is 100dvh. Above 640 px the
+    .ph controls do not exist. Each is a string a redesign could quietly drop."""
+    assert "@media(max-width:760px)" not in PAGE, "one breakpoint: 640 replaces 760, never joins it"
+    assert PAGE.count("@media(max-width:640px),(max-height:480px)") == 1, \
+        "one phone block: narrow OR short (a phone on its side, 11456)"
+    mobile = PAGE[PAGE.index("@media(max-width:640px),(max-height:480px)"):]
     mobile = mobile[:mobile.index("</style>")]
-    assert 'id="railBtn"' in PAGE and "body.railOpen #rail{display:flex}" in mobile
-    assert ".cbottom{flex-wrap:wrap" in mobile and "#top{flex-wrap:wrap" in mobile
+    assert " .ph{display:none}\n" in PAGE and "#top>button.ph{display:inline-flex" in mobile, \
+        "phone-only controls exist ONLY under 640 px (desktop byte-identical)"
+    assert 'id="roomBtn" class="ph"' in PAGE and 'id="toolsBtn" class="ph"' in PAGE and \
+        'id="meBtn" class="ph"' in PAGE and 'id="phRooms" class="ph"' in PAGE and 'id="moreBtn" class="ph"' in PAGE
+    assert "body.railOpen #rail{display:flex}" in mobile and "#rail{display:none;position:fixed;" in mobile
+    assert "$('roomBtn').onclick" in PAGE and "classList.toggle('railOpen')" in PAGE
+    assert "if(!e.target.closest('#roomBtn'))document.body.classList.remove('railOpen')" in PAGE
+    assert "data-phroom" in PAGE and "pickRoom(b.dataset.phroom)" in PAGE, "the sheet's room list switches rooms"
+    assert "body.toolsOpen #filter{display:block" in mobile and "body.toolsOpen #histBtn{display:inline-block" in mobile
+    assert "$('phSettings').onclick" in PAGE and "$('miSettings').click()" in PAGE and "$('miLogout').click()" in PAGE, \
+        "me = settings/logout through the SAME handlers, not a second implementation"
+    assert "#composer:not(.more) .cbottom>:not(#moreBtn):not(#send):not(#attchips){display:none}" in mobile
+    assert "#mic{order:1}#micState{order:2}#listen{order:3}" in mobile, "talk and listen take the + row's first slots"
+    assert "#kbdHint{display:none}" in mobile
     assert "#composer input,#composer textarea,#filter{font-size:16px}" in mobile
-    assert "$('railBtn').onclick" in PAGE and "classList.toggle('railOpen')" in PAGE
+    assert "html,body{height:100dvh;" in mobile
+    assert ".row{grid-template-columns:1.6rem 1fr;gap:.5rem;" in mobile and \
+        ".row.active .mid,.row.active .del{display:inline;opacity:1}" in mobile and \
+        ".row:not(.cont){border-top:1px solid var(--line)}" in mobile
+    for sel in ("#roomBtn{", "#voice,#vstop,#toolsBtn,#meBtn{", "#mic,#listen,#attachBtn,#send,#moreBtn{",
+                "#phMenu .mi{", "#phRooms .phRoom{"):
+        rule = mobile[mobile.index(sel):]
+        rule = rule[:rule.index("}")]
+        assert "min-height:2.75rem" in rule, f"{sel} finger target"
 
 
 def test_nothing_in_the_feed_is_wider_than_the_feed():
@@ -1307,10 +1333,11 @@ def test_nothing_in_the_feed_is_wider_than_the_feed():
     assert "touch-action:pan-y" in PAGE and ".msgcol{min-width:0}" in PAGE
     assert ".body{color:#c3ccd8;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;" in PAGE
     assert ".mdview pre{overflow-x:auto;max-width:100%}" in PAGE
-    mobile = PAGE[PAGE.index("@media(max-width:760px)"):]
+    mobile = PAGE[PAGE.index("@media(max-width:640px),(max-height:480px)"):]
     mobile = mobile[:mobile.index("</style>")]
-    assert "html,body{overflow-x:hidden;overscroll-behavior-x:none}" in mobile
-    assert "#jump{bottom:auto;top:5.2rem;right:.8rem}" in mobile
-    sized = re.findall(r"(?:width|height|left|right|top|bottom|inset|gap|padding|margin):[^;}]*\dpx",
-                       mobile.replace("(max-width:760px)", ""))
+    assert "html,body{height:100dvh;overflow-x:hidden;overscroll-behavior-x:none}" in mobile
+    assert "#jump{bottom:auto;top:4rem;right:.8rem}" in mobile
+    # a 1px BORDER is a hairline, not a layout dimension: border-top/-bottom are let through
+    sized = re.findall(r"(?<![-a-z])(?:width|height|left|right|top|bottom|inset|gap|padding|margin):[^;}]*\dpx",
+                       mobile.replace("(max-width:640px),(max-height:480px)", ""))
     assert not sized, f"no device pixels in the phone LAYOUT rules (11483 B): {sized}"
