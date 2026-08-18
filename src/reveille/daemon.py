@@ -224,10 +224,7 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
-0.2.134 AUDIO ATTACHMENTS PLAY IN THE ROOM (operator 11495): .wav/.mp3/
-.m4a/.ogg/.opus/.flac are served inline (audio types carry no script) and
-the page renders them as a player beside the download link.
-THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended). In
+0.2.134 THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended). In
 listen mode the page rings ONE bell when a take's words land in the box --
 ready for a command or more words, the same moment the pause-to-send
 countdown starts. /ui/earcon.wav ships with the page (the operator's pick
@@ -4128,19 +4125,14 @@ def _looks_multipart(content_type):
 _INLINE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".gif": "image/gif", ".webp": "image/webp", ".txt": "text/plain",
                  ".log": "text/plain", ".md": "text/plain", ".json": "application/json",
-                 ".csv": "text/plain",
-                 # Audio (operator 11495): a browser plays these and never
-                 # executes them; typed inline so <audio> can stream them.
-                 ".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-                 ".ogg": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac"}
+                 ".csv": "text/plain"}
 
 
 def file_headers(fname):
     """(media_type, content_disposition) for a stored attachment. Pure.
 
-    Images, plain text and audio render inline -- that is what makes a
-    screenshot show up in the room and a clip play there. Everything else
-    downloads, typed as a stream so the browser
+    Images and plain text render inline -- that is what makes a screenshot show
+    up in the room. Everything else downloads, typed as a stream so the browser
     never sniffs its way into executing it. SVG is DELIBERATELY not inline: it
     is an image to a user and a script host to a browser."""
     ext = os.path.splitext(fname)[1].lower()

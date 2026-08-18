@@ -386,12 +386,14 @@ def test_boot_doctrine_states_the_broadcast_rule():
 
 def test_only_allowlisted_types_render_in_the_browser():
     # The dangerous set is open-ended, so the safe set is the enumerated one.
-    for name in ("shot.png", "SHOT.PNG", "log.txt", "notes.md",
-                 "bell-1.wav", "clip.M4A", "song.mp3", "take.ogg", "take.opus", "hq.flac"):
+    for name in ("shot.png", "SHOT.PNG", "log.txt", "notes.md"):
         media, disp = daemon.file_headers(name)
         assert disp == "inline", name
         assert not media.startswith("application/octet-stream"), name
-    assert daemon.file_headers("bell.wav")[0] == "audio/wav"
+    # NO NATIVE AUDIO UNDER /files (operator 11499, ruling 11500): a raw clip is
+    # a download until DES-017 converts it at upload; the wire form is what plays.
+    for name in ("bell-1.wav", "clip.m4a", "song.mp3"):
+        assert daemon.file_headers(name) == ("application/octet-stream", "attachment"), name
     for name in ("note.html", "page.htm", "logo.svg", "app.js", "data.xml",
                  "file.bin", "noext"):
         media, disp = daemon.file_headers(name)
@@ -407,13 +409,7 @@ def test_the_ui_only_tries_to_render_what_the_server_serves_inline():
     for alt in m.group(1).split("|"):
         for ext in ("." + alt.replace("jpe?g", "jpeg"), "." + alt.replace("?", "")):
             assert daemon.file_headers("x" + ext)[1] == "inline", ext
-    # Same invariant for the audio player (0.2.134): an <audio> pointed at an
-    # octet-stream download is a dead control.
-    a = re.search(r"const AUD_RE=/\\\.\(([^)]+)\)\$/i;", PAGE)
-    assert a, "the UI's audio test moved"
-    for alt in a.group(1).split("|"):
-        assert daemon.file_headers("x." + alt)[0].startswith("audio/"), alt
-    assert '<audio class="att" controls preload="none" src="' in PAGE
+    assert "<audio class=\"att\"" not in PAGE, "no player for a raw clip (11500): DES-017 converts first"
 
 
 def test_multipart_is_detected_by_content_type_whatever_its_case():
@@ -706,7 +702,7 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
     sites = {}
     for expr in re.findall(r'(?:href|src|data-src)="\'\+([A-Za-z_]+)', PAGE):
         sites[expr] = sites.get(expr, 0) + 1
-    assert sites == {"esc": 1, "safe": 5, "tile": 1, "u": 1}, \
+    assert sites == {"esc": 1, "safe": 4, "tile": 1, "u": 1}, \
         f"a URL interpolation appeared or moved: {sites} -- every one needs a check"
     # AND THE SINKS THAT ARE NOT BUILT STRINGS. The regex above sees only
     # concatenation, so a URL set by PROPERTY ASSIGNMENT was invisible to it --
