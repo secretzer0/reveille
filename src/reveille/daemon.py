@@ -226,6 +226,14 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.146 EVERY COMMAND HAS A SOUND (operator 11576/11578, architect 11577;
+DES-014 s5 amended, supersedes 11465 "one bell only"). One table, one earcon(name),
+one "sounds" setting per browser (me menu, default ON), synthesized in the
+page, never over an utterance (queued to vDone): send accepted WHOOSH, any red
+toast BONK, words landed DING (the bell), listen on BIP / off BOP, auto-send
+cancelled PLIP, a message for me or a human's broadcast with voice off POP,
+attach done CLUNK, room switched SWISH. Skipped: countdown ticks, a dropped
+take, push-to-talk. Bus tools unchanged.
 0.2.145 A DEGENERATE TAKE IS DROPPED BEFORE IT LANDS (operator 11569, ruling
 11572; DES-014 s4/s5 amended). Whisper turned a non-speech take into "oh, oh,
 oh, ..." and auto-send shipped it. The broker now asks verbose_json and returns

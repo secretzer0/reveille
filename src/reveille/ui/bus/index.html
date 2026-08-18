@@ -811,6 +811,7 @@
  <div id="meWrap">
   <div id="meMenu">
    <div class="mi" id="miSettings">Settings</div>
+   <div class="mi" id="miSounds" title="the short sounds a command makes (send, listen, attach...); per browser">Sounds: on</div>
    <div class="mi" id="miLogout">Logout</div>
   </div>
   <div id="meCard" title="settings, logout">
@@ -848,6 +849,7 @@
    title="settings, logout">&#9881;</button>
   <div id="phMenu" class="ph">
    <div class="mi" id="phSettings">Settings</div>
+   <div class="mi" id="phSounds">Sounds: on</div>
    <div class="mi" id="phLogout">Logout</div>
   </div>
  </div>
@@ -1000,6 +1002,7 @@
 'use strict';
 const $=id=>document.getElementById(id);
 function toast(msg,info){
+ if(!info&&typeof earcon==='function')earcon('bonk');   // a red toast is a refusal: it has a sound (11577)
  const t=document.createElement('div');
  t.className='toast'+(info?' info':'');
  t.textContent=msg;
@@ -1035,6 +1038,7 @@ const qsFor=r=>'?room='+encodeURIComponent(r||'');
 const qs=()=>qsFor(room);
 let blast=false;           // broadcast scope: false = this room only, true = every room I hold
 let lastId=0,follow=true,prevMsg=null,mode='live',agentList=[];
+const humanNames=new Set();   // presence entries tagged web: -- a human's tab, not an agent
 const selAgents=new Set();     // sidebar filter: matches by FROM (default) or TO
 let filterMode='from';
 const recip=new Set();          // empty = ALL (broadcast); else one unicast per member
@@ -1089,7 +1093,7 @@ async function uploadFile(f){
  // DES-017: audio comes back CONVERTED (a .webm/.m4a pair, clip:true,
  // duration_s) -- the original never reaches the room in its native form.
  attachments.push(await r.json());
- renderAttchips();
+ renderAttchips();earcon('clunk');
 }
 function clipLabel(a){const d=Math.round(a.duration_s||0);return Math.floor(d/60)+':'+String(d%60).padStart(2,'0');}
 
@@ -1178,6 +1182,9 @@ $('roomBtn').onclick=e=>{e.stopPropagation();document.body.classList.toggle('rai
 $('toolsBtn').onclick=e=>{e.stopPropagation();const on=document.body.classList.toggle('toolsOpen');if(on)$('filter').focus();};
 $('meBtn').onclick=e=>{e.stopPropagation();$('phMenu').classList.toggle('on');};
 $('phSettings').onclick=()=>{$('phMenu').classList.remove('on');$('miSettings').click();};
+$('miSounds').onclick=e=>{e.stopPropagation();setSounds(!soundsOn());if(soundsOn())earcon('pop');};
+$('phSounds').onclick=e=>{e.stopPropagation();setSounds(!soundsOn());if(soundsOn())earcon('pop');};
+paintSounds();
 $('phLogout').onclick=()=>{$('phMenu').classList.remove('on');$('miLogout').click();};
 document.addEventListener('click',e=>{if(!e.target.closest('#meBtn'))$('phMenu').classList.remove('on');});
 $('moreBtn').onclick=()=>{const on=$('composer').classList.toggle('more');$('moreBtn').setAttribute('aria-expanded',on?'true':'false');};
@@ -1418,6 +1425,9 @@ function add(m){
  if(m.id>lastId)lastId=m.id;
  if(mode!=='live'||msgs.has(m.id))return;   // history view: live frames wait for "back to live"
  msgs.set(m.id,m);
+ // POP (11577): a live message for me, or a human's broadcast, when voice is OFF --
+ // with voice ON it is spoken, which is the louder pop. Never my own words.
+ if(!voiceOn&&m.from&&m.from!==myName&&(m.to===myName||(m.to==='*'&&humanNames.has(m.from))))earcon('pop');
  $('empty')?.remove();
  $('inner').appendChild(render(m));
  if(follow)$('feed').scrollTop=$('feed').scrollHeight;
@@ -1681,7 +1691,7 @@ function vPump(){
  vBusy=true;
  vPlay(t.id,vUrl(t.id));
 }
-function vDone(){vCtl=null;vBusy=false;paintStop();if(earconPending)earconRing();vPump();}
+function vDone(){vCtl=null;vBusy=false;paintStop();earconDrain();vPump();}
 // AND THE QUEUE TAKES EACH ID ONCE: whatever delivers a frame twice (a leaked
 // socket, a broker replay), a message is spoken once. This is the belt; dropFeed
 // is the braces.
@@ -1866,6 +1876,7 @@ async function loadPresence(){
 function renderPresence(agents){
  agentList=agents
   .sort((a,b)=>(b.connected-a.connected)||(b.live-a.live)||a.name.localeCompare(b.name));
+ for(const a of agentList)if((a.tag||'').startsWith('web:'))humanNames.add(a.name);
  $('agents').innerHTML='';
  // "everyone" is a FILTER SCOPE, not a being: it has no presence, so it gets no presence
  // dot. It wore one because the row reused .live to mean "selected" -- the same gold dot
@@ -2129,7 +2140,8 @@ $('composer').addEventListener('submit',async e=>{
    body:JSON.stringify(payload)});
   if(!r.ok){toast('send to '+to+' failed: '+(await r.text()));return;}
  }
- if(blast)toast('blasted '+rooms.length+' rooms');
+ earcon('whoosh');
+ if(blast)toast('blasted '+rooms.length+' rooms',true);
  blast=false;updateBlast();
  $('body').value='';$('subject').value='';earPrevTake='';   // 11581: a new message may open with the same words the last one closed on
  attachments.length=0;renderAttchips();
@@ -3091,7 +3103,7 @@ function start(){if(polling)return;polling=true;setInterval(loadPresence,15000);
 // each delivering every frame again; add() deduped messages by id, so the only
 // visible symptom was the audio frame arriving twice and being spoken twice.
 function dropFeed(){if(ws){ws.onclose=null;ws.onmessage=null;ws.close();ws=null;}}
-function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();
+function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();earcon('swish');
  closePanel();clearFeed();lastId=0;loadBacklog(true);loadPresence();
  dropFeed();connect();start();}
 
@@ -3815,13 +3827,13 @@ async function listenStart(){
   });
   await v.start();
  }catch(e){listenPaint('');toast(micWhy(e));return;}
- listenVad=v;listenPaint('listening');
+ listenVad=v;listenPaint('listening');earcon('bip');
 }
 function listenStop(){
  const v=listenVad;if(!v)return;listenVad=null;clearTimeout(listenCapTimer);
  if(typeof pauseSendAbort==='function')pauseSendAbort(true);
  try{v.destroy();}catch(e){}                      // pause + release the mic
- listenPaint('');
+ listenPaint('');earcon('bop');
 }
 // THE CAP: pause submits the open take (submitUserSpeechOnPause), start reopens.
 async function listenCap(){
@@ -3852,23 +3864,75 @@ function listenTake(f32){
 // same unlocked AudioContext, constant volume; never over an utterance being
 // spoken (it rings when that one ends); no bell in push-to-talk; off with listen
 // off. One sound only: a second "start" tick is what people turn off.
-let earconBuf=null,earconPending=false;
+let earconBuf=null;
 function earconLoad(){
  if(earconBuf)return Promise.resolve(earconBuf);
  return fetch('/ui/earcon.wav',{credentials:'same-origin'}).then(r=>r.arrayBuffer())
   .then(ab=>new Promise((res,rej)=>vCtxUp().decodeAudioData(ab,res,rej)))
   .then(b=>(earconBuf=b));
 }
-function earconRing(){
- if(!listenVad)return;
- if(vBusy){earconPending=true;return;}
- earconPending=false;
- earconLoad().then(buf=>{
-  if(!listenVad)return;
-  const c=vCtxUp(),src=c.createBufferSource();
-  src.buffer=buf;src.connect(c.destination);src.start();
- }).catch(()=>{});
+// ---- THE EARCON VOCABULARY (DES-014 s5 amendment; operator 11576/11578, architect 11577;
+// supersedes 11465's "one bell only"). Every command that lands makes ONE short
+// sound, so a hand on the wheel hears what happened. All but the ding are
+// synthesized here (an oscillator or a noise burst through a gain envelope, the
+// vMark way) -- nothing new is fetched. One table, one function earcon(name), one
+// "sounds" setting per browser (default ON, revSounds in the browser store), constant
+// volume, and NEVER over an utterance being spoken: while vBusy the names queue
+// and ring in order at vDone. Skipped on purpose: countdown ticks (visible), a
+// dropped degenerate take (11572: silence), push-to-talk start/stop (the finger
+// is on the button).
+const EARCON_GAIN=0.06;
+const EARCONS={
+ whoosh:{kind:'noise',f0:1200,f1:300,ms:180},   // send accepted
+ bonk:  {kind:'sine', f0:220, f1:110, ms:150},   // send refused / failed (any red toast)
+ ding:  {kind:'wav'},                            // words landed in the box (the bell of 11465)
+ bip:   {kind:'sine', f0:440, f1:880, ms:80},    // listen ON
+ bop:   {kind:'sine', f0:880, f1:440, ms:80},    // listen OFF
+ plip:  {kind:'sine', f0:1000,f1:1000,ms:40},    // auto-send cancelled (spoken cancel / keystroke)
+ pop:   {kind:'sine', f0:900, f1:900, ms:35},    // a message for me, or a human's broadcast, voice OFF only
+ clunk: {kind:'square',f0:160,f1:160, ms:60},    // attach done
+ swish: {kind:'noise',f0:300, f1:1200,ms:120},   // room switched
+};
+let earconQ=[];
+function soundsOn(){return localStorage.revSounds!=='0';}
+function setSounds(on){if(on)delete localStorage.revSounds;else localStorage.revSounds='0';paintSounds();}
+function paintSounds(){for(const id of ['miSounds','phSounds']){const el=$(id);if(el)el.textContent=soundsOn()?'Sounds: on':'Sounds: off';}}
+function earcon(name){
+ const e=EARCONS[name];if(!e||!soundsOn())return;
+ if(vBusy){earconQ.push(name);return;}
+ earconPlay(name,e);
 }
+function earconDrain(){const q=earconQ;earconQ=[];for(const n of q)earcon(n);}
+function earconPlay(name,e){
+ try{
+  const c=vCtxUp(),t=c.currentTime,g=c.createGain();
+  g.connect(c.destination);
+  if(e.kind==='wav'){
+   earconLoad().then(buf=>{const src=c.createBufferSource();src.buffer=buf;src.connect(c.destination);src.start();}).catch(()=>{});
+   return;
+  }
+  const d=e.ms/1000;
+  g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(EARCON_GAIN,t+0.005);
+  g.gain.exponentialRampToValueAtTime(0.0005,t+d);
+  let src;
+  if(e.kind==='noise'){
+   const n=Math.ceil(c.sampleRate*d),buf=c.createBuffer(1,n,c.sampleRate),ch=buf.getChannelData(0);
+   for(let i=0;i<n;i++)ch[i]=Math.random()*2-1;
+   src=c.createBufferSource();src.buffer=buf;
+   const f=c.createBiquadFilter();f.type='bandpass';f.Q.value=1.2;
+   f.frequency.setValueAtTime(e.f0,t);f.frequency.exponentialRampToValueAtTime(e.f1,t+d);
+   src.connect(f);f.connect(g);
+  }else{
+   src=c.createOscillator();src.type=e.kind;
+   src.frequency.setValueAtTime(e.f0,t);
+   if(e.f1!==e.f0)src.frequency.exponentialRampToValueAtTime(e.f1,t+d);
+   src.connect(g);
+  }
+  src.start(t);src.stop(t+d+0.02);
+ }catch(e){}
+}
+// The bell of 11465, by its old name: the words landed, in listen mode only.
+function earconRing(){if(listenVad)earcon('ding');}
 // ---- PAUSE-TO-SEND (operator 11389 "A+B", numbers ruled 11385): hands-free ----
 // ONLY; a deliberate SETTING, off by default, persisted per browser (unlike the
 // listen toggle, which is per tab); counted from the moment the words LANDED
@@ -3881,7 +3945,7 @@ let pauseSendTimer=null;
 function pauseSendOn(){return !!localStorage.revAutosend;}
 function pauseSendAbort(quiet){
  if(!pauseSendTimer)return;clearInterval(pauseSendTimer);pauseSendTimer=null;
- if(!quiet)listenPaint(listenVad?'listening':'');
+ if(!quiet){listenPaint(listenVad?'listening':'');earcon('plip');}
 }
 function pauseSendArm(){
  pauseSendAbort(true);
