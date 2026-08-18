@@ -78,6 +78,8 @@ def test_the_audio_dies_with_the_message_at_the_single_choke_point(tmp_path):
     audio.write_bytes(b"\x1a\x45\xdf\xa3....")
     part = tmp_path / f"tts-{mid}.webm.part"
     part.write_bytes(b"\x1a\x45\xdf\xa3....")
+    m4a = tmp_path / f"tts-{mid}.m4a"
+    m4a.write_bytes(b"....ftyp....")
     keep = tmp_path / "tts-999999.webm"
     keep.write_bytes(b"\x1a\x45\xdf\xa3....")
 
@@ -89,6 +91,7 @@ def test_the_audio_dies_with_the_message_at_the_single_choke_point(tmp_path):
         store.AUDIO_DIR = None
     assert not audio.exists(), "the audio outlived its message"
     assert not part.exists(), "the in-flight .part outlived its message"
+    assert not m4a.exists(), "the .m4a outlived its message"
     assert keep.exists(), "it removed audio belonging to another message"
 
 
@@ -120,14 +123,15 @@ def test_the_route_authorizes_from_the_message_and_ignores_the_query():
     decision is a hole, and the parameter is there only because every other call
     on that page carries one."""
     src = pathlib.Path(daemon.__file__).read_text()
-    fn = src[src.index("async def audio_http("):]
-    fn = fn[:fn.index("\n@_guard")]
-    assert 'SELECT room FROM messages WHERE id=?' in fn, \
-        "the room must come from the message row"
-    assert "query_params" not in fn, \
-        "the ?room= parameter must not be read here -- it is the client's claim"
-    assert 'row["room"] not in p.rooms' in fn, \
-        "the message's room must be checked against the caller's rooms"
+    for name in ("async def audio_http(", "async def audio_m4a_http("):
+        fn = src[src.index(name):]
+        fn = fn[:fn.index("\n@_guard")]
+        assert 'SELECT room FROM messages WHERE id=?' in fn, \
+            "the room must come from the message row"
+        assert "query_params" not in fn, \
+            "the ?room= parameter must not be read here -- it is the client's claim"
+        assert 'row["room"] not in p.rooms' in fn, \
+            "the message's room must be checked against the caller's rooms"
 
 
 def test_the_worker_writes_the_file_and_announces_it(monkeypatch, tmp_path):
@@ -145,8 +149,14 @@ def test_the_worker_writes_the_file_and_announces_it(monkeypatch, tmp_path):
     # THE FILE IS WEBM/OPUS (ruling 11211): the broker transcoded the stub's WAV.
     out = (tmp_path / "tts-7.webm").read_bytes()
     assert out[:4] == EBML and abs(_webm_seconds(tmp_path / "tts-7.webm") - 1.0) < 0.15
-    assert pushed == [("r1", {"event": "audio", "id": 7})]
+    # THE PAIR IS ONE UTTERANCE (DES-015, ruling 11383): the .m4a lands beside the
+    # .webm, made after the announcement, and is named by its own frame.
+    assert pushed == [("r1", {"event": "audio", "id": 7}), ("r1", {"event": "audio_m4a", "id": 7})]
+    m4a = (tmp_path / "tts-7.m4a").read_bytes()
+    assert m4a[4:8] == b"ftyp", "an MP4 container"
+    assert m4a.index(b"moov") < m4a.index(b"mdat"), "moov up front: a player starts before the read ends"
     assert not (tmp_path / "tts-7.webm.part").exists(), "the .part must be renamed, not copied"
+    assert not (tmp_path / "tts-7.m4a.part").exists()
     assert 7 not in daemon._tts_inflight, "the registry entry outlived the rename"
 
 
@@ -475,6 +485,47 @@ def test_a_message_deleted_mid_flight_leaves_no_wav_and_no_part(monkeypatch, tmp
     assert 7 not in daemon._tts_inflight
 
 
+def test_the_m4a_route_is_the_file_or_a_404_and_the_sweep_takes_both_parts(tmp_path):
+    """DES-015: two states for the .m4a (a container that cannot be tailed):
+    complete -> the file as audio/mp4; anything else -> 404. And a broker that
+    died mid-way leaves either .part; the sweep removes both."""
+    from starlette.requests import Request
+    import asyncio
+    path = str(tmp_path / "b.db")
+    conn = store.connect(path)
+    store.migrate(conn, path)
+    conn.execute("INSERT INTO users(id, name, pw_hash, role, created_ns) VALUES('u1','t','x','admin',1)")
+    conn.execute("INSERT INTO rooms(id, name, owner_id, created_ns) VALUES('r1','room','u1',1)")
+    mid = _plant(conn)
+    old_conn, old_files = daemon._conn, daemon._files_dir
+    daemon._conn, daemon._files_dir = conn, tmp_path
+
+    class _P:
+        rooms = {"r1"}
+    old_p = daemon._principal
+    daemon._principal = lambda request: _P()
+    try:
+        def get(raw):
+            req = Request({"type": "http", "method": "GET", "path": f"/audio/{raw}.m4a", "headers": [],
+                           "query_string": b"", "path_params": {"mid": raw}})
+            return asyncio.run(daemon.audio_m4a_http(req))
+        assert get(str(mid)).status_code == 404, "no file yet = a defined 404"
+        (tmp_path / f"tts-{mid}.m4a.part").write_bytes(b"half")
+        assert get(str(mid)).status_code == 404, "a .part is not the answer: an MP4 is not tailed"
+        (tmp_path / f"tts-{mid}.m4a").write_bytes(b"....ftypisom")
+        r = get(str(mid))
+        assert r.status_code == 200 and r.media_type == "audio/mp4"
+        assert get("x").status_code == 404 and get(str(mid + 9)).status_code == 404
+        _P.rooms = {"r2"}
+        assert get(str(mid)).status_code == 404, "a stranger to the room sees nothing"
+    finally:
+        daemon._conn, daemon._files_dir, daemon._principal = old_conn, old_files, old_p
+    (tmp_path / "tts-5.webm.part").write_bytes(b"x")
+    daemon._sweep_abandoned_audio(tmp_path)
+    assert not (tmp_path / f"tts-{mid}.m4a.part").exists() and not (tmp_path / "tts-5.webm.part").exists()
+    assert (tmp_path / f"tts-{mid}.m4a").exists(), "the sweep takes parts, never finished files"
+
+
 def test_the_startup_sweep_removes_an_orphaned_part(tmp_path):
     """Gate 6. A .part with no worker is a broker that died mid-synthesis:
     swept at startup, the message stays silent. Seen red on a planted file."""
@@ -513,7 +564,7 @@ def test_a_reader_that_leaves_mid_tail_does_not_wedge_the_worker(monkeypatch, tm
     assert not t.is_alive(), "the worker wedged behind a departed reader"
     assert (tmp_path / f"tts-{mid}.webm").exists()
     assert (tmp_path / f"tts-{mid + 100}.webm").exists(), "the next message was not spoken"
-    assert [m["id"] for m in pushed] == [mid, mid + 100]
+    assert [m["id"] for m in pushed if m["event"] == "audio"] == [mid, mid + 100]
 
 
 def test_the_client_speaks_on_the_audio_frame_not_the_message_frame():

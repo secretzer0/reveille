@@ -209,6 +209,13 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.126 THE SAME UTTERANCE ALSO LANDS AS AAC (DES-013 section 6 amended,
+ruling 11383 for DES-015 the car shell). Beside tts-<id>.webm the worker
+now writes tts-<id>.m4a from the finished .webm (after the announcement --
+first sound owes it nothing), names it on the feed as `audio_m4a`, and
+serves it at GET /audio/<id>.m4a with the .webm's authorization: the file
+or a 404, an MP4 is not tailed. Delete and the startup sweep take the pair.
+Bus tools unchanged.
 0.2.125 PAUSE-TO-SEND (DES-014, operator 11389 "A+B", numbers ruled 11385).
 An `auto-send` setting beside `listen`, off by default and remembered per
 browser: hands-free only, five seconds after your words land they are sent
@@ -2757,16 +2764,47 @@ def _tts_worker(url, token, timeout):
         finally:
             done.set()
             _tts_inflight.pop(mid, None)
+        # THE SECOND REPRESENTATION (DES-015, ruling 11383): a native shell's
+        # audio stack plays AAC, not WebM/Opus, so the same utterance also lands
+        # as tts-<mid>.m4a -- made from the finished .webm by the ffmpeg this
+        # box already owns, AFTER the announcement (first sound owes it
+        # nothing), and named on the feed as its own event so a shell knows
+        # when to fetch it. The pair is one utterance: same gate, same delete,
+        # same sweep. A failed .m4a is logged and the .webm stands.
+        if (_files_dir / f"tts-{mid}.webm").is_file() and _m4a_from_webm(mid):
+            _feed_push(room, {"event": "audio_m4a", "id": mid})
+
+
+def _m4a_from_webm(mid):
+    """tts-<mid>.webm -> tts-<mid>.m4a (AAC-LC, 48 kbit/s mono, moov up front so
+    a player can start before the read ends), written as .m4a.part and renamed,
+    so a reader never sees a half file. True when the file landed."""
+    src = _files_dir / f"tts-{mid}.webm"
+    part = _files_dir / f"tts-{mid}.m4a.part"
+    try:
+        r = subprocess.run(["ffmpeg", "-loglevel", "error", "-nostdin", "-y", "-i", str(src),
+                            "-c:a", "aac", "-b:a", "48k", "-movflags", "+faststart", "-f", "mp4", str(part)],
+                           capture_output=True, timeout=120)
+        if r.returncode != 0:
+            raise OSError((r.stderr or b"").decode(errors="replace").strip()[-300:] or f"ffmpeg exit {r.returncode}")
+        os.replace(part, _files_dir / f"tts-{mid}.m4a")
+        return True
+    except Exception as e:
+        log.warning("tts: m4a for %s not made: %s", mid, e)
+        with contextlib.suppress(OSError):
+            os.unlink(part)
+        return False
 
 
 def _sweep_abandoned_audio(files_dir):
     """A .part left on disk is a broker that died mid-synthesis. Nothing will
     finish it and no registry names it, so it is not in flight and not
     complete: remove it, and the message stays silent (section 7)."""
-    for p in pathlib.Path(files_dir).glob("tts-*.webm.part"):
-        with contextlib.suppress(OSError):
-            p.unlink()
-            log.info("tts: removed abandoned %s", p.name)
+    for pat in ("tts-*.webm.part", "tts-*.m4a.part"):
+        for p in pathlib.Path(files_dir).glob(pat):
+            with contextlib.suppress(OSError):
+                p.unlink()
+                log.info("tts: removed abandoned %s", p.name)
 
 
 def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
@@ -4610,6 +4648,30 @@ async def audio_make_http(request):
 
 
 @_guard
+async def audio_m4a_http(request):
+    """GET /audio/<msg-id>.m4a -> the same utterance as AAC in MP4 (DES-015,
+    ruling 11383) for a native shell. Same authorization as the .webm (the
+    message's room, ?room= ignored). Two states, not three: an MP4 is not
+    tailed -- complete -> the file; anything else -> 404, and the feed's
+    `audio_m4a` event says when to come back."""
+    p = _principal(request)
+    raw = request.path_params["mid"]
+    if not raw.isdigit():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    mid = int(raw)
+    row = _conn.execute("SELECT room FROM messages WHERE id=?", (mid,)).fetchone()
+    if row is None or row["room"] not in p.rooms:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = _files_dir / f"tts-{mid}.m4a"
+    if not path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(path, media_type="audio/mp4",
+                        headers={"Content-Disposition": f'inline; filename="tts-{mid}.m4a"',
+                                 "X-Content-Type-Options": "nosniff",
+                                 "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
+@_guard
 async def audio_http(request):
     """GET /audio/<msg-id>.webm -> the spoken form of that message (WebM/Opus,
     ruling 11211), if you are in its room.
@@ -5451,6 +5513,7 @@ def build_app():
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
             Route("/audio/{mid}.webm", audio_http),
+            Route("/audio/{mid}.m4a", audio_m4a_http),
             Route("/audio/{mid}", audio_make_http, methods=["POST"]),
             Route("/stt", stt_http, methods=["POST"]),
             Route("/script/{mid}", script_http),
