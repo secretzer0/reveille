@@ -24,7 +24,14 @@ def test_creation_is_a_tick_on_the_page():
     assert 'id="newTokNew"' in PAGE and "this is a NEW agent" in PAGE
     # ...and the tick is what the mint sends; nothing else may set create.
     assert "rooms:picked,create:$('newTokNew').checked" in PAGE
-    assert PAGE.count("create:") == 1, "one site declares creation"
+    # TWO sites may declare creation and no more: the token form's tick, and
+    # the launcher's "+ New Agent" form, which IS the human's deliberate act.
+    # The move-it-here path (DES-011 s2.1) deliberately sends nothing, so the
+    # mint is a bare attach on an identity that already exists.
+    assert PAGE.count("create:") == 2, "only the two deliberate-creation forms"
+    assert "agent:n,rooms:picked,create:true" in PAGE, "the New Agent form"
+    move = PAGE[PAGE.index("async function openMaterialize"):PAGE.index("async function openCreate")]
+    assert "create:" not in move, "a body swap must never declare creation"
 
 
 def test_the_refusal_points_at_the_box_the_reader_can_see():

@@ -2551,7 +2551,15 @@ function tabActions(t){
  // recreate path) and not on a retired/erased one.
  if(!broken&&!gone&&a.image&&agDefaultImage&&a.image!==agDefaultImage)
   out+=b('upgrade','&#8679;','upgrade '+t.agent+' from '+a.image+' to '+agDefaultImage+' (token carried, data kept)');
- if(!gone)out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
+ // MOVE IT HERE (DES-011 s2.1, operator 11883). An agent alive on another
+ // machine gets ONE verb: give it a body on this host. The mint is a BARE
+ // attach on the same identity, so the broker supersedes the other body's
+ // credential in its own transaction -- one identity, one live body, and no
+ // shell anywhere in the path. Never offered beside a container of its own:
+ // that is start/stop, not a swap.
+ if(st==='elsewhere')out+=b('materialize','&#11015;',
+   'move '+t.agent+' here -- new body on this host, its current body goes dark');
+ if(!gone&&st!=='elsewhere')out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
  return '<span class="acts">'+out+'</span>';
 }
 // Why this agent has no terminal, said in the well where the terminal would
@@ -2559,7 +2567,9 @@ function tabActions(t){
 function stateSentence(name){
  const a=agRows[name]||{};
  const st=a.state||(a.status==='running'?'running':'stopped');
- const say=st==='retired'
+ const say=st==='elsewhere'
+   ? 'Alive on another machine -- this host has no body for it. "Move it here" mints a new credential for the SAME identity and supersedes the one it is running on now: its name, history, memories and rooms come with it, and the other body goes dark on its next call.'
+  :st==='retired'
    ? 'Retired -- its container is gone and its files are kept. Recreating this name resumes everything it learned locally.'
   :st==='erased'
    ? 'Erased -- no container and no files. The hive still holds its messages, memories and lessons.'
@@ -2627,6 +2637,7 @@ function drawTabs(){
   if(k==='edit')openEdit(n);
   else if(k==='destroy')openDestroy(n);
   else if(k==='recreate')openCreate(n);
+  else if(k==='materialize')openMaterialize(n);
   else agLifecycle(n,k);
  };
  if(refocus){
@@ -3010,6 +3021,70 @@ function openDestroy(name){
   }catch(e){toast(e.message);}
  };
 }
+// ---- MOVE IT HERE (DES-011 s2.1, operator 11883) --------------------------
+// A body swap from the WEB. The operator's words: "no remote user will EVER be
+// able to ssh into this box... the Transfer step MUST be a clickable interface".
+// They are right, and the design already said so -- a bare attach on a live
+// name IS the body swap, and the only reason it needed a shell was that this
+// page's one provisioning call hardcoded create=true.
+//
+// What this does NOT do: mint anything in the browser. The launcher mints
+// server-side with this request's own forwarded cookie, exactly as "+ New
+// Agent" does, and the secret reaches the docker child's env and nothing else.
+// The browser never holds it (DES-005 P3).
+async function openMaterialize(name){
+ if(!agMeta)try{agMeta=await lapi('/rooms-mine');}
+ catch(e){toast('cannot read your rooms right now -- '+(e.message||e),true);return;}
+ const rooms=(agMeta&&agMeta.rooms)||[];
+ // Pre-tick what the identity already reaches: a swap that quietly narrowed an
+ // agent's rooms would be a demotion wearing a move's clothes. Still ticks, not
+ // a fixed list -- the mint attaches exactly what is ticked here.
+ const has=new Set((agTokRooms&&agTokRooms[name])||[]);
+ openAgDlg(
+  '<div class="pRow"><b id="agDlgTitle">Move '+esc(name)+' here</b></div>'+
+  '<div class="pAsk">'+esc(name)+' is alive on another machine. This mints ONE '+
+  'new credential for the SAME identity and starts a container for it on this '+
+  'host. Its name, history, memories, lessons and rooms travel with it, because '+
+  'they belong to the identity and not to the body. The credential it is using '+
+  'now is superseded in the same transaction -- that body goes dark on its next '+
+  'call and cannot act afterwards. Files on the other machine do NOT travel; '+
+  'anything uncommitted there stays there.</div>'+
+  '<div class="pChips" id="agmRooms">'+(rooms.length?rooms.map(r=>
+    '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'"'+
+    (has.has(r.id)?' checked':'')+'> '+esc(r.name)+'</label>').join('')
+   :'<span class="pDim">no rooms -- a body with none reaches nothing</span>')+
+   '</div>'+
+  '<div class="pRow"><input id="agmRepo" aria-label="repo URL" '+
+   'placeholder="repo URL (blank = your profile default)"></div>'+
+  '<div class="pRow"><button id="agmGo">move it here</button> '+
+   '<button id="agmNo">cancel</button></div>'+
+  '<div id="agmStatus" class="pDim"></div>','#agmGo');
+ $('agmNo').onclick=closeAgDlg;
+ $('agmGo').onclick=async()=>{
+  const st=$('agmStatus');
+  const picked=[...document.querySelectorAll('#agmRooms input:checked')]
+   .map(c=>c.value);
+  if(!picked.length){toast('tick at least one room -- a body with none reaches nothing');return;}
+  try{
+   st.textContent='minting and starting the new body...';
+   // NO CREATE FLAG HERE: this attaches to the identity that already exists.
+   // Declaring creation would earn the refusal "you already have a live agent
+   // by that name" -- correctly, because bringing a new being into the world
+   // is a different act from moving one (DES-011 s2, ruling 10896).
+   await lapi('/agents',{method:'POST',body:JSON.stringify({
+    agent:name,rooms:picked,repo_url:$('agmRepo').value.trim()})});
+   st.textContent='container up; waiting for it to reach the bus...';
+   for(let i=0;i<60;i++){
+    await new Promise(r=>setTimeout(r,2000));
+    const a=await lapi('/agents/'+encodeURIComponent(name));
+    if(a.live){st.textContent='LIVE: '+name+' is on the bus from this host.';
+     closeAgDlg();refreshAgents();return;}
+   }
+   st.textContent='container is up but not live yet -- check its logs.';
+   refreshAgents();
+  }catch(e){st.textContent='';toast(e.message);}
+ };
+}
 // Creation is a page-level action and it has ONE entry point: the rail's
 // "+ New Agent". It was also a disclosure inside the well, which is two
 // selectors for one thing (operator, msg 8752). Recreate is CREATE with the
@@ -3060,7 +3135,7 @@ async function openCreate(name){
   try{
    st.textContent='provisioning...';
    await lapi('/agents',{method:'POST',body:JSON.stringify({
-    agent:n,rooms:picked,role:$('agRole').value,
+    agent:n,rooms:picked,create:true,role:$('agRole').value,
     append:$('agAppend').value.trim(),
     repo_url:$('agRepo').value.trim(),
     model:$('agModel').value.trim()})});
