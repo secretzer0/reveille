@@ -205,6 +205,16 @@ def login(url, user, password):
     """One web session for the installer's few calls; the cookie, or a
     RuntimeError naming why the broker refused."""
     code, body, cookie = _post(url, "/login", {"name": user, "password": password})
+    if code == 410:
+        # DES-018 slice 2: this broker has doors and the password door is shut,
+        # so there is no password for this installer to send. Name the door that
+        # IS open rather than repeating a refusal the reader cannot act on.
+        raise RuntimeError(
+            f"password sign-in is closed on {url} -- sign in with a door in the web UI, "
+            f"mint the agent's token there (Settings -> Tokens; tick \"this is a NEW "
+            f"agent\" for one that does not exist yet), then run: "
+            f"REVEILLE_URL={url} REVEILLE_AGENT_ROLE=<name> REVEILLE_TOKEN=<secret> "
+            f"reveille init")
     if code != 200 or not cookie:
         raise RuntimeError(f"login failed ({code}): {body.get('error') or body}")
     return cookie.split(";", 1)[0]
