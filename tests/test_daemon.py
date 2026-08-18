@@ -42,7 +42,10 @@ def test_ui_override_announces_itself(monkeypatch):
     import asyncio
     monkeypatch.delenv("REVEILLE_UI_PATH", raising=False)
     r = asyncio.run(daemon.version_http(None))
-    assert r.body.decode() == daemon.__version__
+    # The upload cap rides along (DES-017 s4.3): it is an operator-set number, so
+    # "which cap is this broker running" must be answerable from outside too.
+    assert r.body.decode().startswith(daemon.__version__)
+    assert "ui override" not in r.body.decode()
     monkeypatch.setenv("REVEILLE_UI_PATH", "/tmp/devui")
     r = asyncio.run(daemon.version_http(None))
     assert "ui override: /tmp/devui" in r.body.decode()
@@ -394,10 +397,13 @@ def test_only_allowlisted_types_render_in_the_browser():
         media, disp = daemon.file_headers(name)
         assert disp == "inline", name
         assert not media.startswith("application/octet-stream"), name
-    # NO NATIVE AUDIO UNDER /files (operator 11499, ruling 11500): a raw clip is
-    # a download until DES-017 converts it at upload; the wire form is what plays.
-    for name in ("bell-1.wav", "clip.m4a", "song.mp3"):
-        assert daemon.file_headers(name) == ("application/octet-stream", "attachment"), name
+    # AN ATTACHMENT YOU CAN PLAY (DES-017 s4.3, operator 11798, ruling 11801):
+    # audio and video render where they landed, the way an image already does --
+    # native <audio>/<video>, so the type has to be the real one and inline.
+    for name, want in (("bell-1.wav", "audio/wav"), ("clip.m4a", "audio/mp4"),
+                       ("song.mp3", "audio/mpeg"), ("CLIP.MOV", "video/quicktime"),
+                       ("talk.mp4", "video/mp4"), ("cap.webm", "video/webm")):
+        assert daemon.file_headers(name) == (want, "inline"), name
     for name in ("note.html", "page.htm", "logo.svg", "app.js", "data.xml",
                  "file.bin", "noext"):
         media, disp = daemon.file_headers(name)
@@ -706,7 +712,7 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
     sites = {}
     for expr in re.findall(r'(?:href|src|data-src)="\'\+([A-Za-z_]+)', PAGE):
         sites[expr] = sites.get(expr, 0) + 1
-    assert sites == {"esc": 1, "safe": 4, "tile": 1, "u": 1}, \
+    assert sites == {"esc": 1, "safe": 6, "tile": 1, "u": 1}, \
         f"a URL interpolation appeared or moved: {sites} -- every one needs a check"
     # AND THE SINKS THAT ARE NOT BUILT STRINGS. The regex above sees only
     # concatenation, so a URL set by PROPERTY ASSIGNMENT was invisible to it --

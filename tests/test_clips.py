@@ -189,7 +189,7 @@ def test_the_worker_binds_a_clip_item_in_its_turn_and_the_sweep_leaves_it(monkey
     assert (files / f"tts-{mid}.webm").is_file()
 
 
-def test_the_converted_webm_is_inline_audio_and_nothing_raw_is(monkeypatch, tmp_path):
+def test_the_converted_webm_is_inline_audio(monkeypatch, tmp_path):
     conn, files, _ = _world(monkeypatch, tmp_path)
     monkeypatch.setattr(daemon, "_principal", lambda request: _P())
     (files / "p.webm").write_bytes(b"1"); (files / "p.m4a").write_bytes(b"1"); (files / "v.webm").write_bytes(b"1")
@@ -201,9 +201,9 @@ def test_the_converted_webm_is_inline_audio_and_nothing_raw_is(monkeypatch, tmp_
     r = asyncio.run(get("p.webm"))
     assert r.media_type == "audio/webm" and r.headers["content-disposition"].startswith("inline")
     r = asyncio.run(get("v.webm"))
-    assert r.media_type == "application/octet-stream", "a lone .webm (no pair) is not a clip"
+    assert r.media_type == "video/webm", "a lone .webm (no pair) is an uploaded video"
     r = asyncio.run(get("p.m4a"))
-    assert r.media_type == "application/octet-stream", "the m4a is the shell's, a download on the web"
+    assert r.media_type == "audio/mp4", "the m4a is the shell's -- and now plays in the page too"
 
 
 def test_the_boot_sweep_of_the_pen(monkeypatch, tmp_path):

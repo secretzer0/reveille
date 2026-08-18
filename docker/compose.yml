@@ -84,11 +84,15 @@ services:
       # providers were registered with, and turns the session cookie into
       # __Host- + Secure when it is https. Derived from PROXY_SITE by make.
       REVEILLE_PUBLIC_URL: ${REVEILLE_PUBLIC_URL:-}
+      # DES-017 s5: how big an upload may be, in MB (default 25). One number,
+      # read at boot, printed in /version -- raise it for video, no rebuild.
+      REVEILLE_UPLOAD_MAX_MB: ${REVEILLE_UPLOAD_MAX_MB:-}
     # DES-018 s4: the provider credentials live in ONE file beside the data,
     # never in this file, the Makefile, git or the bus:
     #   $SERVER_DATA/reveille.env   (mode 600)
     #     REVEILLE_OIDC_GOOGLE_ID=... / _SECRET, _GITHUB_, _MICROSOFT_
     #     REVEILLE_SIGNUP=open|closed|mythos.org,other.org   (optional)
+    #     REVEILLE_UPLOAD_MAX_MB=200                          (optional)
     # Absent file = no doors; a provider without an ID is simply not a door.
     env_file:
       - path: ${SERVER_DATA}/reveille.env
