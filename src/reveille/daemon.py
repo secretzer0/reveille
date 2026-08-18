@@ -77,6 +77,28 @@ def _https_public():
     return _public_url.startswith("https://")
 
 
+def env_int(name, default):
+    """A NUMBER FROM THE ENVIRONMENT, WHERE UNSET AND EMPTY MEAN THE SAME THING.
+
+    Measured live 2026-08-18: compose passes every optional variable through as
+    `${VAR:-}`, so an unset one arrives as the EMPTY STRING, not as absent --
+    and `int(os.environ.get(name, "25"))` never sees its default. The broker
+    crash-looped at boot on `int('')` and the deploy failed its health wait.
+    A string variable does not notice (empty means off); a number must.
+
+    A value that is present and NOT a number is a different thing: that is an
+    operator typo, and it refuses by name rather than falling back to a default
+    the operator did not choose."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"{name}={raw!r} is not a whole number -- fix it or unset it "
+                         f"(unset means {default})")
+
+
 def _cookie_name():
     """__Host-rev_session on an https public URL (prefix = Secure + Path=/ + no
     Domain, enforced by the browser), rev_session on plain http. ONE function
@@ -246,6 +268,17 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.166 AN EMPTY ENVIRONMENT VARIABLE MEANS ITS DEFAULT (live defect,
+2026-08-18). 0.2.163 read its upload cap as int(os.environ.get(NAME, "25")),
+which is correct only when an unset variable is ABSENT. A deploy passes every
+optional variable through as ${NAME:-}, so unset arrives as the EMPTY STRING,
+the default was never reached, and the broker crash-looped at boot on
+int('') until the deploy failed its own health wait. env_int() now reads
+every number the same way: unset or blank = the default; a value that is
+present and not a number is an operator TYPO and refuses by name at boot
+rather than silently running on a cap nobody chose. Applied to
+REVEILLE_UPLOAD_MAX_MB, REVEILLE_QUOTA_BYTES, REVEILLE_FEED_PING, and (in the
+launcher) REVEILLE_ROLL_IDLE_MIN.
 0.2.165 A DEPLOY ROLLS WHAT IS IDLE (DES-006 s7.2, EPIC-001 #10, ruling
 11807). An image bump only ever reached NEW containers, and the roll was left
 to a human who never performs it; the opposite fix -- restart everything on
@@ -5345,7 +5378,7 @@ _FNAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 # The cap is one number, read at boot and printed in /version (operator
 # 11803: "modifiable via environment variable"), so raising it for a video is
 # one line in the env file rather than a build.
-MAX_UPLOAD = int(os.environ.get("REVEILLE_UPLOAD_MAX_MB", "25")) * 1024 * 1024
+MAX_UPLOAD = env_int("REVEILLE_UPLOAD_MAX_MB", 25) * 1024 * 1024
 # The upload() TOOL's cap is far tighter than the HTTP route's, and for a
 # different reason: base64 rides the calling agent's context at ~133% of the
 # file, so an uncapped tool spends the caller's room to think rather than the
@@ -5358,7 +5391,7 @@ TOOL_UPLOAD_MAX = 256 * 1024
 # self-hoster runs.
 # This counts UPLOADS, not the database: messages are ~5KB and bounded by retention, while
 # /upload is the only place a single caller can write gigabytes.
-QUOTA_BYTES = int(os.environ.get("REVEILLE_QUOTA_BYTES", "0"))
+QUOTA_BYTES = env_int("REVEILLE_QUOTA_BYTES", 0)
 
 
 def _files_used():
@@ -5742,7 +5775,7 @@ async def delete_http(request):
 # How long a feed socket may go silent before the server pokes it. A browser that
 # vanishes WITHOUT closing (lid shut, wifi gone) sends no close frame, so only a
 # failed write reveals it -- and a quiet room writes nothing for hours.
-FEED_PING_SECONDS = int(os.environ.get("REVEILLE_FEED_PING", "30"))
+FEED_PING_SECONDS = env_int("REVEILLE_FEED_PING", 30)
 
 
 async def _feed_reader(ws, q=None):

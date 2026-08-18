@@ -1435,7 +1435,22 @@ def behind_image(conn, image=DEFAULT_IMAGE):
 # behind container rolls only when it is IDLE, and idle is READ -- from the
 # grants table, from its spool, and from the broker -- never guessed from a
 # heartbeat, which every container about to be replaced also has.
-ROLL_IDLE_MIN = float(os.environ.get("REVEILLE_ROLL_IDLE_MIN", "10"))
+# Unset and EMPTY mean the same thing here: a deploy passes optional variables
+# through as ${VAR:-}, so "absent" arrives as "" (the broker crash-looped on
+# exactly that, 2026-08-18). A present non-number is an operator typo and is
+# refused by name rather than silently defaulted.
+def _env_min(name, default):
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        die(f"{name}={raw!r} is not a number of minutes -- fix it or unset it "
+            f"(unset means {default})")
+
+
+ROLL_IDLE_MIN = _env_min("REVEILLE_ROLL_IDLE_MIN", 10.0)
 
 
 def roll_block(*, grants, spool, unread, last_send_ns, now_ns, window_ns):

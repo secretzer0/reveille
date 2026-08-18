@@ -136,3 +136,26 @@ def test_a_video_can_be_seeked(tmp_path):
     assert len(r.content) == 100
     conn.close()
     assert json.dumps({"ok": True})
+
+
+def test_an_empty_env_var_means_the_default_not_a_crash(monkeypatch):
+    """LIVE DEFECT 2026-08-18: compose passes optional variables as ${VAR:-},
+    so an unset one arrives as the EMPTY STRING and int('') raised at import --
+    the broker crash-looped and the deploy failed its health wait. Unset and
+    empty are the same thing for a number; a typo is not."""
+    import importlib
+    monkeypatch.setenv("REVEILLE_UPLOAD_MAX_MB", "")
+    d = importlib.reload(daemon)
+    assert d.MAX_UPLOAD == 25 * 1024 * 1024
+    monkeypatch.setenv("REVEILLE_UPLOAD_MAX_MB", "  ")
+    assert importlib.reload(daemon).MAX_UPLOAD == 25 * 1024 * 1024
+    monkeypatch.setenv("REVEILLE_UPLOAD_MAX_MB", "200")
+    assert importlib.reload(daemon).MAX_UPLOAD == 200 * 1024 * 1024
+    # A value that is present and not a number is an operator typo: refuse by
+    # name rather than silently running on a cap nobody chose.
+    monkeypatch.setenv("REVEILLE_UPLOAD_MAX_MB", "200MB")
+    with pytest.raises(SystemExit) as e:
+        importlib.reload(daemon)
+    assert "REVEILLE_UPLOAD_MAX_MB" in str(e.value)
+    monkeypatch.delenv("REVEILLE_UPLOAD_MAX_MB")
+    importlib.reload(daemon)

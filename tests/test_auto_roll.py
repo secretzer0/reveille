@@ -13,6 +13,8 @@ import pathlib
 import sqlite3
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from reveille import store  # noqa: E402
 
@@ -50,7 +52,7 @@ def test_every_busy_signal_blocks_the_roll_and_says_which():
 def test_the_window_is_one_env_number():
     assert rl.ROLL_IDLE_MIN == 10, "REVEILLE_ROLL_IDLE_MIN default"
     src = pathlib.Path(rl.__file__).read_text()
-    assert 'os.environ.get("REVEILLE_ROLL_IDLE_MIN", "10")' in src
+    assert '_env_min("REVEILLE_ROLL_IDLE_MIN", 10.0)' in src
 
 
 def test_a_live_grant_is_read_from_the_grants_table(tmp_path):
@@ -147,3 +149,14 @@ def test_the_broker_answers_work_not_heartbeat(tmp_path):
     assert store.agent_activity(c, p, {room["id"]: "R"})["unread"] == 0
     store.send(c, p, "*", "on it", room=room["id"])
     assert store.agent_activity(c, p, {room["id"]: "R"})["last_send_ns"] > 0
+
+
+def test_the_launchers_window_survives_an_empty_env(monkeypatch):
+    """Same defect, same shape: ${REVEILLE_ROLL_IDLE_MIN:-} arrives as ""."""
+    monkeypatch.setenv("REVEILLE_ROLL_IDLE_MIN", "")
+    assert rl._env_min("REVEILLE_ROLL_IDLE_MIN", 10.0) == 10.0
+    monkeypatch.setenv("REVEILLE_ROLL_IDLE_MIN", "3")
+    assert rl._env_min("REVEILLE_ROLL_IDLE_MIN", 10.0) == 3.0
+    monkeypatch.setenv("REVEILLE_ROLL_IDLE_MIN", "ten")
+    with pytest.raises(SystemExit):
+        rl._env_min("REVEILLE_ROLL_IDLE_MIN", 10.0)
