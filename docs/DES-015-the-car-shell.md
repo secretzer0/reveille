@@ -39,10 +39,10 @@ Everything below exists today (0.2.123); nothing is added for the app.
 |---|---|---|
 | who am I, is the ear on, my rooms | `GET /me` | `{id, name, rooms, ear, is_admin, ...}` |
 | sign in / out | `POST /login {name, password}`, `POST /logout` | JSON -> `Set-Cookie rev_session` (httponly, samesite=lax, Secure under https, path=/, **fixed 14 d from login, no sliding**; devops 11377). A native client is not a browser: it keeps the cookie in the OS keychain and sends it as a `Cookie:` header on `/feed`, `/stt`, `/send`, `/me`, `/audio`, `/files`. On 401 the shell signs in again with the keychain-held name+password (that is what the keychain is for) -- zero broker change. A sliding session is the ONE API change in sight; if wanted it is DES-numbered and shared with the web, not an app-private path. |
-| the room, live | `WS /feed?room=<rid>` | events `message`, `audio`, `script`, `presence`, `deleted`, `ping`, `error` -- the app paints from these exactly as the page does |
+| the room, live | `WS /feed?room=<rid>` | events `message`, `audio`, `script`, `presence`, `deleted`, `ping`, `error` -- the app paints from these exactly as the page does. **The app MUST send `{"voice": true|false}` on the socket after connect and at every toggle** (devops 11382): the DES-013 s5 listener gate lives on the socket, and a room only the app hears gets NO audio otherwise. |
 | the room, back | `GET /messages`, `GET /search` | scrollback |
 | say something | `POST /send {room, to, body, reply_to}` | a human's message: spoken verbatim in their voice (ruling 11358) |
-| hear it | `GET /audio/{mid}.webm`, `POST /audio/{mid}` | the file when ready; ask when it is not |
+| hear it | `GET /audio/{mid}.m4a` (NEW, shared), `GET /audio/{mid}.webm`, `POST /audio/{mid}` | the file when ready; ask when it is not. **RULED (11382 resolved): the broker writes a second container beside the WebM at synthesis -- `tts-{mid}.m4a` (AAC), one more ffmpeg output from the same transcode step it already owns; iOS/Android/AVFoundation/ExoPlayer play it natively, so the shell decodes nothing.** Chosen over libopus + a WebM demuxer in Dart on every platform: the broker has ffmpeg, the phone would need two dependencies and a decode path. It is a second REPRESENTATION of the same resource, served the same way (same gate, same headers), usable by the web too -- not an app-private endpoint. Ships as a DES-013 s7 amendment in its own small PR before slice 1; the file registry, sweep and on-demand route treat the pair as one utterance. |
 | talk | `POST /stt` (audio/wav, PCM s16 mono 16 kHz, <=60 s, <=8 MiB) | the ear (DES-014 s3): human only, one slot, nothing stored |
 | voices | `GET /voices`, `GET /rooms/{rid}/voices` | read only in the shell; the bank is edited on the web |
 | the box | `GET /version`, `GET /health` | pin: the app names the broker version it was built against and refuses a lower one by name |
@@ -67,6 +67,10 @@ screen (DES-014 s3, unchanged).
   into voice, at most three template screens, audio session live only while
   talking. Fallback category if Apple declines: **communication** (SiriKit
   send/read intents + a room list template).
+- **LAN brokers:** a plaintext `http://` broker on the LAN (DES-011
+  `REVEILLE_LAN_PLAINTEXT=1`) needs an ATS exception in the iOS target
+  (`NSAllowsLocalNetworking`), and the session cookie carries no `Secure` flag
+  there (devops 11382); the shell shows the same plaintext banner the page does.
 - **Where it lives:** `app/` in this repo. One PR reviews contract and client
   together; the docs are in one place; `app/` does not ride the broker's
   version chain (no bump for app-only PRs; the image gate ignores the path). A
@@ -91,8 +95,10 @@ screen (DES-014 s3, unchanged).
 ## 5. Slices, each its own PR and gate, in this order
 
 1. **The shell:** sign-in (URL + password -> keychain), room list from `/me`,
-   one room's feed over WS, message list, playback of `audio` events through the
-   phone's audio session (Bluetooth into the car for free), `POST /send`.
+   one room's feed over WS with `{"voice": true}` sent on connect, message list,
+   playback of `audio` events as `/audio/{mid}.m4a` through the phone's audio
+   session (Bluetooth into the car for free), `POST /send`. Precondition: the
+   `.m4a` amendment (s2) merged.
    Gate: iPhone on the LAN broker signs in, sees the room, hears the next
    message, sends one that comes back verbatim in its voice.
 2. **The ear in the shell:** `talk` (hold) and `listen` (hands-free) exactly as
