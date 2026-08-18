@@ -268,6 +268,33 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.172 A BODY SWAP IS A CLICK, NOT AN SSH SESSION, AND ONLY OF YOUR OWN
+AGENT (operator 11883; DES-011 s2.1; owner scoping per architect review). Moving an agent to another machine was ruled a bare attach -- mint on
+the live name, the previous body's credential superseded in the same
+transaction -- and the design has said so since 0.2.130. It still took a shell
+on the broker host, because this page's one provisioning call hardcoded
+create=true and the broker rightly refuses that for a name that already has a
+live identity. The operator's answer was the correct one: "no remote user will
+EVER be able to ssh into this box... the Transfer step MUST be a clickable
+interface". Now: the launcher LISTS an agent that is alive somewhere else
+(state `elsewhere`) instead of hiding it -- the old reason for hiding was that
+a mint could fork, which s2.1 settled -- and the agents rail offers it exactly
+one verb, "move it here". The dialog says what it costs before it does
+anything: the SAME identity, its name, history, memories, lessons and rooms
+travel; the credential the other body holds is superseded and that body goes
+dark on its next call; files on the other machine do NOT travel. Rooms are
+ticked, pre-filled with what the identity already reaches, and the mint
+attaches exactly those. The launcher mints server-side with the caller's own
+forwarded cookie exactly as "+ New Agent" does, so the browser never holds the
+secret (DES-005 P3), and `create` is once again the CALLER's word: the two
+creation forms send it, the move sends nothing. SCOPED BY OWNER: these rooms
+are shared, so the hive's live names include other humans' agents, and moving
+one of those is not a swap a person may perform alone -- it is a VISIT, and
+DES-012 s3 wants both humans. /agents-seen now answers an `owner` per name
+(from presence, which carries it; a name nobody is wearing resolves from
+`agents` only when exactly ONE live identity wears it, because two owners
+running one name is legal and a guess there would move the wrong being), and
+the pane marks `elsewhere` only where that owner is the caller.
 0.2.171 A NATIVE AGENT ALWAYS GETS ITS DOCTRINE, AND ONLY ITS BLOCK IS
 MANAGED (red-shirt, live 2026-08-18; ruled by the operator 11879). The hive is
 PULLED, never pushed: lessons(), brief() and inbox() are tools an agent must

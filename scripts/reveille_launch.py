@@ -2617,11 +2617,28 @@ def _agent_status(conn, user, hive_by_name=None):
                     "state": lifecycle_state(st, has_files, hive),
                     "has_files": has_files, "hive": hive})
     for agent, hive in sorted(hive_by_name.items()):
-        # present = alive right now somewhere else (a host agent, another
-        # user's container). Remembered-and-gone is a recovery case;
-        # remembered-and-working is not, and offering to recreate it would
-        # invite someone to duplicate a live identity.
-        if agent in listed or hive.get("present") or not ROLE_RE.match(agent or ""):
+        if agent in listed or not ROLE_RE.match(agent or ""):
+            continue
+        # ALIVE SOMEWHERE ELSE IS A STATE, NOT AN OMISSION (operator 11883).
+        # This used to skip a present agent outright, because "offering to
+        # recreate it would invite someone to duplicate a live identity" -- true
+        # when a mint could fork. DES-011 s2.1 settled that: a bare attach
+        # SUPERSEDES the previous body's credential in the same transaction, so
+        # the offer is a MOVE and duplication is not one of the outcomes. The
+        # row says `elsewhere` and the page offers exactly one verb on it.
+        # ONLY YOUR OWN (architect BLOCKING on #124). These rooms are shared,
+        # so the hive's present names include OTHER humans' agents. Moving one
+        # of those is not a swap a person may perform alone: it is a VISIT, and
+        # DES-012 s3 requires both humans to consent, per visit. An unowned or
+        # ambiguous name is not offered either -- the broker answers "" when two
+        # owners wear one name, and a guess there would move the wrong being.
+        if hive.get("present") and hive.get("owner") == user:
+            out.append({"agent": agent, "container": container_name(user, agent),
+                        "status": "absent", "image": "", "repo_url": "",
+                        "created_ns": hive.get("last_ns") or 0,
+                        "state": "elsewhere",
+                        "has_files": os.path.isdir(data_root(user, agent)),
+                        "hive": hive})
             continue
         has_files = os.path.isdir(data_root(user, agent))
         state = lifecycle_state("absent", has_files, hive)
@@ -2717,10 +2734,18 @@ def build_api(auth_url):
         # token in the body (the P1/CLI path) is still honored.
         token, minted_id = d.get("token") or "", None
         if not token and d.get("rooms"):
+            # CREATE IS THE CALLER'S WORD, NEVER THIS ROUTE'S (10919). The
+            # create-agent form says create=true because the form IS the human's
+            # deliberate act; the MOVE-IT-HERE path says nothing, so the mint is
+            # a bare attach on the identity that already exists -- which is the
+            # body swap (DES-011 s2.1), and the previous body's credential is
+            # superseded in the broker's own transaction. Hardcoding True here
+            # made the second case impossible from the web, which is how a body
+            # swap came to need an ssh session (operator 11883).
             minted_id, token = mint_bound_token(
                 auth_url, request.headers.get("cookie"),
                 (d.get("agent") or "").strip(), list(d["rooms"]),
-                create=True)
+                create=bool(d.get("create")))
         role = (d.get("role") or "").strip()
         try:
             if role and role not in ROLE_PROMPTS:
