@@ -1961,6 +1961,18 @@ def test_flip_to_private_spares_members_revokes_strangers():
     assert store.rooms_for_token(c, ctok["id"]) == {}           # stranger revoked
 
 
+def test_a_deleted_user_leaves_the_users_list_but_stays_as_the_referent():
+    """Operator 11606: "bill" deleted, confirm hit, still shown with actions. The
+    tombstone (8938) is the row that stays for the history it owns; the Users
+    tab is the accounts that can be acted on. list_users returns the second."""
+    c, admin, room, tok, bob, btok = _member_fixture()
+    assert "bob" in [u["name"] for u in store.list_users(c)]
+    store.delete_user(c, bob["id"])
+    assert "bob" not in [u["name"] for u in store.list_users(c)], "a tombstone is not an account"
+    assert c.execute("SELECT deleted_ns FROM users WHERE id=?", (bob["id"],)).fetchone()[0], \
+        "the row stays: it is the referent for what bob sent and owned"
+
+
 def test_membership_dies_with_user_and_room_audit_survives():
     c, admin, room, tok, bob, btok = _member_fixture()
     store.invite_member(c, room["id"], admin["id"], "bob", actor_name="web:travis")

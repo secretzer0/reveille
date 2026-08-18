@@ -1501,9 +1501,14 @@ def change_password(conn, user_id, old_password, new_password):
 
 
 def list_users(conn):
+    """The ACCOUNTS -- not the tombstones (operator 11606: "bill" deleted and
+    confirmed, still listed with make-admin/reset/delete beside him). A deleted
+    user is a tombstone by ruling 8938: the row stays as the referent for the
+    history it owns, credentials wiped, and it is not an account anyone can act
+    on. The Users tab lists what can be acted on."""
     return [{"id": r["id"], "name": r["name"], "role": r["role"],
              "created_ns": r["created_ns"]}
-            for r in conn.execute("SELECT * FROM users ORDER BY name")]
+            for r in conn.execute("SELECT * FROM users WHERE deleted_ns IS NULL ORDER BY name")]
 
 
 def set_role(conn, user_id, role):

@@ -226,6 +226,13 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.148 THE USERS TAB LISTS ACCOUNTS, NOT TOMBSTONES (operator 11606: "bill"
+deleted, confirm hit, still listed with make-admin / reset / delete beside
+him). A deleted user is a tombstone by ruling 8938 -- the row stays as the
+referent for the history it owns, credentials wiped -- and list_users now
+returns only rows with deleted_ns NULL. Note: the name stays taken by the
+tombstone (users.name UNIQUE), so "add bill" again refuses "already exists"
+until that is ruled. Bus tools unchanged.
 0.2.147 AN AGENT CONTAINER UPGRADES IN PLACE (operator 11594/11599, ruling
 11600; DES-006 s7 "carry, not park"). The launcher carries the bound token
 (and gate secret) from the container it made into a new one on the new
