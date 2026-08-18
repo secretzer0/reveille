@@ -270,6 +270,34 @@ an identity -- identity is a credential (DES-011), not a voiceprint. pyannote
 on the STT host, if it fits the table. Gate: a two-speaker take is labelled;
 the sent message is still the signed-in user's.
 
+### 5a. As built, slice 2 amendment (0.2.159): a browser that cannot run the VAD
+
+MEASURED (operator 11718, iPhone Safari): onnxruntime-web cannot instantiate
+its WASM there -- `[wasm] RangeError: Out of memory`, then `[cpu] previous
+call to initWasm() failed`, and the ORT loader reports no backend. iOS WebKit
+refuses the threaded build's `WebAssembly.Memory` maximum. Push-to-talk was
+unaffected; listening was simply dead.
+
+Ruled (11719) and built:
+
+1. The ONNX attempt goes first, with `numThreads=1`, `proxy=false`,
+   `simd=true` -- no cross-origin isolation, no worker.
+2. If it still refuses, listening falls back to a LOUDNESS GATE on the same
+   PCM `vRecStart` takes (ScriptProcessor, zero-gain sink so the mic never
+   reaches the speakers): a take opens at RMS > 0.02 held 150 ms with a 300 ms
+   pre-roll, closes after the SAME `EAR_SILENCE_MS` of quiet or at the SAME
+   `EAR_TAKE_CAP_MS`, and goes through the SAME `listenTake` -> POST /stt.
+   The WAV carries the device's own rate rather than resampling in the page.
+3. The toast NAMES it: "this browser cannot run the voice detector --
+   listening with simple loudness detection instead". A loudness gate cannot
+   tell speech from a slammed door and must not pretend otherwise.
+4. A MIC refusal (`NotAllowedError` and friends) does NOT fall back: that is
+   the phone's answer, and it keeps naming where to allow the microphone.
+
+Ceiling: the gate is loudness only. If a phone's noise floor defeats it, the
+upgrade is a small energy + zero-crossing test in the same place -- still no
+WASM.
+
 ## 6. Not in this design, deliberately
 
 - **No storage of takes.** The ear is transient by rule; a message is the only

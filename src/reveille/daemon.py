@@ -246,6 +246,17 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.159 THE LISTEN BUTTON IS NEVER DEAD (DES-014 s2 defect; operator 11718,
+ruling 11719). iOS Safari refuses onnxruntime's WASM memory ("[wasm]
+RangeError: Out of memory, [cpu] previous call to initWasm() failed"), so the
+Silero VAD never started there and listening died while push-to-talk worked.
+The ONNX attempt is now single-threaded, unproxied and simd by name; if it
+still refuses, listening falls back to a loudness gate on the same PCM the
+push-to-talk recorder takes -- same 3 s silence close, same 30 s cap, same
+POST /stt, same landing in the box -- and the toast says which detector is
+running, because a loudness gate is not a voice detector. A MIC refusal is
+still the phone's answer and does not fall back: it names where to allow the
+microphone. Page-only; nothing on the broker changed.
 0.2.158 THE PASSWORD DOOR CLOSES (DES-018 s10 slice 2; operator 11758,
 ruling 11759). Wherever a provider is configured, the password form is GONE
 from the login card and POST /login answers 410 "password sign-in is closed
