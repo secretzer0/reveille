@@ -124,6 +124,13 @@ ROOMS: you may be in several. Every message you receive carries `room` (its id) 
   - Carrying knowledge BETWEEN rooms (rare, and normally an orchestration request):
     post a NEW root message in the target room quoting what you learned. A reply_to
     across rooms is REFUSED -- that edge would drag one room's content into another.
+  - NAMES ARE PER ROOM (DES-011). You are addressed by the ROOM-NAME a room calls
+    you: your bare name, or `<owner>-<name>` when another owner's live agent of the
+    same name is in that room first (join() answers `as` per room; presence lists
+    every member's room-name with its `owner`). Send to=<room-name> as presence
+    shows it; delivered_to and every `from` are room-names; a ring says `from` +
+    `owner`. Your identity (the token) is what is keyed and rung -- an alias
+    changes what people read, never whether mail reaches you.
 
 USE:
 1. Startup: join(url="http://<broker-host>:8765"). You join every room your token holds
@@ -156,7 +163,7 @@ USE:
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
    BEING WOKEN IS NOT BEING ASKED. A ring means mail arrived, never that you owe a
    reply. Reply ONLY if: it names you in NEED:, blocks your work, or asks you a
-   direct question. The ring carries id/from/subject and a `direct` count, so you
+   direct question. The ring carries id/from/owner/room/subject and a `direct` count, so you
    can apply that test before calling anything -- direct:0 means nothing is
    addressed to you and silence is the correct turn.
    FYI / retraction / method-lesson -> ack, note in your own memory, do NOT reply.
@@ -239,6 +246,20 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.153 THE HUMAN SURFACE (DES-011 6.1(c), EPIC-001 S2 item 3). The wake
+registry and the poke gate are keyed on the TOKEN alone, not (token, name):
+an agent aliased <owner>-<name> in a room registered under one name while
+the ring was addressed to the other, so its ring could not land. Rings are
+now addressed by IDENTITY -- send() answers wake (room-names, what
+delivered_to shows) beside wake_principals, and _notify resolves those
+through store.wake_tokens (the agent's tokens that hold the room, so a
+revoke stays instant and a person is never rung). The ring frame carries
+from (the sender's ROOM-NAME there), owner (the account behind it), room,
+id and subject beside the direct count. Presence carries `owner` next to
+the room-name and principal; readers() renders the room-name each reader
+wears in that message's room, not the identity's own name; usage() gains a
+NAMES ARE PER ROOM paragraph. No schema change, nothing on the wire
+renamed.
 0.2.152 EMAIL IN ONE CASE (DES-018 follow-up, architect 11667). The store
 lowercases every email it keeps or compares (identities upsert, the s5.2
 verified-holder match, the "use your other door" check): Ada@Example.com and
@@ -2168,20 +2189,21 @@ log = logging.getLogger("reveille")  # logs client name + thread id per op; leve
 
 _conn = None  # one connection, used only from the event-loop thread (async tools)
 
-# In-process wake registry: (token_id, name) -> set of asyncio.Queue, one per connected
+# In-process wake registry: token_id -> set of asyncio.Queue, one per connected
 # wake.py. send() notifies; the WS handler awaiting the queue pushes a frame and the
 # client exits. This is the wake signal -- the message itself stays in SQLite, read over
-# MCP. Keyed by TOKEN, not room: one agent = one token = one socket = one prompt, however
-# many rooms it holds.
-_waiters: dict[tuple, set] = {}  # (token_id, name) -> wake queues
+# MCP. Keyed by TOKEN, not room and not name (DES-011 6.1(c)): one agent = one token =
+# one socket = one prompt, however many rooms it holds and whatever each room calls it
+# -- an agent aliased `bob-architect` in one room is rung there like anywhere else.
+_waiters: dict[str, set] = {}  # token_id -> wake queues
 
 # Poke gate: one outstanding wake per AGENT (not per agent-room). A pushed frame sets
-# (token_id, name) -> ts here; no further frames are pushed until the agent polls inbox()
+# token_id -> ts here; no further frames are pushed until the agent polls inbox()
 # (its ack), so wake notifications never stack up on a busy agent. Keying this per room
 # would let a 3-room agent take 3 rings for one turn -- exactly the storm the gate exists
 # to prevent, and inbox() unions the rooms anyway so one ring covers them all. The TTL is
 # the escape hatch for a lost frame (waiter died before the agent saw it).
-_poke_pending: dict[tuple, int] = {}
+_poke_pending: dict[str, int] = {}
 POKE_TTL_NS = 10 * 60 * 1_000_000_000
 
 
@@ -2201,21 +2223,21 @@ mcp = FastMCP("reveille", stateless_http=True, json_response=True,
                   enable_dns_rebinding_protection=False))
 
 
-def _notify(room_id, names, msg_id=None, sender=None, subject=""):
-    """Ring the waiters of every token that holds this room. The token_rooms lookup is
-    what makes a revoke instant: a revoked token stops ringing without reconnecting.
+def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=None):
+    """Ring the waiters of the tokens behind these identities that hold this room
+    (store.wake_tokens: the token_rooms lookup is what makes a revoke instant --
+    a revoked token stops ringing without reconnecting).
 
     The new message's facts ride the ring so a woken agent can apply the reply
     test -- does this name me, block me, ask me? -- without a round trip. A ring
     that says only "something happened" makes inbox() mandatory before an agent
-    can even decide silence is correct."""
-    fact = {"id": msg_id, "from": sender, "subject": subject} if msg_id else None
-    toks = [r["token_id"] for r in _conn.execute(
-        "SELECT token_id FROM token_rooms WHERE room_id=?", (room_id,))]
-    for n in names:
-        for t in toks:
-            for q in list(_waiters.get((t, n), ())):
-                q.put_nowait(fact)
+    can even decide silence is correct. `from` is the ROOM-NAME the sender wears
+    in that room and `owner` the account behind it (6.1(c)): what a human reads."""
+    fact = ({"id": msg_id, "from": sender, "owner": owner, "subject": subject, "room": room_id}
+            if msg_id else None)
+    for t in store.wake_tokens(_conn, room_id, principals):
+        for q in list(_waiters.get(t, ())):
+            q.put_nowait(fact)
 
 
 _SHUTDOWN = {"shutdown": True}
@@ -3589,8 +3611,7 @@ def _annotate_deafness(agents, rooms):
             continue
         if (a["room"], a["name"]) in stuck:
             a["deaf"] = True
-            a["deaf_reason"] = ("not-draining"
-                               if _waiters.get((a["token_id"], a["name"]))
+            a["deaf_reason"] = ("not-draining" if _waiters.get(a["token_id"])
                                else "no-waiter")
 
 
@@ -3623,7 +3644,7 @@ def _reachable(entry):
     about the waiter, so a web user -- who never has one and never will -- was pinned to
     "live, waiter down" forever: the UI asking a person whether they are running wake.py.
     """
-    if _waiters.get((entry["token_id"], entry["name"])):
+    if _waiters.get(entry["token_id"]):
         return True
     return (entry["room"], entry["name"]) in set(_feed.values())
 
@@ -4044,7 +4065,7 @@ async def info(ctx: Context = None) -> str:
     # my rooms would reach me" -- not "my own token has a waiter". The old
     # reading said ATTACHED for a waiter no ring could select, which is the
     # green check devops sat deaf behind.
-    attached = any(_waiters.get((r["token_id"], p.name))
+    attached = any(_waiters.get(r["token_id"])
                    for rid in p.rooms
                    for r in _conn.execute(
                        "SELECT token_id FROM token_rooms WHERE room_id=?", (rid,)))
@@ -4102,9 +4123,9 @@ async def send(to: str, body: str, subject: str = "",
     # is a no-op -- the gate coalesces SIMULTANEOUS rings, not paced ones. The
     # web plane rings on broadcast because a human paging a room is a gesture
     # with a person behind it; nothing here can loop.
-    woke = res["wake"] if to != store.BROADCAST else []
+    woke = res["wake_principals"] if to != store.BROADCAST else []
     me = res["sender"]          # the ROOM-NAME the store wrote (alias if in force)
-    _notify(rid, woke, res["id"], me, subject)
+    _notify(rid, woke, res["id"], me, subject, owner=res["owner"])
     _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
                           # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
@@ -4129,7 +4150,7 @@ async def inbox(ctx: Context = None) -> dict:
         _seen(speaker_key(p), p.name, p.rooms, p.token_id)
     # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
     # this one call covers every room, so one ring was the right number.
-    _poke_pending.pop((p.token_id, p.name), None)
+    _poke_pending.pop(p.token_id, None)
     msgs = store.inbox(_conn, speaker_key(p), p.rooms)
     log.info("%s inbox -> %s unread across %s room(s)", p.name, len(msgs), len(p.rooms))
     return {"messages": msgs}
@@ -4393,7 +4414,7 @@ async def wake_ws(ws: WebSocket):
         await ws.close(code=4404)
         log.warning("%s wake rejected: no_rooms (unringable by construction)", name)
         return
-    key = (tok["id"], name)
+    key = tok["id"]             # the TOKEN is the waiter's key (6.1(c)), never the name
     principal = store.agent_principal(tok["agent_id"]) if tok.get("agent_id") else ""
     _seen(principal, name, rooms, tok["id"])
     log.info("%s wake connected (%s room(s))", name, len(rooms))
@@ -4475,9 +4496,13 @@ async def wake_ws(ws: WebSocket):
             # last), so a woken agent can apply the reply test before calling
             # anything. direct:0 is the strongest signal that silence is right.
             fact = next((v for v in reversed(vals) if isinstance(v, dict)), {})
+            # `from` is the sender's ROOM-NAME in that room, `owner` the account
+            # behind it (6.1(c)): the woken agent reads the ring the way a human
+            # reads the feed.
             await ws.send_json({"wake": True, "reason": "message",
                                 "unread": n, "direct": direct,
                                 "id": fact.get("id"), "from": fact.get("from"),
+                                "owner": fact.get("owner"), "room": fact.get("room"),
                                 "subject": fact.get("subject", "")})
             log.info("%s wake ring (%s direct of %s unread)", name, direct, n)
     except WebSocketDisconnect:
@@ -4641,8 +4666,8 @@ async def send_http(request):
     # selected and reset after every send, so a human could not keep it on and
     # concluded the bus does not wake on broadcast. A capability nobody can
     # reach is indistinguishable from one that does not exist.
-    woke = res["wake"]
-    _notify(rid, woke, res["id"], sender, d.get("subject") or "")
+    woke = res["wake_principals"]
+    _notify(rid, woke, res["id"], sender, d.get("subject") or "", owner=res["owner"])
     _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
                           # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
