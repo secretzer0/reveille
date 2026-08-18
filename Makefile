@@ -168,34 +168,18 @@ COMPOSE_EXTRA =
 # (measured 2026-08-13: compose_gate took the live bus down for ~15 minutes).
 # Scratch invocations MUST override this; the default is the live project.
 COMPOSE_PROJECT ?= reveille
-# THE THREE UPSTREAMS HAVE DEFAULTS HERE, AND THE ENVIRONMENT STILL WINS
-# (operator, 2026-08-18). They lived only in whatever shell last ran this
-# recipe, so the first container recreate that did not carry them turned the
-# voices, the ear and the script writer OFF at once with nothing to say why --
-# a configuration that exists only in a shell's memory is not configuration.
-# make imports the environment, so `?=` here means: this deployment's address
-# unless the operator says otherwise, and REVEILLE_STT_URL=... make up (or an
-# export) overrides any of them. They are LAN addresses, not secrets -- the
-# credentials still live only in $(SERVER_DATA)/reveille.env.
-# Plaintext is deliberate and declared: these are hosts on the operator's own
-# LAN (ruling 11036), and the flag that permits it is defaulted beside them so
-# the URLs and the permission cannot drift apart. Point any of them at an https
-# upstream and the flag stops mattering for it.
-REVEILLE_TTS_URL      ?= http://192.168.90.136:18004
-REVEILLE_STT_URL      ?= http://192.168.85.101:18090
-REVEILLE_STT_MODEL    ?= deepdml/faster-whisper-large-v3-turbo-ct2
-REVEILLE_SCRIPT_URL   ?= http://192.168.85.101:18080
-REVEILLE_SCRIPT_MODEL ?= writer
-REVEILLE_LAN_PLAINTEXT ?= 1
+# THE UPSTREAMS ARE NOT SET HERE, DELIBERATELY (operator + architect 11825,
+# after the 2026-08-18 outage). Their home is $(SERVER_DATA)/reveille.env,
+# which every recreate reads; compose passes them through only when the shell
+# has them, so an export or `REVEILLE_STT_URL=... make up` still overrides the
+# file for one run. Defaulting them HERE would put this deployment's LAN in the
+# repo and would silently outrank the operator's own file -- which is the
+# failure being fixed, wearing different clothes.
 COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
   REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
   PROXY_IMAGE=$(PROXY_IMAGE) PROXY_SITE=$(PROXY_SITE) REVEILLE_PUBLIC_URL=$(PUBLIC_URL) \
   BROKER_NAME=$(BROKER_NAME) PROXY_NAME=$(PROXY_NAME) \
   TTS_IMAGE=$(TTS_IMAGE) TTS_NAME=$(TTS_NAME) \
-  REVEILLE_TTS_URL=$(REVEILLE_TTS_URL) REVEILLE_STT_URL=$(REVEILLE_STT_URL) \
-  REVEILLE_STT_MODEL=$(REVEILLE_STT_MODEL) \
-  REVEILLE_SCRIPT_URL=$(REVEILLE_SCRIPT_URL) REVEILLE_SCRIPT_MODEL=$(REVEILLE_SCRIPT_MODEL) \
-  REVEILLE_LAN_PLAINTEXT=$(REVEILLE_LAN_PLAINTEXT) \
   docker compose -p $(COMPOSE_PROJECT) -f docker/compose.yml $(COMPOSE_EXTRA)
 
 # REFUSES TO REBUILD AN EXISTING TAG. The version string is the image tag; building

@@ -43,16 +43,35 @@ def test_a_closed_password_door_names_the_open_one(monkeypatch):
     assert "login failed" not in said
 
 
-def test_the_upstreams_have_defaults_the_environment_can_override():
-    """A configuration that exists only in a shell's memory is not
-    configuration: the recreate that dropped these turned voices, the ear and
-    the writer off at once with nothing to say why."""
+UPSTREAM_SETTINGS = ("REVEILLE_TTS_URL", "REVEILLE_TTS_TOKEN", "REVEILLE_STT_URL",
+                     "REVEILLE_STT_MODEL", "REVEILLE_STT_TOKEN", "REVEILLE_STT_TIMEOUT",
+                     "REVEILLE_SCRIPT_URL", "REVEILLE_SCRIPT_MODEL",
+                     "REVEILLE_SCRIPT_TOKEN", "REVEILLE_SCRIPT_TIMEOUT",
+                     "REVEILLE_LAN_PLAINTEXT", "REVEILLE_UPLOAD_MAX_MB")
+
+
+def test_no_environment_entry_can_shadow_the_operators_file():
+    """MEASURED on this deployment's docker compose, not assumed: an
+    `environment` entry BEATS `env_file`, and BOTH spellings put an empty value
+    on the container when the shell has none --
+
+        environment:            env_file: e.env holding FOO=from-file
+          FOO: ${FOO:-}    ->   FOO=[]
+          FOO:             ->   FOO=[]
+          (absent)         ->   FOO=[from-file]
+
+    which is why one deploy from a shell that did not carry them turned
+    voices, the ear and the script writer off at once. A setting that lives in
+    a shell's memory is not a setting: these come from the env file and from
+    nowhere else, so a recreate cannot lose them."""
+    compose = (ROOT / "docker/compose.yml").read_text()
+    env_block = compose[compose.index("    environment:"):compose.index("    env_file:")]
+    for var in UPSTREAM_SETTINGS:
+        assert f"{var}:" not in env_block, \
+            f"{var} in `environment` shadows reveille.env -- that is the outage"
+        assert var in compose, f"{var} must still be NAMED in the file's guide"
+    # The Makefile must not set them either: a default there outranks the
+    # operator's own file, which is the same failure wearing different clothes.
     mk = (ROOT / "Makefile").read_text()
-    for var in ("REVEILLE_TTS_URL", "REVEILLE_STT_URL", "REVEILLE_STT_MODEL",
-                "REVEILLE_SCRIPT_URL", "REVEILLE_SCRIPT_MODEL", "REVEILLE_LAN_PLAINTEXT"):
-        assert f"{var} " in mk or f"{var}\t" in mk, var
-        assert f"{var}=$({var})" in mk, f"{var} must reach compose"
-        # `?=` is the whole point: make imports the environment, so an exported
-        # value or `VAR=... make up` wins over the default.
-        assert any(line.strip().startswith(var) and "?=" in line
-                   for line in mk.splitlines()), f"{var} must be overridable"
+    for var in UPSTREAM_SETTINGS:
+        assert f"{var}=$(" not in mk, f"{var} must not be forced by the deploy recipe"
