@@ -246,6 +246,14 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.155 A ROW IS A REFERENT ONLY WHILE SOMETHING REFERS TO IT (ruling 11732).
+Deleting a user has two outcomes and the page says which: an account with NO
+history (no messages, agents, tokens, rooms, memberships, receipts, doors,
+memories -- store.user_history counts them before anything is wiped) is
+REMOVED outright and its name is free again; anything with history is
+tombstoned exactly as before (8938/11611). The never-used account whose name
+was reserved forever was the defect; a cited one still keeps its referent.
+DELETE /users/<id> answers {"deleted", "how": removed|tombstoned}.
 0.2.154 KNOCK, OR CARRY A KEY (DES-018 s6a, rulings 11701-11709). Schema v30:
 signup_requests + invites, and identity_audit's CHECK widened to
 request|approve|deny|invite (the table is rebuilt, rows copied). New signup
@@ -6155,9 +6163,12 @@ async def user_http(request):
     uid = request.path_params["uid"]
     store.live_user(_conn, uid)                       # a tombstone answers 404 (11607)
     if request.method == "DELETE":
-        store.delete_user(_conn, uid)
-        log.info("%s deleted user %s", p.name, uid)
-        return JSONResponse({"deleted": uid})
+        # Two outcomes (ruling 11732), and the page says WHICH: a never-used
+        # account is removed and its name freed; one with history is
+        # tombstoned and the name stays reserved.
+        how = store.delete_user(_conn, uid)
+        log.info("%s deleted user %s (%s)", p.name, uid, how)
+        return JSONResponse({"deleted": uid, "how": how})
     d = await request.json()
     store.set_role(_conn, uid, d.get("role") or "user")
     return JSONResponse({"ok": True})

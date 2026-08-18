@@ -177,6 +177,19 @@ invite-only; `open` ignores codes; §5.2 still runs above the policy; the
 migration adds both tables and takes the new verbs; two racing redemptions
 burn one code only.
 
+### 6b. RULED (11732): deleting a user has two outcomes
+
+A `users` row is a REFERENT only while something refers to it. `user_history`
+counts messages (their own and their agents'), agents, tokens, owned rooms,
+memberships, receipts, room invitations, doors and memories -- BEFORE the
+delete wipes any of them. Zero across the board: the row is removed and the
+name is free again (the account created and never used; reserving its name
+forever was the bug). Anything at all: tombstone, unchanged (8938 / 11611) --
+the messages still carry the claim, so the referent stays. `DELETE
+/users/<id>` answers `{"deleted", "how": removed|tombstoned}` and the Users
+tab says which happened, because a freed name and a reserved one are different
+facts.
+
 ## 7. RULED: sessions, tokens, cookies
 
 - Session = the existing server-side `sessions` table and `rev_session` cookie

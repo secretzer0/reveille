@@ -2098,16 +2098,52 @@ def _is_admin(conn, user_id):
     return bool(r and r["role"] == "admin")
 
 
-def delete_user(conn, user_id):
-    """Account deletion is a TOMBSTONE (architect ruling, msg 8938): the users
-    row stays with deleted_ns stamped, credentials wiped, sessions destroyed,
-    tokens revoked, agents released. Rooms survive as ownerless -- deleting a
-    user must not silently take a room's history; purge_room is the explicit way.
+def user_history(conn, user_id):
+    """What refers to this person. A users row is a REFERENT only while
+    something points at it (ruling 11732), so this is the exact list the
+    delete verb branches on -- counted, never guessed."""
+    def q(sql, *args):
+        return conn.execute(sql, args or (user_id,)).fetchone()[0]
 
-    Hard delete was ruled out the moment the bound-token mint became the
-    provisioning event: every mint inserts an owned agents row, so deleting the
-    users row destroys the referent while retaining the claim -- the citation
-    defect one plane up. The row is the referent, not the account."""
+    row = conn.execute("SELECT name FROM users WHERE id=?", (user_id,)).fetchone()
+    name = row["name"] if row else ""
+    principal = user_principal(user_id)
+    return {
+        # A person's send writes sender = the ROOM-NAME they wear and leaves
+        # sender_agent_id NULL; their agents' sends carry the agent id.
+        "messages": q("SELECT count(*) FROM messages WHERE sender_agent_id IN "
+                      "(SELECT id FROM agents WHERE owner_id=?)")
+                  + q("SELECT count(*) FROM messages WHERE sender=? "
+                      "AND sender_agent_id IS NULL", name),
+        "agents": q("SELECT count(*) FROM agents WHERE owner_id=?"),
+        "tokens": q("SELECT count(*) FROM tokens WHERE owner_id=?"),
+        "rooms": q("SELECT count(*) FROM rooms WHERE owner_id=?"),
+        "memberships": q("SELECT count(*) FROM members WHERE principal=?", principal),
+        "reads": q("SELECT count(*) FROM reads WHERE principal=?", principal),
+        "room_members": q("SELECT count(*) FROM room_members WHERE user_id=?"),
+        "identities": q("SELECT count(*) FROM identities WHERE user_id=?"),
+        "memories": q("SELECT count(*) FROM memories WHERE author=?", name),
+    }
+
+
+def delete_user(conn, user_id):
+    """Delete a person. Two outcomes, decided by whether anything REFERS to
+    them (ruling 11732) -- returns "removed" or "tombstoned".
+
+    ZERO history (no messages, agents, tokens, rooms, memberships, receipts,
+    doors, memories): the row is HARD deleted and the name is free again.
+    Nothing cites it, so nothing is left dangling -- this is the account that
+    was created and never used, and reserving its name forever is the bug.
+
+    ANY history: TOMBSTONE, unchanged (rulings 8938 / 11611). The users row
+    stays with deleted_ns stamped, credentials wiped, sessions destroyed,
+    tokens revoked, agents released, rooms ownerless. Hard delete there would
+    destroy the referent while every message still carried the claim -- the
+    citation defect one plane up. The row is the referent, not the account."""
+    # Counted BEFORE anything is wiped: the delete itself drops tokens,
+    # memberships and room_members, so reading after would call every account
+    # historyless.
+    history = user_history(conn, user_id)
     with tx(conn):
         # Guard INSIDE the transaction. Read outside it and two admins deleting each
         # other at once both see "2 admins", both proceed, and the database is left with
@@ -2138,10 +2174,16 @@ def delete_user(conn, user_id):
         conn.execute("UPDATE agents SET retired_ns=COALESCE(retired_ns, ?), "
                      "released_ns=?, released_by='account-deletion' "
                      "WHERE owner_id=?", (now, now, user_id))
+        if not any(history.values()):
+            # Nothing points here: the row goes, the name is free.
+            conn.execute("DELETE FROM identities WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+            return "removed"
         # The hash is REPLACED, not emptied: an empty pw_hash is one bad
         # verify_password edge from matching an empty password.
         conn.execute("UPDATE users SET deleted_ns=?, pw_hash='!deleted' WHERE id=?",
                      (now, user_id))
+    return "tombstoned"
 
 
 # ---- sessions ----------------------------------------------------------------

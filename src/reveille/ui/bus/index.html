@@ -4368,8 +4368,10 @@ async function openUsers(){
    return askRow('Delete '+esc(u.name)+'?',
     isMe?'Your tokens die, your rooms survive as unowned, and you are signed out '+
          'immediately. Another admin must let you back in.'
-        :'Their tokens die; their rooms survive as unowned. Their messages stay -- '+
-         'authorship is history.','');
+        :'An account that never sent, joined or owned anything is removed outright '+
+         'and its name is free again. One with history is kept as a tombstone: '+
+         'their tokens die, their rooms survive as unowned, their messages stay -- '+
+         'authorship is history -- and the name stays reserved.','');
   if(confirming&&confirming.kind==='reset'&&confirming.id===u.id)
    return askRow('Reset the password for '+esc(u.name)+'?',
     'Signs them out of every session. Minimum 8 characters.',
@@ -4440,8 +4442,12 @@ async function openUsers(){
   confirming={kind:'delUser',id:b.dataset.del,self:!!b.dataset.self};openUsers();};
  if(confirming&&confirming.kind==='delUser')wireAsk(async()=>{
   const id=confirming.id, self=confirming.self;confirming=null;
-  try{await api('/users/'+id,{method:'DELETE'});
+  try{const r=await api('/users/'+id,{method:'DELETE'});
    if(self){location.reload();return;}   // session died with the row; stop pretending
+   // Say WHICH of the two happened (ruling 11732): a freed name and a reserved
+   // one are different facts, and the admin is about to act on one of them.
+   toast(r.how==='removed'?'removed -- that name is free again'
+                          :'deleted -- history kept, name reserved',true);
    openUsers();}catch(e){toast(e.message);openUsers();}},openUsers);
 }
 
