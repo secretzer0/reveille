@@ -209,6 +209,14 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.123 THE EAR, SLICE 2: HANDS-FREE (DES-014, ruling 11355). A `listen`
+toggle beside `talk`: while it is on, a page-side voice-activity detector
+(Silero VAD v5 in WASM, shipped with the page under /ui/vad/ -- no CDN)
+cuts what you say into takes and each goes through the same POST /stt;
+silence of 3 s closes a take, a 30 s cap closes and reopens it, noise
+below the detector's threshold sends nothing, a hidden tab or a mic error
+turns it off, and the words land in the compose box for you to send.
+Push-to-talk stays. Bus tools unchanged.
 0.2.122 A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357; DES-013
 section 5 amended). The writer performs AGENTS -- text-first speakers that
 need a mouth. A signed-in human's message is spoken exactly as typed or

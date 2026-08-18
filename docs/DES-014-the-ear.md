@@ -124,6 +124,26 @@ the human sends. Gate: a 3 s silence closes an utterance; background noise
 below the VAD's threshold produces no request; the same silence refusal still
 guards the wire.
 
+**Slice 2 as built (0.2.123, ruling 11355; measured 2026-08-18 on the eval
+box, Chrome, real ear over the LAN).** Placement: IN THE PAGE. Silero VAD v5 via
+`@ricky0123/vad-web` 0.0.30 on `onnxruntime-web` 1.22.0 (WASM, single-threaded --
+no cross-origin isolation asked of the page), vendored under `/ui/vad/` from a
+six-name table (`vad_asset_http`; `scripts/vendor-vad` pins versions and sha256s;
+14 MB on disk, the 11 MB runtime and 2.3 MB model fetched only when listening
+starts, cached a day). The DES said "~2 MB": that was the model alone. Two
+controls, one route: `talk` (slice 1, push-to-talk -- kept, operator 11364) and
+`listen` (the hands-free toggle); one ear at a time; both post the same 16 kHz
+WAV to the one `POST /stt`; the server never learns which. Binding, all met and
+gated in the page: per-tab toggle, never persisted; audio leaves the page only
+for a take the VAD closed as speech; `EAR_SILENCE_MS` = 3000 closes a take;
+`EAR_TAKE_CAP_MS` = 30000 closes-and-reopens (pause submits the open take,
+start reopens); hidden tab / page gone / mic error = OFF; takes post one at a
+time (the broker holds one slot); words append with a space, caret at the end.
+Measured: runtime + model load 0.4 s warm; a 7.7 s clip -> speech start at 0.09 s,
+closed 2.2 s after the clip's last word (its tail is silent), 9.9 s take -> the
+sentence in the box; 6 s of noise at about -50 dBFS -> zero takes; a looped clip
+-> the cap closed a 30.3 s take at 30.0 s and the next opened 0.26 s later.
+
 **Slice 3 -- streaming partials.** Words appear as they are spoken; the final
 transcript replaces the partial. This is the one slice that changes the wire:
 `POST /stt` stays for a finished take, and a **WebSocket `/stt/stream`** (the
