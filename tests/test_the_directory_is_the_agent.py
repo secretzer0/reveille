@@ -10,6 +10,8 @@ semantics, what it preserves, what it refuses, and its mode -- because this
 file is the credential and the settings file is shared real estate.
 """
 import json
+import types
+from unittest import mock
 import os
 
 import pytest
@@ -120,22 +122,87 @@ def test_a_directory_that_is_not_an_agent_yields_no_headers(tmp_path):
     assert headers.gather(tmp_path) == {}
 
 
-def test_mcp_json_converges_and_preserves_other_servers(tmp_path):
+def test_the_registration_is_local_scope_and_leaves_nothing_in_the_tree(tmp_path):
+    """Architect 12167: nothing per-agent is tracked. Project scope means a
+    .mcp.json FILE IN THE REPO -- no secret in it, but still per-agent config in
+    a shared tree that two people's agents collide over. Local scope keys the
+    same registration to this project path in ~/.claude.json."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with mock.patch.object(cli.subprocess, "run", fake_run):
+        where = cli.register_mcp_local("http://b:8765", tmp_path, "claude")
+    assert "local" in where
+    assert not (tmp_path / ".mcp.json").exists(), "nothing lands in the tree"
+    cmd = calls[-1]
+    assert cmd[:5] == ["claude", "mcp", "add-json", "--scope", "local"]
+    spec = json.loads(cmd[-1])
+    assert spec == {"type": "http", "url": "http://b:8765/mcp",
+                    "headersHelper": "reveille-headers"}
+
+
+def test_a_failed_registration_is_raised_not_swallowed(tmp_path):
+    def fake_run(cmd, **kw):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="no such flag")
+
+    with mock.patch.object(cli.subprocess, "run", fake_run):
+        with pytest.raises(RuntimeError, match="add-json"):
+            cli.register_mcp_local("http://b:8765", tmp_path, "claude")
+
+
+def test_an_earlier_project_scope_entry_is_migrated_away(tmp_path):
+    """Two registrations for one server is how a body authenticates twice by
+    different rules. Every OTHER server in that file is somebody else's."""
     (tmp_path / ".mcp.json").write_text(json.dumps({
         "mcpServers": {"other": {"type": "stdio", "command": "kept"},
                        "reveille": {"type": "http", "url": "http://old/mcp"}}}))
-    cli.write_mcp_json("http://b:8765", tmp_path)
+    cli.drop_project_mcp_entry(tmp_path)
     cfg = json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"]
-    assert cfg["other"] == {"type": "stdio", "command": "kept"}
-    assert cfg["reveille"] == {"type": "http", "url": "http://b:8765/mcp",
-                               "headersHelper": "reveille-headers"}
+    assert cfg == {"other": {"type": "stdio", "command": "kept"}}, "theirs survives"
 
 
-def test_mcp_json_that_cannot_be_parsed_is_refused_not_clobbered(tmp_path):
+def test_a_file_left_holding_nothing_is_removed(tmp_path):
+    """An empty config in a tracked tree is litter that outlives its reason."""
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {
+        "reveille": {"type": "http", "url": "http://old/mcp"}}}))
+    cli.drop_project_mcp_entry(tmp_path)
+    assert not (tmp_path / ".mcp.json").exists()
+
+
+def test_a_mcp_json_we_cannot_parse_is_left_alone(tmp_path):
+    """It may name servers this installer does not own -- refusing to touch it
+    is the same discipline the write path had."""
     (tmp_path / ".mcp.json").write_text("{not json")
-    with pytest.raises(RuntimeError, match="not valid JSON"):
-        cli.write_mcp_json("http://b:8765", tmp_path)
+    assert cli.drop_project_mcp_entry(tmp_path) is None
     assert (tmp_path / ".mcp.json").read_text() == "{not json"
+
+
+def test_the_credential_cannot_be_committed_from_its_own_directory(tmp_path):
+    """The credential is written INTO a git working tree, and whether it was
+    ignored used to be a property of the person's own machine -- a personal
+    global ignore covered it on one laptop and nowhere else. A fresh clone left
+    a live agent token untracked-but-not-ignored, one `git add -A` from a public
+    repo. The fix stays inside what we own: a .gitignore in the .claude
+    directory this installer creates -- never the repo's own .gitignore, and
+    never .git/info/exclude, which is the user's git config."""
+    path, wrote = cli.ignore_the_credential(tmp_path)
+    assert wrote and path == tmp_path / ".claude" / ".gitignore"
+    assert "settings.local.json" in path.read_text()
+    # Idempotent, and it never duplicates the line.
+    path2, wrote2 = cli.ignore_the_credential(tmp_path)
+    assert wrote2 is False and path2.read_text().count("settings.local.json") == 1
+
+
+def test_an_existing_claude_gitignore_is_appended_to_not_replaced(tmp_path):
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / ".gitignore").write_text("something-else\n")
+    path, wrote = cli.ignore_the_credential(tmp_path)
+    text = path.read_text()
+    assert wrote and "something-else" in text and "settings.local.json" in text
 
 
 def test_the_helper_the_registration_names_is_shipped(tmp_path):
@@ -144,10 +211,42 @@ def test_the_helper_the_registration_names_is_shipped(tmp_path):
     script this package ships."""
     import pathlib
     import tomllib
-    path = cli.write_mcp_json("http://b:8765", tmp_path)
-    helper = json.loads(path.read_text())["mcpServers"]["reveille"]["headersHelper"]
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with mock.patch.object(cli.subprocess, "run", fake_run):
+        cli.register_mcp_local("http://b:8765", tmp_path, "claude")
+    helper = json.loads(calls[-1][-1])["headersHelper"]
     scripts = tomllib.loads(
         (pathlib.Path(cli.__file__).parents[2] / "pyproject.toml")
         .read_text())["project"]["scripts"]
     assert helper in scripts, (
         f".mcp.json names {helper!r}; [project.scripts] ships {sorted(scripts)}")
+
+
+def test_a_committable_doctrine_is_warned_about_not_silently_ignored(tmp_path):
+    """The honest half of the ignore story. `.claude/.gitignore` covers the
+    CREDENTIAL because that file lives in a directory this installer creates.
+    CLAUDE.local.md lives at the project root, where a .gitignore of ours cannot
+    reach it -- only the repo's own .gitignore (the project's, not ours) or
+    .git/info/exclude (the user's git config) could, and neither is ours to
+    write. So init says so rather than pretending it is covered."""
+    import subprocess
+    subprocess.run(["git", "init", "-q", "."], cwd=tmp_path, check=True)
+    target = tmp_path / "CLAUDE.local.md"
+    target.write_text("x")
+    warn = cli.warn_if_committable(tmp_path, target)
+    assert "can be committed" in warn and "CLAUDE.local.md" in warn
+
+    # Ignored -> silent. Nothing to say when nothing is at risk.
+    (tmp_path / ".gitignore").write_text("CLAUDE.local.md\n")
+    assert cli.warn_if_committable(tmp_path, target) == ""
+
+
+def test_outside_a_git_work_tree_there_is_nothing_to_warn_about(tmp_path):
+    target = tmp_path / "CLAUDE.local.md"
+    target.write_text("x")
+    assert cli.warn_if_committable(tmp_path, target) == ""

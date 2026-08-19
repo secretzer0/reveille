@@ -25,6 +25,7 @@ root-equivalent credential into .bash_history on every machine that runs it.
 import argparse
 import contextlib
 import getpass
+import hashlib
 import re
 import json
 import os
@@ -71,39 +72,101 @@ def read_token(args_token, stdin=None):
     return os.environ.get("REVEILLE_TOKEN", "").strip() or None
 
 
-def write_mcp_json(url, workdir):
-    """The registration lives in the DIRECTORY too, as <workdir>/.mcp.json.
+def register_mcp_local(url, workdir, claude):
+    """Register the MCP at LOCAL scope, so nothing per-agent lands in the tree.
 
-    The first cutover registered user-scope with ${VAR} headers and put the
-    values in the directory's settings env block -- and the acceptance run
-    caught the seam: Claude Code expands MCP headers from the process
-    environment at connect time, BEFORE project settings env is injected, so
-    the session's Bash saw the identity while the MCP headers expanded empty.
-    Headers therefore ride a headersHelper -- reveille-headers, a console
-    script this package ships -- which Claude Code runs with the project
-    directory as cwd, fresh on every connect, reading the same
-    settings.local.json the credential lands in. One file holds the secret;
-    this one only names the mechanism, carries nothing sensitive, and is safe
-    to commit. Same converge discipline as the credential write: rewrite the
-    reveille entry to correct, preserve every other server, refuse a file
-    that cannot be parsed."""
-    path = pathlib.Path(workdir) / ".mcp.json"
-    cfg = {}
-    if path.exists():
-        try:
-            cfg = json.loads(path.read_text())
-        except (ValueError, UnicodeDecodeError) as e:
-            raise RuntimeError(
-                f"{path} exists and is not valid JSON ({e}). It may name MCP "
-                f"servers this installer does not own, so it is refused rather "
-                f"than clobbered -- fix or remove it, then re-run.")
-    cfg.setdefault("mcpServers", {})["reveille"] = {
+    Project scope means <workdir>/.mcp.json -- a FILE IN THE REPO. It carries no
+    secret (the headersHelper below is a mechanism name, not a credential), but
+    it is still per-agent configuration sitting in a shared, tracked working
+    tree, and in a checkout two people share it is one more thing to collide
+    over and commit. Local scope stores the same registration in ~/.claude.json
+    keyed by this project path: read by Claude Code exactly the same way, never
+    in the repo, and needing no enableAllProjectMcpServers approval
+    (architect 12167).
+
+    The HEADERS still ride a headersHelper -- reveille-headers, a console script
+    this package ships. The first cutover used ${VAR} headers and the acceptance
+    run caught the seam: Claude Code expands MCP headers from the process
+    environment at connect time, BEFORE project settings env is injected, so the
+    session's Bash saw the identity while the MCP headers expanded empty. The
+    helper runs with the project directory as cwd, fresh on every connect,
+    reading the same settings.local.json the credential lands in.
+    """
+    spec = json.dumps({
         "type": "http",
         "url": url.rstrip("/") + "/mcp",
         "headersHelper": "reveille-headers",
-    }
+    })
+    r = subprocess.run([claude, "mcp", "add-json", "--scope", "local", "reveille", spec],
+                       capture_output=True, text=True, cwd=str(workdir))
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"`claude mcp add-json --scope local` failed: "
+            f"{(r.stderr or r.stdout).strip()}")
+    return "~/.claude.json (local scope)"
+
+
+def drop_project_mcp_entry(workdir):
+    """Remove OUR entry from a <workdir>/.mcp.json an earlier init wrote.
+
+    Migration, idempotent (architect 12167). Two registrations for one server is
+    how a body ends up authenticating twice by different rules; the project-scope
+    one is the stale shape. Every OTHER server in that file is somebody else's
+    and survives untouched -- and a file left holding nothing but an empty
+    mcpServers map is removed, because an empty config in a tracked tree is
+    litter that outlives the reason for it.
+    """
+    path = pathlib.Path(workdir) / ".mcp.json"
+    if not path.exists():
+        return None
+    try:
+        cfg = json.loads(path.read_text())
+    except (ValueError, UnicodeDecodeError):
+        # Not ours to repair -- and refusing to touch it is the same discipline
+        # the write path had: it may name servers this installer does not own.
+        return None
+    servers = cfg.get("mcpServers") or {}
+    if "reveille" not in servers:
+        return None
+    servers.pop("reveille")
+    if not servers and set(cfg) <= {"mcpServers"}:
+        path.unlink()
+        return path
+    cfg["mcpServers"] = servers
     path.write_text(json.dumps(cfg, indent=2) + "\n")
     return path
+
+
+def ignore_the_credential(workdir):
+    """Make sure <workdir>/.claude/settings.local.json cannot be committed.
+
+    The credential is written INTO A GIT WORKING TREE, and whether it is ignored
+    was, until now, a property of the person's own machine: on this laptop a
+    personal ~/.config/git/ignore covered it, and nowhere else did. A fresh
+    clone by anyone else leaves a live agent token untracked-but-not-ignored,
+    one `git add -A` from a public repo.
+
+    The fix stays inside what we own: a .gitignore in the .claude directory THIS
+    INSTALLER CREATES. Not the repo's own .gitignore (a tracked file that is the
+    project's, not ours) and NOT .git/info/exclude (the user's git config, and a
+    tool that writes there to protect its own mess is fixing the wrong layer --
+    operator, 2026-08-19). Self-contained: it ships beside the credential, so a
+    clone that gets one gets the other.
+    """
+    d = pathlib.Path(workdir) / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / ".gitignore"
+    want = "settings.local.json\n"
+    if path.exists():
+        text = path.read_text()
+        if "settings.local.json" in text.split():
+            return path, False
+        path.write_text(text if text.endswith("\n") else text + "\n")
+        with path.open("a") as fh:
+            fh.write(want)
+        return path, True
+    path.write_text(want)
+    return path, True
 
 
 def verify(url, name, token, timeout=10):
@@ -176,7 +239,7 @@ def write_credential(url, name, token, workdir):
     # setdefault never overrides an existing choice, only fills an absence.
     env.setdefault("CAVEMAN_DEFAULT_MODE", "ultra")
     env.setdefault("PONYTAIL_DEFAULT_MODE", "full")
-    # The directory's .mcp.json (write_mcp_json) is what carries the identity
+    # The local-scope registration (register_mcp_local) is what carries the identity
     # into MCP, and a project-scope server needs the session's approval;
     # granting it here is the same single-write pre-approval the installer
     # already does for permissions.allow -- without it the first session gets
@@ -560,16 +623,44 @@ def ask_type(stdin=None):
 # written by a human gets the block appended once and updated thereafter. The
 # markers carry the version that wrote them, so a later boot can tell whether
 # what it is reading is current.
-DOCTRINE_BEGIN = "<!-- reveille:begin -- managed by `reveille init`; edit OUTSIDE these markers -->"
+# THE BEGIN MARKER IS A SIGNATURE, not just a fence (operator, 2026-08-19). It
+# carries the version that wrote the block AND a sha256 of the block's own body,
+# which lets a later boot tell three states apart instead of two:
+#   file-hash == marker-hash == expected   the block is current; do nothing
+#   file-hash == marker-hash != expected   doctrine MOVED ON; replace, and the
+#                                          log can name both versions
+#   file-hash != marker-hash               somebody EDITED INSIDE THE MARKERS;
+#                                          replace, and say so
+# The third case is the one a version string alone cannot see, and it is exactly
+# how a stale doctrine stays alive -- a person tweaks one line, the version still
+# reads current, and every later boot agrees with the edit instead of correcting
+# it. Everything OUTSIDE the markers is still never touched.
+DOCTRINE_BEGIN_PREFIX = "<!-- reveille:begin"
 DOCTRINE_END = "<!-- reveille:end -->"
+_MARKER_RE = re.compile(
+    r"<!-- reveille:begin(?:\s+v=(?P<v>\S+))?(?:\s+sha256=(?P<sha>[0-9a-f]+))?[^>]*-->")
+
+
+def body_hash(body):
+    """sha256 of the block body, short. Pure, so a gate can recompute it."""
+    return hashlib.sha256(body.encode()).hexdigest()[:16]
+
+
+def doctrine_begin(version, sha):
+    return (f"{DOCTRINE_BEGIN_PREFIX} v={version} sha256={sha} -- managed by "
+            f"`reveille init`; edit OUTSIDE these markers -->")
 
 
 def doctrine_block(name, agent_type, version=__version__):
     """The managed section, verbatim. Pure, so a gate can read it."""
+    body = doctrine_body(name, agent_type)
+    return f"{doctrine_begin(version, body_hash(body))}\n{body}{DOCTRINE_END}\n"
+
+
+def doctrine_body(name, agent_type):
+    """Everything BETWEEN the markers. Hashed, so it is its own identity."""
     role = f"You are the fleet's **{agent_type}**.\n\n" if agent_type else ""
     return (
-        f"{DOCTRINE_BEGIN}\n"
-        f"<!-- written by reveille {version} -->\n"
         f"# {name}\n\n"
         f"{role}"
         f"## Bus\n"
@@ -607,40 +698,122 @@ def doctrine_block(name, agent_type, version=__version__):
         f"now -> unicast the one who owes it. Broadcast only when a shared contract\n"
         f"changed or you block several peers.\n\n"
         f"Full reference: `usage()`.\n"
-        f"{DOCTRINE_END}\n")
+        )
 
 
 def sync_claude_md(workdir, name, agent_type, version=__version__):
-    """Write or refresh the managed doctrine block. Returns (path, what) where
-    what is 'created' | 'updated' | 'appended' | 'unchanged'.
+    """Write or refresh the managed doctrine block in CLAUDE.local.md.
+
+    Returns (path, what) where what is 'created' | 'updated' | 'repaired' |
+    'appended' | 'unchanged'.
+
+    CLAUDE.local.md, NOT CLAUDE.md (architect 12167). Claude Code loads both at
+    session start, but CLAUDE.md is the PROJECT's file -- tracked, shared, and
+    written by whoever owns the repo. This block is PER-AGENT: it carries the
+    agent's own name and role, so in a shared checkout two people's agents would
+    overwrite each other's block in a tracked file and commit the fight. The
+    .local.md variant is the documented per-developer, untracked home, which is
+    exactly what a per-agent block is.
 
     NEVER an overwrite of somebody's file: outside the markers, every byte the
-    directory already had survives, in place. Between them, this owns the text
-    -- which is what makes a later boot able to correct a doctrine that has
-    moved on without asking a human to merge prose by hand.
+    directory already had survives, in place. Between them, this owns the text --
+    which is what makes a later boot able to correct a doctrine that has moved on
+    without asking a human to merge prose by hand.
     """
-    path = pathlib.Path(workdir) / "CLAUDE.md"
+    path = pathlib.Path(workdir) / "CLAUDE.local.md"
+    body = doctrine_body(name, agent_type)
     block = doctrine_block(name, agent_type, version)
     if not path.exists():
         path.write_text(block)
         return path, "created"
     text = path.read_text()
-    i, j = text.find(DOCTRINE_BEGIN), text.find(DOCTRINE_END)
-    if i == -1 or j == -1 or j < i:
+    m = _MARKER_RE.search(text)
+    j = text.find(DOCTRINE_END)
+    if m is None or j == -1 or j < m.start():
         sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
         path.write_text(text + sep + block)
         return path, "appended"
-    # WHERE THE BLOCK ENDS, MEASURED (architect nit on #123): the end marker
-    # plus its newline IF there is one. Assuming the newline eats the first byte
-    # after the marker in a hand-edited file -- and this whole design exists to
-    # promise that nothing outside the markers is ever touched.
+    # WHERE THE BLOCK ENDS, MEASURED (architect nit on #123): the end marker plus
+    # its newline IF there is one. Assuming the newline eats the first byte after
+    # the marker in a hand-edited file -- and this whole design exists to promise
+    # that nothing outside the markers is ever touched.
     end = j + len(DOCTRINE_END)
     if text[end:end + 1] == "\n":
         end += 1
-    if text[i:end] == block:
+    found_body = text[m.end():j]
+    if found_body.startswith("\n"):
+        found_body = found_body[1:]
+
+    # THE THREE CASES (operator, 2026-08-19). The marker CLAIMS a hash; the bytes
+    # HAVE a hash; and there is the hash we would write. Comparing all three is
+    # what separates "doctrine moved on" from "someone edited inside the markers"
+    # -- and only the second one is silent under a version-only check.
+    claimed = (m.group("sha") or "")
+    actual = body_hash(found_body)
+    expected = body_hash(body)
+    if actual != claimed:
+        path.write_text(text[:m.start()] + block + text[end:])
+        return path, "repaired"
+    if actual == expected and (m.group("v") or "") == version:
         return path, "unchanged"
-    path.write_text(text[:i] + block + text[end:])
+    path.write_text(text[:m.start()] + block + text[end:])
     return path, "updated"
+
+
+def lift_doctrine_from_claude_md(workdir):
+    """Remove a doctrine block an EARLIER init wrote into CLAUDE.md.
+
+    Migration, idempotent (architect 12167). Before this version the block lived
+    in the project's own tracked CLAUDE.md; leaving it there would mean two
+    blocks claiming to be the doctrine, and the stale one is in the file a
+    reviewer is more likely to read. Only ever removes text BETWEEN our own
+    markers -- a CLAUDE.md that never had one is not touched, and neither is a
+    single byte outside them.
+    """
+    path = pathlib.Path(workdir) / "CLAUDE.md"
+    if not path.exists():
+        return None
+    text = path.read_text()
+    m = _MARKER_RE.search(text)
+    j = text.find(DOCTRINE_END)
+    if m is None or j == -1 or j < m.start():
+        return None
+    end = j + len(DOCTRINE_END)
+    if text[end:end + 1] == "\n":
+        end += 1
+    remainder = (text[:m.start()] + text[end:]).rstrip("\n")
+    path.write_text(remainder + "\n" if remainder else "")
+    return path
+
+
+def warn_if_committable(workdir, path):
+    """Say so when a per-agent file could be committed. Returns the warning, or "".
+
+    THE HONEST HALF OF THE IGNORE STORY. `.claude/.gitignore` covers the
+    credential because the credential lives in a directory this installer
+    creates. CLAUDE.local.md lives at the PROJECT ROOT, where a .gitignore of
+    ours cannot reach it -- the only files that could are the repo's own
+    .gitignore (the project's, not ours) and .git/info/exclude (the user's git
+    config, and a tool that writes there to protect its own mess is fixing the
+    wrong layer -- operator, 2026-08-19).
+
+    So this does not act. It tells the truth and names the one line that fixes
+    it. A per-agent doctrine block committed to a shared repo is noise and a
+    small identity leak, not a credential leak -- worth a warning, not worth
+    reaching into somebody's git config.
+    """
+    rel = pathlib.Path(path).name
+    r = subprocess.run(["git", "check-ignore", "-q", str(path)],
+                       cwd=str(workdir), capture_output=True, text=True)
+    if r.returncode == 0:
+        return ""
+    inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"],
+                            cwd=str(workdir), capture_output=True, text=True)
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return ""
+    return (f"warning: {rel} is per-agent and this directory is a git work "
+            f"tree, so it can be committed. Add `{rel}` to that repo's "
+            f".gitignore if it is shared.")
 
 
 def cmd_init(a):
@@ -797,19 +970,26 @@ def cmd_init(a):
     # env at connect time, before project settings env exists, so it either
     # authenticates as whatever the shell happened to export or as nobody --
     # both wrong, and the second one silently. The remove is idempotent and
-    # cheap; the .mcp.json write below is the registration.
+    # cheap; the local-scope add-json below is the registration.
     subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
                    capture_output=True, text=True)
     try:
-        mcp_path = write_mcp_json(url, workdir)
+        mcp_where = register_mcp_local(url, workdir, claude)
     except RuntimeError as e:
         print(f"reveille init: REFUSING at step 1 of 3 -- {e}\n"
               f"Nothing else was installed: a Stop hook beside a directory "
               f"whose MCP registration did not land looks configured and is "
               f"not.", file=sys.stderr)
         return 1
-    steps.append(f"mcp: {mcp_path} (project scope; headersHelper reads the "
-                 f"credential from settings.local.json at connect time)")
+    steps.append(f"mcp: {mcp_where}; headersHelper reads the credential from "
+                 f"settings.local.json at connect time")
+    # NOTHING PER-AGENT STAYS IN THE TREE. An earlier init put the registration
+    # in <dir>/.mcp.json; two registrations for one server is how a body ends up
+    # authenticating twice by different rules, so the old one is lifted here
+    # rather than left for someone to notice.
+    dropped = drop_project_mcp_entry(workdir)
+    if dropped:
+        steps.append(f"migrated: removed the reveille entry from {dropped}")
 
     hook_rc = install.main()
     if hook_rc != 0:
@@ -828,6 +1008,16 @@ def cmd_init(a):
               f"file is fixed and init converges the rest.", file=sys.stderr)
         return 1
     steps.append(f"credential: {path} (0600) -- this directory IS the agent")
+    ign, wrote = ignore_the_credential(workdir)
+    if wrote:
+        steps.append(f"ignored: {ign} -- the credential cannot be committed from here")
+    warn = warn_if_committable(workdir, pathlib.Path(workdir) / "CLAUDE.local.md")
+    if warn:
+        steps.append(warn)
+    lifted = lift_doctrine_from_claude_md(workdir)
+    if lifted:
+        steps.append(f"migrated: lifted the doctrine block out of {lifted} "
+                     f"(it belongs in CLAUDE.local.md, which is not tracked)")
     # THE DAEMON HOLDING THE OLD CREDENTIAL HAS TO GO (ruling 12008). It read
     # its token once, at spawn, and no file written here can reach it.
     retired = retire_waked(name)

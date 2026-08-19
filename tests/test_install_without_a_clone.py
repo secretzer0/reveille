@@ -42,15 +42,21 @@ def broker():
     srv.shutdown()
 
 
-def fake_claude(tmp_path, rc=0, listed=""):
+def fake_claude(tmp_path, rc=0, listed="", fail_add=False):
     """A `claude` that records its argv. The real binary is not on this box and
     would not be on a fresh host either -- what matters is the command we hand
-    it, which is the same one docker/entrypoint.sh already runs."""
+    it, which is the same one docker/entrypoint.sh already runs.
+
+    fail_add makes only `mcp add-json` fail, so a test can exercise a refused
+    registration without also breaking the `mcp remove` that runs before it.
+    """
     log = tmp_path / "claude.log"
     p = tmp_path / "claude"
+    add_fail = 'if [ "$2" = "add-json" ]; then echo "no such flag" >&2; exit 1; fi' if fail_add else ""
     p.write_text(f'''#!/bin/sh
 if [ "$2" = "list" ]; then printf '%s' '{listed}'; exit 0; fi
 printf '%s\\n' "$*" >> {log}
+{add_fail}
 exit {rc}
 ''')
     p.chmod(0o755)
@@ -76,18 +82,23 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
 
-    # 1. the MCP registration IS the directory's .mcp.json: a headersHelper
-    # that reads the credential at connect time, because ${VAR} headers expand
-    # from the process env BEFORE project settings env is injected -- the
-    # acceptance run measured Bash seeing the identity while the MCP headers
-    # expanded empty. The stale user-scope registration is converged away.
+    # 1. the MCP registration is LOCAL scope (architect 12167): the same
+    # headersHelper registration, keyed to this project path in ~/.claude.json
+    # rather than written into the tree. The helper reads the credential at
+    # connect time, because ${VAR} headers expand from the process env BEFORE
+    # project settings env is injected -- the acceptance run measured Bash
+    # seeing the identity while the MCP headers expanded empty. The stale
+    # user-scope registration is converged away.
     said = log.read_text()
     assert "mcp remove --scope user reveille" in said
-    mcp = json.loads((work / ".mcp.json").read_text())["mcpServers"]["reveille"]
-    assert mcp == {"type": "http", "url": f"{broker}/mcp",
-                   "headersHelper": "reveille-headers"}
-    assert "sekrit" not in (work / ".mcp.json").read_text(), \
-        "the literal token leaked into a committable file"
+    assert "mcp add-json --scope local reveille" in said
+    assert not (work / ".mcp.json").exists(), \
+        "NOTHING PER-AGENT IS TRACKED: no registration may land in the tree"
+    spec = json.loads(said.split("mcp add-json --scope local reveille ", 1)[1]
+                      .splitlines()[0].strip().strip("'"))
+    assert spec == {"type": "http", "url": f"{broker}/mcp",
+                    "headersHelper": "reveille-headers"}
+    assert "sekrit" not in said, "the literal token reached the registration"
     # ...and the session must be able to APPROVE that project server unattended
     assert json.loads((work / ".claude" / "settings.local.json").read_text())[
         "enableAllProjectMcpServers"] is True
@@ -188,18 +199,18 @@ def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
     assert cli.main(argv) == 0
     first = (home / ".claude" / "settings.json").read_text()
     first_local = (work / ".claude" / "settings.local.json").read_text()
-    first_mcp = (work / ".mcp.json").read_text()
+    first_doctrine = (work / "CLAUDE.local.md").read_text()
     assert cli.main(argv) == 0
     assert (home / ".claude" / "settings.json").read_text() == first, \
         "a second run rewrote the hook -- re-running must report, not change"
     assert (work / ".claude" / "settings.local.json").read_text() == first_local, \
         "a correct credential file must converge byte-identical"
-    assert (work / ".mcp.json").read_text() == first_mcp, \
-        "a correct registration must converge byte-identical"
+    assert (work / "CLAUDE.local.md").read_text() == first_doctrine, \
+        "an unchanged doctrine block must converge byte-identical"
     out = capsys.readouterr().out
     # registration converges every run: "already registered, left alone" is
     # what kept a stale literal-token config through a rotation
-    assert "mcp: " in out and ".mcp.json" in out
+    assert "mcp: " in out and "local scope" in out
     assert "already installed" in out
 
 
@@ -214,7 +225,7 @@ def test_a_broker_that_refuses_the_token_installs_nothing(tmp_path, broker,
     monkeypatch.setenv("REVEILLE_TOKEN", "wrong")
     assert cli.main(argv) == 1
     assert not log.exists(), "it registered an MCP server against a refused token"
-    assert not (work / ".mcp.json").exists(), "it wrote a registration"
+    assert not log.exists(), "it registered against a refused token"
     assert not (home / ".claude" / "settings.json").exists(), "it installed a hook"
     assert not (work / ".claude" / "settings.local.json").exists(), \
         "it wrote a credential"
@@ -224,16 +235,13 @@ def test_a_broker_that_refuses_the_token_installs_nothing(tmp_path, broker,
 def test_a_failing_registration_stops_before_the_hook(tmp_path, broker,
                                                       monkeypatch, capsys):
     """Step 1 failing must not leave a Stop hook beside a directory whose MCP
-    registration did not land -- that state looks configured and is not. The
-    failure that can actually happen now is an unparseable .mcp.json: it may
-    name servers the installer does not own, so it is refused, not clobbered."""
-    claude, _ = fake_claude(tmp_path)
+    registration did not land -- that state looks configured and is not. With
+    the registration at local scope the failure that can happen is `claude mcp
+    add-json` itself refusing."""
+    claude, _ = fake_claude(tmp_path, fail_add=True)
     argv, home, work = run(tmp_path, broker, claude)
-    (work / ".mcp.json").write_text("{not json")
     monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
     assert cli.main(argv) == 1
-    assert (work / ".mcp.json").read_text() == "{not json", \
-        "a refusal must leave the file exactly as it found it"
     assert not (home / ".claude" / "settings.json").exists()
     assert not (work / ".claude" / "settings.local.json").exists()
     assert "step 1 of 3" in capsys.readouterr().err
@@ -521,8 +529,8 @@ def test_a_piped_stdin_takes_the_default_rather_than_blocking(monkeypatch):
 def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
     """RULED by the operator (11879) after red-shirt came up doctrine-less: the
     block is written, and REFRESHED, on every init -- but only the block. A
-    directory that already has a CLAUDE.md has an opinion, and every byte of it
-    outside the markers survives in place.
+    directory that already has a CLAUDE.local.md has an opinion, and every byte
+    of it outside the markers survives in place.
 
     The seed used to run on the wizard path only, which the web-mint-then-paste
     install never takes -- and with the password door closed that is the only
@@ -530,24 +538,25 @@ def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
     connection, a Stop hook and no idea a broadcast does not wake anybody."""
     path, what = cli.sync_claude_md(tmp_path, "reveille-devops", "devops")
     text = path.read_text()
+    assert path.name == "CLAUDE.local.md", "per-agent text never lands in a tracked file"
     assert what == "created"
     assert "reveille-devops" in text and "devops" in text
     assert "join()" in text and "wake-watch" in text, "the boot ritual must be in it"
     assert "does not wake anyone" in text, "the rule red-shirt did not have"
-    assert cli.DOCTRINE_BEGIN in text and cli.DOCTRINE_END in text
+    assert cli.DOCTRINE_BEGIN_PREFIX in text and cli.DOCTRINE_END in text
     # Idempotent, and a later init corrects a stale block in place.
     assert cli.sync_claude_md(tmp_path, "reveille-devops", "devops")[1] == "unchanged"
     assert cli.sync_claude_md(tmp_path, "reveille-devops", "architect")[1] == "updated"
     assert "architect" in path.read_text()
     # A human's own file: the block is APPENDED once, and their words are kept
     # exactly, in place, forever after.
-    mine = tmp_path / "own" / "CLAUDE.md"
+    mine = tmp_path / "own" / "CLAUDE.local.md"
     mine.parent.mkdir()
     mine.write_text("# my own instructions\nnever touch this line\n")
     _, what = cli.sync_claude_md(mine.parent, "x", "devops")
     assert what == "appended"
     assert mine.read_text().startswith("# my own instructions\nnever touch this line\n")
-    assert cli.DOCTRINE_BEGIN in mine.read_text()
+    assert cli.DOCTRINE_BEGIN_PREFIX in mine.read_text()
     assert cli.sync_claude_md(mine.parent, "x", "devops")[1] == "unchanged"
     assert cli.sync_claude_md(mine.parent, "x", "senior-dev")[1] == "updated"
     assert "never touch this line" in mine.read_text(), "outside the markers is theirs"
@@ -555,11 +564,74 @@ def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
     # right after it is the agent's and must survive an update (architect nit).
     hand = tmp_path / "hand"
     hand.mkdir()
-    (hand / "CLAUDE.md").write_text(
-        cli.doctrine_block("x", "devops") .rstrip("\n") + "TAIL-KEEP-ME\n")
+    (hand / "CLAUDE.local.md").write_text(
+        cli.doctrine_block("x", "devops").rstrip("\n") + "TAIL-KEEP-ME\n")
     _, what = cli.sync_claude_md(hand, "x", "architect")
     assert what == "updated"
-    assert "TAIL-KEEP-ME" in (hand / "CLAUDE.md").read_text()
+    assert "TAIL-KEEP-ME" in (hand / "CLAUDE.local.md").read_text()
+
+
+def test_the_marker_signs_the_block_so_a_hand_edit_cannot_survive(tmp_path):
+    """OPERATOR, 2026-08-19. The marker carries the writing version AND a
+    sha256 of the body, which separates three states a version string alone
+    collapses into two:
+
+      file == marker == expected   current
+      file == marker != expected   doctrine moved on
+      file != marker               EDITED INSIDE THE MARKERS
+
+    Only the third is silent under a version-only check, and it is exactly how a
+    stale doctrine stays alive: a person tweaks one line, the version still
+    reads current, and every later boot agrees with the edit instead of
+    correcting it."""
+    path, _ = cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")
+    text = path.read_text()
+    assert "sha256=" in text and "v=" in text
+
+    # The claimed hash is the hash of what is actually between the markers.
+    import re
+    m = re.search(r"sha256=([0-9a-f]+)", text)
+    body = text.split("-->\n", 1)[1].split(cli.DOCTRINE_END, 1)[0]
+    assert m.group(1) == cli.body_hash(body)
+
+    # Case 3: edit INSIDE the markers. The version still says current.
+    path.write_text(text.replace("## Bus", "## Bus (I edited this)"))
+    _, what = cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")
+    assert what == "repaired", "an in-marker edit must be detected and replaced"
+    assert "I edited this" not in path.read_text()
+
+    # Case 1 again: now it is current and nothing happens.
+    assert cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")[1] == "unchanged"
+
+    # Case 2: the doctrine moves on -- same body-hash claim, older version.
+    stale = path.read_text().replace(f"v={cli.__version__}", "v=0.0.1")
+    path.write_text(stale)
+    _, what = cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")
+    assert what == "updated"
+    assert f"v={cli.__version__}" in path.read_text()
+
+
+def test_a_block_an_earlier_init_left_in_claude_md_is_lifted_out(tmp_path):
+    """Migration (architect 12167). Before this version the block lived in the
+    project's own tracked CLAUDE.md. Leaving it there would mean two blocks
+    claiming to be the doctrine, and the stale one sits in the file a reviewer
+    is more likely to read. Only text BETWEEN our markers is removed."""
+    md = tmp_path / "CLAUDE.md"
+    md.write_text("# the project's own words\n\n"
+                  + cli.doctrine_block("old-name", "devops")
+                  + "\n## and more of theirs\n")
+    lifted = cli.lift_doctrine_from_claude_md(tmp_path)
+    assert lifted == md
+    left = md.read_text()
+    assert cli.DOCTRINE_BEGIN_PREFIX not in left and cli.DOCTRINE_END not in left
+    assert "the project's own words" in left and "more of theirs" in left
+    # Idempotent, and a CLAUDE.md that never had one is not touched.
+    assert cli.lift_doctrine_from_claude_md(tmp_path) is None
+    untouched = tmp_path / "clean"
+    untouched.mkdir()
+    (untouched / "CLAUDE.md").write_text("nothing of ours\n")
+    assert cli.lift_doctrine_from_claude_md(untouched) is None
+    assert (untouched / "CLAUDE.md").read_text() == "nothing of ours\n"
 
 
 def daemon_routes():

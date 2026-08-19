@@ -6,7 +6,8 @@ env -- measured on the first per-directory acceptance run (2026-08-13): the
 session's Bash subshell saw $REVEILLE_AGENT_ROLE while the MCP headers had
 expanded empty and the broker refused the call. So headers cannot ride ${VAR}
 references for a credential that lives in the directory; they ride THIS
-command, named as headersHelper in the directory's .mcp.json. Claude Code runs
+command, named as headersHelper in the LOCAL-scope registration for this
+directory (~/.claude.json, architect 12167). Claude Code runs
 it with the project directory as cwd, fresh on every connect and reconnect, so
 the one place the credential lives -- .claude/settings.local.json's env block
 -- is read at the moment the connection needs it, and a rotation is still a
