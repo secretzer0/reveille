@@ -103,3 +103,46 @@ def test_convergence_never_exits_the_daemon(monkeypatch):
         raise RuntimeError("anything at all")
     monkeypatch.setattr(waked, "_converge_inner", boom)
     waked._converge("ws://x/wake", {})   # must simply return
+
+
+def test_the_probe_and_the_exec_use_the_console_script_never_dash_m():
+    """THE BUG THIS PINS (architect, blocking on the first draft).
+
+    The first draft re-exec'd as `python -m reveille.waked`. That leaves
+    sys.argv[0] pointing at the MODULE FILE, which is not executable -- so the
+    next hour's `--version` probe raises, the shield catches it, and convergence
+    reports "check failed" for ever after. The feature would have worked exactly
+    once per machine and then gone quiet, which is the failure this whole change
+    exists to end: a thing that silently stops converging is indistinguishable
+    from the stale toolchain it was meant to fix.
+    """
+    import inspect
+    src = inspect.getsource(waked._converge_inner)
+    assert '"-m"' not in src, "re-exec via -m breaks argv[0] for the next probe"
+    assert 'shutil.which("reveille-waked")' in src, "resolve the console script"
+    # One resolved path used for BOTH, so they can never disagree.
+    assert src.count("me = ") == 1
+    assert "[me, \"--version\"]" in src, "probe through the console script"
+    assert "os.execv(me, [me, *sys.argv[1:]])" in src, "exec the same path"
+
+
+def test_uv_is_a_bootstrap_dependency_not_a_prerequisite(monkeypatch):
+    """Operator 12140: no user should have to know how to build our toolchain
+    deps. uv is one self-contained binary that brings its own python and needs
+    no admin, so a machine without it is one curl away -- the agent image
+    already installs it exactly this way."""
+    monkeypatch.setattr(waked.shutil, "which", lambda n: "/usr/bin/uv" if n == "uv" else None)
+    assert waked._uv_or_bootstrap() == "/usr/bin/uv", "present: use it, install nothing"
+
+    import inspect
+    src = inspect.getsource(waked._uv_or_bootstrap)
+    assert "astral.sh/uv/install.sh" in src, "absent: fetch it"
+    assert "return \"\"" in src, "unfetchable is a reason to skip, never to fail"
+
+
+def test_a_missing_uv_that_cannot_be_installed_skips_rather_than_raises(monkeypatch):
+    """Skipping the convergence is correct; taking the wake path down over it
+    is not."""
+    monkeypatch.setattr(waked, "_broker_version", lambda url: "0.2.999")
+    monkeypatch.setattr(waked, "_uv_or_bootstrap", lambda: "")
+    waked._converge("ws://x/wake", {})   # returns quietly

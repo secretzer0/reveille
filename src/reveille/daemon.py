@@ -304,6 +304,22 @@ broker outage cannot become a probe-per-reconnect storm. On success it
 os.execv's itself: the environment carries the credential, the flock is retaken,
 and a ring that lands mid-swap waits in the spool and fires at the next arm.
 
+BOTH THE PROBE AND THE EXEC GO THROUGH THE CONSOLE SCRIPT, never `python -m`
+(caught in review). Re-execing as a module leaves argv[0] pointing at the module
+FILE, which is not executable, so the next hour's --version probe raises, the
+shield catches it, and convergence reports "check failed" for ever after -- the
+feature would have worked exactly once per machine and then gone quiet. A thing
+that silently stops converging is indistinguishable from the stale toolchain it
+was meant to fix.
+
+UV IS A BOOTSTRAP DEPENDENCY, NOT A PREREQUISITE (operator 12140). It is one
+self-contained binary that brings its own python and needs no admin, so a
+machine without it is one curl away -- the same install the agent image already
+runs. A uv that is missing AND unfetchable skips the convergence; it never fails
+the daemon. Windows takes the same shape with install.ps1 and belongs to DES-021,
+not here: nothing in waked runs on Windows yet (fcntl is imported at module top),
+so branching for it now would be dead code pretending to be support.
+
 NATIVE AND CONTAINER ARE THE SAME CODE, because waked runs in both. The
 container consequence the architect accepted: its toolchain can now legitimately
 exceed the image pin. The launcher's `version` read verb still reports only the

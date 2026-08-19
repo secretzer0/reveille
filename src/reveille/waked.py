@@ -280,6 +280,40 @@ def _broker_version(url):
         return ""
 
 
+def _uv_or_bootstrap():
+    """Path to uv, installing it first if this machine has none.
+
+    UV IS A BOOTSTRAP DEPENDENCY, NOT A PREREQUISITE (operator 12140: "without
+    forcing the user to know how to build our toolchain deps"). It is a single
+    self-contained binary that brings its own python and needs no admin, so a
+    machine that lacks it is one curl away from having it -- and the agent image
+    already installs it exactly this way. Returns "" when it is absent and could
+    not be fetched, which is a reason to skip converging, never to fail.
+
+    Windows takes the same shape with install.ps1 and is DES-021's, not this
+    slice's: nothing else in this file runs there yet (fcntl is imported at
+    module top), so branching for it here would be dead code pretending to be
+    support.
+    """
+    import subprocess
+    found = shutil.which("uv") or (
+        os.path.expanduser("~/.local/bin/uv")
+        if os.path.exists(os.path.expanduser("~/.local/bin/uv")) else "")
+    if found:
+        return found
+    print("reveille-waked: uv not found -- installing it", file=sys.stderr)
+    try:
+        subprocess.run(["sh", "-c",
+                        "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+                       capture_output=True, text=True, timeout=300, check=True)
+    except Exception as e:
+        print(f"reveille-waked: uv bootstrap failed ({e!r})", file=sys.stderr)
+        return ""
+    return shutil.which("uv") or (
+        os.path.expanduser("~/.local/bin/uv")
+        if os.path.exists(os.path.expanduser("~/.local/bin/uv")) else "")
+
+
 def _converge(url, state):
     """Bring the toolchain up to the broker, then re-exec so it is RUNNING it.
 
@@ -314,7 +348,11 @@ def _converge_inner(url, state):
 
     print(f"reveille-waked: toolchain {__version__} is behind the broker "
           f"{'.'.join(str(n) for n in broker)} -- converging", file=sys.stderr)
-    uv = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
+    uv = _uv_or_bootstrap()
+    if not uv:
+        print("reveille-waked: uv is missing and could not be installed -- "
+              f"staying on {__version__}", file=sys.stderr)
+        return
     try:
         r = subprocess.run([uv, "tool", "install", "--force", "--from",
                             GIT_SOURCE, "reveille"],
@@ -329,23 +367,32 @@ def _converge_inner(url, state):
               file=sys.stderr)
         return
 
+    # BOTH THE PROBE AND THE EXEC GO THROUGH THE CONSOLE SCRIPT, never `-m`
+    # (architect, blocking on the first draft). Re-execing as
+    # `python -m reveille.waked` leaves sys.argv[0] pointing at the MODULE FILE,
+    # which is not executable -- so the next hour's `--version` probe raises,
+    # the shield catches it, and convergence reports "check failed" for ever
+    # after. The feature would have worked exactly once per machine and then
+    # gone quiet, which is the failure mode this whole PR exists to end.
+    me = shutil.which("reveille-waked") or sys.argv[0]
+
     # DID IT ACTUALLY MOVE? An install that exits 0 without changing the version
     # (a stale cache, a source that did not advance) would otherwise re-exec into
     # the same code and check again next hour for ever. Re-exec only on evidence.
     after = version_tuple(subprocess.run(
-        [sys.argv[0], "--version"], capture_output=True, text=True).stdout)
+        [me, "--version"], capture_output=True, text=True).stdout)
     if after and after <= installed:
         print(f"reveille-waked: convergence produced no change (still "
               f"{__version__}) -- not restarting", file=sys.stderr)
         return
 
-    print(f"reveille-waked: converged -- restarting on the new code",
+    print("reveille-waked: converged -- restarting on the new code",
           file=sys.stderr)
     # os.execv REPLACES this process: the environment carries REVEILLE_TOKEN, the
     # flock is retaken by the new image of the daemon, and the spool is untouched.
     # A ring that lands during the swap waits in the spool and fires at the next
     # arm -- the wake path is designed for exactly this and loses nothing.
-    os.execv(sys.executable, [sys.executable, "-m", "reveille.waked", *sys.argv[1:]])
+    os.execv(me, [me, *sys.argv[1:]])
 
 
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
