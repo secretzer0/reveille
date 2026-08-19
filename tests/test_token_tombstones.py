@@ -33,11 +33,17 @@ def db():
 
 
 def minted_twice(c):
-    """An owner, a bound mint, and the re-mint that supersedes it."""
+    """An owner, a bound mint, and the re-mint that supersedes it -- which under
+    the two-phase swap (ruling 11945) is the mint PLUS the new body's arrival.
+    The mint alone supersedes nothing now; join() is what displaces the old
+    credential, so a tombstone test has to actually arrive."""
     admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
     old = store.create_token(c, admin["id"], "body-1", agent_name="wanderer", create=True)
     new = store.create_token(c, admin["id"], "body-2", agent_name="wanderer")
-    assert old["id"] in new["superseded"]
+    assert new["pending"] and not new["superseded"], "a mint may not seize the identity"
+    superseded = store.commit_pending(c, new["id"])
+    assert old["id"] in superseded
+    new["superseded"] = superseded
     return admin, old, new
 
 

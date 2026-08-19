@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -265,7 +265,16 @@ CREATE TABLE IF NOT EXISTS tokens (
     agent_id     TEXT REFERENCES agents(id),
     -- Memory write tier (DES-001 section 6): state < write < ratify. Every new token
     -- starts at 'state' -- randy day one reads the hive and writes only his own state.
-    mem_tier     TEXT NOT NULL DEFAULT 'state'
+    mem_tier     TEXT NOT NULL DEFAULT 'state',
+    -- SET = this credential is MINTED BUT NOT YET ARRIVED (DES-012 s15, ruling
+    -- 11945). A body swap is two-phase: the mint no longer supersedes anything,
+    -- so the OLD body keeps working until the new one proves it is alive. The
+    -- new body's first join() is that proof, and it commits the swap in one
+    -- transaction. Until then this token may call join() and nothing else.
+    -- Unclaimed past PENDING_TTL_NS the broker's sweeper deletes it and the old
+    -- body never notices. NULL = live, which is every token that ever existed
+    -- before this column and every token that has arrived since.
+    pending_ns   INTEGER
                  CHECK (mem_tier IN ('state','write','ratify')),
     created_ns   INTEGER NOT NULL,
     last_used_ns INTEGER
@@ -1856,6 +1865,24 @@ CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
         conn.execute("PRAGMA user_version=31")
 
 
+def _upgrade_v33(conn, db_path):
+    """v33 -> v34 (DES-012 s15, ruling 11945): tokens.pending_ns.
+
+    Additive, and every existing row is correct as NULL: a token already in the
+    table has, by definition, already been the live credential for its
+    identity. Backfilling anything else would retroactively park bodies that
+    are working right now."""
+    with tx(conn):
+        # IF-NOT-EXISTS BY HAND, the same shape every additive step here uses:
+        # a chain replayed from an older version onto a database laid down from
+        # the current _SCHEMA already has the column, and ALTER has no IF NOT
+        # EXISTS. A step that cannot be re-run is a step that breaks the ladder.
+        have = {r[1] for r in conn.execute("PRAGMA table_info(tokens)")}
+        if "pending_ns" not in have:
+            conn.execute("ALTER TABLE tokens ADD COLUMN pending_ns INTEGER")
+        conn.execute("PRAGMA user_version=34")
+
+
 def _upgrade_v32(conn, db_path):
     """v32 -> v33 (DES-012 item 8): visits. Additive: one empty table, nothing
     existing is read or rewritten. No broker has ever held a visit, so there is
@@ -2031,7 +2058,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2811,7 +2838,7 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
     agent_name = (agent_name or "").strip() or None
     tid, secret = uuid.uuid4().hex, secrets.token_urlsafe(32)
     now = time.time_ns()
-    agent_id, superseded = None, []
+    agent_id, superseded, pending = None, [], False
     with tx(conn):
         if agent_name:
             valid_name(agent_name)
@@ -2868,16 +2895,116 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
                     f"mint attaches to an existing identity; creating a new "
                     f"agent is deliberate -- pass create=true. Your live "
                     f"agents: {', '.join(live) if live else '(none)'}")
-            superseded = supersede_bound_tokens(conn, owner_id, agent_id)
+            # THE MINT NO LONGER SEIZES THE IDENTITY (ruling 11941 Part A /
+            # 11945). It used to supersede here, in this transaction, which
+            # meant a move killed the working body BEFORE the new one existed
+            # -- and every failure after this line left the identity with no
+            # live credential at all. That is how red-shirt was stranded, and
+            # native-reveille-devops after it. So: if this identity already has
+            # a live body, the new credential is minted PENDING and the old one
+            # is not touched. The new body's first join() commits the swap
+            # (commit_pending); no arrival inside PENDING_TTL_NS and the
+            # sweeper deletes the pending token with nothing else disturbed.
+            # A bodyless identity stops being reachable from this path.
+            live = conn.execute(
+                "SELECT 1 FROM tokens WHERE owner_id=? AND agent_id=? "
+                "AND pending_ns IS NULL LIMIT 1", (owner_id, agent_id)).fetchone()
+            pending = bool(live)
+            # r4 (ruling 11938): NAMING A ROOM CLEARS A LEAVE. An owner ticking
+            # a room on a mint is a deliberate act with exactly the semantics of
+            # join(room=X), so it must clear the identity's standing leave for
+            # that room -- measured live 2026-08-18, when a swapped body's bare
+            # join() came back rooms=[] skipped=[Reveille2.0] and the agent sat
+            # silent in a room its owner had just granted it.
+            for rid in rooms or []:
+                conn.execute(
+                    "UPDATE members SET left_ns=NULL WHERE room_id=? AND principal=?",
+                    (rid, agent_principal(agent_id)))
         conn.execute(
             "INSERT INTO tokens(id, secret_hash, owner_id, label, agent_id, mem_tier, "
-            "created_ns) VALUES(?,?,?,?,?,?,?)",
-            (tid, _sha(secret), owner_id, label, agent_id, mem_tier, now))
+            "created_ns, pending_ns) VALUES(?,?,?,?,?,?,?,?)",
+            (tid, _sha(secret), owner_id, label, agent_id, mem_tier, now,
+             now if pending else None))
         for rid in rooms or []:
             assign_room(conn, tid, rid, owner_id)
     return {"id": tid, "secret": secret, "label": label, "agent_name": agent_name,
             "agent_id": agent_id, "mem_tier": mem_tier, "superseded": superseded,
-            "rooms": list(rooms or [])}
+            "rooms": list(rooms or []), "pending": pending}
+
+
+# THE ARRIVAL WINDOW (ruling 11945). Ten minutes: long enough for a container
+# to pull an image and boot, short enough that an abandoned mint does not sit
+# claimable for an afternoon. Expiry is the BROKER's timer, swept on a schedule
+# rather than lazily on the next request -- a pending nobody ever presents must
+# still die, and a lazy check would keep it alive precisely in the case where
+# nothing is coming.
+PENDING_TTL_NS = 10 * 60 * 1_000_000_000
+
+
+def commit_pending(conn, token_id):
+    """A pending credential ARRIVES: it goes live and the old body is superseded,
+    both in the caller's transaction. Returns the superseded ids, or [] when
+    this token was never pending -- every ordinary join passes straight through.
+
+    ARRIVAL IS THE COMMIT (ruling 11945), and the readiness act is join()
+    itself: no new verb, no fork window, no moment when two credentials for one
+    identity are both live. Called from join() for exactly that reason -- the
+    proof that the new body works is that it reached the bus, and there is no
+    earlier point that proves it.
+    """
+    if not token_id:
+        return []
+    r = conn.execute("SELECT owner_id, agent_id, pending_ns FROM tokens WHERE id=?",
+                     (token_id,)).fetchone()
+    if not r or r["pending_ns"] is None:
+        return []
+    conn.execute("UPDATE tokens SET pending_ns=NULL WHERE id=?", (token_id,))
+    # Ordered so the identity is never without one: this token is live by the
+    # line above, and named as the exception so the sweep cannot take it.
+    return supersede_bound_tokens(conn, r["owner_id"], r["agent_id"],
+                                  except_id=token_id)
+
+
+def resolve_pending(conn, token_id):
+    """Is this credential still pending? Read after join() to tell an arrival
+    that COMMITTED from one that never had anything to commit."""
+    r = conn.execute("SELECT pending_ns FROM tokens WHERE id=?", (token_id,)).fetchone()
+    return bool(r and r["pending_ns"] is not None)
+
+
+def live_token_ids(conn, owner_id, agent_id, except_id=None):
+    """The identity's live credentials right now. Read by the arrival path so it
+    knows WHOSE wake sockets the commit is about to displace -- the supersede
+    itself happens inside join()'s transaction, and by the time it returns the
+    rows are gone."""
+    return [r["id"] for r in conn.execute(
+        "SELECT id FROM tokens WHERE owner_id=? AND agent_id=? "
+        "AND pending_ns IS NULL AND id IS NOT ?",
+        (owner_id, agent_id, except_id))]
+
+
+def expire_pending(conn, now=None):
+    """Delete pending credentials nobody arrived on. Returns the ids deleted.
+
+    The old body is untouched by construction -- a pending mint never took
+    anything from it -- so this is the whole of the NAK path: the credential
+    that was going to replace it simply stops existing, and the machine that
+    was working keeps working. That is the invariant the two-phase swap exists
+    for, and it is why this sweep can be blunt.
+    """
+    now = now or time.time_ns()
+    rows = conn.execute(
+        "SELECT id FROM tokens WHERE pending_ns IS NOT NULL AND pending_ns < ?",
+        (now - PENDING_TTL_NS,)).fetchall()
+    if not rows:
+        return []
+    with tx(conn):
+        for r in rows:
+            # A plain delete, NOT supersede: nothing was superseded to begin
+            # with, so a tombstone here would sign-post a body that never
+            # existed toward a successor that never arrived.
+            conn.execute("DELETE FROM tokens WHERE id=?", (r["id"],))
+    return [r["id"] for r in rows]
 
 
 def resolve_token(conn, secret):
@@ -2894,7 +3021,11 @@ def resolve_token(conn, secret):
     conn.execute("UPDATE tokens SET last_used_ns=? WHERE id=?", (time.time_ns(), r["id"]))
     return {"id": r["id"], "owner_id": r["owner_id"], "label": r["label"],
             "agent_name": r["agent_name"], "agent_id": r["agent_id"],
-            "mem_tier": r["mem_tier"]}
+            "mem_tier": r["mem_tier"],
+            # Resolves like any other credential; what it may DO is the caller's
+            # gate (daemon: join() only). Refusing it here would make the one
+            # call it is allowed impossible.
+            "pending": r["pending_ns"] is not None}
 
 
 def list_tokens(conn, owner_id):
@@ -2995,7 +3126,7 @@ def leave_listed(conn, principal, token_id, room_id):
                  "AND left_ns IS NULL", (time.time_ns(), principal, token_id, room_id))
 
 
-def supersede_bound_tokens(conn, owner_id, agent_id):
+def supersede_bound_tokens(conn, owner_id, agent_id, except_id=None):
     """Revoke the owner's live tokens bound to this identity; returns their ids.
 
     Called at bound-mint time: ONE bus identity, ONE live credential (operator
@@ -3012,9 +3143,14 @@ def supersede_bound_tokens(conn, owner_id, agent_id):
     credential for one INSTANCE of a label, so a declined resurrect minting a
     new identity under a reused name does not revoke the retired instance's
     history of credentials by accident of spelling."""
+    # except_id is the ARRIVING credential (commit_pending): it is already live
+    # in this same transaction, so without excluding it the sweep would revoke
+    # the very body that just proved itself and tombstone it as displaced --
+    # one identity, zero live credentials, which is the state this whole
+    # two-phase design exists to make unreachable.
     rows = conn.execute(
-        "SELECT id, secret_hash FROM tokens WHERE owner_id=? AND agent_id=?",
-        (owner_id, agent_id)).fetchall()
+        "SELECT id, secret_hash FROM tokens WHERE owner_id=? AND agent_id=? "
+        "AND id IS NOT ?", (owner_id, agent_id, except_id)).fetchall()
     now = time.time_ns()
     for r in rows:
         # The tombstone rides the same transaction as the supersede (S2, ruling
@@ -4278,6 +4414,11 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
     # the credential was handed over -- so the stamp lives here, on the first
     # join the visiting token makes. Every other join passes straight through.
     visit_arrive(conn, token_id)
+    # THE SWAP COMMITS HERE, in this same transaction (ruling 11945). Reaching
+    # the bus IS the proof the new body works, so the credential that carried
+    # it goes live and the one it replaces is superseded at the same instant --
+    # never a window with two live, never a window with none.
+    commit_pending(conn, token_id)
     return rname
 
 

@@ -120,6 +120,21 @@ async def _session(uri, agent, state):
                           "exiting (the newer daemon owns the slot)",
                           file=sys.stderr)
                     return 2
+                if obj.get("reason") == "credential-superseded":
+                    # PARKED, NOT DEAD (rulings 11947 / 12008). The IDENTITY
+                    # moved to another body; this machine's credential is spent
+                    # and reconnecting with it would be a refusal loop against
+                    # a broker that has already answered. So: say so once, in
+                    # the words the operator will read, and stop -- silence
+                    # here is the defect, and it is the one that cost an hour
+                    # on 2026-08-18, when this daemon held an ESTABLISHED
+                    # socket on a dead credential and never printed a line.
+                    print(f"reveille-waked: PARKED -- superseded by "
+                          f"{obj.get('successor', 'another body')}; this "
+                          f"credential no longer speaks for {agent}. Not "
+                          f"reconnecting. Re-key this machine (`reveille init`) "
+                          f"to become the body again.", file=sys.stderr)
+                    return 4
                 if obj.get("wake"):
                     spool.write_ring(agent, frame)
                     state["last"] = time.time_ns()   # real rings reset the nudge
@@ -128,6 +143,17 @@ async def _session(uri, agent, state):
         finally:
             hb.cancel()
     return None
+
+
+def _why(e):
+    """Readable text for an exception whose str() is empty. Class name always;
+    the close code and reason when the exception carries one."""
+    said = str(e).strip()
+    code = getattr(getattr(e, "rcvd", None), "code", None)
+    if code is None:
+        code = getattr(getattr(e, "sent", None), "code", None)
+    where = f" (close {code})" if code is not None else ""
+    return f"{said}{where}" if said else f"{type(e).__name__}{where}"
 
 
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S):
@@ -167,7 +193,13 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S):
                     if code is not None:
                         return code
             except (OSError, websockets.WebSocketException) as e:
-                print(f"reveille-waked: {e} -- retrying in {delay}s",
+                # NEVER AN EMPTY REASON (ruling 12008). websockets' closed
+                # exceptions render as "" when the peer sent no close frame, so
+                # this loop printed `reveille-waked:  -- retrying in 15s` for an
+                # hour -- the one line you need readable is the one that said
+                # nothing. Fall back to the class name, and to the close code
+                # when there is one.
+                print(f"reveille-waked: {_why(e)} -- retrying in {delay}s",
                       file=sys.stderr)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 15)
@@ -203,6 +235,15 @@ def main():
         # an error.
         print(f"reveille-waked: {a.name} already held -- exiting", file=sys.stderr)
         return 0
+    # THE LOCK FILE NAMES ITS HOLDER (ruling 12008). It was opened, truncated
+    # and left empty, so nothing could tell WHICH process held the slot -- and
+    # a re-key had no way to retire the daemon still carrying the old
+    # credential except a pattern match on the process table, which is exactly
+    # the tool that must never be pointed at one's own command line. The flock
+    # already proves this pid is the holder; writing it down makes that fact
+    # readable.
+    lock.write(f"{os.getpid()}\n")
+    lock.flush()
     # The flock rides the open fd for the daemon's whole life; releasing is
     # process exit, which is exactly when the slot should free.
     return asyncio.run(_run(a.url, a.name, a.idle_nudge,

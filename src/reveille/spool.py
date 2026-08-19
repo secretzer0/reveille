@@ -36,6 +36,19 @@ def lock_path(agent, base=None):
     return os.path.join(ensure(agent, base), ".lock")
 
 
+def holder_pid(agent, base=None):
+    """The pid of the waked holding this agent's slot, or None.
+
+    Read, never trusted blindly: the caller signals it only after confirming it
+    is a live process, because a stale file naming a recycled pid would
+    otherwise hand a signal to an innocent bystander."""
+    try:
+        pid = int(open(lock_path(agent, base)).read().strip() or 0)
+    except (OSError, ValueError):
+        return None
+    return pid or None
+
+
 def write_ring(agent, text, base=None):
     """One ring, one file. tmp -> fsync -> atomic rename into new/: a watcher
     never sees a half-written entry, and a crash between the two leaves only

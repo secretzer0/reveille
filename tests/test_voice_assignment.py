@@ -67,9 +67,10 @@ def test_a_bound_token_carries_its_agent_id_into_the_principal(tmp_path, monkeyp
 # ---- routes ------------------------------------------------------------------
 
 class _P:
-    def __init__(self, kind, name, user_id, rooms, is_admin=False, agent_id=""):
+    def __init__(self, kind, name, user_id, rooms, is_admin=False, agent_id="",
+                 pending=False):
         self.kind, self.name, self.user_id, self.is_admin = kind, name, user_id, is_admin
-        self.rooms, self.agent_id = rooms, agent_id
+        self.rooms, self.agent_id, self.pending = rooms, agent_id, pending
 
 
 def _req(method, path, params, body=None):

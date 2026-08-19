@@ -156,8 +156,13 @@ def test_every_act_tool_and_mutating_route_wears_the_gate():
     tools = {}
     for m in re.finditer(r"@mcp\.tool\(\)\nasync def (\w+)\(.*?\n(?=@mcp\.tool\(\)|\n\n\S)", src, re.S):
         tools[m.group(1)] = m.group(0)
-    acts = {"join", "lesson_add", "memory_add", "memory_retract", "ratify", "reject", "send",
+    acts = {"lesson_add", "memory_add", "memory_retract", "ratify", "reject", "send",
             "ack", "upload", "leave", "presence"}
+    # join wears _arriving, which is _acting minus ONE refusal: a pending
+    # credential is allowed through, because join IS its arrival (ruling
+    # 11945). It still demands a name and a binding, and still clears the poke.
+    assert "_arriving(ctx.request_context.request)" in tools["join"], \
+        "join must go through _arriving -- the one door a pending credential may use"
     reads = {"rooms", "lessons", "recall", "brief", "info", "inbox", "thread", "trace", "graph",
              "history", "usage", "whoami"}
     for name, body in tools.items():

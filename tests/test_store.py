@@ -2218,8 +2218,12 @@ def test_bound_mint_supersedes_the_owners_previous_tokens_for_that_name():
     # ids ride the return so a rotation is reported rather than silent.
     # bare attach: the swap verb (DES-011 2.1) -- create=True here is a refusal
     t3 = store.create_token(c, admin["id"], "ui", agent_name="ui-dev")
-    assert t3["superseded"] == [t1["id"]]
-    assert store.resolve_token(c, t1["secret"]) is None      # instantly dead
+    # ...but the mint no longer performs it (two-phase, ruling 11945): the new
+    # credential is pending and the working body is untouched until it arrives.
+    assert t3["pending"] and t3["superseded"] == []
+    assert store.resolve_token(c, t1["secret"]) is not None
+    assert store.commit_pending(c, t3["id"]) == [t1["id"]]
+    assert store.resolve_token(c, t1["secret"]) is None      # dead on arrival, not on mint
     # and the binding is by IDENTITY: both mints resolved to the same agents row
     assert t3["agent_id"] == t1["agent_id"]
     mine = [t for t in store.list_tokens(c, admin["id"])

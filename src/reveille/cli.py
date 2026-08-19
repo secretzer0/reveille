@@ -29,6 +29,7 @@ import re
 import json
 import os
 import pathlib
+import signal
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,7 @@ import urllib.request
 
 from reveille import __version__
 
-from . import install
+from . import install, spool
 
 
 def read_token(args_token, stdin=None):
@@ -189,6 +190,37 @@ def write_credential(url, name, token, workdir):
     os.replace(tmp, path)
     os.chmod(path, 0o600)          # explicit, in case the file already existed
     return path
+
+
+def retire_waked(name):
+    """Stop the wake daemon still carrying the OLD credential. Returns a line to
+    report, or "".
+
+    A RE-KEY MUST REACH THE DAEMON (ruling 12008; measured 2026-08-18). waked
+    reads $REVEILLE_TOKEN once, at spawn, and holds it for the life of the
+    process -- on that day it held one for four hours and forty-six minutes
+    across a body swap and back, kept an ESTABLISHED socket the broker no
+    longer counted as a waiter, and left the agent deaf while every file on
+    disk said it was configured correctly. Writing the new credential is not
+    enough; the process reading the old one has to go.
+
+    By PID from the spool lock, never by pattern: the flock proves that pid is
+    the holder, and a pattern match on a process table would sooner or later
+    find the command line of whoever is running this. The Stop hook respawns a
+    daemon from the fresh session env at the next turn boundary."""
+    pid = spool.holder_pid(name)
+    if not pid:
+        return ""
+    try:
+        os.kill(pid, 0)            # live? a stale file names a recycled pid
+    except OSError:
+        return ""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        return f"could not stop the old wake daemon (pid {pid}): {e}"
+    return (f"stopped the wake daemon holding the previous credential (pid {pid}) -- "
+            f"the Stop hook starts a fresh one on the new one")
 
 
 # ---- minting from a password (operator ask, 2026-07-31) ---------------------
@@ -782,6 +814,11 @@ def cmd_init(a):
               f"file is fixed and init converges the rest.", file=sys.stderr)
         return 1
     steps.append(f"credential: {path} (0600) -- this directory IS the agent")
+    # THE DAEMON HOLDING THE OLD CREDENTIAL HAS TO GO (ruling 12008). It read
+    # its token once, at spawn, and no file written here can reach it.
+    retired = retire_waked(name)
+    if retired:
+        steps.append(f"wake: {retired}")
     # ALWAYS, wizard or not (operator 11879 + red-shirt, 2026-08-18): the paste
     # path skips every prompt, and an agent with no CLAUDE.md has no boot ritual
     # -- it comes up connected and doctrine-less, which is what red-shirt did.
