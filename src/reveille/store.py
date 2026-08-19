@@ -5750,7 +5750,7 @@ def _mem_by_uid(conn, uid):
 
 def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
                owned_rooms, fact, kind, scope="", entities="", source=0,
-               supersedes="", occurred_ns=None):
+               supersedes="", occurred_ns=None, agent_id=""):
     """Add one memory, gated by the caller's tier (DES-001 section 6).
 
     Below-tier writes land as status='draft' -- invisible to recall()/brief() until
@@ -5772,7 +5772,7 @@ def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
             raise AccessError(
                 "state memories need a BOUND token: under a shared token every agent "
                 "shares one state bucket, and a wrong brief is worse than none")
-        scope = agent_scope(conn, token_id)
+        scope = agent_scope(conn, token_id, agent_id)
         status = "live"                       # own state is always yours to write
         expires_ns = time.time_ns() + STATE_TTL_NS
     else:
@@ -5854,7 +5854,7 @@ def _chain_info(conn, row):
     return depth, fork
 
 
-def agent_scope(conn, token_id):
+def agent_scope(conn, token_id, agent_id=""):
     """The scope a state note lives at, for this token: agent:<agent_id> when the
     token is bound to a name with an identity, agent:<token_id> otherwise.
 
@@ -5873,6 +5873,15 @@ def agent_scope(conn, token_id):
     unbound token, so the fallback is reached only by readers, where it returns
     the empty bucket such a caller has always had.
     """
+    # THE IDENTITY IS THE ANSWER, AND THE CALLER MAY ALREADY HOLD IT. A HANDOVER
+    # principal (R2) has no token row -- the supersede deleted it -- and an empty
+    # token_id, so the lookup below returned the scope "agent:" for it: an empty
+    # bucket, invisible to the body that arrives, and SHARED by every handover
+    # body of every identity. The note the grace exists to write landed where
+    # nobody reads and everybody could (measured 2026-08-19; caught in review by
+    # the architect one layer below the crash it was hiding behind).
+    if agent_id:
+        return f"agent:{agent_id}"
     row = conn.execute("SELECT agent_id FROM tokens WHERE id=?",
                        (token_id,)).fetchone()
     return (f"agent:{row['agent_id']}" if row and row["agent_id"]
@@ -5881,13 +5890,14 @@ def agent_scope(conn, token_id):
 
 def recall(conn, *, rooms, token_id, caller="", tier="state", is_admin=False,
            owned_rooms=(), query="", kind="", scope="", entity="", author="",
-           since_ns=None, until_ns=None, status="live", limit=10, explain=False):
+           since_ns=None, until_ns=None, status="live", limit=10, explain=False,
+           agent_id=""):
     """Ranked live facts (DES-001 section 5). Read scoping is the invariant every
     read path obeys: global OR the caller's rooms OR the caller's OWN agent scope --
     other agents' state is never returned, at any status. Drafts are visible to
     their author, to ratify-eligible owners (owned_rooms), and to admins."""
     where = ["(m.scope='global' OR m.scope IN (%s) OR m.scope=?)" % _ph(list(rooms))]
-    args = list(rooms) + [agent_scope(conn, token_id)]
+    args = list(rooms) + [agent_scope(conn, token_id, agent_id)]
     where.append("(m.expires_ns IS NULL OR m.expires_ns > ?)")
     args.append(time.time_ns())
     if status in ("draft", "rejected") and not is_admin:
@@ -6159,7 +6169,7 @@ def sweep_expired_state(conn):
     return len(rows)
 
 
-def brief(conn, *, rooms, token_id, role="", budget=28000):
+def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
     """The onboarding pack (DES-001 section 7): lessons, then doctrine ranked by
     entity overlap with the caller's role, then live contracts, then decisions
     (recent weighted up), then own state, then a presence digest. Budget is CHARS
@@ -6260,7 +6270,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000):
     srows = conn.execute(
         "SELECT * FROM memories WHERE kind='state' AND status='live' AND scope=? "
         "AND (expires_ns IS NULL OR expires_ns > ?) ORDER BY created_ns DESC",
-        (agent_scope(conn, token_id), time.time_ns())).fetchall()
+        (agent_scope(conn, token_id, agent_id), time.time_ns())).fetchall()
     if srows:
         section("state", srows, lambda r, _: f"- {r['fact']}", 0.15)
     # 6. presence digest

@@ -242,6 +242,63 @@ def test_a_second_run_survives_a_claude_that_refuses_a_duplicate(tmp_path, broke
     assert len(adds) == 2, adds
 
 
+def test_installing_over_another_agents_directory_is_refused(tmp_path, broker,
+                                                             monkeypatch, capsys):
+    """MEASURED 2026-08-19, and it cost an identity. `reveille init <broker>
+    native-reveille-devops` ran with no --dir from a shell sitting in
+    red-shirt-01's directory. It wrote devops' credential over red-shirt's
+    settings.local.json, so the next session started there read the file,
+    believed it was devops, and called join() -- which IS the arrival. One agent
+    arrived as another, superseding devops' real body mid-turn and destroying
+    the handover note that body was writing.
+
+    The directory IS the agent, so a directory that already names one is a fact,
+    not a default to overwrite."""
+    claude, log = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude)
+    (work / ".claude").mkdir(parents=True, exist_ok=True)
+    (work / ".claude" / "settings.local.json").write_text(json.dumps(
+        {"env": {"REVEILLE_AGENT_ROLE": "red-shirt-01", "REVEILLE_TOKEN": "theirs"}}))
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    rc = cli.main(argv)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "this directory is 'red-shirt-01'" in err and "'dev-agent'" in err
+    assert "--dir" in err and "--force" in err, "both remedies named"
+    assert "Nothing was installed" in err
+    assert not log.exists(), "and nothing local ran either"
+    kept = json.loads((work / ".claude" / "settings.local.json").read_text())
+    assert kept["env"]["REVEILLE_AGENT_ROLE"] == "red-shirt-01", "untouched"
+    assert kept["env"]["REVEILLE_TOKEN"] == "theirs"
+
+
+def test_force_installs_over_it_deliberately(tmp_path, broker, monkeypatch):
+    """Replacing an agent's body with another IS a real thing to want. It just
+    must never be what a wrong cwd does."""
+    claude, log = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude, force=True)
+    (work / ".claude").mkdir(parents=True, exist_ok=True)
+    (work / ".claude" / "settings.local.json").write_text(json.dumps(
+        {"env": {"REVEILLE_AGENT_ROLE": "red-shirt-01"}}))
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 0
+    kept = json.loads((work / ".claude" / "settings.local.json").read_text())
+    assert kept["env"]["REVEILLE_AGENT_ROLE"] == "dev-agent"
+
+
+def test_the_same_agent_re_running_in_its_own_directory_is_not_refused(
+        tmp_path, broker, monkeypatch):
+    """Re-running init in your OWN directory is the ordinary convergence path --
+    the one the PARKED daemon's message tells a person to use."""
+    claude, log = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude)
+    (work / ".claude").mkdir(parents=True, exist_ok=True)
+    (work / ".claude" / "settings.local.json").write_text(json.dumps(
+        {"env": {"REVEILLE_AGENT_ROLE": "dev-agent"}}))
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 0
+
+
 def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
     claude, log = fake_claude(tmp_path, listed="reveille")
     argv, home, work = run(tmp_path, broker, claude)
