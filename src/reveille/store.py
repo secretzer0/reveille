@@ -79,7 +79,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -495,6 +495,24 @@ CREATE TABLE IF NOT EXISTS message_entities (
     PRIMARY KEY (entity, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_msgent_msg ON message_entities(message_id);
+-- DES-012 s14: THE RETURN TICKET. A machine that already HELD a credential for
+-- this identity can exchange its superseded one for a live one, inside a window
+-- the owner opened deliberately -- so a body that was moved away comes back
+-- without a paste. Nothing here is a secret: claim_hash is the hash of the
+-- SUPERSEDED credential (the broker already keeps that as a tombstone), and the
+-- new secret is minted at CLAIM time and answered exactly once.
+CREATE TABLE IF NOT EXISTS recalls (
+    id           TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,        -- only the owner may offer a return
+    claim_hash   TEXT NOT NULL,        -- sha of the superseded secret: the proof
+    rooms        TEXT NOT NULL,        -- json list: the reach the returning body gets
+    created_ns   INTEGER NOT NULL,
+    expires_ns   INTEGER NOT NULL,     -- a short window; an open door is not an offer
+    claimed_ns   INTEGER,
+    token_id     TEXT                  -- the ONE credential this offer minted
+);
+CREATE INDEX IF NOT EXISTS recalls_claim ON recalls(claim_hash);
 """
 
 # DES-013: THE BANK reveille owns (section 3), WHO SPEAKS WITH WHAT in a room
@@ -1865,6 +1883,35 @@ CREATE INDEX IF NOT EXISTS idx_roomaudit_room ON room_audit(room_id);
         conn.execute("PRAGMA user_version=31")
 
 
+RECALLS_SCHEMA = """-- DES-012 s14: THE RETURN TICKET. A body that was superseded does not have to be
+-- re-installed by hand to come back: the machine that already HELD a credential
+-- for this identity can exchange its dead one for a live one, inside a window
+-- the owner opened deliberately. Nothing here is a secret -- claim_hash is the
+-- hash of the SUPERSEDED credential, which the broker already stored as a
+-- tombstone, and the new secret is minted at CLAIM time and answered once.
+CREATE TABLE IF NOT EXISTS recalls (
+    id           TEXT PRIMARY KEY,
+    agent_id     TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,        -- only the owner may offer a return
+    claim_hash   TEXT NOT NULL,        -- sha of the superseded secret: the proof
+    rooms        TEXT NOT NULL,        -- json list: the reach the returning body gets
+    created_ns   INTEGER NOT NULL,
+    expires_ns   INTEGER NOT NULL,     -- a short window; an open door is not an offer
+    claimed_ns   INTEGER,
+    token_id     TEXT                  -- the ONE credential this offer minted
+);
+CREATE INDEX IF NOT EXISTS recalls_claim ON recalls(claim_hash);
+"""
+
+
+def _upgrade_v34(conn, db_path):
+    """v34 -> v35 (DES-012 s14): recalls. Additive, one empty table; no broker
+    has ever held a recall offer, so there is nothing to backfill."""
+    with tx(conn):
+        _exec_script(conn, RECALLS_SCHEMA)
+        conn.execute("PRAGMA user_version=35")
+
+
 def _upgrade_v33(conn, db_path):
     """v33 -> v34 (DES-012 s15, ruling 11945): tokens.pending_ns.
 
@@ -2058,7 +2105,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -2963,6 +3010,112 @@ def commit_pending(conn, token_id):
     # line above, and named as the exception so the sweep cannot take it.
     return supersede_bound_tokens(conn, r["owner_id"], r["agent_id"],
                                   except_id=token_id)
+
+
+# THE RETURN WINDOW (DES-012 s14, ruling 11941 Part B). Five minutes: the parked
+# daemon polls, so this only has to outlast a poll interval and a human's click,
+# and an offer that stood for an hour would be a standing invitation to whoever
+# ends up holding that disk.
+RECALL_TTL_NS = 5 * 60 * 1_000_000_000
+
+
+def recall_offer(conn, *, agent_id, owner_id, superseded_secret_hash, rooms,
+                 ttl_ns=RECALL_TTL_NS):
+    """Open a return ticket: whoever can present the SUPERSEDED credential for
+    this identity may exchange it for a live one, once, inside the window.
+
+    WHY A HASH AND NOT A SECRET. The broker never stores a credential it could
+    hand back, so this records only the hash it will be shown -- the same hash
+    the supersede tombstone already holds. The new credential is minted at CLAIM
+    time and answered exactly once, which means an offer sitting in the table is
+    worth nothing to anyone who reads the table.
+
+    WHY POSSESSION IS THE RIGHT PROOF. The claimant is a machine this identity
+    already lived on: the owner put it there, and the credential it holds was
+    live until the swap displaced it. Exchanging a dead credential for a live
+    one asks that machine to prove exactly what the owner is relying on -- that
+    it is still the same machine -- and asks the bus to carry no fresh secret in
+    the clear on the way (Part B).
+    """
+    if not superseded_secret_hash:
+        raise BusError("a return ticket is claimed by presenting the superseded "
+                       "credential -- without its hash there is nothing to check")
+    rooms = [r for r in (rooms or []) if r]
+    if not rooms:
+        raise BusError("a returning body needs at least one room -- one with none "
+                       "reaches nothing")
+    now = time.time_ns()
+    rid = uuid.uuid4().hex
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO recalls(id, agent_id, owner_id, claim_hash, rooms, "
+            "created_ns, expires_ns) VALUES(?,?,?,?,?,?,?)",
+            (rid, agent_id, owner_id, superseded_secret_hash, json.dumps(rooms),
+             now, now + ttl_ns))
+    return {"id": rid, "agent_id": agent_id, "expires_ns": now + ttl_ns,
+            "rooms": rooms}
+
+
+def recall_claim(conn, secret, now=None):
+    """Exchange a superseded credential for a live PENDING one. Returns the mint
+    (secret included, once) or None when no offer matches.
+
+    None rather than an error, deliberately: the parked daemon POLLS this, and
+    "no offer for you" is the ordinary answer for almost every call. An error
+    would make the normal case look like a fault in every log that carries it.
+    """
+    now = now or time.time_ns()
+    h = _sha(secret or "")
+    r = conn.execute(
+        "SELECT * FROM recalls WHERE claim_hash=? AND claimed_ns IS NULL "
+        "AND expires_ns > ? ORDER BY created_ns DESC LIMIT 1", (h, now)).fetchone()
+    if not r:
+        return None
+    # ONE CLAIM, and it is stamped in the same transaction as the mint: two
+    # daemons holding copies of one disk image would otherwise both return with
+    # the same right, and the second would displace the first as a stranger.
+    with tx(conn):
+        got = conn.execute(
+            "UPDATE recalls SET claimed_ns=? WHERE id=? AND claimed_ns IS NULL",
+            (now, r["id"])).rowcount
+        if not got:
+            return None
+        agent = conn.execute("SELECT name FROM agents WHERE id=?",
+                             (r["agent_id"],)).fetchone()
+        if not agent:
+            raise NotFound("the identity this ticket was written for is gone")
+    tok = create_token(conn, r["owner_id"], f"return:{agent['name']}",
+                       agent_name=agent["name"], rooms=json.loads(r["rooms"]))
+    conn.execute("UPDATE recalls SET token_id=? WHERE id=?", (tok["id"], r["id"]))
+    conn.commit()
+    return dict(tok, recall_id=r["id"])
+
+
+def recalls_for(conn, owner_id, now=None):
+    """The owner's open return tickets -- what is offered and how long it stands.
+    Never the hash: it is the proof, and a proof on a screen is a proof spent."""
+    now = now or time.time_ns()
+    out = []
+    for r in conn.execute(
+            "SELECT r.*, a.name AS agent FROM recalls r "
+            "JOIN agents a ON a.id=r.agent_id "
+            "WHERE r.owner_id=? ORDER BY r.created_ns DESC LIMIT 50", (owner_id,)):
+        out.append({"id": r["id"], "agent": r["agent"],
+                    "rooms": json.loads(r["rooms"]),
+                    "expires_ns": r["expires_ns"],
+                    "claimed_ns": r["claimed_ns"],
+                    "state": ("claimed" if r["claimed_ns"]
+                              else "open" if r["expires_ns"] > now else "expired")})
+    return out
+
+
+def superseded_hash_for(conn, agent_id):
+    """The hash of the credential most recently displaced for this identity --
+    the one a parked body is still holding. None when nothing was displaced."""
+    r = conn.execute(
+        "SELECT secret_hash FROM token_tombstones WHERE agent_id=? "
+        "ORDER BY superseded_ns DESC LIMIT 1", (agent_id,)).fetchone()
+    return r["secret_hash"] if r else None
 
 
 def resolve_pending(conn, token_id):
