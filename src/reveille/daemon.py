@@ -277,14 +277,21 @@ landed, so there was no moment in which it could write anything down. Two-phase
 created that moment. At a PENDING mint the broker now RINGS the body that is
 still live with `reason: swap-pending` (successor named when known) -- a ring,
 not a close, because that body is still the live one and may keep working. The
-doctrine block teaches the response: write the handover NOW, while you hold the
-context -- memory_add kind=state with task, branch, next step, open threads,
-what is uncommitted and where -- then carry on; if the swap never arrives,
-nothing about your situation changed. The note is the AGENT'S act, never
-synthesised: the broker cannot know what is worth saying, and a fabricated
-handover is a record of work nobody did. State notes are already
-identity-scoped, so they travel; FILES do not move (s2.1 stands) and the note
-says where they are.
+doctrine block teaches the response, in two acts and in this order (operator
+12023, ruled 12024). (1) SAVE THE WORK: files do not travel, so a note
+describing uncommitted work the new body cannot reach is a description of
+something lost -- commit everything uncommitted to wip/<agent>/<utc-ts> and push
+it, never onto main and never force, because that branch exists so the far side
+can FETCH it, not so it can overwrite anything. (2) WRITE THE NOTE: memory_add
+kind=state with the task, that branch and sha, next step, open threads and what
+is still undone; if the push was impossible, say exactly "unpushed at
+<host>:<path>" so the new body knows the work is stranded rather than assuming
+it travelled. The new body fetches that branch before it does anything else.
+Then carry on -- if the swap never arrives, nothing about the old body's
+situation changed. The note is the AGENT'S act, never synthesised: the broker
+cannot know what is worth saying, and a fabricated handover is a record of work
+nobody did. State notes are already identity-scoped, so they travel; FILES do
+not move (s2.1 stands), which is exactly why act (1) exists.
 FOUND WHILE CHECKING THAT SCOPE: join()'s brief_available counted state notes at
 agent:<token_id> while every writer stores them at agent:<agent_id>. A bound
 agent's own resume point was invisible in the one number the boot ritual
@@ -5073,10 +5080,15 @@ async def wake_ws(ws: WebSocket):
                 await ws.send_json({"wake": True, "reason": "swap-pending",
                     **({"successor": nxt} if nxt else {}),
                     "note": "a new credential was minted for your identity and is "
-                            "waiting to arrive. You are STILL the live body: write "
-                            "your handover now (memory_add kind=state -- task, "
-                            "branch, next step, open threads) and carry on. The new "
-                            "body reads it first. If it never arrives, nothing "
+                            "waiting to arrive. You are STILL the live body. Two "
+                            "acts, in order: (1) SAVE THE WORK -- files do not "
+                            "travel, so commit anything uncommitted to "
+                            "wip/<agent>/<utc-ts> and push it; never main, never "
+                            "force. (2) WRITE THE NOTE -- memory_add kind=state "
+                            "with the task, that branch and sha, next step, open "
+                            "threads, and what is undone; if you could not push, "
+                            "say 'unpushed at <host>:<path>'. The new body fetches "
+                            "that branch first. If the swap never arrives, nothing "
                             "changes for you."})
                 # Its own ring, then back to waiting: this frame is not mail and
                 # must not consume the poke gate or be counted as unread.

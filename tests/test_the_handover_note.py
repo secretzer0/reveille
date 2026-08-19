@@ -57,8 +57,24 @@ def test_the_doctrine_block_tells_the_agent_what_to_do_with_it():
     """A frame nobody was taught to read is a frame that changes nothing."""
     block = cli.doctrine_block("someone", "", "0.0.0")
     assert "swap-pending" in block
-    assert "memory_add" in block and "handover" in block
+    assert "memory_add" in block
     assert "STILL the live body" in block
+
+
+def test_the_work_is_saved_before_the_note_is_written():
+    """Operator 12023, ruled 12024: a note describing uncommitted work the new
+    body cannot reach is a description of something lost. Files do not travel,
+    so the work has to be pushed somewhere the far side can fetch -- and the
+    note has to carry the branch and sha, or say plainly where it is stranded."""
+    block = cli.doctrine_block("someone", "", "0.0.0")
+    assert "wip/$REVEILLE_AGENT_ROLE/<utc-ts>" in block
+    assert "NEVER onto main, NEVER a force-push" in block, (
+        "this branch exists so the far side can fetch it, not overwrite anything")
+    assert "unpushed at <host>:<path>" in block, "a failed push must be said, not implied"
+    assert "FETCHES that branch before it does anything else" in block
+    # ORDER MATTERS: save, then describe. A note written first describes a state
+    # the push may still change.
+    assert block.index("SAVE THE WORK") < block.index("WRITE THE NOTE")
 
 
 def test_the_note_is_the_agents_act_never_synthesised():
