@@ -55,6 +55,15 @@ every host the same way. Nothing else decides, nothing else checks.
 - Named and accepted: `curl | sh` plus auto-converge are two places code
   arrives without a human reading it first. Same mitigation for both: one
   trusted origin, TLS, main-is-the-release.
+- **A local-directory receipt is repaired, not trusted** (devops 12157): the
+  operator's laptop had been installed from a checkout
+  (`requirements = [{ directory = "/home/.../reveille" }]`), so a plain
+  `uv tool upgrade` would have tracked whatever branch was checked out and
+  looked clean. Converge always runs the canonical `--from <GIT_SOURCE>`
+  command, which rewrites the receipt to the git source on first run. Slice 2
+  adds a one-shot receipt audit line per body so a pre-0.2.185 body installed
+  from a checkout (the image's `uv tool install /tmp/reveille` is the same
+  class) is NAMED at the first tick, not discovered later.
 - **Comparison is `installed < broker`** (devops 12131). A body AHEAD of the
   broker is the normal state for the minutes between a merge and its deploy
   and is converged, not pathological; `!=` against a moving HEAD would
