@@ -67,7 +67,11 @@ def test_attaching_to_a_live_identity_needs_no_flag():
     first = store.create_token(c, a["id"], "b1", agent_name="wanderer", create=True)
     second = store.create_token(c, a["id"], "b2", agent_name="wanderer")
     assert second["agent_id"] == first["agent_id"]
-    assert first["id"] in second["superseded"]
+    # Two-phase (ruling 11945): the mint is PENDING and takes nothing. The old
+    # body is still the live one until the new body arrives.
+    assert second["pending"] and second["superseded"] == []
+    assert store.resolve_token(c, first["secret"]) is not None
+    assert store.commit_pending(c, second["id"]) == [first["id"]]
 
 
 def test_a_retired_name_is_not_a_live_identity():
@@ -129,7 +133,8 @@ def test_the_route_refuses_structured_and_create_true_proceeds():
         code, body2, _ = _post(b.base, "/tokens",
                                {"agent_name": "wanderer", "label": "x2"}, cookie)
         assert code == 200 and body2["agent_id"] == body["agent_id"]
-        assert body["id"] in body2["superseded"]
+        # Two-phase over the wire (ruling 11945): pending, and nothing displaced.
+        assert body2["pending"] and body2["superseded"] == []
 
 
 # ---- the launcher: create is a parameter, never a property (msg 10919) --------
@@ -198,7 +203,10 @@ def test_the_sibling_bare_attach_on_a_held_name_is_the_body_swap():
     first = store.create_token(c, a["id"], "laptop", agent_name="wanderer", create=True)
     second = store.create_token(c, a["id"], "container", agent_name="wanderer")
     assert second["agent_id"] == first["agent_id"], "same being, new body"
-    assert first["id"] in second["superseded"]
+    # The swap is two-phase now (ruling 11945): the mint is pending, and the
+    # sibling's arrival is what displaces the body that held the name.
+    assert second["pending"] and second["superseded"] == []
+    assert store.commit_pending(c, second["id"]) == [first["id"]]
     assert store.resolve_token(c, first["secret"]) is None, "old body superseded"
     assert store.tombstone_for(c, first["secret"]), "old body gets the signpost"
     assert c.execute("SELECT count(*) FROM tokens WHERE agent_id=?",
@@ -228,7 +236,10 @@ def test_the_route_refuses_a_held_name_structured():
         code, body2, _ = _post(b.base, "/tokens",
                                {"agent_name": "wanderer", "label": "swap"}, cookie)
         assert code == 200 and body2["agent_id"] == first["agent_id"]
-        assert first["id"] in body2["superseded"]
+        # ...and the swap it starts is two-phase over the wire too: the route
+        # hands back a PENDING credential and displaces nothing until the new
+        # body joins on it (ruling 11945).
+        assert body2["pending"] and body2["superseded"] == []
 
 
 # ---- BLOCKING 1 on PR #7 (msg 11000): refused AND told --------------------------

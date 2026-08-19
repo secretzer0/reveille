@@ -164,7 +164,7 @@ def test_a_failure_after_the_swap_mint_says_what_state_it_left(tmp_path):
     i = route.index("except (LaunchError, subprocess.CalledProcessError) as e:")
     window = route[i:i + 2000]
     assert "revoke_minted_token" in window
-    assert "NO LIVE BODY" in window and "Retry the move" in window, \
+    assert "KEPT the body it had" in window and "Retry the move" in window, \
         "a silent revoke is how an agent vanished from presence with no reason"
 
 

@@ -99,8 +99,16 @@ def test_the_accept_mints_one_body_and_the_home_one_goes_dark(tmp_path):
     assert store.resolve_token(c, home["secret"])["id"] == home["id"]
     v = ask(c, bob, travis, shared, agent)
     out = store.visit_decide(c, v["id"], travis["id"], "accept", body="native")
-    # gate 4: one identity, one live body -- the home credential is superseded
-    assert store.resolve_token(c, home["secret"]) is None
+    # gate 4: one identity, one live body -- but the displacement is the
+    # VISITING BODY'S ARRIVAL, not the accept (two-phase, ruling 11945). An
+    # accept that killed the home body before the harbor booted is how a visit
+    # that never starts costs an agent its only credential.
+    assert store.resolve_token(c, home["secret"])["id"] == home["id"], \
+        "the home body works until the visitor proves it arrived"
+    tok = store.resolve_token(c, out["secret"])
+    assert tok["pending"], "the visit's credential is pending until it joins"
+    store.join(c, "architect", "agent", shared["id"], token_id=tok["id"])
+    assert store.resolve_token(c, home["secret"]) is None, "arrival displaces it"
     tok = store.resolve_token(c, out["secret"])
     assert tok["agent_id"] == agent["id"] and tok["owner_id"] == bob["id"]
     assert list(store.rooms_for_token(c, tok["id"])) == [shared["id"]]

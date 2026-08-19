@@ -268,6 +268,48 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.176 A BODY SWAP IS TWO PHASE (DES-012 s15; ruling 11941 Part A, 11945,
+11947, 12008). The mint used to seize the identity -- it superseded the working
+body in its own transaction, BEFORE the new body existed -- so everything that
+failed afterwards left the identity with NO live credential at all: a missing
+role prompt, a docker error, a person who never ran the command. reveille-red-
+shirt was stranded that way on 2026-08-18 and native-reveille-devops after it.
+NOW THE MINT TAKES NOTHING. A bound mint on an identity that already has a live
+body returns a PENDING credential (`pending: true`); the old body keeps working;
+the new body's first join() IS the arrival and commits the swap in ONE
+transaction -- pending goes live and the old is superseded at the same instant,
+so there is never a window with two live credentials and never one with none.
+The readiness act is join() itself: no new verb, no fork window. A pending
+credential may call join() and NOTHING else -- every other route, read or write,
+refuses with "pending: join first. ... the identity's previous body is still the
+live one". No arrival inside 10 minutes and the broker's own sweeper deletes the
+pending token: the machine that was working keeps working and never learns
+anything happened. That is the whole NAK path, and a bodyless identity stops
+being reachable from this path. A first mint for an identity with no live body
+is live at once -- a pending nobody can commit would BE the bodyless state.
+THE DISPLACED BODY IS NOW TOLD ON THE SOCKET IT IS STILL HOLDING. Measured
+live: a supersede revoked the credential everywhere HTTP and MCP could see it
+while the old body's WebSocket stayed ESTABLISHED for an hour, still receiving
+rings on a credential the broker refused for every other purpose, never sent a
+close, a 401 or anything it could log. One credential, two verdicts, and the
+silent half held the socket. On commit the broker now closes that waiter with
+`reason: credential-superseded` naming the successor and the time, and waked
+PARKS on it: prints why, names the way back (`reveille init`), does not
+reconnect. Related: waked's retry line rendered `reveille-waked:  -- retrying in
+15s` for an hour, because websockets' closed exceptions str() to nothing --
+it falls back to the class name plus the close code now.
+A RE-KEY REACHES THE DAEMON. waked reads $REVEILLE_TOKEN once, at spawn; one
+held a credential for 4h46m across a swap and back while every file on disk said
+the machine was configured correctly. `reveille init` now retires the running
+daemon -- by PID from the spool lock, which the flock proves is the holder,
+never by a pattern match on the process table -- and the Stop hook starts a
+fresh one on the new credential.
+NAMING A ROOM AT THE MINT CLEARS A STANDING LEAVE (r4, ruling 11938). Measured
+the same day: after a swap the new body's bare join() answered rooms=[]
+skipped=[Reveille2.0]. A leave recorded by a previous body outlived the
+credential that made it, and the agent sat silent in a room its owner had just
+granted it. An owner ticking a room on a mint is a deliberate act with exactly
+join(room=X)'s semantics, so it clears the leave.
 0.2.175 THE INSTALLER COULD NOT REPLACE A DEAD CREDENTIAL (operator, live:
 "the install script does not correctly edit the project specific
 settings.local.json"). Two reads of $REVEILLE_TOKEN, both wrong in the one
@@ -2613,6 +2655,37 @@ _SHUTDOWN = {"shutdown": True}
 _SUPERSEDE = {"supersede": True}   # DES-003 2.3: newer wake attachment wins
 
 
+def _successor_note():
+    """What the displaced body is told about its successor: host and time, and
+    nothing else. Ruling 11945 asks for both; the broker records no more about
+    a body than where it called from, and a word the record cannot establish
+    stays unsaid."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _credential_superseded(token_ids, successor):
+    """Close the wake socket of every credential a swap just displaced.
+
+    THE OLD BODY MUST BE TOLD (ruling 12008; measured live 2026-08-18). A
+    supersede revoked the credential everywhere HTTP and MCP could see it,
+    while the old body's WebSocket stayed ESTABLISHED for an hour: it kept
+    receiving rings on a credential the broker refused for every other purpose,
+    and it was never sent a close, a 401 or anything it could log. One
+    credential, two verdicts, and the silent half was the one holding the
+    socket. So the displacement now reaches the socket layer too, carrying the
+    successor and the time -- which is also the only way waked can print the
+    line ruling 11947 requires it to print.
+    """
+    n = 0
+    for tid in token_ids or ():
+        for q in list(_waiters.get(tid, ())):
+            q.put_nowait({"credential_superseded": successor})
+            n += 1
+    if n:
+        log.info("closed %s wake socket(s) on superseded credential(s): %s", n, successor)
+    return n
+
+
 def _push_shutdown():
     """Tell every attached waiter the broker is going down (pre-exit courtesy frame):
     do not reply, just re-arm; the broker will be back."""
@@ -4033,6 +4106,7 @@ class Principal:
     is_admin: bool = False
     rooms: dict = field(default_factory=dict)   # room_id -> room_name
     agent_id: str = ""              # agents.id for a BOUND token; "" unbound / user
+    pending: bool = False           # minted, not yet arrived (DES-012 s15): join() only
 
 
 def speaker_key(p):
@@ -4101,7 +4175,7 @@ def _agent_principal(request):
         name = bound
     return Principal(kind="agent", name=name, user_id=tok["owner_id"],
                      token_id=tok["id"], rooms=store.rooms_for_token(_conn, tok["id"]),
-                     agent_id=tok["agent_id"] or "")
+                     agent_id=tok["agent_id"] or "", pending=bool(tok.get("pending")))
 
 
 def _user_principal(request):
@@ -4137,6 +4211,24 @@ def _me(request) -> Principal:
     return p
 
 
+PENDING_ACT = ("pending: join first. This credential was minted for a body swap and "
+               "has not arrived yet -- the identity's previous body is still the live "
+               "one, and stays live until this body joins. Call join() and nothing "
+               "else; that call IS the arrival and commits the swap.")
+
+
+def _not_pending(p):
+    """A PENDING CREDENTIAL MAY ONLY ARRIVE (ruling 11945). Its single permitted
+    call is join(), because the readiness act IS join -- so every other route
+    refuses here rather than letting a half-swapped body send mail, write
+    memories or take a turn as an identity another machine is still serving.
+    Read routes refuse too: reading as the identity before arriving is the fork
+    window the two-phase design closes."""
+    if p.kind == "agent" and p.pending:
+        raise store.AccessError(PENDING_ACT)
+    return p
+
+
 UNBOUND_ACT = ("token is not bound to an agent, so it can only read -- a token that is "
                "not an agent cannot act as one. Run `reveille init` in the agent's "
                "directory (it mints a bound token), or mint one bound to the agent in "
@@ -4153,7 +4245,7 @@ def _act(p):
     closed at the mint). Web users are not tokens and pass."""
     if p.kind == "agent" and not p.agent_id:
         raise store.AuthError(UNBOUND_ACT)
-    return p
+    return _not_pending(p)
 
 
 def _acting(request) -> Principal:
@@ -4170,6 +4262,20 @@ def _acting(request) -> Principal:
     agent that sends, acks or reads has demonstrably taken its turn, so the
     condition the gate exists for is over and the next message must ring."""
     p = _act(_me(request))
+    _poke_pending.pop(p.token_id, None)
+    return p
+
+
+def _arriving(request) -> Principal:
+    """join()'s principal: named and bound, but NOT refused for being pending.
+
+    This is the one door a pending credential may walk through, and it is the
+    only exception in the file. Everything else about it is _acting -- the same
+    binding requirement, the same poke clear -- because arriving IS taking a
+    turn."""
+    p = _me(request)
+    if p.kind == "agent" and not p.agent_id:
+        raise store.AuthError(UNBOUND_ACT)
     _poke_pending.pop(p.token_id, None)
     return p
 
@@ -4228,9 +4334,15 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
     BROKER's version, reported here because boot is where you already ask -- the
     broker never announces itself on the bus. Differs from the last one you saw?
     Re-read usage(): its CHANGES section says what moved."""
-    p = _acting(ctx.request_context.request)
+    p = _arriving(ctx.request_context.request)
     if name and name != p.name:
         raise ValueError(f"join name {name!r} must match your X-Agent header {p.name!r}")
+    # ARRIVAL COMMITS THE SWAP (ruling 11945), and store.join does it inside the
+    # membership transaction. Read the credentials it is about to displace
+    # FIRST -- afterwards their rows are gone and there is nothing left to name
+    # the sockets by.
+    displaced = (store.live_token_ids(_conn, p.user_id, p.agent_id, except_id=p.token_id)
+                 if p.pending else [])
     if room and room not in p.rooms:
         raise store.AccessError(f"no access to room {room}")
     targets = [room] if room else list(p.rooms)
@@ -4247,6 +4359,10 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
                                  token_id=p.token_id, fresh=fresh, url=url or None,
                                  clear_leave=bool(room))
         _push_presence(rid)     # an AGENT arriving is the same room event
+    if displaced and not store.resolve_pending(_conn, p.token_id):
+        # The swap committed inside the loop above. Tell the bodies it displaced,
+        # on the one channel that stayed silent through the whole incident.
+        _credential_superseded(displaced, _successor_note())
     unread = len(store.inbox(_conn, speaker_key(p), p.rooms))
     # `rooms` is what you are IN, so a skipped room must not appear in both lists --
     # a join report that shows a room as joined and skipped at once is the silence
@@ -4861,6 +4977,19 @@ async def wake_ws(ws: WebSocket):
             vals = [woke.result()] if woke in done and not woke.cancelled() else []
             while not q.empty():
                 vals.append(q.get_nowait())
+            # The CREDENTIAL is gone, not just this attachment: a body swap
+            # committed elsewhere. Distinct frame from the attachment supersede
+            # above -- that one says "another daemon holds your slot", this one
+            # says "you are not this agent any more". waked parks on it.
+            swap = next((v.get("credential_superseded") for v in vals
+                         if isinstance(v, dict) and "credential_superseded" in v), None)
+            if swap:
+                await ws.send_json({"wake": False, "reason": "credential-superseded",
+                    "successor": swap,
+                    "note": f"this credential was superseded by {swap} -- another "
+                            f"body holds the identity now. Do not reconnect: park, "
+                            f"say so, and wait to be recalled."})
+                break
             if any(v is _SUPERSEDE for v in vals):
                 await ws.send_json({"wake": False, "reason": "superseded",
                     "note": "a newer wake attachment for this agent took the "
@@ -7174,6 +7303,14 @@ async def _sweeper():
             store.sweep_sessions(_conn)
             store.reap_stale(_conn)
             store.sweep_expired_state(_conn)
+            # THE ARRIVAL WINDOW IS THE BROKER'S TIMER (ruling 11947), not a
+            # lazy check on the next request: a pending credential nobody ever
+            # presents is precisely the one no request will come for, and it
+            # must still die. Nothing else is disturbed -- a pending mint never
+            # took anything from the working body.
+            for tid in store.expire_pending(_conn):
+                log.info("pending credential %s expired unclaimed -- the previous "
+                         "body keeps the identity", tid)
             if dropped:
                 log.info("retention swept %s message(s)", dropped)
         except Exception:

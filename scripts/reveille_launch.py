@@ -2795,11 +2795,12 @@ def build_api(auth_url):
                 revoke_minted_token(auth_url, request.headers.get("cookie"),
                                     minted_id)
                 raise LaunchError(
-                    f"{e} -- the new credential was revoked, so "
-                    f"{(d.get('agent') or '').strip()} now has NO LIVE BODY: its "
-                    f"previous one was superseded when this mint landed. Its "
-                    f"identity, history and memories are untouched. "
-                    f"Retry the move, or mint it a credential in the Tokens tab.")
+                    f"{e} -- the new credential was revoked. "
+                    f"{(d.get('agent') or '').strip()} KEPT the body it had: a "
+                    f"mint no longer supersedes anything until the new body "
+                    f"joins (two-phase swap), and this one never got that far. "
+                    f"Nothing was taken from the working machine. "
+                    f"Retry the move once the cause above is fixed.")
             raise
         return JSONResponse({"container": name, "agent": d.get("agent"),
                              "credential": kind})
