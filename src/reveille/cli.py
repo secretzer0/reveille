@@ -234,6 +234,18 @@ def verify(url, name, token, timeout=10):
         return None, f"{e} -- the broker did not answer"
 
 
+def agent_of_directory(workdir):
+    """The agent name <workdir> already belongs to, or "" -- read from the same
+    settings.local.json the credential lands in. Unreadable or absent is "",
+    because the only thing this answer guards is a refusal."""
+    path = pathlib.Path(workdir) / ".claude" / "settings.local.json"
+    try:
+        return ((json.loads(path.read_text()).get("env") or {})
+                .get("REVEILLE_AGENT_ROLE") or "")
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return ""
+
+
 def write_credential(url, name, token, workdir):
     """THE DIRECTORY IS THE AGENT (operator ruling, 2026-08-13). The credential
     goes in <workdir>/.claude/settings.local.json's env block, which Claude Code
@@ -1191,6 +1203,33 @@ def cmd_init(a):
     claude = a.claude or shutil.which("claude") or "claude"
     workdir = pathlib.Path(a.dir or os.getcwd()).resolve()
 
+    # ONE DIRECTORY, ONE AGENT (measured 2026-08-19, and it cost an identity).
+    # `reveille init <broker> native-reveille-devops` was run with no --dir from
+    # a shell sitting in red-shirt-01's directory. It wrote devops' credential
+    # over red-shirt's settings.local.json, so the NEXT session started there
+    # read the file, believed it was devops, and called join() -- which is the
+    # arrival. One agent therefore ARRIVED as another, superseding devops' real
+    # body mid-turn and destroying the handover note that body was writing. Two
+    # agents then spent an hour disagreeing about where devops lived.
+    # The directory IS the agent, so a directory that already names one is a
+    # fact, not a default to overwrite: name both sides and refuse. --force is
+    # the deliberate override, because REPLACING an agent's body with another
+    # is a real thing to want -- it just must never be what a wrong cwd does.
+    # Before the mint (D4), so a refusal here leaves no credential behind.
+    held = agent_of_directory(workdir)
+    if held and name and held != name and not a.force:
+        print(f"reveille init: REFUSING -- this directory is {held!r}; you are "
+              f"installing {name!r}.\n"
+              f"  {workdir}\n"
+              f"The directory IS the agent: whatever is installed here is what a "
+              f"session started here becomes, and its first join() ARRIVES as "
+              f"that identity. Installing over {held!r} would hand this body to "
+              f"{name!r} and displace {held!r} wherever it is now.\n"
+              f"If you meant another directory, pass --dir. If you really mean "
+              f"to replace {held!r} here, pass --force. Nothing was installed.",
+              file=sys.stderr)
+        return 1
+
     # VERIFY BEFORE INSTALLING ANYTHING. The credential is the one thing that can
     # be wrong in a way no amount of correct installation fixes, and finding out
     # first is what keeps a failure from leaving a half-configured machine: at
@@ -1417,7 +1456,8 @@ def main(argv=None):
                    help="never ask: fail on anything not supplied. For scripts "
                         "that would rather stop than block")
     i.add_argument("--force", action="store_true",
-                   help="install even if the broker did not answer")
+                   help="install even if the broker did not answer, or over a "
+                        "directory that already belongs to a different agent")
     i.set_defaults(fn=cmd_init)
     lg = sub.add_parser("login", help="sign this machine in -- one link, one click, "
                                       "and every agent here mints from it")
