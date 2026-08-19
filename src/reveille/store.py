@@ -4825,7 +4825,47 @@ def agents_seen(conn, rooms, exclude=(), present=True):
     for name, e in seen.items():
         e["present"] = name in here
         e["owner"] = here.get(name) or _sole_owner(conn, name)
+        # MOVING AND BODYLESS ARE STATES A ROW MUST BE ABLE TO SAY (ruling
+        # 11945, owed since 12055). The pane could distinguish "here" from
+        # "elsewhere" and nothing else, so an identity mid-swap looked exactly
+        # like one that was simply away, and one with NO live credential looked
+        # like one that had merely stopped -- which is the state red-shirt sat
+        # in while every control read normal. Both are answerable from the
+        # credential table and neither is derivable from presence.
+        e["moving"] = _has_pending(conn, name, e["owner"])
+        e["bodyless"] = not _has_live_credential(conn, name, e["owner"])
     return sorted(seen.values(), key=lambda e: e["name"])
+
+
+def _identity_of(conn, name, owner):
+    if not owner:
+        return None
+    r = conn.execute(
+        "SELECT a.id FROM agents a JOIN users u ON u.id=a.owner_id "
+        "WHERE a.name=? AND u.name=? AND a.retired_ns IS NULL", (name, owner)).fetchone()
+    return r["id"] if r else None
+
+
+def _has_pending(conn, name, owner):
+    """A credential minted for this identity that has not arrived yet."""
+    aid = _identity_of(conn, name, owner)
+    if not aid:
+        return False
+    return bool(conn.execute(
+        "SELECT 1 FROM tokens WHERE agent_id=? AND pending_ns IS NOT NULL LIMIT 1",
+        (aid,)).fetchone())
+
+
+def _has_live_credential(conn, name, owner):
+    """Whether ANY body could act as this identity right now. An ambiguous or
+    unresolvable name answers True: this flag exists to raise an alarm, and an
+    alarm the code is not sure about is noise."""
+    aid = _identity_of(conn, name, owner)
+    if not aid:
+        return True
+    return bool(conn.execute(
+        "SELECT 1 FROM tokens WHERE agent_id=? AND pending_ns IS NULL LIMIT 1",
+        (aid,)).fetchone())
 
 
 def _sole_owner(conn, name):

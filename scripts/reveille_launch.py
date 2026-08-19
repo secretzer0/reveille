@@ -2682,6 +2682,32 @@ def _agent_status(conn, user, hive_by_name=None):
         # DES-012 s3 requires both humans to consent, per visit. An unowned or
         # ambiguous name is not offered either -- the broker answers "" when two
         # owners wear one name, and a guess there would move the wrong being.
+        # MOVING: a credential is minted for this identity and has not arrived.
+        # Distinct from `elsewhere` (a body working somewhere else) and from
+        # `no-live-body` (nothing can act as it at all) -- three situations that
+        # all used to render as one, so the pane could not tell a swap in
+        # flight from an agent that was simply away.
+        if hive.get("moving"):
+            out.append({"agent": agent, "container": container_name(user, agent),
+                        "status": "absent", "image": "", "repo_url": "",
+                        "created_ns": hive.get("last_ns") or 0,
+                        "state": "moving",
+                        "has_files": os.path.isdir(data_root(user, agent)),
+                        "hive": hive})
+            continue
+        # NO LIVE BODY: the identity exists, the hive remembers it, and no
+        # credential can act as it. This is the state reveille-red-shirt sat in
+        # while every control read normal, and the state the two-phase swap
+        # exists to make unreachable -- so if it ever appears again, it must be
+        # visible rather than inferred from an agent that answers nothing.
+        if hive.get("bodyless") and hive.get("owner") == user:
+            out.append({"agent": agent, "container": container_name(user, agent),
+                        "status": "absent", "image": "", "repo_url": "",
+                        "created_ns": hive.get("last_ns") or 0,
+                        "state": "no-live-body",
+                        "has_files": os.path.isdir(data_root(user, agent)),
+                        "hive": hive})
+            continue
         if hive.get("present") and hive.get("owner") == user:
             out.append({"agent": agent, "container": container_name(user, agent),
                         "status": "absent", "image": "", "repo_url": "",

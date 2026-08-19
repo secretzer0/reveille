@@ -268,6 +268,25 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.180 THE ROW SAYS WHERE THE BODY IS (ruling 11945, owed since 12055). The
+pane could distinguish "a body here" from "a body somewhere else" and nothing
+further, so an identity MID-SWAP looked exactly like one that was simply away,
+and an identity with NO credential at all looked like one that had merely
+stopped -- which is the state reveille-red-shirt sat in on 2026-08-18 while
+every control read normal, and the state the operator asked about and could not
+be answered. Two-phase made both answerable: a PENDING credential is a swap in
+flight, and the absence of any live one is a bodyless identity. Neither is
+derivable from presence, which is why nothing could say them. agents_seen now
+carries `moving` and `bodyless`, the launcher gives each its own row state --
+decided BEFORE `elsewhere`, because a swap in flight is not the same fact as a
+body working somewhere else -- and the pane says what each means: moving names
+that the current body KEEPS WORKING and that the swap may come to nothing;
+no-live-body names that the identity's name, history, memories and lessons are
+untouched and points at the remedy. Neither is painted as a fault, and destroy
+is withheld mid-swap: the body being replaced is still working, and destroying
+the record underneath it is not a choice anyone should make by accident. An
+ambiguous name raises NO alarm -- this flag exists to raise one, and an alarm
+the code is not sure about is noise.
 0.2.179 THE RETURN TICKET (DES-012 s14; ruling 11941 Part B). A superseded body
 did not have to be destroyed to be replaced -- its machine is still there, still
 holding the credential that went dead. Since 0.2.176 that machine PARKS instead
