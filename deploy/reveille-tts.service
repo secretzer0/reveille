@@ -45,8 +45,9 @@
 #   Environment=TTS_PUBLISH_PORT=18004
 #   Environment=TTS_REFERENCE=/home/vyzon/tts-measure/reference_audio
 #   Environment=TTS_CACHE=/home/vyzon/tts-measure/hf_cache
-#   Environment=TTS_BATCH_SIZE=1
 #   User=vyzon
+# TTS_BATCH_SIZE is absent on purpose: 1 is the default now, and an override that
+# only restates a default is a number nobody remembers to re-measure.
 # matching the broker's REVEILLE_TTS_URL exactly. Nothing about the broker
 # changes; that is the point of overriding rather than editing.
 #
@@ -109,15 +110,21 @@ Environment=TTS_CACHE=reveille_tts-cache
 # would hand docker a single unparsable blob.
 Environment=TTS_EXTRA=
 # Upstream PR #161 on our fork batches a request's chunks through the turbo
-# decoder. 4 is what an 8 GB card holds with real chunks (7.7 GB peak; 8 OOMs).
-# A 12 GB card can take 8 once that is MEASURED on it -- not before.
+# decoder. THE DEFAULT IS 1, AND IT IS DELIBERATELY THE SMALL ONE (architect,
+# ruling 12089).
 #
-# AND IT MUST BE MEASURED DOWNWARD TOO. titan's 4 GB card cannot hold the batched
-# path at 4: every multi-chunk request OOMed inside synthesize_batch and fell back
-# to sequential, which SUCCEEDS -- correct audio, an OOM per request, and nothing
-# in the response to say so. At 1 there is no fallback and no OOM. A default
-# tuned for the biggest card silently taxes every smaller one.
-Environment=TTS_BATCH_SIZE=4
+# It used to be 4, which is what an 8 GB card holds with real chunks (7.7 GB
+# peak; 8 OOMs). On titan's 4 GB card that default OOMed inside
+# synthesize_batch on every multi-chunk request and fell back to sequential --
+# which SUCCEEDS. Correct audio, an OOM per request, and nothing in the response
+# to say so. That silence is the defect: a value tuned for the biggest card taxes
+# every smaller one invisibly, and it surfaces only if somebody happens to read
+# the container log. At 1 there is no fallback and no OOM.
+#
+# So the default is the one that cannot do that, and a bigger card RAISES it per
+# host AFTER measuring there -- never before, and never by inheriting a number
+# measured on different hardware.
+Environment=TTS_BATCH_SIZE=1
 
 # Idempotent start: a container left behind by a kill -9, a host that lost power
 # mid-run, or an operator who ran `docker run` by hand once must not turn every

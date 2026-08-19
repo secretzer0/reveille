@@ -297,8 +297,11 @@ reveille-tts:0.2.4.
 A SECOND DEFECT THE MOVE EXPOSED: TTS_BATCH_SIZE unset defaulted to 4, tuned for
 an 8 GB card. On 4 GB every multi-chunk request OOMed inside synthesize_batch and
 fell back to sequential -- CORRECT AUDIO, an OOM per request, and nothing in the
-response to say so. A default tuned for the biggest card silently taxes every
-smaller one. The unit's header now says to measure it DOWNWARD as well as up.
+response to say so. That silence IS the defect: a value tuned for the biggest
+card taxes every smaller one invisibly, surfacing only if somebody happens to
+read the container log. So the unit's default is now 1 (ruling 12089) -- the
+value that cannot do that -- and a bigger card RAISES it per host after measuring
+there, never by inheriting a number measured on different hardware.
 
 THE WATCHDOG (deploy/reveille-tts-watchdog.{sh,service,timer}). systemd restarts
 a unit whose PROCESS died; the failure that matters here is the opposite --

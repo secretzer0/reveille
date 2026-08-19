@@ -55,8 +55,7 @@ def test_the_deployment_example_matches_what_actually_runs():
     is the assertion that would have caught the example being left behind."""
     for fact in ("TTS_BIND=192.168.89.104", "TTS_PUBLISH_PORT=18004",
                  "/home/vyzon/tts-measure/reference_audio",
-                 "/home/vyzon/tts-measure/hf_cache",
-                 "TTS_BATCH_SIZE=1"):
+                 "/home/vyzon/tts-measure/hf_cache"):
         assert fact in UNIT, f"the documented override must carry: {fact}"
 
 
@@ -75,13 +74,16 @@ def test_the_image_tag_is_a_version_not_a_moving_word():
     assert ":dev" not in DIRECTIVES
 
 
-def test_batch_size_is_measured_downward_as_well_as_up():
-    """4 is right for an 8 GB card. On titan's 4 GB card the batched path OOMed
+def test_the_default_batch_size_is_the_small_one():
+    """Ruling 12089. 4 is right for an 8 GB card; on titan's 4 GB card it OOMed
     inside synthesize_batch on every multi-chunk request and fell back to
     sequential -- correct audio, an OOM per request, nothing in the response to
-    say so. A default tuned for the biggest card silently taxes every smaller
-    one, and the header has to say that or the next host repeats it."""
-    assert "MEASURED DOWNWARD TOO" in UNIT
+    say so. A value tuned for the biggest card taxes every smaller one
+    invisibly, so the DEFAULT is the one that cannot do that and a bigger card
+    raises it per host after measuring there."""
+    assert "Environment=TTS_BATCH_SIZE=1" in UNIT
+    assert "Environment=TTS_BATCH_SIZE=4" not in UNIT
+    assert "DELIBERATELY THE SMALL ONE" in UNIT, "and the header says why"
 
 
 def test_the_working_tree_mount_survives_as_a_word_split_variable():
