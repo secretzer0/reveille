@@ -1,6 +1,6 @@
 # DES-020: A body runs its broker's code -- the toolchain converges by itself
 
-Status: RULED 2026-08-19 (operator 12126: "the MCP needs to upgrade itself as it
+Status: RULED 2026-08-19 (operator 12126, 12134 source = main: "the MCP needs to upgrade itself as it
 starts ... no user constantly having to upgrade ... the same way inside the
 container ... no prompts"; architect 12128, devops 12127 aligned here at
 operator 12129). Supersedes ruling 11863 "no boot-time tool refresh" for the
@@ -28,20 +28,27 @@ truth -- a human deployed it deliberately; it is never ahead by accident. A body
 whose installed version differs CONVERGES to it, by itself, with no prompt, on
 every host the same way. Nothing else decides, nothing else checks.
 
-## 3. Source: named, authenticated, exact
+## 3. Source: main at the org repo, never a local copy (operator 12134)
 
 - Source is the one `reveille init` already persists with: `GIT_SOURCE =
   git+https://github.com/secretzer0/reveille` (cli.py) -- our org repo over
-  TLS, never "whatever answers a URL" (devops 12127 risk 1).
-- **Every version is a tag.** The publish workflow tags `v<version>` on main
-  after the image push (same job, same guard). The body installs
-  `--from <GIT_SOURCE>@v<broker-version>` -- EXACT match, so a broker rollback
-  is followed down, not only up, and a fallback (s6) is the same command with a
-  different tag. A broker version with no tag (pre-DES-020 history) = fail-open,
-  one log line, no install.
-- Command: `uv tool install --force --from <GIT_SOURCE>@v<ver> reveille`.
-  Non-interactive by construction; uv and git are present natively (init
-  required them) and in the image (Dockerfile installs via `uv tool install`).
+  TLS, never "whatever answers a URL" (devops 12127 risk 1), and NEVER a
+  checkout on the body's disk: a pulled copy is whatever branch someone was
+  reviewing (the launcher learned this at 8568).
+- **main IS the release.** The operator's contract (12134): code on main has
+  been tested and has a matching broker deployed live -- main and the broker
+  move in lock step. So the body installs main HEAD, no tags, no pin:
+  `uv tool install --force --from <GIT_SOURCE> reveille`. Non-interactive by
+  construction; uv and git are present natively (init required them) and in
+  the image (Dockerfile installs via `uv tool install`).
+- **Comparison is `installed < broker`** (devops 12131). A body AHEAD of the
+  broker is the normal state for the minutes between a merge and its deploy
+  and is converged, not pathological; `!=` against a moving HEAD would
+  reinstall every hour forever.
+- **Record what was installed.** `git ls-remote <repo> main` (one call, no
+  clone) gives the sha the install resolved; converge.json keeps it. That sha
+  is what s6 falls back to -- `--from <GIT_SOURCE>@<sha>` -- so a rollback
+  needs no tag, only memory of the last body that attached.
 
 ## 4. Trigger: the turn boundary, one block, same everywhere
 
@@ -77,11 +84,15 @@ every host the same way. Nothing else decides, nothing else checks.
 ## 6. Unattended means it must survive its own failure (devops 12127 risks 3/4)
 
 - **One attempt per target version per hour.** State in
-  `~/.reveille/converge.json`: `{installed, last_good, target, tried_ns,
-  bad: [..]}`. `last_good` = the version whose waked ATTACHED (s7 reports it).
+  `~/.reveille/converge.json`: `{installed, sha, last_good: {version, sha},
+  target, tried_ns, bad: [..]}`. `last_good` = the version+sha whose waked
+  ATTACHED (s7 reports it).
+- **Did not move = hold** (devops 12131): an install that exits 0 but leaves
+  the version unchanged is logged once and not retried until the broker's
+  version CHANGES. A failed-but-silent install must not become a storm.
 - **Crash-loop guard:** if, within 10 min of converging, waked has not
   attached (no `last_good == installed` mark), the next hook run reinstalls
-  `last_good`, appends the target to `bad`, and will not try that target again
+  `last_good.sha`, appends the target to `bad`, and will not try that target again
   until the broker's version CHANGES. Same shape as the TTS watchdog's reboot
   guard (da5b3015), same reason: a self-healer that loops is worse than one
   that stops.
@@ -119,11 +130,12 @@ every host the same way. Nothing else decides, nothing else checks.
 - Red-shirt chain (12123/12125) runs FIRST on a one-time manual
   `uv tool upgrade reveille`; this DES does not block it and is not tested by
   it.
-- One PR, devops builds, bump rides: tag step in publish.yml; `reveille
-  converge` + converge.json + guard; hook block + entrypoint call; waked `?v=`
+- One PR, devops builds, bump rides: `reveille converge` + converge.json +
+  guard; hook block + entrypoint call; waked `?v=`
   + headers version; broker `agents_seen.version` + `behind` + MIN_BODY_VERSION
   (initial value = the version that ships this, so nothing live is refused);
-  one test per: converge decision table (skip/install/hold/rollback),
+  one test per: converge decision table (equal skips, behind installs,
+  AHEAD skips, unreachable fail-open, did-not-move hold, rollback to sha),
   too_old refusal.
 - Gate (architect verifies live): laptop deliberately pinned one release back
   -> next turn boundary converges + waked respawns on new code, one log line;
