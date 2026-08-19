@@ -282,6 +282,17 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.192 ONE DIRECTORY, ONE AGENT. `reveille init <broker> native-reveille-devops`
+was run with no --dir from a shell sitting in red-shirt-01's directory. It wrote
+devops' credential over red-shirt's settings.local.json, so the next session
+started there read the file, believed it was devops, and called join() -- which
+IS the arrival. One agent ARRIVED as another: it superseded devops' real body
+mid-turn, destroyed the handover note that body was writing, and cost two agents
+an hour of disagreeing about where devops lived. init now REFUSES a directory
+that already names a different agent -- both names, the path, and both remedies
+(--dir for the one you meant, --force to replace this body deliberately) -- and
+it refuses before the mint, so nothing is left behind.
+
 0.2.190 WHAT THE ACCEPTANCE CHAIN FOUND (rulings 12305/12320, all measured live
 on 2026-08-19 while running DES-012's chain end to end).
   B THE ARRIVAL WINDOW IS TRUE NOW. Ten minutes was enforced only by a sweep and
