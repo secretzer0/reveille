@@ -41,6 +41,12 @@ every host the same way. Nothing else decides, nothing else checks.
   `uv tool install --force --from <GIT_SOURCE> reveille`. Non-interactive by
   construction; uv and git are present natively (init required them) and in
   the image (Dockerfile installs via `uv tool install`).
+- **One line installs AND upgrades** (operator 12146): `curl -LsSf
+  https://raw.githubusercontent.com/secretzer0/reveille/main/install.sh | sh`
+  -- repo-root `install.sh`: uv missing -> astral's installer; `uv tool
+  install --force --from <GIT_SOURCE> reveille`; `reveille init "$@"`.
+  Idempotent; run it again any time. Windows twin `install.ps1` (DES-021).
+  Replaces the README's `uvx --from git+...` line. Slice 2.
 - **Comparison is `installed < broker`** (devops 12131). A body AHEAD of the
   broker is the normal state for the minutes between a merge and its deploy
   and is converged, not pathological; `!=` against a moving HEAD would
