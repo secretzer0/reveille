@@ -2,9 +2,32 @@
 #
 # 60s is chosen against the escalation ladder, not for its own sake: three
 # consecutive failures before the first restart means a wedged container is
-# noticed in about three minutes, and the full ladder to a reboot takes about
-# nine. Faster would restart things during transient hiccups; slower would leave
-# the fleet mute for longer than a human would tolerate before asking.
+# noticed in about three minutes. Faster would restart things during transient
+# hiccups; slower would leave the fleet mute longer than a human would tolerate
+# before asking.
+#
+# THE FULL LADDER IS NOT NINE MINUTES. An earlier draft of this comment said it
+# was, by multiplying 9 failures by 60s, and that is wrong in a way worth
+# recording: every action this watchdog takes RESTARTS the unit, which re-arms
+# the 15-minute grace window, which suppresses counting until it expires. So the
+# ticks that matter are not one a minute -- they are one per grace window from
+# the first restart onward. Traced against the script's own thresholds:
+#
+#   t+0,1     fail 1,2     counted
+#   t+2       fail 3       restart          -> grace re-arms
+#   t+18      fail 4       restart          -> grace re-arms
+#   t+34      fail 5       restart          -> grace re-arms
+#   t+50      fail 6       uvm + restart    -> grace re-arms
+#   t+66,82   fail 7,8     uvm + restart    -> grace re-arms
+#   t+98      fail 9       REBOOT
+#
+# About an hour and a half to the reboot, because the ladder acts on `fails >=
+# threshold` and therefore retries the cheap rung at 4 and 5 (and the middle one
+# at 7 and 8) before moving up. That is deliberate -- the cheap fix is worth
+# repeating -- but it means the reboot is a genuine last resort measured in
+# hours, not the ~40 minutes it would take if each rung fired only at its exact
+# count. Anyone changing >= to == is choosing faster escalation over more retries
+# of the thing most likely to work; say which you want in the commit.
 
 [Unit]
 Description=Probe the reveille TTS model every minute
