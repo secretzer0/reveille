@@ -1,6 +1,6 @@
 # DES-020: A body runs its broker's code -- the toolchain converges by itself
 
-Status: RULED 2026-08-19 (operator 12126, 12134 source = main: "the MCP needs to upgrade itself as it
+Status: RULED 2026-08-19; slice 1 = #138 (0.2.185, waked converge); slice 2 = s6 guard + s7 visibility + uv bootstrap + source-shape measurement (12141). (operator 12126, 12134 source = main: "the MCP needs to upgrade itself as it
 starts ... no user constantly having to upgrade ... the same way inside the
 container ... no prompts"; architect 12128, devops 12127 aligned here at
 operator 12129). Supersedes ruling 11863 "no boot-time tool refresh" for the
@@ -50,36 +50,38 @@ every host the same way. Nothing else decides, nothing else checks.
   is what s6 falls back to -- `--from <GIT_SOURCE>@<sha>` -- so a rollback
   needs no tag, only memory of the last body that attached.
 
-## 4. Trigger: the turn boundary, one block, same everywhere
+## 4. Trigger: waked, before it dials, once an hour (as built, #138)
 
-- The check runs in the **Stop hook** (`agent-stop-hook`), native AND
-  container -- the image already ships that hook; no second mechanism. The
-  container entrypoint calls the SAME function once before the agent starts
-  (a start is a boundary where nothing runs yet, devops 12127).
-- The hook's own rule stands: the top of the hook never probes the broker.
-  This is a BLOCK BELOW the supervision blocks that probes INSIDE itself,
-  3 s timeout, and fails open -- exactly the carve-out the hook's header
-  names. Broker down = no opinion = no change.
-- NOT at waked connect (a reconnect happens mid-turn -- a deploy restarts
-  the broker exactly then -- and rewriting the package under a live session
-  is "changed the code you are running, mid-turn, without telling you",
-  devops 12127 (c)); NOT in wake-watch (stateless and secretless by design,
-  keep it so). The Stop boundary is the point where nothing of ours runs
-  except waked and the watcher, both ours to restart.
-- Logic lives in Python -- `reveille converge` (cli subcommand; hook and
-  entrypoint are glue) -- so it is testable and the bash stays bash.
+- The check runs in **reveille-waked**, at the top of its reconnect loop,
+  native AND container alike -- waked runs in both, so one code path. Rate:
+  `UPGRADE_INTERVAL_S = 3600`, burned even when the probe throws (a broker
+  outage must not become a probe-per-reconnect storm). GET /version, 5 s,
+  unauthenticated; unreachable or unparsable = nothing.
+- The WHOLE call is shielded: it sits inside the wake loop, and an exception
+  escaping there kills the wake path -- going deaf to fix a version number is
+  never the trade. Every failure = one stderr line, old code keeps running.
+- NOT the Stop hook (its header rule, 8573: anything slow or remote at a turn
+  boundary costs the session); NOT wake-watch (stateless, secretless). The
+  architect's first cut (12132) put it in the hook for turn-boundary safety;
+  the built waked shape was accepted at 12141: one long-lived process that
+  already dials the broker and can fail open with nobody waiting. The
+  mid-turn rewrite hazard (devops 12127 c) is bounded by the hour rate and
+  the install's seconds-long window; accepted.
+- The container entrypoint may call the same check once at start (free of any
+  in-flight hazard); not required, since waked starts with the agent.
 
 ## 5. Restart: an upgrade that restarts nothing changed nothing
 
-- After a successful install the hook kills waked by the pid waked already
-  writes into `$spool/.lock`, and the spawn block below it -- unchanged --
-  starts the NEW daemon in the same hook run. Deaf window ~0, at a boundary.
+- On an install whose version MOVED, waked `os.execv`s itself via the console
+  script path (`shutil.which("reveille-waked")`, the durable ~/.local/bin
+  entry -- never `-m reveille.waked`, which leaves sys.argv[0] a module file
+  and breaks the next hour's probe): env carries the credential, the flock is
+  retaken, a ring landing mid-swap waits in the spool and fires at the next
+  arm.
+- Did not move (exit 0, same version) = log once, no re-exec, no retry until
+  the broker's version changes.
 - Hook, cli, headers, upload, wake-watch are fresh processes: new code on
-  their next invocation. An old wake-watch in flight reads a directory;
-  harmless. The claude session is untouched (MCP = HTTP to the broker).
-- `reveille converge` prints ONE line per action to waked.log and stderr:
-  `converged 0.2.178 -> 0.2.184` / `converge skipped: <why>`. Silence is the
-  defect (12008).
+  their next invocation. The claude session is untouched (MCP = HTTP).
 
 ## 6. Unattended means it must survive its own failure (devops 12127 risks 3/4)
 
@@ -130,8 +132,8 @@ every host the same way. Nothing else decides, nothing else checks.
 - Red-shirt chain (12123/12125) runs FIRST on a one-time manual
   `uv tool upgrade reveille`; this DES does not block it and is not tested by
   it.
-- One PR, devops builds, bump rides: `reveille converge` + converge.json +
-  guard; hook block + entrypoint call; waked `?v=`
+- Slice 1 (#138): waked converge + `<` + did-not-move hold + tests. Slice 2
+  (own PR): converge.json guard + sha rollback; hook block + entrypoint call; waked `?v=`
   + headers version; broker `agents_seen.version` + `behind` + MIN_BODY_VERSION
   (initial value = the version that ships this, so nothing live is refused);
   one test per: converge decision table (equal skips, behind installs,
