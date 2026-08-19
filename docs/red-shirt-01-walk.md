@@ -24,3 +24,13 @@ is that the RITUAL runs identically in both directions: save, note, and the new
 body fetches the branch before anything else. Body C is the laptop, native,
 /home/tmelhiser/reveille-materialize; it clones main, so this log exists only on
 the wip branch it must fetch.
+
+Body C: laptop, native, /home/tmelhiser/reveille-materialize. Arrived as a real
+session 20260819T172322Z, AFTER the step-8 claim had already expired unused
+(12259 defect 1: claimed != arrived) and after a re-mint + one headless
+`claude -p` turn committed the arrival (12264). This is the first interactive
+turn of body C. join() -> lessons() -> brief(), then fetched
+wip/red-shirt-01/20260819T171729Z BEFORE anything else: sha cb5e087, base main
+fc918ea. Work rode the swap intact a second time. Two things seen at arrival:
+bare join() returned Reveille2.0 in `skipped` with no LEAVE on record (rejoined
+by join(room=)); waked pid 3341646 is new since the re-mint (3227115 before).
