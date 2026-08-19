@@ -639,6 +639,13 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
     note = ""
     if tok.get("superseded"):
         note = f" (superseded {len(tok['superseded'])} previous token(s) for {agent})"
+    # SAY THAT AN EARLIER MOVE WAS RETRACTED. A person re-running init after a
+    # failed materialisation is holding a link or a container that will now be
+    # refused, and the only place they can learn that is here.
+    n = len(tok.get("discarded_pending") or ())
+    if n:
+        note += (f" (discarded {n} unclaimed move(s) for {agent}: whatever was "
+                 f"minted for them cannot arrive)")
     return tok["secret"], attached, note
 
 

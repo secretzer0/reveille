@@ -2885,7 +2885,7 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
     agent_name = (agent_name or "").strip() or None
     tid, secret = uuid.uuid4().hex, secrets.token_urlsafe(32)
     now = time.time_ns()
-    agent_id, superseded, pending = None, [], False
+    agent_id, superseded, pending, stale = None, [], False, []
     with tx(conn):
         if agent_name:
             valid_name(agent_name)
@@ -2957,6 +2957,22 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
                 "SELECT 1 FROM tokens WHERE owner_id=? AND agent_id=? "
                 "AND pending_ns IS NULL LIMIT 1", (owner_id, agent_id)).fetchone()
             pending = bool(live)
+            # ONE PENDING PER IDENTITY (defect 3, measured live 2026-08-19).
+            # Three unclaimed pending credentials for red-shirt-01 coexisted at
+            # once, because every re-mint added one and only an arrival or the
+            # ten-minute sweep ever removed one. Any of the three could still
+            # claim the identity, so the body that eventually arrived was
+            # whichever one happened to join first -- not the one the operator
+            # had just minted and was watching. A mint is a statement about
+            # where the identity is going NOW, so it retracts the moves nobody
+            # took. Deleting them is the whole retraction: a pending never took
+            # anything from the live body, which is what makes the sweep blunt
+            # too (expire_pending).
+            stale = [r["id"] for r in conn.execute(
+                "SELECT id FROM tokens WHERE owner_id=? AND agent_id=? "
+                "AND pending_ns IS NOT NULL", (owner_id, agent_id))]
+            for sid in stale:
+                conn.execute("DELETE FROM tokens WHERE id=?", (sid,))
             # r4 (ruling 11938): NAMING A ROOM CLEARS A LEAVE. An owner ticking
             # a room on a mint is a deliberate act with exactly the semantics of
             # join(room=X), so it must clear the identity's standing leave for
@@ -2976,7 +2992,8 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
             assign_room(conn, tid, rid, owner_id)
     return {"id": tid, "secret": secret, "label": label, "agent_name": agent_name,
             "agent_id": agent_id, "mem_tier": mem_tier, "superseded": superseded,
-            "rooms": list(rooms or []), "pending": pending}
+            "rooms": list(rooms or []), "pending": pending,
+            "discarded_pending": stale}
 
 
 # THE ARRIVAL WINDOW (ruling 11945). Ten minutes: long enough for a container

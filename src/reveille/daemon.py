@@ -7768,10 +7768,12 @@ async def tokens_http(request):
         _swap_pending(store.live_token_ids(_conn, p.user_id, t["agent_id"],
                                            except_id=t["id"]),
                       (d.get("host_machine") or "").strip())
-    log.info("%s minted token %s%s%s%s", p.name, t["id"],
+    log.info("%s minted token %s%s%s%s%s", p.name, t["id"],
              f" bound to {t['agent_name']}" if t["agent_name"] else "",
              " PENDING" if t.get("pending") else "",
-             f" (superseded {len(superseded)})" if superseded else "")
+             f" (superseded {len(superseded)})" if superseded else "",
+             f" (discarded {len(t['discarded_pending'])} unclaimed)"
+             if t.get("discarded_pending") else "")
     # The secret is returned exactly once here; only its hash is stored.
     return JSONResponse(dict(t, superseded=superseded))
 
