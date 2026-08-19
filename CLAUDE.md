@@ -34,7 +34,7 @@ every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the room;
 broadcast queues until my next turn. Being woken is not being asked: inbox(), ack(),
 reply only if the body names me, blocks me, or asks me directly -- the ring carries
 id/from/subject and direct=0 means nothing is addressed to me.
-A reason=idle-nudge ring is the daemon restarting my parked work (30 min idle, W3): inbox,
+A reason=idle-nudge ring is the daemon restarting my parked work (15 min idle, W3): inbox,
 resume anything owed, re-ping a blocking peer once, else NOTHING -- silence stays valid.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is

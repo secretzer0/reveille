@@ -202,7 +202,7 @@ USE:
    supported way to stop re-arming; a loop is not.
    Duplicates are harmless; a ring landing while unarmed waits in the spool and
    fires at the next arm. One watcher covers ALL rooms.
-   IDLE NUDGE (W3): after 30 min without any ring (tunable --idle-nudge on
+   IDLE NUDGE (W3): after 15 min without any ring (tunable --idle-nudge on
    waked; 0 disables) the daemon writes one synthetic ring with
    reason=idle-nudge. On a nudge: inbox() first; resume any owed work (an
    unfinished slice, an unpushed branch); if blocked on a peer, re-ping that
@@ -288,7 +288,7 @@ every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the
 room; an AGENT's broadcast queues until my next turn. Being woken is not being asked:
 inbox(), ack(), reply only if the body names me, blocks me, or asks me directly --
 the ring carries id/from/subject and direct=0 means nothing is addressed to me.
-A reason=idle-nudge ring is the daemon restarting my parked work (30 min idle, W3): inbox,
+A reason=idle-nudge ring is the daemon restarting my parked work (15 min idle, W3): inbox,
 resume anything owed, re-ping a blocking peer once, else NOTHING -- silence stays valid.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
@@ -309,6 +309,37 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.197 THE SWEEP BELIEVES ITS OWN EYES (ruling 12401, plus nudge 900 per
+12246/12411). Four defects from one bricked container, each fixed at its root.
+(1) The launcher idle-stopped a 22-second-old container: a probe landing before
+tmux was up read (False, 0, 0) and is_idle measured "idle since the epoch". The
+container's boot time is now IN the max -- never observed means idle since it
+BOOTED -- and a probe whose exec FAILS returns None, which the sweep SKIPS:
+could-not-tell is never read as dead (8866). That SIGKILL was what interrupted
+a claude self-update and bricked the body. (2) `reveille init` on a machine
+with no claude binary died with a FileNotFoundError traceback -- the resolution
+ended `or "claude"`, a literal whose only reachable effect was that exception.
+Resolved once at the top of cmd_init; an unconfigured directory refuses by
+name with nothing installed; an ALREADY CONFIGURED one (credential +
+registration standing) exits 0 saying DEGRADED with claude-dependent steps
+skipped, so a container entrypoint under set -e boots instead of crash-looping,
+and the Agents row shows state=degraded with the reason. (3) That row could
+never say it: the entrypoint wrote .reveille-repo-status to container-local
+/home/agent while the launcher read the host data root -- broken since the
+home mount became two subdir mounts. It now rides the mounted ~/.claude.
+(4) `reveille-launch new` gains --role/--role-prompt, the flag its own refusal
+text has prescribed since r3. Also: the idle nudge default is IDLE_NUDGE_S =
+900 -- the ruled announcement floor (12246) that sat unbuilt as a bare argparse
+literal nothing could gate -- and the repo CLAUDE.md is now PINNED to USAGE's
+reachability paragraph by a gate (red-shirt-01's), so the two doctrines cannot
+drift apart silently again. AGENT IMAGE 0.2.22 rides this release (the pin
+gate is why: the entrypoint is a build input): claude self-update is OFF in
+containers -- DISABLE_AUTOUPDATER=1, image and data-root only, never a human's
+native install -- so THE IMAGE PIN IS NOW ALSO THE CLAUDE-VERSION PIN. An
+interrupted in-container update bricked the binary twice in one night, and the
+update state rides the shared ~/.claude mount, so one body's half-update was
+every next boot's crash.
 
 0.2.196 THE SPENT SECRET SURVIVES A RESTART (ruling 12393). A return ticket is
 written against the hash of the credential the displaced body holds, and

@@ -56,12 +56,20 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_$
     && install -m 0755 /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh \
     && rm -rf /tmp/gh_*
 
-# THE AGENT OWNS WHAT ITS TOOLING AUTO-UPDATES. claude's updater runs as the
-# agent uid and rewrites its own npm global tree in place; installed as root
-# under /usr/lib it could only warn "npm global folder isn't writable" on
-# every /status (operator screenshot, 2026-08-13). A dedicated prefix, chowned
-# to the agent after the root-stage installs, gives the updater a tree it may
-# write without handing it /usr/bin.
+# THE IMAGE PIN IS THE CLAUDE PIN (ruling 12401 D1). Container bodies converge
+# by re-provision against a pinned image -- self-update inside an ephemeral FS
+# buys nothing and bricks plenty: the updater's rename-unpack-swap, interrupted
+# by ANY stop (an operator's, or the launcher's own idle sweep -- both measured
+# 2026-08-19), leaves no binary and a boot that cannot come back. The update
+# STATE also rides the shared ~/.claude bind mount, so one body's half-update
+# is every future body's boot. Updates are therefore OFF in the image; a new
+# claude ships as a new image tag, exactly like every other build input.
+# IMAGE AND DATA-ROOT ONLY: nothing may ever write this switch onto a human's
+# native install (same rule as laptop-awake.conf, 0.2.182).
+# /opt/npm stays a dedicated agent-owned prefix -- not for the updater any
+# more, but because a root-owned global tree made claude warn on every /status
+# (operator screenshot, 2026-08-13).
+ENV DISABLE_AUTOUPDATER=1
 ENV NPM_CONFIG_PREFIX=/opt/npm
 ENV PATH=/opt/npm/bin:$PATH
 

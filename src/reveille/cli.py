@@ -251,6 +251,20 @@ def agent_of_directory(workdir):
         return ""
 
 
+def mcp_registered(workdir):
+    """Is the local-scope registration for this directory already in
+    ~/.claude.json? Read-only, shape-tolerant: the file is claude's, not ours,
+    and the only thing this answer guards is whether a boot with no claude
+    binary may DEGRADE instead of refusing -- so anything unreadable is False,
+    which fails toward the hard refusal."""
+    try:
+        cfg = json.loads((pathlib.Path.home() / ".claude.json").read_text())
+        proj = (cfg.get("projects") or {}).get(str(workdir)) or {}
+        return "reveille" in (proj.get("mcpServers") or {})
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return False
+
+
 def write_credential(url, name, token, workdir):
     """THE DIRECTORY IS THE AGENT (operator ruling, 2026-08-13). The credential
     goes in <workdir>/.claude/settings.local.json's env block, which Claude Code
@@ -1221,7 +1235,14 @@ def cmd_init(a):
               f"history.", file=sys.stderr)
         return 2
 
-    claude = a.claude or shutil.which("claude") or "claude"
+    # RESOLVED ONCE, NEVER THE LITERAL (ruling 12401). The old fallback
+    # `or "claude"` existed only to turn a missing binary into a
+    # FileNotFoundError traceback -- at whichever of three call sites happened
+    # to run first (the user-scope remove here, both runs in
+    # register_mcp_local). Measured 2026-08-19: an interrupted claude
+    # self-update deleted the binary, and every docker start of that container
+    # died on the traceback instead of a sentence.
+    claude = shutil.which(a.claude) if a.claude else shutil.which("claude")
     workdir = pathlib.Path(a.dir or os.getcwd()).resolve()
 
     # ONE DIRECTORY, ONE AGENT (measured 2026-08-19, and it cost an identity).
@@ -1270,28 +1291,65 @@ def cmd_init(a):
               file=sys.stderr)
         return 1
 
+    # A MISSING BINARY IS A SENTENCE, NEVER A TRACEBACK (ruling 12401). Two
+    # worlds, told apart by what already stands in the directory: one that is
+    # ALREADY CONFIGURED (this agent's credential and this directory's
+    # registration both present) continues DEGRADED -- the claude-dependent
+    # steps are skipped, everything local is still converged, and the exit is
+    # 0 so a container entrypoint under set -e boots instead of crash-looping.
+    # A first boot with nothing configured refuses hard, by name, before any
+    # local step: there is nothing to degrade into.
+    degraded = ""
+    if not claude:
+        if agent_of_directory(workdir) == name and mcp_registered(workdir):
+            degraded = ("the claude binary was not found on PATH; this "
+                        "directory's registration and credential already "
+                        "stand, so the claude-dependent steps were skipped")
+        else:
+            print(f"reveille init: REFUSING -- the `claude` binary was not "
+                  f"found on PATH{f' or at {a.claude}' if a.claude else ''}, "
+                  f"and this directory is not already configured for "
+                  f"{name!r}.\n"
+                  f"The MCP registration is written by `claude mcp add-json`, "
+                  f"so without the binary it cannot land, and a credential "
+                  f"beside a registration that never landed looks configured "
+                  f"and is not. Install claude (or pass --claude PATH), then "
+                  f"re-run. Nothing was installed.", file=sys.stderr)
+            return 1
+
     steps = []
     persisted = ensure_on_path()
     if persisted:
         steps.append(persisted)
-    # THE REGISTRATION LIVES IN THE DIRECTORY. A stale user-scope registration
-    # is converged AWAY, never left: its ${VAR} headers expand from the process
-    # env at connect time, before project settings env exists, so it either
-    # authenticates as whatever the shell happened to export or as nobody --
-    # both wrong, and the second one silently. The remove is idempotent and
-    # cheap; the local-scope add-json below is the registration.
-    subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
-                   capture_output=True, text=True)
-    try:
-        mcp_where = register_mcp_local(url, workdir, claude)
-    except RuntimeError as e:
-        print(f"reveille init: REFUSING at step 1 of 3 -- {e}\n"
-              f"Nothing else was installed: a Stop hook beside a directory "
-              f"whose MCP registration did not land looks configured and is "
-              f"not.", file=sys.stderr)
-        return 1
-    steps.append(f"mcp: {mcp_where}; headersHelper reads the credential from "
-                 f"settings.local.json at connect time")
+    if degraded:
+        steps.append(f"DEGRADED: {degraded}")
+        # ON STDERR, BECAUSE THAT IS WHAT THE ENTRYPOINT CAPTURES (architect
+        # blocking on #153): `init_said=$(reveille init ... 2>&1 >/dev/null)`
+        # keeps stderr and discards stdout, so a degraded sentence on stdout
+        # sets nothing and the row shows running for a body that cannot take a
+        # turn. The steps line above stays for the human reading stdout; a
+        # warning belongs on stderr anyway.
+        print(f"reveille init: DEGRADED -- {degraded}", file=sys.stderr)
+    else:
+        # THE REGISTRATION LIVES IN THE DIRECTORY. A stale user-scope
+        # registration is converged AWAY, never left: its ${VAR} headers expand
+        # from the process env at connect time, before project settings env
+        # exists, so it either authenticates as whatever the shell happened to
+        # export or as nobody -- both wrong, and the second one silently. The
+        # remove is idempotent and cheap; the local-scope add-json below is the
+        # registration.
+        subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
+                       capture_output=True, text=True)
+        try:
+            mcp_where = register_mcp_local(url, workdir, claude)
+        except RuntimeError as e:
+            print(f"reveille init: REFUSING at step 1 of 3 -- {e}\n"
+                  f"Nothing else was installed: a Stop hook beside a directory "
+                  f"whose MCP registration did not land looks configured and is "
+                  f"not.", file=sys.stderr)
+            return 1
+        steps.append(f"mcp: {mcp_where}; headersHelper reads the credential "
+                     f"from settings.local.json at connect time")
     # NOTHING PER-AGENT STAYS IN THE TREE. An earlier init put the registration
     # in <dir>/.mcp.json; two registrations for one server is how a body ends up
     # authenticating twice by different rules, so the old one is lifted here

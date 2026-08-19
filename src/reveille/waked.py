@@ -19,7 +19,7 @@ Idle nudge (DES-003 W3): the daemon is the only component that outlives a
 turn boundary, so it is the one that can restart a parked agent whose
 instructions were acked in an earlier turn (the ring those instructions
 carried is already spent). After ``--idle-nudge`` seconds without writing a
-ring (default 1800; 0 disables) it writes ONE synthetic entry with
+ring (default IDLE_NUDGE_S = 900; 0 disables) it writes ONE synthetic entry with
 ``reason=idle-nudge`` and resets its timer -- same spool, same watcher, no
 new plumbing. Fixed interval by ruling: backoff would make an agent harder
 to reach the longer it has been stuck, which is backwards. The nudge fires
@@ -46,6 +46,12 @@ HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))
 # directly -- the LOOP decides when recoverable stops being credible.
 NO_ROOMS = "no_rooms"
 NO_ROOMS_WINDOW_S = 1800
+# The announcement floor (ruled 12246, rebuilt per 12411): a parked agent's
+# work restarts after 15 idle minutes, not 30. A NAMED constant, because the
+# ruled value sat unbuilt for days as a bare argparse literal that nothing
+# could gate -- and 1800 collided with NO_ROOMS_WINDOW_S above, which is a
+# SEPARATE 1800 with its own ruling (9119). Do not merge them.
+IDLE_NUDGE_S = 900
 
 
 def no_rooms_exit_due(first_s, now_s, window_s):
@@ -780,9 +786,10 @@ def main():
     ap = argparse.ArgumentParser(prog="reveille-waked")
     ap.add_argument("--url", required=True, help="ws://host:port/wake")
     ap.add_argument("--name", required=True, help="agent identity (spool + X-Agent)")
-    ap.add_argument("--idle-nudge", type=int, default=1800, metavar="SECONDS",
+    ap.add_argument("--idle-nudge", type=int, default=IDLE_NUDGE_S,
+                    metavar="SECONDS",
                     help="write one synthetic reason=idle-nudge ring after this "
-                         "many seconds without any ring (default 1800; 0 "
+                         f"many seconds without any ring (default {IDLE_NUDGE_S}; 0 "
                          "disables). Fixed interval by ruling -- no backoff.")
     ap.add_argument("--no-rooms-window", type=int, default=NO_ROOMS_WINDOW_S,
                     metavar="SECONDS",
