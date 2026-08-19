@@ -1,0 +1,42 @@
+# /etc/systemd/system/reveille-tts-watchdog.service -- one probe pass (S3.1).
+#
+# Type=oneshot: this is not a daemon. The timer fires it, it probes once, it
+# exits. Nothing to supervise, nothing to leak, and the escalation state lives in
+# /var/lib rather than in a long-lived process -- which is what lets the reboot
+# guard survive the reboot it is guarding.
+#
+# ROOT, deliberately and minimally. It restarts a unit, reloads a kernel module,
+# and can reboot the host; none of those are reachable unprivileged. It is also
+# why the script does exactly those three things and never touches the broker.
+#
+# INSTALL (operator, once, on the TTS host -- titan.vyzon.ai):
+#   sudo install -Dm755 deploy/reveille-tts-watchdog.sh /usr/local/bin/reveille-tts-watchdog
+#   sudo cp deploy/reveille-tts-watchdog.service deploy/reveille-tts-watchdog.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now reveille-tts-watchdog.timer
+#   systemctl list-timers reveille-tts-watchdog    # confirm it is scheduled
+#   journalctl -u reveille-tts-watchdog -f         # one line per action, silence when healthy
+#
+# It probes 127.0.0.1:8004 by default -- the container's own published port on the
+# host it runs on. A deployment that publishes elsewhere overrides WATCHDOG_URL
+# here; on titan the container publishes 192.168.89.104:18004, so that override is
+# required and is listed in reveille-tts.service's header alongside the rest.
+
+[Unit]
+Description=reveille TTS watchdog (probe the model, escalate only as far as needed)
+Documentation=https://github.com/secretzer0/reveille/blob/main/docs/DES-009-agent-voices.md
+# Only meaningful once the thing it watches exists.
+After=reveille-tts.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/reveille-tts-watchdog
+# The probe allows 10s; a reload-and-restart pass is the slow path. If a pass
+# somehow wedges, killing it is correct -- the next tick starts clean.
+TimeoutStartSec=5min
+# The escalation counter and the reboot timestamp must outlive both this unit and
+# the host itself, so they are files, not runtime state.
+StateDirectory=reveille-tts-watchdog
+
+# ON TITAN the container publishes on the LAN address, not loopback:
+#   Environment=WATCHDOG_URL=http://192.168.89.104:18004

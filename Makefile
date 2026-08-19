@@ -149,7 +149,7 @@ SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut
 DEPLOY_CONF ?= $(HOME)/.reveille/deploy.env
 -include $(DEPLOY_CONF)
 
-TTS_IMAGE ?= reveille-tts:0.2.3
+TTS_IMAGE ?= reveille-tts:0.2.4
 TTS_UPSTREAM := $(shell cat docker/tts.upstream)
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
@@ -174,7 +174,6 @@ PROXY_SITE  ?= :$(PROXY_PORT)
 PUBLIC_URL  ?= $(if $(filter :%,$(PROXY_SITE)),,https://$(PROXY_SITE))
 BROKER_NAME ?= reveille-server
 PROXY_NAME  ?= reveille-proxy
-TTS_NAME    ?= reveille-tts
 # COMPOSE_EXTRA: overlay files layered by variant targets (up-dev). Empty for
 # the real deploy, so `make up` composes exactly one file.
 COMPOSE_EXTRA =
@@ -195,7 +194,6 @@ COMPOSE = SERVER_IMAGE=$(SERVER_IMAGE) SERVER_DATA=$(SERVER_DATA) \
   REVEILLE_NET=$(SERVER_NETWORK) AGENTS_PATH=$(AGENTS_PATH) \
   PROXY_IMAGE=$(PROXY_IMAGE) PROXY_SITE=$(PROXY_SITE) REVEILLE_PUBLIC_URL=$(PUBLIC_URL) \
   BROKER_NAME=$(BROKER_NAME) PROXY_NAME=$(PROXY_NAME) \
-  TTS_IMAGE=$(TTS_IMAGE) TTS_NAME=$(TTS_NAME) \
   docker compose -p $(COMPOSE_PROJECT) -f docker/compose.yml $(COMPOSE_EXTRA)
 
 # REFUSES TO REBUILD AN EXISTING TAG. The version string is the image tag; building
@@ -215,10 +213,14 @@ server-image:
 
 # DES-009. NOT wired into `up`: this image carries CUDA torch and a 350M model,
 # takes minutes to build and gigabytes to hold, and a fleet that has not asked
-# for voices must never pay for it during a deploy. The compose service sits
-# behind the `voices` profile for the same reason, so the two decisions cannot
-# drift.
-#   make tts-image && docker compose --profile voices up -d tts
+# for voices must never pay for it during a deploy.
+#
+# THERE IS NO COMPOSE SERVICE TO START ANY MORE (S3, ruled 11961/11965; the
+# `voices` profile removed here). The synthesizer runs as a HOST service under
+# deploy/reveille-tts.service, on whatever machine has the card -- since
+# 2026-08-19 that is titan.vyzon.ai, not the host running the broker. Build the
+# image on THAT host and start it with systemctl; the broker only ever needs
+# REVEILLE_TTS_URL to point at it.
 # The build context IS the upstream repo at the pinned SHA -- no Dockerfile of
 # ours, nothing vendored, and the pin file is the only input (publish-images and
 # image-pin-check read the same file). No refuse-to-rebuild here, deliberately:

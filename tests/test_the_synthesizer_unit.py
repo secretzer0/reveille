@@ -49,14 +49,41 @@ def test_it_binds_one_address_and_never_a_wildcard():
 
 
 def test_the_deployment_example_matches_what_actually_runs():
-    """Measured from the running container on WorldBuilder, 2026-08-18. An
-    example that does not reproduce the live shape is a trap: it looks like
-    instructions and installs a different service."""
-    for fact in ("TTS_BIND=192.168.90.136", "TTS_PUBLISH_PORT=18004",
-                 "TTS_IMAGE=reveille-tts:cu128-try",
-                 "/home/vyzon/tts/reference_audio", "/home/vyzon/tts/hf_cache",
-                 "-v /home/vyzon/tts/ctts-fork:/app"):
+    """Measured on titan.vyzon.ai, 2026-08-19. An example that does not reproduce
+    the live shape is a trap: it looks like instructions and installs a different
+    service. The synthesizer moved off the operator's laptop that day, and this
+    is the assertion that would have caught the example being left behind."""
+    for fact in ("TTS_BIND=192.168.89.104", "TTS_PUBLISH_PORT=18004",
+                 "/home/vyzon/tts-measure/reference_audio",
+                 "/home/vyzon/tts-measure/hf_cache"):
         assert fact in UNIT, f"the documented override must carry: {fact}"
+
+
+def test_the_example_no_longer_mounts_a_working_tree_over_the_image():
+    """The laptop bind-mounted /app from a git checkout, so the server ran code
+    from disk while the image name claimed otherwise. Same-name-different-software
+    is the hardest failure to see; titan runs the image's own copy."""
+    assert "-v /home/vyzon/tts/ctts-fork:/app" not in UNIT
+    assert "no TTS_EXTRA" in UNIT, "and the header says why it is absent"
+
+
+def test_the_image_tag_is_a_version_not_a_moving_word():
+    """Ruling 10877: an image pin is a version claim. `:dev` names whatever was
+    built last, which is exactly what a pin exists to prevent."""
+    assert "Environment=TTS_IMAGE=reveille-tts:0.2.4" in UNIT
+    assert ":dev" not in DIRECTIVES
+
+
+def test_the_default_batch_size_is_the_small_one():
+    """Ruling 12089. 4 is right for an 8 GB card; on titan's 4 GB card it OOMed
+    inside synthesize_batch on every multi-chunk request and fell back to
+    sequential -- correct audio, an OOM per request, nothing in the response to
+    say so. A value tuned for the biggest card taxes every smaller one
+    invisibly, so the DEFAULT is the one that cannot do that and a bigger card
+    raises it per host after measuring there."""
+    assert "Environment=TTS_BATCH_SIZE=1" in UNIT
+    assert "Environment=TTS_BATCH_SIZE=4" not in UNIT
+    assert "DELIBERATELY THE SMALL ONE" in UNIT, "and the header says why"
 
 
 def test_the_working_tree_mount_survives_as_a_word_split_variable():
@@ -115,8 +142,17 @@ def test_the_lid_drop_in_is_shipped_and_installed_by_nobody():
 
 def test_the_deploy_does_not_install_the_unit_either():
     """`make up` starting a GPU service nobody configured is the failure the
-    voices profile exists to prevent; a systemd unit installed by a deploy would
-    be the same thing with more privilege."""
+    voices profile existed to prevent; a systemd unit installed by a deploy would
+    be the same thing with more privilege.
+
+    Reads the DIRECTIVES, not the comments. Lesson
+    `a-gate-must-not-grep-the-prose-that-names-the-rule`, earned a third time
+    here: the Makefile now has to TELL the operator the synthesizer is a host
+    service and point at the unit by name, and a gate reading the whole file
+    fires on that sentence -- getting more certain to fire the better the
+    pointer is written."""
     for f in ("Makefile", "scripts/deploy-preflight"):
         text = (ROOT / f).read_text()
-        assert "reveille-tts.service" not in text, f"{f} must not install the unit"
+        directives = "\n".join(
+            ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        assert "reveille-tts.service" not in directives, f"{f} must not install the unit"

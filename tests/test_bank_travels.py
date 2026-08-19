@@ -229,12 +229,17 @@ def test_a_synthesizer_that_refuses_the_push_leaves_the_message_spoken_not_stall
     assert (broker["vd"] / "bank-rom.wav").exists()
 
 
-def test_compose_no_longer_mounts_the_brokers_voices_dir_into_the_synthesizer():
+def test_compose_no_longer_carries_a_synthesizer_at_all():
+    """The clip travels by PUSH, never by mount (DES-013 s3 as amended, 11104) --
+    and as of S3 there is no compose synthesizer to mount anything into. It runs
+    as a host service (deploy/reveille-tts.service) on whatever machine has the
+    card, which since 2026-08-19 is not the machine running the broker. The push
+    path is what makes that move cost one environment variable."""
     compose = open(os.path.join(ROOT, "docker", "compose.yml")).read()
     assert "TTS_VOICES_DIR" not in compose, "one path: the clip travels by push, never by mount"
-    assert "/app/reference_audio" in compose, "the synthesizer's reference dir is its own volume"
-    tts = compose[compose.index("reveille-tts:"):]
-    assert re.search(r"-\s+tts-reference:/app/reference_audio\b", tts), tts[:400]
+    assert "reveille-tts" not in compose, "the synthesizer is a host service now"
+    for gone in ("tts-reference", "tts-cache", "profiles: [voices]"):
+        assert gone not in compose, f"dead with the service: {gone}"
 
 
 def test_a_blackholed_synthesizer_costs_the_put_its_timeout_and_nobody_else_anything(broker, monkeypatch):

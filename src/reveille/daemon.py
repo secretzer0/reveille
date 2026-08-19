@@ -268,6 +268,64 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.183 THE SYNTHESIZER MOVED, AND LEARNED TO HEAL ITSELF (S3.1, ruled 12084 at
+operator ask 12082; host move on operator directive). The voice ran on the
+operator's laptop and went silent; it now runs on titan.vyzon.ai
+(192.168.89.104:18004) and the broker reaches it by REVEILLE_TTS_URL alone --
+which is exactly what DES-009 s3's "hostable off this network later" was for.
+The move cost one environment variable and nothing else.
+
+IT DID NOT FIT, AND THE REASON WAS NOT THE MODEL. titan's card is 4096 MiB and
+the load OOMed 2 to 26 MiB short at s3gen.to(device), identically across cu128
+AND cu130/torch 2.10 AND TTS_BF16 both off and on -- six measured cells, all
+dead at the same line. Checkpoint arithmetic said 746M params = 2.98 GB fp32 and
+should have left ~700 MiB free. The missing 1.5 GiB was NOT WEIGHTS: T3 carried
+24 bool buffers `attn.bias` of shape (1,1,8196,8196), 64.1 MiB each, 1537.5 MiB
+total -- GPT-2's legacy materialized causal mask, registered per attention layer
+by transformers 4.46.3 while the model config already selects `sdpa`, which
+builds causality on the fly and NEVER READS THEM. Allocated, moved to the GPU,
+ignored. Buffers do not appear in safetensors headers, so every estimate from
+checkpoint size was blind to them, and a dtype cast could never have helped: it
+touches floating-point parameters and leaves bool buffers at full size. Fork
+ede3c6f loads on CPU, drops them, THEN moves -- fp32 load 2665.9 MiB, peak 2952
+MiB, RTF 0.39 on the card that had been called too small. Gated on the attention
+implementation deliberately: under `eager` the layer really does index that
+buffer, and dropping it there would not raise, it would quietly yield a model
+that attends to the future. docker/tts.upstream moves to ede3c6f; TTS_IMAGE to
+reveille-tts:0.2.4.
+
+A SECOND DEFECT THE MOVE EXPOSED: TTS_BATCH_SIZE unset defaulted to 4, tuned for
+an 8 GB card. On 4 GB every multi-chunk request OOMed inside synthesize_batch and
+fell back to sequential -- CORRECT AUDIO, an OOM per request, and nothing in the
+response to say so. That silence IS the defect: a value tuned for the biggest
+card taxes every smaller one invisibly, surfacing only if somebody happens to
+read the container log. So the unit's default is now 1 (ruling 12089) -- the
+value that cannot do that -- and a bigger card RAISES it per host after measuring
+there, never by inheriting a number measured on different hardware.
+
+THE WATCHDOG (deploy/reveille-tts-watchdog.{sh,service,timer}). systemd restarts
+a unit whose PROCESS died; the failure that matters here is the opposite --
+container up, port answering, model gone -- and systemd will supervise that
+forever. So the probe asserts the MODEL: /api/model-info reports loaded AND
+device != cpu, because a server that fell back to CPU answers every request at
+1.6x realtime and nothing else in the stack will ever notice. Escalation is
+ordered by blast radius, each step only because the cheaper one already failed
+three times running: 3 consecutive -> restart the unit, 6 -> reload nvidia_uvm
+and restart (this host suspends, and suspend wedges nvidia_uvm), 9 -> reboot;
+nvidia-smi dead skips the ladder entirely, because restarting a container onto a
+card that cannot be talked to is theatre. NEVER TWICE IN AN HOUR: a reboot loop
+destroys the evidence every time it comes back, and the timestamp is a file in
+/var/lib precisely so the guard survives the reboot it guards. A probe is
+ignored while the unit is younger than 15 min -- the model load is minutes, and
+a shorter window restarts it mid-load forever, silently, because each restart
+looks like a fresh start. THE BROKER IS NEVER TOUCHED: the voice worker retries,
+so restarting the bus to fix a speaker would take the fleet down for a cosmetic
+failure.
+
+THE COMPOSE SYNTHESIZER IS GONE, not deprecated: the `tts:` service, the
+tts-cache and tts-reference volumes, the voices profile doc, and the TTS_NAME
+passthrough are deleted. It has been dead since S3 and a second way to configure
+one container is the shape defects hide in.
 0.2.182 THE SYNTHESIZER AS A HOST SERVICE (S3, ruled 11961/11965). The TTS runs
 fine as compose's `voices` profile; what it cannot do there is start without
 something holding the docker socket -- and S2 ruled the launcher never gains

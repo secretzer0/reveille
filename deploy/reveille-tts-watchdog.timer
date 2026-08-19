@@ -1,0 +1,46 @@
+# /etc/systemd/system/reveille-tts-watchdog.timer -- probe every 60s (S3.1).
+#
+# 60s is chosen against the escalation ladder, not for its own sake: three
+# consecutive failures before the first restart means a wedged container is
+# noticed in about three minutes. Faster would restart things during transient
+# hiccups; slower would leave the fleet mute longer than a human would tolerate
+# before asking.
+#
+# THE FULL LADDER IS NOT NINE MINUTES. An earlier draft of this comment said it
+# was, by multiplying 9 failures by 60s, and that is wrong in a way worth
+# recording: every action the watchdog takes RESTARTS the unit, which re-arms the
+# 15-minute grace window, which suppresses counting until it expires. After the
+# first restart the ticks that matter are one per GRACE WINDOW, not one a minute.
+# Traced against the script's thresholds, each firing exactly once:
+#
+#   t+0,1     fail 1,2     counted
+#   t+2       fail 3       restart          -> grace re-arms
+#   t+18,19   fail 4,5     counted
+#   t+20      fail 6       uvm + restart    -> grace re-arms
+#   t+36,37   fail 7,8     counted
+#   t+38      fail 9       REBOOT
+#
+# About forty minutes to the reboot. It was ninety-eight when each rung fired on
+# `fails >= threshold`, because the cheap rung then repeated at 4 and 5 and the
+# middle one at 7 and 8, and each repeat cost a whole grace window rather than a
+# minute. Ruled 12096: a rung fires ONCE. The same action against the same wedge
+# does not get better on repeat, process death is already covered by the unit's
+# own Restart=on-failure, and the fleet is mute for every minute of this.
+
+[Unit]
+Description=Probe the reveille TTS model every minute
+Documentation=https://github.com/secretzer0/reveille/blob/main/docs/DES-009-agent-voices.md
+
+[Timer]
+# Start probing a minute after boot rather than immediately: the host has just
+# come up, docker has not necessarily started the container yet, and the unit's
+# own 15-minute grace window is measured from when the UNIT started, not boot.
+OnBootSec=60s
+OnUnitActiveSec=60s
+AccuracySec=5s
+# A missed tick (host asleep, host rebooting) fires once on resume rather than
+# replaying every tick it slept through.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
