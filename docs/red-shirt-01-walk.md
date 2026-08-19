@@ -17,3 +17,10 @@ brief(), then fetched wip/red-shirt-01/20260819T164207Z BEFORE anything else.
 Work rode the swap intact: sha 17330f4, base main fc918ea, 12 insertions.
 Body A's uncommitted .mcp.json deletion stayed on WorldBuilder, as designed --
 files do not travel, only the identity does.
+
+Sendback (step 7): swap-pending ring received by body B in the container. Tree
+was already clean and pushed, so this line is the only new content -- the point
+is that the RITUAL runs identically in both directions: save, note, and the new
+body fetches the branch before anything else. Body C is the laptop, native,
+/home/tmelhiser/reveille-materialize; it clones main, so this log exists only on
+the wip branch it must fetch.
