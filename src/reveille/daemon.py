@@ -282,7 +282,7 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
-0.2.191 ONE DIRECTORY, ONE AGENT. `reveille init <broker> native-reveille-devops`
+0.2.192 ONE DIRECTORY, ONE AGENT. `reveille init <broker> native-reveille-devops`
 was run with no --dir from a shell sitting in red-shirt-01's directory. It wrote
 devops' credential over red-shirt's settings.local.json, so the next session
 started there read the file, believed it was devops, and called join() -- which
