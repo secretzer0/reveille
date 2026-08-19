@@ -78,6 +78,31 @@ def test_the_arrival_is_what_opens_the_socket(broker):
         assert daemon._waiters.get(new["id"]), "arrived, so it is reachable"
 
 
+def test_a_second_ticket_still_names_the_credential_the_parked_body_holds(broker):
+    """The other half of parking again: falling back is only useful if the spent
+    credential can still CLAIM. An arrival window that closes deletes the mint
+    and writes no tombstone, so the newest tombstone is still the parked body's
+    -- and the next ticket is written against it."""
+    conn = broker.conn
+    u, room, old, new = _identity(conn)
+    store.join(conn, "wanderer", "agent", room["id"], token_id=new["id"])   # old is superseded
+    first = store.recall_offer(conn, agent_id=old["agent_id"], owner_id=u["id"],
+                               superseded_secret_hash=store.superseded_hash_for(
+                                   conn, old["agent_id"]),
+                               rooms=[room["id"]])
+    claimed = store.recall_claim(conn, old["secret"])
+    assert claimed and claimed["recall_id"] == first["id"]
+    # nobody joined on it: the window closes and the credential is swept
+    later = store.time.time_ns() + store.PENDING_TTL_NS + 1
+    assert claimed["id"] in store.expire_pending(conn, now=later)
+    h = store.superseded_hash_for(conn, old["agent_id"])
+    store.recall_offer(conn, agent_id=old["agent_id"], owner_id=u["id"],
+                       superseded_secret_hash=h, rooms=[room["id"]])
+    again = store.recall_claim(conn, old["secret"])
+    assert again, "the parked body can claim the next ticket with what it holds"
+    assert again["agent_name"] == "wanderer"
+
+
 # ---- the daemon half ---------------------------------------------------------
 
 def _env(tmp_path):
@@ -150,6 +175,64 @@ def test_a_claimed_return_ticket_rings_before_it_celebrates(tmp_path, monkeypatc
                                   lambda secret: True))
     assert got == "fresh-secret"
     assert [r["reason"] for r in _rings(tmp_path)] == ["recalled"]
+
+
+def _scripted(codes, calls, monkeypatch):
+    """Drive _run's decisions without a broker: _session hands back the codes in
+    order, and every _park call is recorded with the secret it was given."""
+    seq = iter(codes)
+
+    async def session(uri, agent, state):
+        return next(seq)
+
+    async def park(url, agent, secret, write_env):
+        calls.append(secret)
+        return "claimed-secret" if len(calls) == 1 else ""
+
+    monkeypatch.setattr(waked, "_session", session)
+    monkeypatch.setattr(waked, "_park", park)
+    monkeypatch.setattr(waked, "_converge", lambda url, state: None)
+
+
+def test_a_window_that_closed_parks_again_instead_of_dying(monkeypatch):
+    """Architect 12284. A claimed credential nobody landed inside the arrival
+    window is SWEPT, so the next dial presents a secret the broker has never
+    heard of. The old shape exited on that, which cost the box its daemon for a
+    missed window -- one ticket claimed too early and the machine needed a human.
+    It parks again on the credential it was superseded on, and waits for another
+    ticket."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "spent-secret")
+    calls = []
+    _scripted([waked.PARKED, waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    rc = asyncio.run(waked._run("ws://b.example/wake", "nr1", 0))
+    assert rc == waked.PARKED
+    # SECOND park is on the SPENT credential, not on the claimed one that died:
+    # the claimed secret can never claim anything, and the tombstone the ticket
+    # matches is the spent one's.
+    assert calls == ["spent-secret", "spent-secret"], calls
+
+
+def test_a_body_that_was_never_parked_still_exits_on_a_dead_credential(monkeypatch):
+    """Nothing to fall back to is not the same situation: a materialised body
+    holding an expired mint has no superseded credential of its own, and a
+    daemon looping on a secret nobody will ever honour is the deafness this
+    whole file exists to prevent."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "never-landed")
+    calls = []
+    _scripted([waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == 1
+    assert calls == [], "there was no ticket to poll for"
+
+
+def test_an_attached_session_spends_the_fallback(monkeypatch):
+    """Once a session attaches, THIS credential speaks for the identity. Keeping
+    the old one would let a later unrelated refusal park on a secret two swaps
+    old, claiming a ticket meant for a body that no longer exists."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "spent-secret")
+    calls = []
+    _scripted([waked.PARKED, None, waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == 1
+    assert calls == ["spent-secret"], "the arrival ended the parked state"
 
 
 def test_the_ring_asks_for_the_one_act_a_daemon_cannot_perform():

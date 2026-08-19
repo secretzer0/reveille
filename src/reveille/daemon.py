@@ -290,7 +290,14 @@ let a move LOOK finished while the identity had not gone anywhere.
   arrival observation; waked answers by ringing its own spool
   (reason=not-arrived, one a minute) and rings it on a claimed return ticket too
   (reason=recalled). The ring is the one act a daemon has that produces the turn
-  that produces the join. Doctrine and USAGE carry the instruction.
+  that produces the join. Doctrine and USAGE carry the instruction. A credential
+  the broker does not know AT ALL (the arrival window closed and the sweep took
+  it) sends a body that was parked BACK to parked, on the credential it was
+  superseded on, still polling for a ticket -- a missed window is retried at the
+  next one and never costs the box its daemon (architect 12284). A body that was
+  never parked has nothing to fall back to and still exits. Note for anyone
+  reading a materialised container's log: the 4409 refusals before the agent's
+  first turn are the intended path, and the daemon says so.
   (2) ONE PENDING PER IDENTITY. Three unclaimed pending credentials for one
   agent coexisted; any could claim, so the body that arrived was whichever
   joined first, not the one just minted. A bound mint now deletes the identity's
