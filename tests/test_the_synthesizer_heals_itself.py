@@ -69,6 +69,18 @@ def test_a_dead_driver_skips_the_ladder():
     assert "do_reboot" in gpu
 
 
+def test_no_rung_repeats():
+    """Ruled 12096. Each rung fires EXACTLY once (-eq, never -ge). The same
+    action against the same wedge does not get better on repeat, and because
+    every action restarts the unit -- re-arming the 15-minute grace window -- a
+    repeated rung costs a whole grace window rather than a minute. At -ge the
+    reboot landed at t+98; at -eq it lands at t+38."""
+    for threshold in ("FAIL_REBOOT", "FAIL_UVM", "FAIL_RESTART"):
+        assert re.search(rf'\[ "\$fails" -eq "\${threshold}" \]', CODE), \
+            f"{threshold} must fire once, not at-or-above"
+    assert '-ge "$FAIL' not in CODE, "no rung may repeat"
+
+
 def test_one_good_probe_clears_the_count():
     """Consecutive failures, not cumulative. A model that answers is a model that
     works, and a counter that only ever climbs eventually reboots a healthy

@@ -11,10 +11,12 @@
 #
 # THE ESCALATION IS ORDERED BY BLAST RADIUS, and each step only happens because
 # the cheaper one already failed three times in a row:
-#   3 consecutive fails  -> restart the unit          (the container is wedged)
-#   6 consecutive fails  -> reload nvidia_uvm, restart (the driver is wedged --
-#                           this host suspends, and suspend wedges nvidia_uvm)
-#   9 consecutive fails  -> reboot the host           (nothing softer worked)
+#   exactly 3 fails  -> restart the unit          (the container is wedged)
+#   exactly 6 fails  -> reload nvidia_uvm, restart (the driver is wedged -- this
+#                       host suspends, and suspend wedges nvidia_uvm)
+#   exactly 9 fails  -> reboot the host           (nothing softer worked)
+# EXACTLY, not at-least: a rung fires once and the count walks past it. Repeating
+# an action that already failed buys nothing and costs a whole grace window.
 #   nvidia-smi itself dead -> reboot immediately, no ladder: if the driver cannot
 #                           be talked to at all, restarting a container is theatre.
 #
@@ -115,17 +117,25 @@ fails=$(( $(cat "$FAIL_FILE" 2>/dev/null || echo 0) + 1 ))
 echo "$fails" > "$FAIL_FILE"
 log "probe failed ($fails consecutive)"
 
-if [ "$fails" -ge "$FAIL_REBOOT" ]; then
+# EACH RUNG FIRES EXACTLY ONCE (-eq, never -ge; ruled 12096). The same action
+# against the same wedge does not get better on repeat, and every action restarts
+# the unit -- which re-arms the 15-minute grace window and suppresses counting
+# until it expires. Retrying a rung therefore does not cost a minute, it costs a
+# grace window: -ge reached the reboot at t+98, -eq reaches it at t+38. Process
+# death is already covered by the unit's own Restart=on-failure; this ladder is
+# only for the failures systemd cannot see, and for those the fleet is mute the
+# whole time.
+if [ "$fails" -eq "$FAIL_REBOOT" ]; then
     echo 0 > "$FAIL_FILE"
     do_reboot "$fails consecutive failures; unit restart and driver reload both failed"
-elif [ "$fails" -ge "$FAIL_UVM" ]; then
+elif [ "$fails" -eq "$FAIL_UVM" ]; then
     log "reloading nvidia_uvm, then restarting $UNIT"
     systemctl stop "$UNIT"
     # Order matters: nothing may hold the module while it is removed.
     modprobe -r nvidia_uvm 2>&1 | sed 's/^/  /' || log "  rmmod nvidia_uvm failed (something still holds it)"
     modprobe nvidia_uvm 2>&1 | sed 's/^/  /' || log "  modprobe nvidia_uvm failed"
     systemctl start "$UNIT"
-elif [ "$fails" -ge "$FAIL_RESTART" ]; then
+elif [ "$fails" -eq "$FAIL_RESTART" ]; then
     log "restarting $UNIT"
     systemctl restart "$UNIT"
 fi
