@@ -70,7 +70,7 @@ def test_the_example_no_longer_mounts_a_working_tree_over_the_image():
 def test_the_image_tag_is_a_version_not_a_moving_word():
     """Ruling 10877: an image pin is a version claim. `:dev` names whatever was
     built last, which is exactly what a pin exists to prevent."""
-    assert "Environment=TTS_IMAGE=reveille-tts:0.2.4" in UNIT
+    assert "Environment=TTS_IMAGE=reveille-tts:0.2.5" in UNIT
     assert ":dev" not in DIRECTIVES
 
 

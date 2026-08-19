@@ -92,10 +92,26 @@ def test_an_assigned_bank_voice_is_cloned_when_visible_and_falls_through_when_no
     clips = ["architect.wav", "bank-quark-7.wav"]
     v = daemon.tts_voice("architect", clips=clips, predefined=["A.wav"], assigned="bank-quark-7.wav")
     assert v == {"voice_mode": "clone", "reference_audio_filename": "bank-quark-7.wav"}
+    # ASSIGNED BUT NOT VISIBLE IS SILENCE (ruled 12101). It used to fall through
+    # to the dropped clip or the digest pick, which sounds harmless and is not:
+    # that rendition gets cached as tts-<mid>.webm and outlives the outage that
+    # caused it. A speaker WITH an assignment is owed that voice or none.
     with caplog.at_level("WARNING"):
         v = daemon.tts_voice("architect", clips=clips, predefined=["A.wav"], assigned="bank-picard-1.wav")
-    assert v == {"voice_mode": "clone", "reference_audio_filename": "architect.wav"}
-    assert "bank clip bank-picard-1.wav is not visible" in caplog.text
+    assert v is None, "silent and uncached beats the wrong voice kept forever"
+    assert "bank clip bank-picard-1.wav not visible after push -- silent, will retry" in caplog.text
+
+
+def test_the_digest_pick_survives_for_a_speaker_who_was_promised_nothing():
+    """Ruled 12101 narrows the refusal to ASSIGNED speakers only. A speaker with
+    no assignment was never promised a particular voice, so the predefined
+    digest pick is the right answer and not a degraded one -- silencing those
+    would mute most of the fleet to fix a bank problem they do not have."""
+    v = daemon.tts_voice("architect", clips=[], predefined=["A.wav", "B.wav"])
+    assert v is not None and v["voice_mode"] == "predefined"
+    # And it is still stable and sorted: same name, same voice, every host.
+    again = daemon.tts_voice("architect", clips=[], predefined=["B.wav", "A.wav"])
+    assert again == v, "sorted, so readdir order cannot change who sounds like what"
 
 
 def test_the_bank_prefix_is_reserved_a_name_never_matches_a_bank_file():

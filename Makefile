@@ -149,7 +149,7 @@ SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut
 DEPLOY_CONF ?= $(HOME)/.reveille/deploy.env
 -include $(DEPLOY_CONF)
 
-TTS_IMAGE ?= reveille-tts:0.2.4
+TTS_IMAGE ?= reveille-tts:0.2.5
 TTS_UPSTREAM := $(shell cat docker/tts.upstream)
 SERVER_DATA  ?= $(HOME)/reveille
 # The shared docker network agent containers live on. THE BROKER MUST BE ON IT: an
