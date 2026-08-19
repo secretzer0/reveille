@@ -265,7 +265,8 @@ def read_env(agent):
     return env.get("REVEILLE_TOKEN") or ""
 
 
-async def _park(url, agent, secret, write_env, deadline=None, read_env=None):
+async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
+                tried=None):
     """Poll for a return ticket until one arrives. Prints once on entry (silence
     is the defect, ruling 11947) and once when it comes back.
 
@@ -274,6 +275,11 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None):
     secret nobody may ever write a ticket for (ruling 12320 R1). A body that WAS
     parked waits indefinitely, because its owner has already been told where it
     went and the machine is doing nothing else with that credential.
+
+    `tried` is every secret this daemon has already dialled. The file self-heal
+    means "a credential arrived by a path I did not take"; one this process
+    itself used and watched die is not that, and adopting it again is a loop
+    that never reaches the claim (measured below).
     """
     waited = 0
     while True:
@@ -290,9 +296,20 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None):
         # The file is the identity (write_credential's own rule), so reading it
         # is how a parked body asks "am I still the spent one?". Cheap, local,
         # and it needs no broker.
+        #
+        # ONLY A CREDENTIAL THIS PROCESS HAS NEVER DIALLED (measured 2026-08-19,
+        # negative test, and it cost the machine every future ticket). Claiming
+        # a ticket WRITES the new secret to this same file, so a body that
+        # claimed and then missed its arrival window re-parks with a dead
+        # credential sitting on disk. Compared only against the parked secret it
+        # always differs, so the self-heal returned on every poll, the dial was
+        # refused as unknown, the daemon re-parked, and _claim below was never
+        # reached: one missed window and no second ticket could ever land. So
+        # the question is not "is this different from what I hold" but "is this
+        # new to me at all".
         if read_env:
             fresh = read_env(agent)
-            if fresh and fresh != secret:
+            if fresh and fresh != secret and fresh not in (tried or ()):
                 print(f"reveille-waked: this directory's credential changed while "
                       f"{agent} was parked -- adopting it and reconnecting. No "
                       f"return ticket was needed: the identity never left this "
@@ -524,6 +541,11 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     # holding a credential that may never land, and the spent one it was parked
     # on is the only thing that can claim the NEXT ticket.
     parked_secret = None
+    # EVERY SECRET THIS PROCESS HAS DIALLED. The file self-heal adopts what
+    # arrived by another path; this is how it tells that from what it wrote
+    # itself. A claimed credential lands in the same file, so without this the
+    # daemon re-adopts its own dead secret forever and never claims again.
+    tried = {token} if token else set()
     try:
         while True:
             # Before dialling, not after: a body that is behind should reach the
@@ -589,7 +611,8 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                               f"polling for one for "
                               f"{ORPHAN_POLL_S // 60} minutes.", file=sys.stderr)
                         got = await _park(url, agent, token, write_env,
-                                          deadline=ORPHAN_POLL_S, read_env=read_env)
+                                          deadline=ORPHAN_POLL_S,
+                                          read_env=read_env, tried=tried)
                         if not got:
                             print(f"reveille-waked: no return ticket for {agent} "
                                   f"in {ORPHAN_POLL_S // 60} minutes -- exiting so "
@@ -599,6 +622,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                             return 1
                         parked_secret = token
                         token = got
+                        tried.add(token)
                         uri = f"{url}{sep}name={agent}" + f"&token={token}"
                         delay = 1
                         continue
@@ -607,10 +631,11 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                           f"machine was superseded on, waiting for another "
                           f"return ticket for {agent}.", file=sys.stderr)
                     got = await _park(url, agent, parked_secret, write_env,
-                                      read_env=read_env)
+                                      read_env=read_env, tried=tried)
                     if not got:
                         return PARKED
                     token = got
+                    tried.add(token)
                     uri = f"{url}{sep}name={agent}" + f"&token={token}"
                     delay = 1
                 elif code == PARKED:
@@ -622,10 +647,11 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # loop simply carries on.
                     parked_secret = token
                     got = await _park(url, agent, token, write_env,
-                                      read_env=read_env)
+                                      read_env=read_env, tried=tried)
                     if not got:
                         return PARKED
                     token = got
+                    tried.add(token)
                     uri = f"{url}{sep}name={agent}" + f"&token={token}"
                     delay = 1
                 else:
