@@ -377,11 +377,15 @@ class Minting(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"owned": [{"id": "r1", "name": "Reveille2.0"}],
                                     "member": [], "public": []})
         if self.path == "/tokens":
+            # SHAPE COPIED FROM store.rooms_for_token: {room_id: room_name}. It
+            # used to be a list of {id, name} dicts here and nowhere else, and
+            # that fiction let a real refusal ship -- the reader took the dict's
+            # KEYS (ids) for names and matched nothing.
             return self._json(200, {"tokens": [
-                {"id": "t1", "agent_name": "roc-sso-dev", "rooms": [{"id": "r1", "name": "Reveille2.0"}]},
-                {"id": "t2", "agent_name": "reveille-architect", "rooms": [{"id": "r1", "name": "Reveille2.0"}]},
-                {"id": "t3", "agent_name": None, "rooms": []},              # unbound: not an agent
-                {"id": "t4", "agent_name": "roc-sso-dev", "rooms": [{"id": "r2", "name": "OverSiteAI"}]},
+                {"id": "t1", "agent_name": "roc-sso-dev", "rooms": {"r1": "Reveille2.0"}},
+                {"id": "t2", "agent_name": "reveille-architect", "rooms": {"r1": "Reveille2.0"}},
+                {"id": "t3", "agent_name": None, "rooms": {}},              # unbound: not an agent
+                {"id": "t4", "agent_name": "roc-sso-dev", "rooms": {"r2": "OverSiteAI"}},
             ]})
         return self._json(200, {"agents": []})
 
@@ -416,6 +420,28 @@ def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
     mint = [b for pth, b in Minting.calls if pth == "/tokens" and b is not None][0]
     assert mint["agent_name"] == "roc-sso-dev"
     assert mint["mem_tier"] == "state"
+
+
+def test_the_picker_reads_the_shape_the_broker_actually_serves(tmp_path, monkeypatch):
+    """THE SEAM, GATED AGAINST THE REAL PAYLOAD instead of a hand-written one.
+    GET /tokens serves store.list_tokens, whose `rooms` is {room_id: room_name}.
+    The reader iterated it and got room IDs; every stub in this file agreed with
+    the reader rather than with the broker, so the picker printed ids at people
+    and a room-carrying mint refused a live agent with "carries no rooms you can
+    reach" -- naming the id it had just failed to match (red-shirt-01,
+    2026-08-19). This builds the payload with the store itself, so a shape
+    change on either side fails here."""
+    from reveille import store
+    db = str(tmp_path / "broker.db")
+    conn = store.connect(db)
+    store.migrate(conn, db)
+    u = store.setup_first_admin(conn, "travis", "hunter2hunter2")
+    room = store.create_room(conn, u["id"], "Reveille2.0")
+    store.create_token(conn, u["id"], "native red-shirt-01", agent_name="red-shirt-01",
+                       create=True, rooms=[room["id"]])
+    payload = {"tokens": store.list_tokens(conn, u["id"])}
+    monkeypatch.setattr(cli, "_get", lambda url, path, cookie, **k: payload)
+    assert cli.my_agents("http://b.example", "c") == [("red-shirt-01", ["Reveille2.0"])]
 
 
 def test_a_re_mint_carries_the_agents_rooms_not_the_owners(minting, monkeypatch):

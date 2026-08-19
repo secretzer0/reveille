@@ -279,6 +279,18 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.189 THE PICKER READS THE SHAPE THE BROKER SERVES. GET /tokens serves
+store.list_tokens, whose `rooms` is {room_id: room_name}; cli.my_agents iterated
+it and collected the KEYS, so the agent picker printed room IDs at people as if
+they were names. 0.2.188 made that load-bearing -- a bound re-mint carries the
+identity's rooms -- and the mint then refused every live agent: "carries no
+rooms you can reach", naming the id it had just failed to match. Every stub in
+the install tests served a list of {id, name} dicts, a shape no route produces,
+so the tests agreed with the reader instead of with the broker. The stub now
+serves the store's shape and one gate builds the payload with list_tokens
+itself. Found by running the acceptance chain's native step against a live
+broker, which is the only place the two shapes ever met.
+
 0.2.188 THE TRANSPORTER TELLS YOU IT LANDED (DES-012; the acceptance chain's
 step 8, measured live 2026-08-19). Five defects, one shape: every one of them
 let a move LOOK finished while the identity had not gone anywhere.
