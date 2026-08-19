@@ -268,6 +268,34 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.184 THE CACHE OUTLIVED THE OUTAGE.
+
+ONE MORE DEFECT, FOUND BY THE OPERATOR'S EAR AND CAUSED BY THIS WORK. Moving
+the synthesizer meant restarting it repeatedly -- host move, two image builds, a
+batch-size sweep -- and the broker pushes every bank clip to the synthesizer on
+worker start. 156 of those pushes hit `Connection refused` while the container
+was down. A message voiced during one of those windows could not reach its
+assigned clip and fell back to another voice, and THAT RENDITION WAS THEN CACHED
+as tts-<mid>.webm. The result is a transcript that plays back in the wrong
+character -- and, because different messages missed different clips, one that
+seems to drift between characters as you scroll. The audio was not wrong when it
+was made; it was made wrong and then kept. Purged all 1304 cached files
+(147 MB); POST /audio/<mid> re-queues anything whose file is absent, so the next
+play regenerates against a synthesizer that now holds all 31 clips. The lesson is
+not about voices: ANY cache written during a dependency outage outlives the
+outage, and nothing downstream can tell a stale-correct file from a fresh-wrong
+one.
+
+ALSO 51a693b in the fork: generation is serialised. chatterbox_model.conds is
+process-wide and the non-batched path assigned it and then called generate(),
+which reads it back off the model -- two steps a concurrent request could split,
+making one request speak in another's voice. synthesize_batch already avoided
+this (see _resolve_conds, whose docstring names the failure); the non-batched
+path could not, because generate() is what reads self.conds. The broker runs ONE
+voice worker on one queue, so this was never the drift reported above -- it is a
+latent race that the batch-size change made reachable, fixed on sight rather than
+left for whoever adds a second caller.
+
 0.2.183 THE SYNTHESIZER MOVED, AND LEARNED TO HEAL ITSELF (S3.1, ruled 12084 at
 operator ask 12082; host move on operator directive). The voice ran on the
 operator's laptop and went silent; it now runs on titan.vyzon.ai

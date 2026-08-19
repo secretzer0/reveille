@@ -46,10 +46,12 @@
 #   Environment=TTS_REFERENCE=/home/vyzon/tts-measure/reference_audio
 #   Environment=TTS_CACHE=/home/vyzon/tts-measure/hf_cache
 #   User=vyzon
-# TTS_BATCH_SIZE is absent on purpose: 1 is the default now, and an override that
-# only restates a default is a number nobody remembers to re-measure.
 # matching the broker's REVEILLE_TTS_URL exactly. Nothing about the broker
 # changes; that is the point of overriding rather than editing.
+#
+# TTS_BATCH_SIZE is absent from that list on purpose: 1 is the default now, and
+# an override that only restates a default is a number nobody remembers to
+# re-measure when the hardware changes under it.
 #
 # NOTE WHAT IS *NOT* IN THAT LIST: no TTS_EXTRA. The laptop deployment bind-
 # mounted a working tree over /app so the server ran code from disk; titan runs
@@ -90,7 +92,7 @@ Type=exec
 # pinned image (ruling 10877): move the pin, rebuild, restart the unit -- an
 # image bump without a moved pin is red in CI, and a moved pin without a
 # restart here is a unit still running the old one.
-Environment=TTS_IMAGE=reveille-tts:0.2.4
+Environment=TTS_IMAGE=reveille-tts:0.2.5
 Environment=TTS_NAME=reveille-tts
 # Where it LISTENS. Defaults are the same-host case; a deployment whose broker
 # is elsewhere overrides both to the address it told the broker to call.
@@ -100,14 +102,16 @@ Environment=TTS_PUBLISH_PORT=8004
 # disk names the paths instead.
 Environment=TTS_REFERENCE=reveille_tts-reference
 Environment=TTS_CACHE=reveille_tts-cache
-# ANYTHING ELSE THIS HOST NEEDS, and the reason it is a variable: this
-# deployment bind-mounts a working tree over /app, so the SERVER'S OWN CODE
-# comes from disk rather than from the image. A unit that quietly ran the
-# image's copy instead would be running different software under the same name
-# -- the hardest kind of difference to see, and the one nobody thinks to check
-# when the voice sounds wrong. Written UNBRACED on purpose: systemd splits
-# $VAR into words and passes ${VAR} as ONE argument, so a braced form here
-# would hand docker a single unparsable blob.
+# ANYTHING ELSE A HOST NEEDS, and EMPTY is the right default. The laptop
+# deployment used this to bind-mount a working tree over /app, so the server's
+# own CODE came from disk rather than from the image -- different software under
+# the same name, the hardest kind of difference to see, and the one nobody
+# thinks to check when the voice sounds wrong. titan does not do that and no
+# deployment should: the image is built from the pinned SHA and that is the
+# whole point of pinning it. The variable stays because a host may still need a
+# device or a mount, not because running unpinned code is a supported shape.
+# Written UNBRACED on purpose: systemd splits $VAR into words and passes ${VAR}
+# as ONE argument, so a braced form here would hand docker an unparsable blob.
 Environment=TTS_EXTRA=
 # Upstream PR #161 on our fork batches a request's chunks through the turbo
 # decoder. THE DEFAULT IS 1, AND IT IS DELIBERATELY THE SMALL ONE (architect,
