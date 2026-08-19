@@ -4640,7 +4640,7 @@ def agents_seen(conn, rooms, exclude=(), present=True):
             f"WHERE scope IN ({ph}) AND status='live'", list(rooms)):
         bump(r["author"], r["created_ns"],
              "lessons" if r["kind"] == "lesson" else "memories")
-    # A state note is scoped to the AGENT (scope='agent:<token_id>'), never to
+    # A state note is scoped to the AGENT (scope='agent:<agent_id>'), never to
     # a room, so the room query above cannot see it -- and the state note is
     # exactly the resume point this feature exists to surface. Asked
     # separately, for names the caller can already see in their rooms, and

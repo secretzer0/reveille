@@ -189,10 +189,24 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   fi
 fi
 
-if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/repos 2>/dev/null)" ]; then
+# R2 (ruling 11938/11942): GUARD ON THE TARGET, NOT THE PARENT'S EMPTINESS.
+# This asked whether ~/repos was empty -- and `reveille init --dir
+# /home/agent/repos` runs ABOVE, writing .mcp.json and .claude/ into exactly
+# that directory. So by the time this ran the answer was always "not empty",
+# the clone was SKIPPED on every boot that had a repo URL, and the report said
+# "already had content" as though a human had put it there. red-shirt came up
+# with a repo URL and no repo and nothing said otherwise. The question this
+# means to ask is whether the WORK TREE exists.
+REPO_STATUS=none
+if [ -n "${REVEILLE_REPO_URL:-}" ] && [ ! -e /home/agent/repos/work ]; then
   if git clone "${REVEILLE_REPO_URL}" /home/agent/repos/work 2>/tmp/clone.err; then
-    say "- cloned ${REVEILLE_REPO_URL} -> ~/repos/work"
+    # THE SHA, NOT JUST THE FACT (r2). "cloned" is a claim; a sha is evidence,
+    # and it is what tells the reader whether the tree is the one they meant.
+    REPO_SHA="$(git -C /home/agent/repos/work rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    REPO_STATUS=ok
+    say "- repo: ${REVEILLE_REPO_URL} @ ${REPO_SHA} -> ~/repos/work"
   else
+    REPO_STATUS="failed: $(head -1 /tmp/clone.err 2>/dev/null | tr -d '\n' | cut -c1-160)"
     note "- clone of ${REVEILLE_REPO_URL} **FAILED**."
     # THE FAILURE AND THE STATE THAT CAUSED IT. "clone failed, clone by hand"
     # cost two people an hour suspecting the token, when the token was fine and
@@ -217,10 +231,17 @@ if [ -n "${REVEILLE_REPO_URL:-}" ] && [ -z "$(ls -A /home/agent/repos 2>/dev/nul
   fi
   rm -f /tmp/clone.err
 elif [ -n "${REVEILLE_REPO_URL:-}" ]; then
-  say "- ~/repos already had content; clone skipped"
+  REPO_SHA="$(git -C /home/agent/repos/work rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  REPO_STATUS=ok
+  say "- repo: ${REVEILLE_REPO_URL} @ ${REPO_SHA} -> ~/repos/work (already present)"
 else
   say "- no REVEILLE_REPO_URL was passed; nothing to clone"
 fi
+# A FACT THE LAUNCHER CAN READ. The boot report is prose for a human; the pane
+# needs one word, and health that ignores the repo is the hole r2 names -- an
+# agent whose repo never arrived looked identical to one that never wanted a
+# repo. The data root is bind-mounted, so this file is the launcher's window.
+printf '%s\n' "$REPO_STATUS" > /home/agent/.reveille-repo-status 2>/dev/null || true
 
 # DES-005 P3 / architect ruling msg 8607: the chosen role's prompt lives in the
 # agent's CLAUDE.md between a DELIMITER PAIR, and the entrypoint rewrites what

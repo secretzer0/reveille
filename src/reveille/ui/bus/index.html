@@ -2567,7 +2567,12 @@ function tabActions(t){
 function stateSentence(name){
  const a=agRows[name]||{};
  const st=a.state||(a.status==='running'?'running':'stopped');
- const say=st==='elsewhere'
+ const say=st==='degraded'
+   ? 'Running, but its repo never arrived: '+esc(a.repo_status||'the clone failed')+
+     '. The agent is reachable and its work tree is not there -- an empty ~/repos '+
+     'is this, not "no repo was asked for". Fix the cause and recreate, or clone '+
+     'by hand inside it.'
+  :st==='elsewhere'
    ? 'Alive on another machine -- this host has no body for it. "Move it here" mints a new credential for the SAME identity and supersedes the one it is running on now: its name, history, memories and rooms come with it, and the other body goes dark on its next call.'
   :st==='retired'
    ? 'Retired -- its container is gone and its files are kept. Recreating this name resumes everything it learned locally.'
@@ -3086,6 +3091,10 @@ async function openMaterialize(name){
  // agent's rooms would be a demotion wearing a move's clothes. Still ticks, not
  // a fixed list -- the mint attaches exactly what is ticked here.
  const roles=(agMeta&&agMeta.roles)||[];
+ // What the launcher recorded this agent was last provisioned with (r3). Empty
+ // for one that has never had a container here, or a record from before this
+ // was written down -- and empty is exactly what makes the picker required.
+ const hadRole=((agRows[name]||{}).role_name)||'';
  // THE THREE AXES, THROUGH THE ONE HELPER (operator 11917/11924). The LIST is
  // the agent's token INTERSECT my rooms -- a body swap never hands an agent
  // reach it never had, and never offers reach I do not hold. The TICKS are
@@ -3112,10 +3121,29 @@ async function openMaterialize(name){
   // right, so the choice belongs on this screen rather than as a surprise
   // after the click. The identity's memories, lessons and history are NOT in
   // this prompt: they travel with the id, whatever role the new body wears.
+  // R1 (ruling 11938): A CONTAINER BODY HAS NO DOCKER AND NO HOST SHELL, ever
+  // -- least privilege, and the launcher holds no fact "this role needs a
+  // socket" to refuse on. So it is not refused, it is NAMED, in the same
+  // register as WILL NOT TRAVEL: the owner is the one who knows whether this
+  // agent's work needs the host, and they are told before the click rather
+  // than discovering it as a command that does not exist.
+  '<div class="pDim">CONTAINER BODY = no docker, no host shell. Work that needs '+
+  'the host stays behind. An agent that deploys, builds images or drives '+
+  'systemd wants a NATIVE body on the machine that has those things.</div>'+
+  // R3 (ruling 11938): THE MOVE CARRIES THE ROLE IT ALREADY HAD. Asking again
+  // for something the launcher already recorded invites a different answer by
+  // accident, and a body that comes up wearing a role nobody chose to change
+  // is a silent rewrite of what the agent IS. So: prefilled from the last
+  // provision, editable, and a CHANGE is said out loud below. The picker is
+  // demanded only when no role is known -- a first move, or a record written
+  // before the launcher kept this.
   '<div class="pRow"><select id="agmRole" aria-label="role template">'+
-   '<option value="">pick a role for the new body</option>'+
-   roles.map(r=>'<option value="'+esc(r)+'">'+esc(r)+'</option>').join('')+
+   '<option value="">'+(hadRole?'keep '+esc(hadRole):'pick a role for the new body')+
+     '</option>'+
+   roles.map(r=>'<option value="'+esc(r)+'"'+(r===hadRole?' selected':'')+'>'+
+     esc(r)+'</option>').join('')+
    '</select></div>'+
+  '<div id="agmRoleDelta" class="pDim"></div>'+
   '<div class="pRow"><input id="agmRepo" aria-label="repo URL" '+
    'placeholder="repo URL (blank = your profile default)"></div>'+
   '<div class="pRow"><button id="agmGo">move it here</button> '+
@@ -3135,13 +3163,23 @@ async function openMaterialize(name){
    : '';
  };
  lost();
+ const roleDelta=()=>{
+  const now=$('agmRole').value||hadRole;
+  $('agmRoleDelta').textContent=(hadRole&&now&&now!==hadRole)
+   ? 'ROLE CHANGES from '+hadRole+' to '+now+' -- the new body boots its '+
+     'CLAUDE.md from the new one. Its memories, lessons and history are '+
+     'unaffected; they belong to the identity, not the role.'
+   : '';
+ };
+ roleDelta();
+ $('agmRole').addEventListener('change',roleDelta);
  for(const c of document.querySelectorAll('#agmRooms input'))c.addEventListener('change',lost);
  $('agmGo').onclick=async()=>{
   const st=$('agmStatus');
   const picked=[...document.querySelectorAll('#agmRooms input:checked')]
    .map(c=>c.value);
   if(!picked.length){toast('tick at least one room -- a body with none reaches nothing');return;}
-  if(!$('agmRole').value){toast('pick a role -- a container body boots its CLAUDE.md from it, '+
+  if(!($('agmRole').value||hadRole)){toast('pick a role -- a container body boots its CLAUDE.md from it, '+
    'and the launcher refuses an agent that would know itself only by its bus name');return;}
   try{
    st.textContent='minting and starting the new body...';
@@ -3150,7 +3188,7 @@ async function openMaterialize(name){
    // by that name" -- correctly, because bringing a new being into the world
    // is a different act from moving one (DES-011 s2, ruling 10896).
    await lapi('/agents',{method:'POST',body:JSON.stringify({
-    agent:name,rooms:picked,role:$('agmRole').value,
+    agent:name,rooms:picked,role:$('agmRole').value||hadRole,
     repo_url:$('agmRepo').value.trim()})});
    st.textContent='container up; waiting for it to reach the bus...';
    for(let i=0;i<60;i++){

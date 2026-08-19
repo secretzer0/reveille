@@ -358,11 +358,28 @@ def _migrate_launcher_db(conn):
     conn.commit()
 
 
+def _add_role_name(conn):
+    """Additive: containers.role_name, for launcher databases that predate r3.
+    Empty is the honest value for a container provisioned before anything
+    recorded it -- the move dialog then asks, exactly as it did before."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(containers)")}
+    if "role_name" not in cols:
+        conn.execute("ALTER TABLE containers ADD COLUMN role_name TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+
+
 def _launcher_tables(conn):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS containers("
         "user TEXT NOT NULL, agent TEXT NOT NULL, repo_url TEXT, container TEXT, "
         "image TEXT, broker_url TEXT, created_ns INTEGER, "
+        # r3 (ruling 11938): the role this agent was last provisioned with, so a
+        # MOVE can carry it instead of asking again. Deliberately NOT called
+        # `role` -- that name belongs to the pre-P0 schema where it meant the
+        # AGENT NAME, and _migrate_launcher_db keys its entire rewrite on seeing
+        # a column by that name. Reusing it would make every modern database
+        # look like an ancient one to the migration.
+        "role_name TEXT NOT NULL DEFAULT '', "
         "PRIMARY KEY(user, agent))")
     # Grant records (4.5.2): metadata ONLY -- the minted token is signable solely
     # with the container's gate secret, which this process never persists. A db
@@ -416,6 +433,7 @@ def _db(path=None):
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='containers'").fetchone():
         _migrate_launcher_db(conn)
     _launcher_tables(conn)
+    _add_role_name(conn)
     return conn
 
 
@@ -465,13 +483,13 @@ def release_agent_name(conn, agent, by, now_ns=None):
     return row["user"]
 
 
-def _record(conn, user, agent, repo_url, image, broker_url):
+def _record(conn, user, agent, repo_url, image, broker_url, role_name=""):
     conn.execute(
         "INSERT OR REPLACE INTO containers"
-        "(user, agent, repo_url, container, image, broker_url, created_ns) "
-        "VALUES(?,?,?,?,?,?,?)",
+        "(user, agent, repo_url, container, image, broker_url, created_ns, role_name) "
+        "VALUES(?,?,?,?,?,?,?,?)",
         (user, agent, repo_url, container_name(user, agent), image,
-         broker_url, time.time_ns()))
+         broker_url, time.time_ns(), role_name or ""))
     conn.commit()
 
 
@@ -1213,7 +1231,8 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                            boot_cmd=boot_cmd, extra_env=extra_env,
                            auth_mount=auth_mount)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
-    _record(conn, user, agent, creds["repo_url"], image, broker)
+    _record(conn, user, agent, creds["repo_url"], image, broker,
+            role_name=split_role_prompt(role_prompt or "", ROLE_PROMPTS)[0])
     owner = claim_agent_name(conn, user, agent)
     # The KIND on the audit line and in every response: "provisioned on api-key
     # billing" is one word that turns an invoice surprise into a paste-time fact.
@@ -2395,7 +2414,22 @@ def revoke_bound_tokens(auth_url, cookie_header, agent):
             _broker_json(auth_url, cookie_header, "DELETE", f"/tokens/{t['id']}")
 
 
-def lifecycle_state(docker_status, has_files, hive):
+def repo_status(user, agent):
+    """What the container's boot said about its repo: "ok", "none", or a
+    "failed: ..." line. "" when nothing was written -- an older image, or a
+    container that has not booted since this shipped.
+
+    R2 (ruling 11938): HEALTH THAT IGNORES THE REPO IS THE HOLE. An agent whose
+    clone never happened looked exactly like one that never wanted a repo, and
+    red-shirt came up with a repo URL, no repo, and every control green."""
+    try:
+        with open(os.path.join(data_root(user, agent), ".reveille-repo-status")) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def lifecycle_state(docker_status, has_files, hive, repo=""):
     """The FOUR states a name can be in, from three independent readings
     (operator requirement 2026-07-30). Pure -- the join is the whole feature,
     so it is testable without docker, disk or a broker.
@@ -2413,7 +2447,11 @@ def lifecycle_state(docker_status, has_files, hive):
     Derived per call from live readings, never stored: a lifecycle flag that
     could lapse would be the deaf-agent shape wearing a lifecycle hat."""
     if docker_status in ("running", "restarting", "paused"):
-        return "running"
+        # DEGRADED IS RUNNING WITH SOMETHING MISSING (r2), not a fourth kind of
+        # stopped: the container is up and the agent is reachable, but the work
+        # tree it was provisioned with never arrived. Said here so the pane can
+        # say it, rather than leaving it in a boot report nobody opens.
+        return "degraded" if str(repo).startswith("failed") else "running"
     if docker_status and docker_status != "absent":
         return "stopped"
     if has_files:
@@ -2620,10 +2658,13 @@ def _agent_status(conn, user, hive_by_name=None):
         listed.add(agent)
         hive = hive_by_name.get(agent, {})
         has_files = os.path.isdir(data_root(user, agent))
+        repo = repo_status(user, agent)
         out.append({"agent": agent, "container": r["container"], "status": st,
                     "image": r["image"], "repo_url": r["repo_url"],
+                    "role_name": r["role_name"],
                     "created_ns": r["created_ns"],
-                    "state": lifecycle_state(st, has_files, hive),
+                    "state": lifecycle_state(st, has_files, hive, repo=repo),
+                    "repo_status": repo,
                     "has_files": has_files, "hive": hive})
     for agent, hive in sorted(hive_by_name.items()):
         if agent in listed or not ROLE_RE.match(agent or ""):
