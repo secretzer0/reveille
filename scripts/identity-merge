@@ -153,7 +153,8 @@ def merge(conn, src, dst, dst_rooms):
         if has_table(conn, "token_tombstones"):
             conn.execute(
                 "INSERT OR REPLACE INTO token_tombstones"
-                "(secret_hash, agent_id, superseded_ns) VALUES(?,?,?)",
+                "(secret_hash, agent_id, reason, died_ns) "
+                "VALUES(?,?,'superseded',?)",
                 (tok["secret_hash"], dst["id"], time.time_ns()))
         conn.execute("UPDATE members SET token_id=NULL WHERE token_id=?", (tok["id"],))
         conn.execute("DELETE FROM token_rooms WHERE token_id=?", (tok["id"],))

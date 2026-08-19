@@ -185,14 +185,18 @@ def test_a_plain_revoke_grants_no_grace():
     assert store.handover_grace(c, old["secret"]) is None
 
 
-def test_expiry_leaves_no_tombstone():
-    """A tombstone signposts a displaced body toward its successor. A pending
-    credential displaced nothing and its successor never arrived, so a
-    signpost here would point at a body that does not exist."""
+def test_expiry_tombstones_without_superseding_anything():
+    """RULING 12445 inverts what this gate used to hold: the broker never
+    deletes a credential into silence, so expiry leaves a tombstone -- but a
+    DIFFERENT kind. reason='expired-unclaimed', never 'superseded': the
+    credential displaced nothing, so it earns the story, not the signpost
+    toward a successor (no grace, no return ticket -- gated in
+    test_no_credential_dies_into_silence.py)."""
     c, u, room, old = world()
     store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
     store.expire_pending(c, now=store.time.time_ns() + store.PENDING_TTL_NS + 1)
-    assert c.execute("SELECT count(*) FROM token_tombstones").fetchone()[0] == 0
+    rows = c.execute("SELECT reason FROM token_tombstones").fetchall()
+    assert [r["reason"] for r in rows] == ["expired-unclaimed"]
 
 
 def test_a_pending_credential_may_only_arrive():

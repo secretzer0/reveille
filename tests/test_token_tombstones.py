@@ -1,8 +1,9 @@
 """S2 (ruling 10876): a superseded credential leaves a tombstone, and its
 refusal becomes a signpost.
 
-Bounds under test, straight from the ruling: the tombstone holds secret_hash,
-agent_id, superseded_ns, last_refusal_ns and NOTHING else; the signpost fires
+Bounds under test, straight from the ruling (fields as amended by 12445: the
+tombstone holds secret_hash, agent_id, reason, died_ns, last_refusal_ns and
+NOTHING else -- reason arrived when expiry started tombstoning); the signpost fires
 only for superseded credentials (a never-valid secret stays the generic "bad
 token" -- the two must be distinguishable); reading refreshes last_refusal_ns
 (S3's liveness signal); past the fixed age the row is deleted on sight and the
@@ -53,14 +54,17 @@ def test_supersede_writes_the_tombstone():
     r = c.execute("SELECT * FROM token_tombstones").fetchall()
     assert len(r) == 1
     assert r[0]["agent_id"] == new["agent_id"]
-    assert r[0]["superseded_ns"] > 0
+    assert r[0]["died_ns"] > 0 and r[0]["reason"] == "superseded"
 
 
 def test_the_tombstone_holds_exactly_the_ruled_fields():
     c = db()
     cols = {r["name"] for r in c.execute("PRAGMA table_info(token_tombstones)")}
-    assert cols == {"secret_hash", "agent_id", "superseded_ns", "last_refusal_ns"}, (
-        "ruling 10876 bounds the tombstone to these four fields and nothing else")
+    assert cols == {"secret_hash", "agent_id", "reason", "died_ns",
+                    "last_refusal_ns"}, (
+        "ruling 10876 bounded the tombstone to four fields; ruling 12445 adds "
+        "reason and renames the ts to died_ns -- expiry tombstones now, and "
+        "the column names the death, not one kind of it")
 
 
 def test_a_superseded_secret_gets_a_signpost_and_stamps_liveness():
@@ -94,7 +98,7 @@ def test_past_the_fixed_age_the_refusal_goes_generic():
     c = db()
     _, old, _ = minted_twice(c)
     ancient = time.time_ns() - store.TOMBSTONE_TTL_NS - 1
-    c.execute("UPDATE token_tombstones SET superseded_ns=?", (ancient,))
+    c.execute("UPDATE token_tombstones SET died_ns=?", (ancient,))
     assert store.tombstone_for(c, old["secret"]) is None
     assert c.execute("SELECT count(*) FROM token_tombstones").fetchone()[0] == 0, (
         "prune rides the read: an expired row is deleted on sight")
@@ -207,7 +211,7 @@ def test_the_refusal_is_a_signpost_for_the_former_body_only():
     _, old, _ = minted_twice(c)
     # Past the handover grace: the note has had its five minutes and this
     # credential is what it has been since the swap -- a signpost.
-    c.execute("UPDATE token_tombstones SET superseded_ns=?",
+    c.execute("UPDATE token_tombstones SET died_ns=?",
               (store.time.time_ns() - store.HANDOVER_GRACE_NS - 1,))
     prev = daemon._conn
     daemon._conn = c

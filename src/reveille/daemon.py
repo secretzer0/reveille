@@ -215,6 +215,10 @@ USE:
    join() -- that call IS the arrival and commits the swap. Until it happens
    the identity is still the other body, your wake socket is refused
    ({"error":"pending"}), and nothing else here works.
+   THE BODY IN WAITING (DES-012 s18, ruling 12445): join() refused and no
+   ring explains it -> print the refusal, take the choice it offers (knock,
+   or idle), do NOTHING else. NEVER read, print, compare or copy credential
+   files -- the broker's refusal is the only diagnostic. Idle is a valid life.
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
    BEING WOKEN IS NOT BEING ASKED. A ring means mail arrived, never that you owe a
    reply. Reply ONLY if: it names you in NEED:, blocks your work, or asks you a
@@ -310,6 +314,23 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.200 NO CREDENTIAL DIES INTO SILENCE (ruling 12445). expire_pending was a
+plain delete, so a stale body booting on an expired-unclaimed credential got
+the amnesiac "bad token" and flailed -- 54k tokens of it, measured 2026-08-19.
+Now every credential the broker kills leaves a tombstone: expiry writes one
+(reason expired-unclaimed, dated to the instant the window closed, keyed on
+the PENDING secret's hash so the return-ticket path is untouched), and the
+refusal tells the whole story -- identity name, whether a live body holds it
+and how recently it was seen, why THIS credential is dead and when, and the
+choices, named as choices; never a credential, never the live body's host.
+The story is true before the sweep arrives (tombstone_for read-repairs an
+expired pending on sight, 12320 B's principle), the grace and the return
+ticket stay superseded-only, tombstones expire on the broker's existing
+sweep (the 12396 lesson), and the doctrine line every body in waiting needed
+is in USAGE section 2 and the managed CLAUDE.local.md block: join() refused
+and no ring explains it -> print the refusal, take the offered choice, do
+NOTHING else -- idle is a valid life.
 
 0.2.199 ALREADY-ON MEANS THE SAME IMAGE, NOT THE SAME NAME. Two builds raced
 onto one tag (measured 2026-08-19: an interrupted ssh left a remote docker
@@ -4928,14 +4949,40 @@ def _agent_principal(request):
                              handover=True)
         ts = store.tombstone_for(_conn, secret)
         if ts:
-            when = time.strftime("%Y-%m-%d", time.gmtime(ts["superseded_ns"] / 1e9))
+            # ONE TEXT, BOTH DEAD REASONS, LIVENESS FILLED IN (ruling 12445):
+            # identity name, alive-elsewhere-and-how-recently OR not alive at
+            # all, why THIS credential is dead and when, and the choices named
+            # as choices. NEVER a credential, NEVER the live body's host or
+            # path -- in the visit case that is another human's machine.
+            live = store.identity_liveness(_conn, ts["agent_id"])
+            if live["alive"]:
+                seen = (" -- a live credential for it was last used " +
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                      time.gmtime(live["last_seen_ns"] / 1e9))
+                        if live["last_seen_ns"] else
+                        ", holding a live credential not yet used")
+                alive = f"The identity is alive elsewhere{seen}."
+            else:
+                alive = "No live body holds the identity right now."
+            idle = ("Or stay idle -- idle is a valid life. This refusal is "
+                    "the only diagnostic: never read, print, compare or copy "
+                    "credential files.")
+            if ts["reason"] == "expired-unclaimed":
+                when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                     time.gmtime(ts["died_ns"] / 1e9))
+                raise store.AuthError(
+                    f"expired unclaimed: this credential for "
+                    f"{ts['agent_name']!r} was minted for a body swap and its "
+                    f"arrival window closed at {when} before anything arrived "
+                    f"on it -- it never carried the identity. {alive} Your "
+                    f"choices: ask the owner to mint the move again. {idle}")
+            when = time.strftime("%Y-%m-%d", time.gmtime(ts["died_ns"] / 1e9))
             raise store.AuthError(
                 f"superseded: this credential for {ts['agent_name']!r} was "
-                f"replaced on {when} -- another body holds the identity now. "
-                f"To bring it back here, the owner sends it back from the bus "
-                f"and a turn in this directory calls join(): that call IS the "
-                f"arrival. `reveille init` also works. To reach the live body, "
-                f"use the bus web UI.")
+                f"replaced on {when}. {alive} Your choices: the owner sends "
+                f"it back from the bus and a turn in this directory calls "
+                f"join(): that call IS the arrival. `reveille init` also "
+                f"works. To reach the live body, use the bus web UI. {idle}")
         raise store.AuthError("bad token")
     name = (request.headers.get("x-agent") if request else "") or ""
     bound = tok.get("agent_name")
@@ -8416,6 +8463,9 @@ async def _sweeper():
             store.sweep_sessions(_conn)
             store.reap_stale(_conn)
             store.sweep_expired_state(_conn)
+            gone = store.sweep_tombstones(_conn)
+            if gone:
+                log.info("swept %s expired token tombstone(s)", gone)
             if dropped:
                 log.info("retention swept %s message(s)", dropped)
         except Exception:
