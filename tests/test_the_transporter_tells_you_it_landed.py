@@ -188,7 +188,8 @@ def _scripted(codes, calls, monkeypatch, tickets=("claimed-secret",)):
     async def session(uri, agent, state):
         return next(seq)
 
-    async def park(url, agent, secret, write_env, deadline=None, read_env=None):
+    async def park(url, agent, secret, write_env, deadline=None, read_env=None,
+                   tried=None):
         calls.append((secret, deadline))
         return next(got, "")
 
@@ -359,3 +360,69 @@ def test_the_ring_asks_for_the_one_act_a_daemon_cannot_perform():
 @pytest.mark.parametrize("name", ["ARRIVAL_RING_S", "NOT_ARRIVED"])
 def test_the_knobs_are_named_not_buried(name):
     assert hasattr(waked, name)
+
+
+def test_it_does_not_re_adopt_a_credential_it_already_watched_die(monkeypatch):
+    """The file self-heal means "a credential arrived by a path I did not take".
+    One this process dialled itself is not that."""
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+    tries = []
+
+    async def claim_third(url, secret):
+        tries.append(secret)
+        return "second-ticket" if len(tries) >= 3 else ""
+
+    monkeypatch.setattr(waked, "_claim", claim_third)
+    got = asyncio.run(waked._park("http://b.example", "nr1", "spent",
+                                  lambda s: True,
+                                  read_env=lambda a: "first-ticket",
+                                  tried={"spent", "first-ticket"}))
+    assert got == "second-ticket", "a secret already dialled is not an arrival"
+    assert tries == ["spent"] * 3, "and the claim keeps running on the spent one"
+
+
+def test_a_claimed_credential_that_died_does_not_eat_the_next_ticket(tmp_path,
+                                                                    monkeypatch):
+    """MEASURED 2026-08-19, the negative test itself, on 0.2.193.
+
+    A body claimed ticket #1, nobody took a turn, and the pending was swept at
+    PENDING_TTL. The daemon re-parked on the spent credential -- correct -- but
+    the claimed secret was still sitting in .claude/settings.local.json, where
+    IT had written it. The self-heal compared that file only against the spent
+    secret, found it different, adopted it, was refused as unknown, re-parked,
+    and did it again every RECALL_POLL_S. _claim below it was never reached, so
+    the second return ticket sat unclaimed until its window closed: one missed
+    arrival cost that machine every future ticket.
+
+    The whole sequence, end to end: superseded -> claim #1 -> it dies -> park
+    again -> claim #2 must still land, on the SPENT secret both times."""
+    monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path))
+    monkeypatch.setenv("REVEILLE_TOKEN", "spent")
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+    monkeypatch.setattr(waked, "_converge", lambda url, state: None)
+    disk = {"secret": "spent"}          # .claude/settings.local.json, in one dict
+    codes = iter([waked.PARKED, waked.DEAD_CREDENTIAL, 7])
+    tickets = iter(["ticket-1", "ticket-2"])
+    claims = []
+
+    async def session(uri, agent, state):
+        return next(codes)
+
+    async def claim(url, secret):
+        claims.append(secret)
+        return next(tickets, "")
+
+    def write_env(secret):
+        disk["secret"] = secret         # claiming writes the new one to disk
+        return True
+
+    monkeypatch.setattr(waked, "_session", session)
+    monkeypatch.setattr(waked, "_claim", claim)
+    rc = asyncio.run(waked._run("ws://b.example/wake", "nr1", 0,
+                                write_env=write_env,
+                                read_env=lambda a: disk["secret"]))
+    assert rc == 7, "it got back on the bus on the second ticket"
+    assert claims == ["spent", "spent"], (
+        "both claims present the SPENT secret -- the tombstone every ticket is "
+        f"written against; got {claims}")
+    assert disk["secret"] == "ticket-2"

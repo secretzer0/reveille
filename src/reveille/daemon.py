@@ -310,6 +310,20 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.195 THE SELF-HEAL MUST NOT EAT THE TICKET. 0.2.193 taught a parked daemon
+to re-read its own credential file and adopt a secret that arrived by a path it
+did not take. Claiming a return ticket writes the new secret to THAT SAME FILE,
+so a body that claimed and then missed its arrival window re-parked with a dead
+credential on disk: different from the spent one, therefore adopted, therefore
+refused as unknown, therefore parked again -- every RECALL_POLL_S, for ever, and
+the claim below the check was never reached. One missed arrival window cost that
+machine every FUTURE ticket. Measured in the negative test on 2026-08-19: the
+second ticket sat unclaimed while the daemon churned adopt-refuse-park at 20s.
+The daemon now remembers every secret it has dialled and adopts only one that is
+NEW to it, so the init-rotation case still heals, the spent secret is still
+skipped, and a claimed-then-swept credential is skipped because this process
+watched it die. Nothing about the two-phase swap or the ticket itself moved.
+
 0.2.194 ONE ARM PER SESSION, AND ARMED MEANS THE HARNESS IS WATCHING. Two
 deafnesses in one day, both with every control green. An architect armed the
 watcher with `cmd &` inside a Bash call: the orphan satisfied the Stop hook's
