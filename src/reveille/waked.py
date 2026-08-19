@@ -36,7 +36,7 @@ import time
 
 import websockets
 
-from reveille import __version__, spool
+from reveille import __version__, spool, timings
 from reveille.cli import GIT_SOURCE
 
 HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))
@@ -204,20 +204,22 @@ NOT_ARRIVED = 5
 # no turn to land it, and the answer is to park again, not to die (architect
 # 12284).
 DEAD_CREDENTIAL = 6
-RECALL_POLL_S = 20
-# One ring a minute while a credential waits to land. The window is ten minutes
-# (store.PENDING_TTL_NS), an agent mid-turn does not answer instantly, and a
-# duplicate ring is harmless by construction -- the watcher prints it, the agent
-# deletes the file. Silence here is what cost the transporter its last step.
-ARRIVAL_RING_S = 60
+RECALL_POLL_S = timings.RECALL_POLL_S
+# Rings repeat while a credential waits to land, several per arrival window
+# (timings pins the ratio, whatever the profile): an agent mid-turn does not
+# answer instantly, and a duplicate ring is harmless by construction -- the
+# watcher prints it, the agent deletes the file. Silence here is what cost the
+# transporter its last step.
+ARRIVAL_RING_S = timings.ARRIVAL_RING_S
 # HOW LONG A BODY THAT WAS NEVER PARKED KEEPS ASKING (ruling 12320 R1). PARKED
 # is only reachable from a LIVE socket -- the credential-superseded frame -- so a
 # body superseded while STOPPED, or restarted afterwards, comes up holding a
 # spent secret and can never claim the ticket written against exactly that
 # secret. It polls instead. Bounded, because the flock must eventually free for
-# a hook respawn on a hand-written credential: 15 minutes covers the 5-minute
-# ticket plus the minutes it takes a person to notice and open one.
-ORPHAN_POLL_S = 15 * 60
+# a hook respawn on a hand-written credential: the wait covers the ticket
+# window with room for a person to notice and open one (the profile keeps
+# that ordering; the gate pins it).
+ORPHAN_POLL_S = timings.ORPHAN_POLL_S
 
 
 def arrival_frame(why):
@@ -488,6 +490,35 @@ def upgrade_due(installed, broker):
     return installed < broker
 
 
+def broker_profile(version_string):
+    """The timing profile a broker's /version announces, "production" when it
+    says nothing -- the bare string IS production's announcement, and "" (an
+    unreachable broker) is nobody's announcement at all."""
+    import re
+    m = re.search(r"\(timings: ([a-z0-9-]+) -- REVEILLE_TIMINGS\)",
+                  version_string or "")
+    return m.group(1) if m else "production"
+
+
+def _warn_profile_skew(version_string):
+    """THE PROFILE IS PER-PROCESS; THE COUPLING IS PER-SYSTEM (architect
+    blocking on #154). A fast broker against a production body puts the claim
+    poll SLOWER than the window it polls inside -- a run that does not fail
+    cleanly, it produces timings that read as defects. Never a refusal (a body
+    must not go deaf over a clock), never silent either: one loud line naming
+    both sides, on every convergence pass while the skew stands."""
+    if not version_string:
+        return
+    theirs = broker_profile(version_string)
+    if theirs != timings.PROFILE:
+        print(f"reveille-waked: TIMING PROFILE SKEW -- the broker runs "
+              f"REVEILLE_TIMINGS={theirs} and this body runs "
+              f"{timings.PROFILE}. The transporter's clocks are coupled "
+              f"ACROSS processes; a mixed deployment produces timings that "
+              f"read as defects. Set both sides to one profile.",
+              file=sys.stderr)
+
+
 def _broker_version(url):
     """The broker's version string, or "" -- unauthenticated, short timeout, and
     every failure is silence. An unreachable broker means no upgrade, never an
@@ -563,7 +594,9 @@ def _converge_inner(url, state):
         return
     state["upgrade_checked"] = now
 
-    broker = version_tuple(_broker_version(url))
+    raw = _broker_version(url)
+    _warn_profile_skew(raw)
+    broker = version_tuple(raw)
     installed = version_tuple(__version__)
     if not upgrade_due(installed, broker):
         return
@@ -811,6 +844,10 @@ def main():
         # an error.
         print(f"reveille-waked: {a.name} already held -- exiting", file=sys.stderr)
         return 0
+    # THE PROFILE SAYS ITS NAME AT STARTUP (12425): the coupling is
+    # per-system, this line is one half of seeing it, and the convergence
+    # pass's skew warning is the other.
+    print(f"reveille-waked: timings profile {timings.PROFILE}", file=sys.stderr)
     # THE LOCK FILE NAMES ITS HOLDER (ruling 12008). It was opened, truncated
     # and left empty, so nothing could tell WHICH process held the slot -- and
     # a re-key had no way to retire the daemon still carrying the old
