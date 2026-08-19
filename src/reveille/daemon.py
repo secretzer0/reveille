@@ -67,6 +67,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from reveille import __version__, store
+from reveille.devicecode import cli_code
 
 COOKIE = "rev_session"          # http; on an https public URL the reader/writer use __Host-
 OIDC_COOKIE = "rev_oidc"        # the browser marker for a login in flight (10 min)
@@ -7071,7 +7072,7 @@ async def auth_callback_http(request):
         # THE TERMINAL GETS ITS OWN SESSION, not this cookie (DES-022 s3): its
         # own row, so signing out of this browser does not kill the machine's
         # sign-in, and the Sessions view can revoke either one alone.
-        _cli_park(data["cli"], u)
+        _cli_park(data["cli"], u, request)
         return _oidc_marker_drop(_cookie(HTMLResponse(CLI_DONE_PAGE), secret, request),
                                  request, sid)
     target = "/ui" + (f"?welcome={urllib.parse.quote(out['banner'])}" if out["banner"] else "")
@@ -7091,6 +7092,19 @@ CLI_STATE_MAX = 64
 CLI_STATE_MIN = 32              # a guessable state would be the whole weakness
 CLI_PARK_TTL_S = 300            # s3: single-use and short
 
+# WHAT THE HUMAN IS ACTUALLY BEING ASKED (architect 12183). Without a code on
+# this page the link is a takeover: an attacker mails their OWN state to a
+# victim, the victim's live provider session signs them in with no visible
+# friction, and the session parked under the attacker's state is a 14-day
+# credential that mints agents on the VICTIM's account. Nothing on their screen
+# would have looked wrong. The code is the one thing the attacker cannot put on
+# the victim's terminal -- they never see it -- so a mismatch is the whole
+# defence, and it only works if the page SAYS what a mismatch means.
+CLI_WARNING = ("A terminal is asking to sign in as you. Continue ONLY if this "
+               "code is on that terminal's screen. If you did not start this, "
+               "or the code is different, close this page -- somebody else is "
+               "asking for your account.")
+
 CLI_DONE_PAGE = ("<!doctype html><meta charset=utf-8><title>signed in</title>"
                  "<style>body{font:16px system-ui;margin:20vh auto;max-width:28rem;"
                  "text-align:center;color:#222}</style>"
@@ -7098,18 +7112,36 @@ CLI_DONE_PAGE = ("<!doctype html><meta charset=utf-8><title>signed in</title>"
                  "continues on its own.</p>")
 
 
-def _cli_park(state, user):
+def _client_ip(request):
+    """Who signed the terminal in. The broker sits behind the proxy, so the
+    socket peer is the proxy -- the forwarded head is the caller, and it is
+    only trusted for a LOG LINE, never for a decision."""
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() if fwd
+            else (request.client.host if request.client else "?"))
+
+
+def _cli_park(state, user, request):
     """Hand the waiting terminal a SECOND session (DES-022 s6). Not the
     browser's: one machine's sign-in must outlive the browser tab that made it,
-    and each is revocable without the other."""
+    and each is revocable without the other.
+
+    ONLY A STATE A TERMINAL IS ACTUALLY WAITING ON. Hygiene rather than the
+    defence -- the code on the page is the defence (see CLI_WARNING) -- but a
+    park with nobody waiting is a session nobody asked for, and there is no
+    reason to write one."""
     if len(state) < CLI_STATE_MIN:
         log.warning("ignoring a CLI sign-in with a short state")
+        return
+    if store.oidc_state_get(_conn, f"cli:{state}") != "pending":
+        log.warning("ignoring a CLI sign-in for a state no terminal registered")
         return
     store.oidc_state_set(_conn, f"cli:{state}", json.dumps(
         {"session": store.create_session(_conn, user["id"]), "cookie": _cookie_name(),
          "user": user["name"],
          "expires_ns": time.time_ns() + store.SESSION_TTL_NS}), CLI_PARK_TTL_S)
-    log.info("%s signed a terminal in", user["name"])
+    log.info("%s signed a terminal in (code %s, from %s)", user["name"],
+             cli_code(state), _client_ip(request))
 
 
 async def auth_cli_page_http(request):
@@ -7139,11 +7171,14 @@ async def auth_cli_page_http(request):
         f'{html.escape(PROVIDERS[n]["label"])}</a>' for n in _oidc_doors)
     return HTMLResponse(
         "<!doctype html><meta charset=utf-8><title>sign in to reveille</title>"
-        "<style>body{font:16px system-ui;margin:15vh auto;max-width:22rem;color:#222}"
-        "a{display:block;padding:.8rem;margin:.5rem 0;border:1px solid #ccc;"
-        "border-radius:.4rem;text-align:center;text-decoration:none;color:inherit}"
-        "p{color:#666}</style><h1>Sign in</h1>"
-        "<p>Your terminal is waiting for this.</p>" + doors)
+        "<style>body{font:16px system-ui;margin:12vh auto;max-width:24rem;color:#222;"
+        "padding:0 1rem}a{display:block;padding:.8rem;margin:.5rem 0;"
+        "border:1px solid #ccc;border-radius:.4rem;text-align:center;"
+        "text-decoration:none;color:inherit}code{display:block;font:700 2rem/1.4 "
+        "ui-monospace,monospace;letter-spacing:.1em;text-align:center;margin:.5rem 0}"
+        "p{color:#555}</style><h1>Sign in</h1>"
+        f"<code>{html.escape(cli_code(state))}</code>"
+        f"<p>{html.escape(CLI_WARNING)}</p>" + doors)
 
 
 async def auth_cli_http(request):

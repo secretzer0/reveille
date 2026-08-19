@@ -43,6 +43,7 @@ import webbrowser
 from reveille import __version__
 
 from . import install, spool
+from .devicecode import cli_code
 
 
 def read_token(args_token, stdin=None):
@@ -403,7 +404,17 @@ def device_login(url, open_browser=True, sleep=time.sleep, window=LOGIN_WINDOW_S
         raise RuntimeError(f"{url} refused to start a sign-in ({code}): "
                            f"{body.get('error') or body}")
     link = f"{url.rstrip('/')}/auth/cli?cli={state}"
-    print(f"\nSign in here -- any browser, any device:\n\n    {link}\n")
+    # THE CODE IS WHAT MAKES THE LINK SAFE TO CLICK (architect 12183). A link
+    # alone can be mailed to somebody else, and their browser would sign THEM in
+    # under the sender's state -- a 14-day minting session, collected by whoever
+    # sent it, with nothing on the victim's screen looking wrong. The page shows
+    # this code; an attacker cannot put it on the victim's terminal because they
+    # never see that terminal. So it is printed here, first, and named as the
+    # thing to compare.
+    print(f"\nSign in here -- any browser, any device:\n\n    {link}\n\n"
+          f"    code: {cli_code(state)}\n\n"
+          f"The page will show that code. If it shows a different one, or you did "
+          f"not\nexpect this, do not continue -- somebody else asked for it.\n")
     if open_browser:
         with contextlib.suppress(Exception):
             webbrowser.open(link)

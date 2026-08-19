@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from reveille import cli, daemon, store  # noqa: E402
+from reveille.devicecode import cli_code  # noqa: E402
 from test_sign_in_with import _hop, _me  # noqa: E402
 
 
@@ -93,6 +94,35 @@ def test_the_link_page_carries_the_state_onto_every_door(broker):
         assert f'href="/auth/{door}/login?cli={st}"' in r.text
 
 
+def test_the_page_shows_the_code_the_terminal_printed(broker):
+    """The ONE thing an attacker cannot forge (architect 12183): they never see
+    the victim's terminal, so they cannot make a code appear on it. A link on
+    its own is a takeover -- mail your state to someone, their live provider
+    session signs them in with no visible friction, and you collect a 14-day
+    minting session for their account."""
+    st = _state()
+    r = broker.get(f"/auth/cli?cli={st}")
+    code = cli_code(st)
+    assert code in r.text, "the page must show what the terminal printed"
+    assert "ONLY if this code is on that terminal" in r.text
+    assert "somebody else is asking for your account" in r.text
+    # SAME DERIVATION, BOTH SIDES: one pure function, nothing stored, nothing
+    # to fall out of step. A code that differed by a byte would train people to
+    # ignore the mismatch, which is the only check there is.
+    assert cli_code(st) == code and len(code) == 9 and code[4] == "-"
+    assert cli_code(_state()) != code
+
+
+def test_a_state_no_terminal_registered_parks_nothing(broker):
+    """Hygiene beside the code: a park with nobody waiting is a session nobody
+    asked for. The callback writes one only for a state that POSTed first."""
+    st = _state()
+    _hop(broker, "google", extra=f"?cli={st}")     # never registered
+    assert broker.conn.execute(
+        "SELECT count(*) c FROM oidc_state WHERE key LIKE 'cli:%'").fetchone()["c"] == 0
+    assert broker.get(f"/auth/cli/{st}").status_code == 404
+
+
 def test_a_password_broker_sends_nobody_to_a_browser(broker):
     """Operator, 2026-08-19: local password sign-in is a different shape. Doors
     and the password form are exclusive on the broker, so no doors means the
@@ -162,6 +192,11 @@ def test_the_poll_stops_when_the_link_is_used(monkeypatch, capsys):
     # ONE link, printed once, and it is the page that carries the state
     out = capsys.readouterr().out
     assert out.count("/auth/cli?cli=") == 1
+    # and the CODE beside it -- the reader is told what to compare, and what a
+    # mismatch means, before they click anything
+    state = calls[0][0].rsplit("/", 1)[1]
+    assert f"code: {cli_code(state)}" in out
+    assert "do not continue" in out
 
 
 def test_an_unused_link_gives_up_rather_than_waiting_forever(monkeypatch):
