@@ -163,10 +163,22 @@ def test_every_act_tool_and_mutating_route_wears_the_gate():
     # 11945). It still demands a name and a binding, and still clears the poke.
     assert "_arriving(ctx.request_context.request)" in tools["join"], \
         "join must go through _arriving -- the one door a pending credential may use"
+    # THE HANDOVER NOTE'S TWO ACTS wear _handing_over (ruling 12320 R2), which is
+    # _acting minus ONE refusal: a credential superseded in the last five minutes
+    # is allowed to write its state note and post the five fields, because the
+    # doctrine asks that of the body the swap has just displaced and nothing else
+    # can write it. A LIVE credential passes through unchanged -- same binding
+    # demand, same pending refusal, same poke clear -- so this is not a second
+    # door around the gate, and the tools below still get one.
+    handover = {"memory_add", "send"}
+    for name in handover:
+        assert "_handing_over(ctx.request_context.request)" in tools[name], \
+            f"{name} must go through _handing_over -- it is half of the handover note"
+    assert "_acting" not in tools["memory_add"], "one door, not two"
     reads = {"rooms", "lessons", "recall", "brief", "info", "inbox", "thread", "trace", "graph",
              "history", "usage", "whoami"}
     for name, body in tools.items():
-        if name in acts:
+        if name in acts - handover:
             assert "_acting(ctx.request_context.request)" in body, f"{name} must go through _acting"
         elif name in reads:
             assert "_acting(" not in body, f"{name} is a read and must stay open to an unbound token"

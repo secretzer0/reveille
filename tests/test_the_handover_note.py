@@ -72,9 +72,33 @@ def test_the_work_is_saved_before_the_note_is_written():
         "this branch exists so the far side can fetch it, not overwrite anything")
     assert "unpushed at <host>:<path>" in block, "a failed push must be said, not implied"
     assert "FETCHES that branch before it does anything else" in block
-    # ORDER MATTERS: save, then describe. A note written first describes a state
-    # the push may still change.
-    assert block.index("SAVE THE WORK") < block.index("WRITE THE NOTE")
+    # ORDER MATTERS, AND IT CHANGED (ruling 12320 R2). Still push before you
+    # describe -- a note written first describes a state the push may change.
+    # But VERIFYING the push now comes after the note, because the two acts have
+    # different deadlines and nothing serialises them: the push must beat the far
+    # side's FETCH, the note must beat its JOIN, and the join is what spends this
+    # credential. Measured 2026-08-19: the swap committed 27 s after the ring and
+    # the note came back "superseded", so the artifact the new body was told to
+    # read was the one thing the swap deleted.
+    assert block.index("COMMIT AND PUSH") < block.index("WRITE THE NOTE")
+    assert block.index("WRITE THE NOTE") < block.index("VERIFY THE PUSH")
+    assert "under 1000 characters" in block, (
+        "a refused write burns a window seconds wide -- one note failed for length "
+        "and its retry hit the supersede")
+    assert "FIVE FIELDS" in block
+
+
+def test_the_agent_rail_refreshes_itself_while_it_is_open():
+    """Operator, 2026-08-19: a container stopped from the launcher kept its green
+    dot, its stop button and its terminal tab until the page was reloaded -- a
+    dead body still offering a terminal. refreshAgents ran on user actions only,
+    so anything that changed a row from OUTSIDE the page was invisible. That is
+    about to be the normal case: ruling 12320 A has the launcher stop a
+    superseded container by itself."""
+    assert "agPoll=setInterval" in PAGE, "the rail polls like presence and unread do"
+    assert "clearInterval(agPoll)" in PAGE, "and stops when the panel closes"
+    assert "if(!document.hidden)refreshAgents()" in PAGE, (
+        "a hidden tab does not need the launcher's attention")
 
 
 def test_the_note_is_the_agents_act_never_synthesised():

@@ -3361,6 +3361,52 @@ def supersede_bound_tokens(conn, owner_id, agent_id, except_id=None):
 TOMBSTONE_TTL_NS = 30 * 86_400 * 1_000_000_000
 
 
+# THE HANDOVER GRACE (ruling 12320 R2). The doctrine asks a displaced body for
+# two acts -- push the work, write the note -- and the swap commits the instant
+# the new body joins, which on 2026-08-19 was 27 seconds after the ring. A
+# refused write burns the window: one note failed for being over the fact limit,
+# the retry came back "superseded", and the note the NEW body was supposed to
+# read was the one artifact the swap deleted. So a credential that was just
+# superseded keeps exactly two acts for five minutes: the state note about its
+# own identity, and the reply that carries the five fields into the move thread.
+# Nothing else -- it cannot read, cannot join, cannot act as the identity it no
+# longer holds.
+HANDOVER_GRACE_NS = 5 * 60 * 1_000_000_000
+
+
+def rooms_for_agent(conn, agent_id):
+    """{room_id: room_name} for an IDENTITY, from its memberships rather than
+    from a token. The handover grace needs it because the credential whose rooms
+    it would otherwise read has already been deleted -- and the note it is
+    allowed to write belongs to the identity, which is exactly what still
+    exists."""
+    return {r["id"]: r["name"] for r in conn.execute(
+        "SELECT ro.id, ro.name FROM members m JOIN rooms ro ON ro.id=m.room_id "
+        "WHERE m.principal=? AND m.left_ns IS NULL ORDER BY ro.name",
+        (agent_principal(agent_id),))}
+
+
+def handover_grace(conn, secret, now=None):
+    """The identity a just-superseded credential may still write FOR, or None.
+
+    Deliberately narrow: it answers only inside HANDOVER_GRACE_NS, and the
+    caller decides what the two permitted acts are. Past the window this is
+    None and the credential is what it has been since the swap: a signpost.
+    """
+    if not secret:
+        return None
+    now = now or time.time_ns()
+    r = conn.execute(
+        "SELECT t.agent_id, t.superseded_ns, a.owner_id, a.name "
+        "FROM token_tombstones t JOIN agents a ON a.id = t.agent_id "
+        "WHERE t.secret_hash=?",
+        (_sha(secret),)).fetchone()
+    if not r or r["superseded_ns"] < now - HANDOVER_GRACE_NS:
+        return None
+    return {"agent_id": r["agent_id"], "owner_id": r["owner_id"],
+            "agent_name": r["name"], "superseded_ns": r["superseded_ns"]}
+
+
 def tombstone_for(conn, secret):
     """The signpost payload for a superseded credential, or None.
 

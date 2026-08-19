@@ -4644,6 +4644,7 @@ class Principal:
     rooms: dict = field(default_factory=dict)   # room_id -> room_name
     agent_id: str = ""              # agents.id for a BOUND token; "" unbound / user
     pending: bool = False           # minted, not yet arrived (DES-012 s15): join() only
+    handover: bool = False          # just superseded (R2): the note and the note only
 
 
 def speaker_key(p):
@@ -4689,6 +4690,18 @@ def _agent_principal(request):
         # a word the predicate cannot establish stays unsaid (flagged to the
         # architect). A never-valid secret stays the generic "bad token" --
         # the two must be distinguishable or the signpost teaches nothing.
+        # THE HANDOVER GRACE COMES FIRST (ruling 12320 R2). A body displaced
+        # seconds ago is still the only party holding the context, and the swap
+        # commits the instant the new body joins -- 27 seconds after the ring,
+        # measured. Refusing it here is what deleted the note the new body was
+        # supposed to read. Two acts, five minutes, write-only; _handover_only
+        # below is the gate that keeps it to two.
+        grace = store.handover_grace(_conn, secret)
+        if grace:
+            return Principal(kind="agent", name=grace["agent_name"],
+                             user_id=grace["owner_id"], agent_id=grace["agent_id"],
+                             rooms=store.rooms_for_agent(_conn, grace["agent_id"]),
+                             handover=True)
         ts = store.tombstone_for(_conn, secret)
         if ts:
             when = time.strftime("%Y-%m-%d", time.gmtime(ts["superseded_ns"] / 1e9))
@@ -4755,6 +4768,27 @@ PENDING_ACT = ("pending: join first. This credential was minted for a body swap 
                "else; that call IS the arrival and commits the swap.")
 
 
+HANDOVER_ACT = ("superseded: another body holds this identity now. This credential "
+                "keeps exactly two acts for five minutes, and only these two: "
+                "memory_add(kind='state') about this identity, and one send carrying "
+                "the five fields into the move thread. That is the handover note, and "
+                "it is the last thing this body is for.")
+
+
+def _handover_only(p, allowed=False):
+    """A JUST-SUPERSEDED CREDENTIAL WRITES THE NOTE AND NOTHING ELSE (R2).
+
+    The grace exists because the doctrine's second act kept losing a race it was
+    never told about: act 1 has to beat the far side's FETCH, act 2 has to beat
+    its JOIN, and nothing serialises them. It is not a reprieve -- the identity
+    has moved, and reading or acting as it here would be the fork the two-phase
+    design closes. So every route says no except the two the note needs.
+    """
+    if p.kind == "agent" and p.handover and not allowed:
+        raise store.AccessError(HANDOVER_ACT)
+    return p
+
+
 def _not_pending(p):
     """A PENDING CREDENTIAL MAY ONLY ARRIVE (ruling 11945). Its single permitted
     call is join(), because the readiness act IS join -- so every other route
@@ -4783,7 +4817,21 @@ def _act(p):
     closed at the mint). Web users are not tokens and pass."""
     if p.kind == "agent" and not p.agent_id:
         raise store.AuthError(UNBOUND_ACT)
-    return _not_pending(p)
+    return _not_pending(_handover_only(p))
+
+
+def _handing_over(request) -> Principal:
+    """The two acts a just-superseded credential keeps (R2): the state note and
+    the send that carries the five fields. Same binding requirement as _acting,
+    and the same poke clear -- writing the note IS that body's last turn. A
+    LIVE credential passes through here unchanged, so these two routes are not
+    a second door: they are the ordinary one, with the grace not refused."""
+    p = _me(request)
+    if p.kind == "agent" and not p.agent_id:
+        raise store.AuthError(UNBOUND_ACT)
+    _not_pending(p)
+    _poke_pending.pop(p.token_id, None)
+    return p
 
 
 def _acting(request) -> Principal:
@@ -4996,7 +5044,14 @@ async def memory_add(fact: str, kind: str, scope: str = "", entities: str = "",
     live). occurred: when the fact became TRUE (ISO/relative), not when recorded.
     Below your tier the write lands as status='draft', invisible until ratified.
     kind='state' needs a BOUND token and is always scoped to yourself."""
-    p = _acting(ctx.request_context.request)
+    # THE HANDOVER NOTE IS WHY THE GRACE EXISTS (R2): a body superseded seconds
+    # ago may still write kind='state' about ITSELF, and nothing else. Any other
+    # kind from that credential is refused below, because doctrine or a contract
+    # written by a body that no longer holds the identity is a ruling from a
+    # ghost.
+    p = _handing_over(ctx.request_context.request)
+    if p.handover and kind != "state":
+        raise store.AccessError(HANDOVER_ACT)
     bound, tier, adm, owned = _mem_ctx(p)
     out = store.memory_add(
         _conn, author=p.name, token_id=p.token_id, agent_bound=bound, tier=tier,
@@ -5154,7 +5209,9 @@ async def send(to: str, body: str, subject: str = "",
     are read on each recipient's next turn (a HUMAN's broadcast from the web does
     ring the room -- a wake is a human gesture). Returns {id, thread_id, parents,
     delivered_to}."""
-    p = _acting(ctx.request_context.request)
+    # The other half of the handover grace (R2): the five fields have to reach
+    # the room, not just the memory, or the peers watching a move learn nothing.
+    p = _handing_over(ctx.request_context.request)
     _seen(speaker_key(p), p.name, p.rooms, p.token_id)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))

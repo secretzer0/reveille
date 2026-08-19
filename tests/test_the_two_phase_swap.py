@@ -148,6 +148,43 @@ def test_the_window_and_its_sweep_are_not_an_hour_apart():
     assert daemon.PENDING_SWEEP_SECS <= store.PENDING_TTL_NS / 1e9 / 5
 
 
+def test_the_old_body_can_still_write_its_note_a_minute_after_the_swap():
+    """RULING 12320 R2, the gate as written: state at supersede+60 s, every
+    other act refused. The doctrine asks the displaced body for two acts and the
+    swap commits the moment the far side joins -- 27 seconds after the ring, on
+    2026-08-19 -- so the note kept losing a race nobody had told it about."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    store.join(c, "wanderer", "agent", room["id"], token_id=new["id"])
+    assert store.resolve_token(c, old["secret"]) is None, "the credential is spent"
+    minute = store.time.time_ns() + 60 * 1_000_000_000
+    g = store.handover_grace(c, old["secret"], now=minute)
+    assert g and g["agent_name"] == "wanderer" and g["agent_id"] == old["agent_id"]
+    # and it is over when the window says, not when the tombstone is pruned
+    assert store.handover_grace(
+        c, old["secret"],
+        now=store.time.time_ns() + store.HANDOVER_GRACE_NS + 1) is None
+
+
+def test_the_grace_writes_as_the_identity_and_reaches_its_rooms():
+    """The note is identity-scoped and the five fields go to the room, so the
+    grace has to resolve both -- from the MEMBERSHIPS, because the credential
+    whose rooms it would otherwise read has already been deleted."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    store.join(c, "wanderer", "agent", room["id"], token_id=new["id"])
+    assert store.rooms_for_agent(c, old["agent_id"]) == {room["id"]: "Hive"}
+
+
+def test_a_plain_revoke_grants_no_grace():
+    """The grace is for a body the SWAP displaced. A revoked credential was
+    taken deliberately, and handing it five more minutes of writes would be
+    handing back part of what the revoke removed."""
+    c, u, room, old = world()
+    store.revoke_token(c, old["id"], u["id"])
+    assert store.handover_grace(c, old["secret"]) is None
+
+
 def test_expiry_leaves_no_tombstone():
     """A tombstone signposts a displaced body toward its successor. A pending
     credential displaced nothing and its successor never arrived, so a
