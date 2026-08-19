@@ -311,6 +311,20 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.199 ALREADY-ON MEANS THE SAME IMAGE, NOT THE SAME NAME. Two builds raced
+onto one tag (measured 2026-08-19: an interrupted ssh left a remote docker
+build running, it tagged reveille-agent:0.2.22 first, the roll used it, the
+correct build then retagged the name) -- and the container rolled from the
+stale build could not be rolled again, because upgrade_agent's same-image
+check compared the tag STRING the container was created with against the tag
+string requested: equal, while the image underneath had moved. That is ruling
+8433's two-builds-one-tag ambiguity living inside the very check meant to
+enforce 8433. upgrade_agent now compares the image ID the container actually
+runs (.Image) against the ID the tag currently names, and refuses only when
+they match; an ID docker cannot produce never blocks a roll. The field
+verification that caught it is the gate. Launcher only; the bus API did not
+move.
+
 0.2.198 THE CLOCKS MOVE TOGETHER (ruled 12415, amended 12418, operator 12417).
 The transporter's seven coupled clocks -- PENDING_TTL, RECALL_TTL,
 HANDOVER_GRACE, the pending sweep, the arrival ring, the claim poll and the

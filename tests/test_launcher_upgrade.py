@@ -7,6 +7,7 @@ presence and the boot report are all faked; nothing here can reach a socket.
 import importlib.util
 import json
 import pathlib
+import sqlite3
 import types
 import urllib.error
 
@@ -62,10 +63,16 @@ class _Docker:
             c = self.c.get(name)
             if not c:
                 return bad
+            # .Image: the id of what the container RUNS. Deterministic from the
+            # tag it was created with, unless a test moved the tag underneath.
             return types.SimpleNamespace(returncode=0, stderr="", stdout="\t".join([
                 json.dumps(c["env"]), c["image"], json.dumps(c["cmd"]), c["network"],
-                "true" if c["running"] else "false"]))
+                "true" if c["running"] else "false",
+                c.get("image_id", "sha256:" + c["image"])]))
         if verb == "image":
+            if "{{.Id}}" in args:
+                return types.SimpleNamespace(returncode=0, stderr="",
+                                             stdout="sha256:" + args[-1])
             return types.SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(["claude", "reveille"]))
         if verb == "rename":
             src, dst = args[1], args[2]
@@ -233,3 +240,48 @@ def test_behind_walks_the_records_only_and_the_surfaces_exist(world):
     ui = (pathlib.Path(rl.__file__).resolve().parent.parent / "src/reveille/ui/bus/index.html").read_text()
     assert "out+=b('upgrade','&#8679;','upgrade '+t.agent+' from '+a.image+' to '+agDefaultImage" in ui
     assert "if(!broken&&!gone&&a.image&&agDefaultImage&&a.image!==agDefaultImage)" in ui
+
+
+def test_already_on_means_same_image_id_not_same_tag_string(tmp_path, monkeypatch):
+    """Found 2026-08-19: two builds raced onto reveille-agent:0.2.22; a
+    container rolled from the stale build could not be rolled again, because
+    the same-image check compared the tag STRING it was created with against
+    the tag string requested -- equal, while the image underneath had moved.
+    The 8433 ambiguity living inside the check meant to enforce 8433.
+
+    The verification that actually caught it in the field IS the gate: compare
+    the container's .Image id against the tag's .Id, never the names."""
+    conn = sqlite3.connect(str(tmp_path / "l.db"))
+    conn.row_factory = sqlite3.Row
+    rl._launcher_tables(conn)
+    conn.execute("INSERT INTO containers(user, agent, container, repo_url, image, "
+                 "broker_url, created_ns) VALUES('tmel','a','rev-tmel-a','',"
+                 "'reveille-agent:0.2.22','',0)")
+    live = {"env": {"REVEILLE_TOKEN": "t"}, "image": "reveille-agent:0.2.22",
+            "image_id": "sha256:stale", "running": True, "cmd": None,
+            "network": "n"}
+    monkeypatch.setattr(rl, "_inspect_container", lambda name: live)
+
+    # ids match: genuinely already on it -> refused
+    monkeypatch.setattr(rl, "image_id_of", lambda tag: "sha256:stale",
+                        raising=False)
+    with pytest.raises(rl.LaunchError, match="already on"):
+        rl.upgrade_agent(conn, "tmel", "a", "reveille-agent:0.2.22")
+
+    # tag moved underneath the same name: NOT already on it -- the check must
+    # fall through (the next step, the token-alive probe, is stubbed to raise
+    # a sentinel so the test proves exactly which line was passed)
+    monkeypatch.setattr(rl, "image_id_of", lambda tag: "sha256:fresh",
+                        raising=False)
+    monkeypatch.setattr(rl, "_token_alive",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("PAST-THE-CHECK")))
+    with pytest.raises(RuntimeError, match="PAST-THE-CHECK"):
+        rl.upgrade_agent(conn, "tmel", "a", "reveille-agent:0.2.22")
+
+    # docker could not say what the tag points at: "" must not refuse either --
+    # a comparison that cannot be made never blocks a roll
+    monkeypatch.setattr(rl, "image_id_of", lambda tag: "",
+                        raising=False)
+    with pytest.raises(RuntimeError, match="PAST-THE-CHECK"):
+        rl.upgrade_agent(conn, "tmel", "a", "reveille-agent:0.2.22")
