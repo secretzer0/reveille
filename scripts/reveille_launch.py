@@ -3110,6 +3110,65 @@ def build_api(auth_url):
                              "problems": boot_report_problems(text)})
 
     @guarded
+    async def agent_read(request, p, conn):
+        """S2 (ruled 11961/11965): the launcher's READ verbs -- logs, version,
+        inspect. Owner-scoped, host-scoped, and READ ONLY.
+
+        THE HARD LINE, ruled explicitly and not softened here: logs / version /
+        inspect ONLY. NO exec, NO run, NO compose file, ever. The launcher holds
+        the docker socket, so a verb that could run something in a container is
+        a verb that hands an HTTP caller the host -- and every argument for
+        "just this once" is an argument for the socket-in-the-container design
+        that r1 refused on the same day.
+
+        A BODY ON ANOTHER HOST GETS AN ANSWER, NOT AN EMPTY ONE (ruled 12066).
+        This launcher knows only its own docker. Returning "no logs" for an
+        agent that is alive elsewhere would be the unreachable-control defect
+        the whole week has been closing: a control that says nothing, and reads
+        as "nothing to say".
+        """
+        name = request.path_params["agent"]
+        verb = request.path_params["verb"]
+        _known_agent(conn, p["user"], name)
+        row = conn.execute("SELECT * FROM containers WHERE user=? AND agent=?",
+                           (p["user"], name)).fetchone()
+        if not row:
+            return JSONResponse(
+                {"agent": name, "verb": verb, "here": False,
+                 "detail": f"{name} has no container on this host. If it is alive, "
+                           f"it is alive somewhere else -- this launcher can only "
+                           f"read its own docker."}, status_code=409)
+        cname = row["container"]
+        if verb == "logs":
+            n = min(int(request.query_params.get("lines") or 200), 2000)
+            out = _docker("logs", "--tail", str(n), cname, check=False, capture=True)
+            return JSONResponse({"agent": name, "verb": verb, "here": True,
+                                 "lines": (out.stdout or "") + (out.stderr or "")})
+        if verb == "version":
+            return JSONResponse({"agent": name, "verb": verb, "here": True,
+                                 "image": row["image"], "default": DEFAULT_IMAGE,
+                                 "behind": row["image"] != DEFAULT_IMAGE})
+        if verb == "inspect":
+            out = _docker("inspect", cname, check=False, capture=True)
+            try:
+                d = (json.loads(out.stdout or "[]") or [{}])[0]
+            except ValueError:
+                d = {}
+            st = d.get("State") or {}
+            # A SHAPE, not the raw blob: docker's inspect carries the whole
+            # environment, and the environment is where credentials live.
+            return JSONResponse({"agent": name, "verb": verb, "here": True,
+                                 "status": st.get("Status") or "unknown",
+                                 "started_at": st.get("StartedAt") or "",
+                                 "restarts": d.get("RestartCount") or 0,
+                                 "image": row["image"],
+                                 "health": (st.get("Health") or {}).get("Status") or ""})
+        return JSONResponse({"error": "unknown read verb",
+                             "detail": f"{verb!r} is not a read verb. This launcher "
+                                       f"reads logs, version and inspect, and runs "
+                                       f"nothing on request."}, status_code=400)
+
+    @guarded
     async def agent_config(request, p, conn):
         """Edit an agent in place (reconfig 2).
 
@@ -3386,6 +3445,10 @@ def build_api(auth_url):
         Route("/agents/{agent}/profile", agent_profile, methods=["PUT"]),
         Route("/agents/{agent}/config", agent_config, methods=["GET", "PUT"]),
         Route("/agents/{agent}/boot-report", agent_boot_report),
+        # READ verbs, before the lifecycle catch-all: that route takes any verb
+        # on POST, and a read must never be reachable by a method that also
+        # reaches start/stop/destroy.
+        Route("/agents/{agent}/read/{verb:str}", agent_read, methods=["GET"]),
         Route("/agents/{agent}/{verb:str}", agent_lifecycle, methods=["POST"]),
         Route("/profile", profile, methods=["GET", "PUT"]),
         Route("/login/start", login_start, methods=["POST"]),

@@ -268,6 +268,26 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.181 THE LAUNCHER READS, AND THE LINE AROUND WHAT IT WILL DO (S1+S2, DES-006
+s7.3; ruled 11961, hard line 11965, host rule 12066). S1 -- auto-roll on deploy
+under an idle rule -- has been shipping since 0.2.170 and is now written down as
+built. S2 is the other half: what the launcher does when a person ASKS.
+THE LAUNCHER HOLDS THE DOCKER SOCKET, and everything here follows from that. A
+verb that could run something inside a container is a verb that hands an HTTP
+caller the host, and the answer to "just this once" is that the same argument,
+made once, is the socket-in-the-container design r1 refused on the same day. So:
+GET /agents/<agent>/read/<verb> answers `logs`, `version` and `inspect`, and
+NOTHING ELSE -- no exec, no run, no compose file, ever. GET only, and declared
+BEFORE the lifecycle catch-all, which takes any verb on POST: a read must not be
+reachable by a method that also reaches start, stop and destroy.
+Owner-scoped like every other launcher verb, and HOST-SCOPED WITH A VOICE: an
+agent alive on another machine gets a 409 naming that -- "no container on this
+host. If it is alive, it is alive somewhere else" -- never an empty log with a
+200. Returning nothing would be the unreachable-control defect this week has
+been spent closing: a control that says nothing, read by a person as nothing to
+say. `inspect` answers a SHAPE (status, started-at, restarts, image, health) and
+never docker's blob: Config.Env is where credentials live, and a read verb that
+returns them has handed out the thing the credential design exists to protect.
 0.2.180 THE ROW SAYS WHERE THE BODY IS (ruling 11945, owed since 12055). The
 pane could distinguish "a body here" from "a body somewhere else" and nothing
 further, so an identity MID-SWAP looked exactly like one that was simply away,

@@ -442,3 +442,40 @@ with `reveille-launch upgrade <user> <agent>`, unchanged.
 `reveille-launch upgrade --all --idle`, after the launcher is confirmed on its
 pinned commit. The roll itself is `upgrade_agent` from §7 -- same carry, same
 health-before-destroy, same rollback.
+
+## 7.3 Amendment (2026-08-18): the launcher's read verbs (ruled 11961, hard line 11965, host rule 12066)
+
+§7.2's auto-roll is the launcher ACTING on a schedule. This is the other half:
+what the launcher will do when a person ASKS -- and the line around it, which is
+the whole security boundary of the component.
+
+**The launcher holds the docker socket.** That is the fact everything here
+follows from. A verb that could run something inside a container is a verb that
+hands an HTTP caller the host, and the answer to "just this once" is that the
+same argument, made once, is the socket-in-the-container design r1 refused on
+the same day (ruling 11938: no docker socket in an agent container, ever).
+
+**RULED, and not softened here: `logs`, `version`, `inspect`. NO `exec`, NO
+`run`, NO compose file, ever.** `GET /agents/<agent>/read/<verb>` — GET only,
+and declared *before* the lifecycle catch-all, which takes any verb on POST: a
+read must not be reachable by a method that also reaches start, stop and
+destroy. The gate greps the route's own body for the forbidden words, with the
+docstring cut away — that prose names them in order to forbid them, and a check
+that matched it would fire on the rule instead of the code.
+
+**Owner-scoped**, like every other launcher verb: `_known_agent` first, and the
+container row fetched by `(user, agent)` rather than by name.
+
+**Host-scoped, and it SAYS so.** This launcher knows only its own docker. An
+agent alive on another machine gets a 409 naming that fact — *"no container on
+this host. If it is alive, it is alive somewhere else"* — never an empty log
+with a 200. Returning nothing would be the unreachable-control defect this whole
+week has been closing: a control that says nothing, read by a person as *nothing
+to say*. The distinction is the entire value of the route on a fleet where a
+body can be moved (DES-011 §2.1, DES-012 §13).
+
+**`inspect` answers a SHAPE, never docker's blob**: status, started-at, restart
+count, image, health. `Config.Env` is not in it and must never be — the
+environment is where credentials live, and a read verb that returns them has
+handed out the thing the whole credential design protects.
+
