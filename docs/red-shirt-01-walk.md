@@ -34,3 +34,7 @@ wip/red-shirt-01/20260819T171729Z BEFORE anything else: sha cb5e087, base main
 fc918ea. Work rode the swap intact a second time. Two things seen at arrival:
 bare join() returned Reveille2.0 in `skipped` with no LEAVE on record (rejoined
 by join(room=)); waked pid 3341646 is new since the re-mint (3227115 before).
+
+Re-run step 6: swap-pending ring received by body C (laptop native) at 20260819T183834Z,
+waked pid 3546705 on 0.2.188. Tree was clean (HEAD 5fd7ae7); this line is the
+commit that rides. Ritual: branch wip/red-shirt-01/20260819T183834Z, push, state note.
