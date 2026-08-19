@@ -13,6 +13,7 @@ doing.
 import os
 import sys
 import tempfile
+import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import importlib.util  # noqa: E402
@@ -99,6 +100,66 @@ def test_the_agent_rail_refreshes_itself_while_it_is_open():
     assert "clearInterval(agPoll)" in PAGE, "and stops when the panel closes"
     assert "if(!document.hidden)refreshAgents()" in PAGE, (
         "a hidden tab does not need the launcher's attention")
+
+
+# ---- ruling 12320 A: the launcher clears the corpse -------------------------
+
+def test_a_superseded_container_is_stopped_not_destroyed(tmp_path, monkeypatch):
+    """Measured twice on 2026-08-19, both times found by the operator: a body
+    superseded by an arrival kept its CPU, its tmux and its ttyd, and the page
+    went on offering a terminal into it. STOP, never destroy -- the home, the
+    image and the record stay, so a send-back restarts the same body with its
+    work intact."""
+    conn = rl._db(str(tmp_path / "launcher.db"))
+    rl._record(conn, "acme", "ghost", "https://example/r", "img", "http://b", "senior-dev")
+    acted = []
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k: acted.append(a) or
+                        types.SimpleNamespace(returncode=0, stdout="true"))
+    monkeypatch.setattr(rl, "_container_credential", lambda u, a: "spent")
+    monkeypatch.setattr(rl, "_credential_known", lambda url, tok: False)
+    monkeypatch.setattr(rl, "_audit", lambda *a, **k: None)
+    assert rl._stop_superseded(conn) == [("acme", "ghost")]
+    assert any(a[0] == "stop" for a in acted), "stopped"
+    assert not any(a[0] in ("rm", "destroy") for a in acted), "never destroyed"
+
+
+def test_a_broker_that_cannot_answer_stops_nothing(tmp_path, monkeypatch):
+    """An unreachable broker must never read as "every body here is dead". The
+    probe answers None and this loop does nothing at all -- the same fail-closed
+    discipline the launcher's authn already uses."""
+    conn = rl._db(str(tmp_path / "launcher.db"))
+    rl._record(conn, "acme", "ghost", "https://example/r", "img", "http://b", "")
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k:
+                        types.SimpleNamespace(returncode=0, stdout="true"))
+    monkeypatch.setattr(rl, "_container_credential", lambda u, a: "whatever")
+    monkeypatch.setattr(rl, "_credential_known", lambda url, tok: None)
+    assert rl._stop_superseded(conn) == []
+
+
+def test_a_live_body_is_left_alone(tmp_path, monkeypatch):
+    conn = rl._db(str(tmp_path / "launcher.db"))
+    rl._record(conn, "acme", "ghost", "https://example/r", "img", "http://b", "")
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k:
+                        types.SimpleNamespace(returncode=0, stdout="true"))
+    monkeypatch.setattr(rl, "_container_credential", lambda u, a: "live")
+    monkeypatch.setattr(rl, "_credential_known", lambda url, tok: True)
+    assert rl._stop_superseded(conn) == []
+
+
+def test_the_probe_reads_the_body_and_keeps_nothing(tmp_path, monkeypatch):
+    """The launcher holds no standing credential (R1). It borrows the body's own
+    secret for one read and writes it nowhere -- and 401 is the only answer that
+    means dead, because every other failure is about the network, not the body."""
+    monkeypatch.setattr(rl, "_docker", lambda *a, **k: types.SimpleNamespace(
+        returncode=0, stdout='["PATH=/usr/bin", "REVEILLE_TOKEN=sekrit", "HOME=/h"]'))
+    assert rl._container_credential("acme", "ghost") == "sekrit"
+    src = open(rl.__file__).read()
+    fn = src[src.index("def _credential_known"):src.index("def _stop_superseded")]
+    assert "e.code == 401" in fn, "only a refusal means the credential is gone"
+    assert "None" in fn, "and anything else means we could not tell"
+    conn = rl._db(str(tmp_path / "launcher.db"))
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(containers)")}
+    assert not {"token", "secret", "credential"} & cols, "nothing persisted"
 
 
 def test_the_note_is_the_agents_act_never_synthesised():

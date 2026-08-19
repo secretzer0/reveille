@@ -1706,8 +1706,14 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.20", (
+    assert tag == "reveille-agent:0.2.21", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.21 IS THE FIRST IMAGE THAT CONVERGES ITSELF (ruling 12320 R3). Every
+    # body materialised from 0.2.20 came up on toolchain 0.2.177 against a
+    # 0.2.189 broker -- measured from inside on 2026-08-19 -- because the image
+    # pins the toolchain and convergence only runs at a turn boundary, so a NEW
+    # body's FIRST turn ran old code by construction. That first turn is exactly
+    # the one that has to arrive.
 
 
 def test_the_wheel_scrolls_the_view_not_the_prompt_history():

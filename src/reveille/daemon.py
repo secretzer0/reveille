@@ -282,6 +282,43 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.190 WHAT THE ACCEPTANCE CHAIN FOUND (rulings 12305/12320, all measured live
+on 2026-08-19 while running DES-012's chain end to end).
+  B THE ARRIVAL WINDOW IS TRUE NOW. Ten minutes was enforced only by a sweep and
+  the sweep ran hourly, so an abandoned pending credential stayed CLAIMABLE long
+  past the window every screen advertised -- a body presenting it at minute 45
+  would have displaced a live one. commit_pending refuses a pending older than
+  PENDING_TTL_NS and names when it closed; resolve_token treats one as unknown,
+  so every door answers now what it will answer at the sweep; and that sweep
+  runs on its own 60 s clock.
+  R2 THE HANDOVER NOTE GETS ITS FIVE MINUTES. A credential superseded in the
+  last five minutes keeps exactly two acts -- memory_add(kind='state') about its
+  own identity, and one send carrying the five fields -- and nothing else. The
+  swap commits the instant the far side joins, 27 seconds after the ring here,
+  and the note kept losing that race: once refused for length, once refused as
+  superseded on the retry. Doctrine order follows: commit and push, then the
+  note (short, five fields), then verify the push.
+  A THE LAUNCHER CLEARS THE CORPSE. A body superseded by an arrival kept its
+  CPU, its tmux and its ttyd, and the Agents page went on offering a terminal
+  into it -- found by the operator, twice in one afternoon. The launcher now
+  STOPS (never destroys) a container whose credential the broker no longer
+  knows, borrowing that body's own secret for one read so no standing
+  credential is introduced and G4 is untouched. An unreachable broker stops
+  nothing. The agent rail also polls while open, because a row that only
+  refreshes on a click cannot show a container something else stopped.
+  R1 A BODY SUPERSEDED WHILE STOPPED CAN COME BACK. PARKED was reachable only
+  from a live socket, so a body superseded while stopped -- or restarted after
+  -- held a spent secret and could never claim the ticket written against
+  exactly that secret. It polls with what it holds, bounded so the lock still
+  frees.
+  R5 A PENDING MINT RETIRES NOTHING. retire_waked is keyed on the agent name and
+  the spool lock is per identity per machine, so `reveille init` in a second
+  directory killed the daemon of the body that was still live.
+  R3 EVERY NEW BODY CONVERGES. reveille-agent:0.2.21 is the first agent image
+  whose toolchain is not behind the broker: bodies materialised from 0.2.20 came
+  up on 0.2.177, and a new body's FIRST turn is exactly the one that must arrive.
+  R4 the superseded refusal names the arrival instead of `reveille init --login`.
+
 0.2.189 THE PICKER READS THE SHAPE THE BROKER SERVES. GET /tokens serves
 store.list_tokens, whose `rooms` is {room_id: room_name}; cli.my_agents iterated
 it and collected the KEYS, so the agent picker printed room IDs at people as if
