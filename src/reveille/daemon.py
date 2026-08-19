@@ -282,7 +282,7 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
-0.2.193 THE PARKED DAEMON READS ITS OWN FILE. `reveille init` rotated a
+0.2.192 THE PARKED DAEMON READS ITS OWN FILE. `reveille init` rotated a
 directory's credential IN PLACE. The identity never left the machine, so no
 return ticket was ever written -- and the daemon parked on the spent secret had
 nothing to claim, ever. It held the spool flock, so the Stop hook saw a live
