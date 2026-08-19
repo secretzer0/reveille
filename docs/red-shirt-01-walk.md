@@ -48,3 +48,20 @@ new body joined between push and note (12259-class race, note lost to bus). Stat
 here instead: task DES-012 walk; next = new body fetches this branch, appends arrival;
 open threads none; undone none; local-only files (.mcp.json del, .claude/, CLAUDE.local.md)
 stay on laptop by design.
+
+Body D: container, host 15b74123d6a4, dir /home/agent/repos/work. No docker, no
+host shell (11960 policy). This is the step-6 RE-RUN onto a container that did
+not exist before -- body B's host was 86aa1a4b0318. Arrived 20260819T183900Z:
+bare join() returned rooms [Reveille2.0], skipped [] (the 12271 widening is
+gone), version 0.2.188, unread 1; then lessons() (103) and brief(); then fetched
+wip/red-shirt-01/20260819T183932Z BEFORE anything else -- sha a02e9bd, base main
+29a0c48. Work rode the swap a third time, across two parks body C made in one
+minute (183834Z, 183932Z).
+
+Two things measured at arrival, neither of them the swap:
+- toolchain in this FRESH container is 0.2.177 (uv tool list), while the broker
+  answers 0.2.188. A new container does not arrive on the broker's version; it
+  arrives on the image's. DES-020 converge runs at the Stop-hook boundary, so
+  the first turn of every new body runs old code by construction.
+- zero waked processes and an empty spool at first turn. The body is deaf until
+  its Stop hook spawns the daemon -- arrival and reachability are not one act.
