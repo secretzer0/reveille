@@ -268,6 +268,44 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.182 THE SYNTHESIZER AS A HOST SERVICE (S3, ruled 11961/11965). The TTS runs
+fine as compose's `voices` profile; what it cannot do there is start without
+something holding the docker socket -- and S2 ruled the launcher never gains
+exec/run/compose, so the agent that keeps this fleet alive has no way to bring
+the synthesizer back and MUST NOT BE GIVEN ONE. deploy/reveille-tts.service
+moves that authority to the machine's own init: the operator installs it once,
+and afterwards it survives reboots, restarts on failure, and is controlled by a
+human with systemctl. Same image, port, volumes and GPU reservation as the
+compose service -- one container under a different supervisor, not a second way
+to configure it. WHERE IT LISTENS IS A DEPLOYMENT FACT, NOT A CONSTANT: the
+first draft hardcoded 127.0.0.1:8004, which is right for a broker on the same
+host and WRONG for this fleet, where the synthesizer runs on the operator's
+workstation and the VM broker calls it across the LAN at
+REVEILLE_TTS_URL=http://192.168.90.136:18004 -- installed as first written it
+would have SILENCED THE FLEET'S VOICE the moment it replaced what runs there now
+(caught in review). Bind and published port come from Environment= with the
+same-host case as the default, and the unit's header carries this deployment's
+override measured from the running container: image tag, both data paths, and
+the working tree bind-mounted over /app. That last one rides an UNBRACED
+$TTS_EXTRA because systemd word-splits $VAR and passes ${VAR} as a single
+argument -- and it matters, because the server's own CODE comes from disk here,
+so a unit that silently ran the image's copy would be different software under
+the same name. Always ONE address, never 0.0.0.0: unauthenticated by design
+(DES-009 s3, one caller, no public port) means it answers where the broker was
+told to call it and nowhere else, and the LAN_PLAINTEXT allowlist naming one
+host is the operator's ruled acceptance of that hop in the clear -- not a
+licence to answer on every interface. TimeoutStartSec=20min because
+the model downloads on a fresh cache and a default timeout kills it mid-download,
+then kills the retry, forever, while the journal says only "timed out".
+ALSO deploy/reveille-laptop-awake.conf, shipped and installed by NOBODY. A
+laptop is a fine host for a native agent, but the defaults are written for a
+laptop someone CARRIES: suspend on lid close, blank on idle. An agent whose host
+is suspended has gone deaf with no error anywhere -- which reads exactly like
+this week's wake-path defects and cost an evening to tell apart from one (the
+operator's black screen, 2026-08-18, was a lid flap). No deploy installs it and
+none may: it changes how a person's own machine behaves when they shut the lid,
+and that is their deliberate call, not a side effect of updating a broker. Gated
+both ways.
 0.2.181 THE LAUNCHER READS, AND THE LINE AROUND WHAT IT WILL DO (S1+S2, DES-006
 s7.3; ruled 11961, hard line 11965, host rule 12066). S1 -- auto-roll on deploy
 under an idle rule -- has been shipping since 0.2.170 and is now written down as
