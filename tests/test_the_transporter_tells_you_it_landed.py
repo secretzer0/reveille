@@ -188,7 +188,7 @@ def _scripted(codes, calls, monkeypatch, tickets=("claimed-secret",)):
     async def session(uri, agent, state):
         return next(seq)
 
-    async def park(url, agent, secret, write_env, deadline=None):
+    async def park(url, agent, secret, write_env, deadline=None, read_env=None):
         calls.append((secret, deadline))
         return next(got, "")
 
@@ -291,6 +291,62 @@ def test_an_attached_session_spends_the_fallback(monkeypatch):
     # credential this body now holds. If the fallback had survived the arrival
     # it would be asking with a secret two swaps old, for a body that is gone.
     assert calls == [("spent-secret", None), ("claimed-secret", waked.ORPHAN_POLL_S)]
+
+
+def test_a_parked_daemon_adopts_a_credential_that_arrived_another_way(tmp_path,
+                                                                     monkeypatch):
+    """MEASURED 2026-08-19: this made devops deaf for ten minutes with every
+    control green. `reveille init` rotated the directory's credential IN PLACE
+    -- the identity never left the machine, so no return ticket was ever written
+    and the parked loop had nothing to claim, ever. It held the spool flock, so
+    the Stop hook saw a live daemon and never started the one that would have
+    worked. Armed watcher, no rings, nothing anywhere disagreeing.
+
+    The file IS the identity (write_credential's own rule), so reading it is how
+    a parked body asks whether it is still the spent one."""
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+
+    async def never(url, secret):
+        return ""
+
+    monkeypatch.setattr(waked, "_claim", never)
+    got = asyncio.run(waked._park("http://b.example", "nr1", "spent-secret",
+                                  lambda s: True, read_env=lambda a: "the-new-one"))
+    assert got == "the-new-one", "it adopts what the directory now holds"
+
+
+def test_it_does_not_adopt_its_own_secret_or_an_empty_file(monkeypatch):
+    """Same secret means nothing changed; empty means the file is gone or
+    unreadable, and neither is a reason to stop waiting for a ticket."""
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+    tries = []
+
+    async def claim_third(url, secret):
+        tries.append(secret)
+        return "ticket-secret" if len(tries) >= 3 else ""
+
+    monkeypatch.setattr(waked, "_claim", claim_third)
+    got = asyncio.run(waked._park("http://b.example", "nr1", "spent", lambda s: True,
+                                  read_env=lambda a: "spent"))
+    assert got == "ticket-secret" and len(tries) == 3, "unchanged file, keep polling"
+    tries.clear()
+    got = asyncio.run(waked._park("http://b.example", "nr1", "spent", lambda s: True,
+                                  read_env=lambda a: ""))
+    assert got == "ticket-secret", "unreadable file, keep polling"
+
+
+def test_the_reader_refuses_a_directory_that_is_now_somebody_else(tmp_path, monkeypatch):
+    """One directory, one agent (0.2.192). If the file has been re-pointed at a
+    DIFFERENT agent, the credential in it is not this daemon's to adopt -- taking
+    it would be the clobber bug wearing a daemon's face."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.local.json").write_text(json.dumps(
+        {"env": {"REVEILLE_AGENT_ROLE": "somebody-else", "REVEILLE_TOKEN": "theirs"}}))
+    assert waked.read_env("nr1") == ""
+    (tmp_path / ".claude" / "settings.local.json").write_text(json.dumps(
+        {"env": {"REVEILLE_AGENT_ROLE": "nr1", "REVEILLE_TOKEN": "mine"}}))
+    assert waked.read_env("nr1") == "mine"
 
 
 def test_the_ring_asks_for_the_one_act_a_daemon_cannot_perform():
