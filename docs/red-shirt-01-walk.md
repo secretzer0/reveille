@@ -10,3 +10,10 @@ Migration steps the body runs on a swap-pending ring:
 3. new body fetches that branch before anything else
 
 Swap-pending ring received 20260819T164207Z by body A; work saved to wip/red-shirt-01/20260819T164207Z.
+
+Body B: container, host 86aa1a4b0318, dir /home/agent/repos/work. No docker, no
+host shell (11960 policy). Arrived 20260819T164305Z: join() -> lessons() ->
+brief(), then fetched wip/red-shirt-01/20260819T164207Z BEFORE anything else.
+Work rode the swap intact: sha 17330f4, base main fc918ea, 12 insertions.
+Body A's uncommitted .mcp.json deletion stayed on WorldBuilder, as designed --
+files do not travel, only the identity does.
