@@ -432,6 +432,30 @@ def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsy
     assert "login failed" in capsys.readouterr().err
 
 
+def test_a_refused_local_step_mints_nothing(tmp_path, minting, monkeypatch, capsys):
+    """THE MINT IS THE LAST ACT (ruling #126, re-ruled 12271). 0.2.186 minted
+    before the MCP registration, so a `claude mcp add-json` that refused printed
+    "Nothing else was installed" while a credential already existed on the
+    broker -- and, being bound, it superseded the name's live token and rang the
+    working body into a full handover for an install that never happened. The
+    gate is the token count, not the message: a local step that refuses leaves
+    ZERO new token rows."""
+    claude, log = fake_claude(tmp_path, fail_add=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    rc = cli.main(["init", minting, "dev-agent", "--login", "--user", "tmelhiser",
+                   "--claude", claude, "--dir", str(work)])
+    assert rc == 1
+    assert "REFUSING at step 1 of 3" in capsys.readouterr().err
+    assert [b for pth, b in Minting.calls if pth == "/tokens" and b is not None] == [], \
+        "the registration refused, so no credential may exist on the broker"
+    assert not (work / ".claude" / "settings.local.json").exists()
+
+
 def test_the_wizard_lists_your_agents_and_a_number_makes_this_directory_one_of_them(
         tmp_path, minting, monkeypatch, capsys):
     """Operator ask (2026-08-17): log in, see MY agents, pick one to be its
