@@ -80,4 +80,62 @@ Numbers keep their original rank for cross-reference; none is scheduled. DES-015
 | 23 | DES-018 slice 2: close the password door + invite flow | DES-018 §10, operator 11695 | Operator keeps passwords "for now"; existing users must link a door first. | close / keep | keep until operator word | S |
 | 24 | Microsoft door (registration + 2 env lines) | DES-018 §4 | Portal was down at slice 1; env-only, no code. | -- | operator, when portal is up | ops |
 
-Status: OPEN -- S1 GO 2026-08-18 (11636).
+## 5. CLOSED 2026-08-19 -- what shipped, and what the close cost
+
+Every row 1-10 is merged and live on the deployed broker (§3's condition). None
+was re-ruled DEFERRED. The backlog (§4) is untouched and still gates nothing.
+
+| # | Item | Shipped as | Live |
+|---|------|-----------|------|
+| 1 | Identity finishing: `recipient_agent_id`, `agent_names`, `agents.merged_into` | #98 (schema v27) | 0.2.149 |
+| 2 | Delivery by id, `<owner>-<name>` alias at join | #99 (schema v28) | 0.2.150 |
+| 3 | Human surface: room-name + owner on presence/rings, wake keyed on token | #104 | 0.2.153 |
+| 4 | Admin adopts an ownerless room | #112 | 0.2.160 |
+| 5 | Record-a-clip beside talk | #113 | 0.2.161 |
+| 6 | Per-room unread counts | #114 | 0.2.162 |
+| 7 | DES-008 §8 Q1/Q2 | ruled 11713, written into DES-008 §8 by this PR | doc |
+| 8 | Visit = body swap (§7-§9 handshake, record, accept screen) | #116 (schema v33) | 0.2.164 |
+| 9 | Native-host harbor ruling | #111 (DES-012 §11) | doc |
+| 10 | Auto-roll containers on deploy under an idle rule | #118 | 0.2.165 |
+
+**The close was not the last row; it was making the swap survivable.** Item 8
+shipped the handshake, and running it end to end showed that the ACT the whole
+epic is built on -- give an identity a new body -- could fail halfway and leave
+the identity with none. That is what DES-012 §13-§17 record: two-phase swap
+(0.2.176), the handover note (0.2.177), the destination menu (0.2.178), the
+return ticket (0.2.179), the row states that can say `moving` and
+`no-live-body` (0.2.180), and eleven more releases of corrections found by
+running the chain against a live broker rather than reasoning about it
+(0.2.188-0.2.195). The last of those, the negative test on 0.2.195, is the
+acceptance: a machine that misses one arrival window can claim the next ticket.
+
+**What the epic proved about method**, in one line each, all measured this week:
+
+- A chain run on real bodies finds defects that no gate written from the design
+  will find; five of them in step 8 alone, every one letting a move LOOK
+  finished.
+- A self-heal that reads state its own process writes needs a case per WRITER,
+  or it heals into a loop (`a-self-heal-must-know-its-own-handwriting`).
+- A recovery credential that lives only in a daemon's memory makes "restart it"
+  destructive, silently (`the-claimant-is-a-process-not-a-file`).
+- A watcher armed as `cmd &` inside a tool call satisfies every check and rings
+  nobody; armed means the HARNESS is watching it
+  (`a-watcher-that-is-a-process-is-not-a-task`).
+
+**Still open, and deliberately not gating this close:**
+
+- Ruling 12393 -- the parked daemon remembers its spent secret on disk,
+  claim-only -- ships after this doc.
+- A visit to ANOTHER human's host has been exercised by design review and by
+  gates, never by two humans on two hosts. That run is the next thing the vision
+  wants and it needs a second operator, not a slice.
+- Two gaps named in DES-012 §17: nothing sweeps the `recalls` table (rows
+  accumulate; an expired row is still unclaimable, so this is hygiene), and
+  `MIN_BODY_VERSION` is ruled in DES-020 but not built -- a body converges
+  toward the broker, the broker does not yet turn one away.
+- A gate pinning the repo's own CLAUDE.md to the USAGE reachability paragraph
+  daemon.py serves (queued at 12393; #150 fixed the drift by hand, and nothing
+  stops it drifting again).
+
+Status: CLOSED 2026-08-19 (S1 GO 11636; rows 1-10 merged and live; DES-012
+built through §17). The DES set is stable until a new DES opens one.
