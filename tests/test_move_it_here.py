@@ -118,7 +118,7 @@ def test_the_move_names_every_room_that_will_not_travel():
     afterwards as an agent that stopped answering somewhere."""
     dlg = PAGE[PAGE.index("async function openMaterialize"):PAGE.index("async function openCreate")]
     assert "WILL NOT TRAVEL" in dlg
-    assert "unreachable" in dlg, "rooms the mover cannot hold are counted too"
+    assert "axes.hidden" in dlg, "rooms the mover cannot hold are counted too"
     assert "addEventListener('change',lost)" in dlg, "it answers per tick, not once"
 
 
@@ -169,10 +169,19 @@ def test_a_failure_after_the_swap_mint_says_what_state_it_left(tmp_path):
 
 
 def test_the_move_offers_only_rooms_you_and_it_share():
-    """Operator 11913: the dialog listed every room the MOVER holds. A body
-    swap is not the place to hand an agent reach it never had -- that is the
-    Tokens tab, where granting reach is the whole point of the screen."""
+    """Operator 11913 and 11917/11924: the dialog listed every room the MOVER
+    holds. A body swap is not the place to hand an agent reach it never had --
+    that is the Tokens tab, where granting reach is the whole point of the
+    screen. The three axes go through one helper so move, request and accept
+    cannot drift apart on the rule."""
     dlg = PAGE[PAGE.index("async function openMaterialize"):PAGE.index("async function openCreate")]
-    assert "const offer=rooms.filter(r=>has.has(r.id))" in dlg
-    assert "id=\"agmRooms\">'+(offer.length?offer.map" in dlg, "the chips come from the intersection"
-    assert "share no room" in dlg, "and the empty case says why there is nothing to move"
+    assert "const axes=await agentRoomAxes(name, rooms)" in dlg
+    assert "roomChips(axes,'value')" in dlg, "the chips come from the intersection"
+    helper = PAGE[PAGE.index("async function agentRoomAxes"):PAGE.index("function roomChips")]
+    assert "offer: mine.filter(r=>tok.has(r.id))" in helper, "LIST = its token INTERSECT mine"
+    assert "hidden: [...tok].filter(id=>!mine.some(r=>r.id===id)).length" in helper, (
+        "what I cannot see is counted, never named"
+    )
+    chips = PAGE[PAGE.index("function roomChips"):PAGE.index("async function openMaterialize")]
+    assert "axes.joined.has(r.id)?' checked'" in chips, "TICKS = where it is joined"
+    assert "carries no room you can see" in chips, "empty case says why there is nothing to move"

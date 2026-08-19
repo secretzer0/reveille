@@ -268,6 +268,41 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.175 THE INSTALLER COULD NOT REPLACE A DEAD CREDENTIAL (operator, live:
+"the install script does not correctly edit the project specific
+settings.local.json"). Two reads of $REVEILLE_TOKEN, both wrong in the one
+directory that matters. Claude Code injects a directory's own
+settings.local.json env into every shell it starts, so INSIDE AN AGENT
+DIRECTORY that variable is always set -- to the credential the person is
+running the installer to REPLACE. (1) read_token() read the environment FIRST,
+so a freshly minted secret piped in was discarded, the dead one was verified,
+and the refusal read as though the paste had been wrong. Explicit wins now:
+stdin and the flag are deliberate acts by someone holding the new secret on
+their screen, and the environment is the fallback for a re-run that supplies
+nothing -- still the security order, no longer the order that ignores the
+human. (2) cmd_init treated the mere PRESENCE of that variable as "already
+configured", skipped the login wizard entirely and rewrote the dead token over
+itself: the file's mtime moved while its contents never changed, exit 0,
+nothing said. The operator minted five credentials in a row, each superseding
+the last, and the directory kept the first. A credential in the environment is
+now a CANDIDATE -- asked about once, and a token the broker REFUSES is treated
+as absent, so the wizard offers a login and --no-prompt refuses in the words of
+the refusal. Only a refusal counts: verify() answers False for "refused" and
+None for "could not ask", because silence from an unreachable broker must not
+cost a machine a credential that is probably fine; that is what --force is for.
+One probe, not two -- the install-time gate reuses the answer.
+ALSO, THE THREE ROOM AXES, WHICH 0.2.174 CLAIMED AND NEVER SHIPPED. That entry
+says the move offers only the rooms the mover and the agent share; the commit
+carrying it landed after PR #126's merge cut, so main never held a line of it.
+It lands HERE, and through one helper every body-swap screen reads rather than
+a rule written once per screen. With a token holding rooms 1, 2 and 3, joined
+to 2, offered to a mover who holds 2 and 3: the LIST is rooms 2 and 3 (its
+token INTERSECT mine), the TICKS are room 2 (where it is actually joined, so
+the default carries what it uses), and room 1 is COUNTED, never named -- a room
+the reader is not in is not a room this page may spell out. Nothing is ever
+added; granting reach stays the Tokens tab. WILL NOT TRAVEL is named on the
+move and on the visit request, and the OWNER's accept names the full delta,
+since they are the one person who can see everything their agent holds.
 0.2.174 THE MINT IS THE LAST IRREVERSIBLE ACT (live incident on
 reveille-red-shirt; ruled 11911). POST /agents minted the bound token BEFORE
 provision_agent validated. A mint supersedes the identity's previous

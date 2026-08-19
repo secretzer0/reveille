@@ -41,14 +41,33 @@ from . import install
 
 
 def read_token(args_token, stdin=None):
-    """Environment, then stdin, then the flag nobody should use. Returns the token
-    or None. The order is the security order, not a convenience order."""
-    if os.environ.get("REVEILLE_TOKEN"):
-        return os.environ["REVEILLE_TOKEN"].strip()
+    """A TOKEN A HUMAN SUPPLIED BEATS THE ONE THE DIRECTORY IS CARRYING.
+
+    This read the environment first, and inside an agent directory that is
+    always the wrong answer: Claude Code injects settings.local.json's env into
+    every shell it starts, so $REVEILLE_TOKEN is set to the very credential the
+    person is running the installer to REPLACE. Piping the new secret in did
+    nothing -- the dead one won, was verified, was refused, and the installer
+    reported the refusal as though the paste had been wrong (operator, live).
+    Stdin and the flag are deliberate acts by someone holding the new secret on
+    their screen; the environment is the fallback for a re-run that supplies
+    nothing. That is still the security order -- neither path puts a secret in
+    shell history -- it is only no longer the order that ignores the human.
+    """
     stdin = sys.stdin if stdin is None else stdin
     if args_token == "-" or (args_token is None and not stdin.isatty()):
-        return stdin.read().strip() or None
-    return (args_token or "").strip() or None
+        try:
+            piped = stdin.read().strip()
+        except OSError:
+            # A stdin that cannot be read is not a token: an implicit pipe is a
+            # guess about the caller's shape, so a wrong guess falls through to
+            # the environment rather than failing the install.
+            piped = ""
+        if piped:
+            return piped
+    elif args_token:
+        return args_token.strip()
+    return os.environ.get("REVEILLE_TOKEN", "").strip() or None
 
 
 def write_mcp_json(url, workdir):
@@ -107,9 +126,14 @@ def verify(url, name, token, timeout=10):
             body = r.read().decode().strip()
             return True, f"{len(json.loads(body).get('agents', []))} agents present"
     except urllib.error.HTTPError as e:
+        # REFUSED is not the same fact as UNREACHABLE, and the difference now
+        # decides something: a refusal is proof the credential is dead, while
+        # silence proves nothing about it at all. False means the broker said
+        # no; None means nobody could ask. Both still refuse the install below
+        # unless --force, so the answer this adds costs the caller nothing.
         return False, f"HTTP {e.code} -- the broker answered and refused this token"
     except Exception as e:
-        return False, f"{e} -- the broker did not answer"
+        return None, f"{e} -- the broker did not answer"
 
 
 def write_credential(url, name, token, workdir):
@@ -582,10 +606,34 @@ def cmd_init(a):
     # else. --no-prompt is for a script that would rather fail than block.
     wizard = sys.stdin.isatty() and not a.no_prompt
     cookie = None
-    if wizard and not (url and name and (a.token or os.environ.get("REVEILLE_TOKEN"))):
+    # A CREDENTIAL IN THE ENVIRONMENT IS A CANDIDATE, NOT A CONFIGURATION.
+    # Claude Code injects this directory's own settings.local.json env into
+    # every shell it starts, so inside an agent directory $REVEILLE_TOKEN is
+    # ALWAYS set -- to the credential the person is running the installer to
+    # replace. Taking it as "already configured" skipped the login wizard,
+    # re-wrote the dead token over itself and left the file's mtime moving
+    # while its contents never changed: the operator minted five credentials
+    # in a row, each superseding the last, and the directory kept the first.
+    # So it is asked about first, and a token the BROKER REFUSES is treated as
+    # absent -- the wizard offers a login, --no-prompt says why it stopped.
+    # Only a refusal counts: silence from an unreachable broker must not throw
+    # away a credential that is probably fine, which is what --force is for.
+    # Resolved ONCE, here, because stdin cannot be read twice -- and resolved
+    # before the wizard so the wizard can see whether there is anything usable.
+    token = read_token(a.token)
+    checked = None
+    if (token and token == os.environ.get("REVEILLE_TOKEN", "").strip()
+            and url and name):
+        ok, said = verify(url, name, token)
+        checked = (token, ok, said)          # asked ONCE; the gate below reuses it
+        if ok is False:
+            print(f"reveille: this directory's credential no longer works "
+                  f"({said}). It will not be reinstalled -- mint a new one.")
+    usable = bool(token) and not (checked and checked[1] is False)
+    if wizard and not (url and name and usable):
         print("reveille: setting this machine up as an agent.\n")
         url = url or ask("broker url", DEFAULT_URL)
-        a.login = a.login or not (a.token or os.environ.get("REVEILLE_TOKEN"))
+        a.login = a.login or not usable
         if not name and a.login:
             # LOG IN FIRST, THEN PICK: the account's own agents are the menu, so
             # becoming the native body of an existing agent is a number, not a
@@ -661,8 +709,6 @@ def cmd_init(a):
                   file=sys.stderr)
             return 1
         minted = f"minted a token bound to {name}, rooms: {', '.join(attached)}{minted}"
-    else:
-        token = read_token(a.token)
     missing = [n for n, v in (("REVEILLE_URL", url), ("REVEILLE_AGENT_ROLE", name),
                               ("REVEILLE_TOKEN", token)) if not v]
     if missing:
@@ -682,7 +728,10 @@ def cmd_init(a):
     # be wrong in a way no amount of correct installation fixes, and finding out
     # first is what keeps a failure from leaving a half-configured machine: at
     # this point there is nothing to undo (ruling 5).
-    ok, said = verify(url, name, token)
+    # The environment's credential was already asked about above -- once is the
+    # whole point, and a second probe of the same secret is a second chance for
+    # a flaky network to answer differently about a token nothing has changed.
+    ok, said = checked[1:] if (checked and checked[0] == token) else verify(url, name, token)
     if not ok and not a.force:
         print(f"reveille init: REFUSING -- {said}.\n"
               f"  url:   {url}\n  agent: {name}\n"
