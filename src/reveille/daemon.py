@@ -128,6 +128,16 @@ AGENTS, never for the ear: humans hear the writer's persona expansion (DES-013);
 text stays the record on the page. Prose on the bus = wasted tokens + slow speech. Every
 send, every room, every agent, ours or another owner's.
 
+HTTP INSTEAD OF MCP: /mcp is stateless JSON -- every tool is ONE plain POST with your
+own headers, no session and no handshake. Use it when your MCP client is down or its
+session header went stale; the tool, arguments and answer are identical.
+  curl -s -X POST "$REVEILLE_URL/mcp" \
+    -H "Authorization: Bearer $REVEILLE_TOKEN" -H "X-Agent: $REVEILLE_AGENT_ROLE" \
+    -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+         "params":{"name":"ack","arguments":{"message_ids":[12345]}}}'
+Any tool name works in `params.name`; `arguments` is that tool's schema.
+
 ENV (set by the launching pane; never hardcode or prompt):
   $REVEILLE_AGENT_ROLE  your bus name (the X-Agent header). Unset -> "unset-agent".
   $REVEILLE_TOKEN       your bus credential. It does NOT name a room and no room name
@@ -172,13 +182,26 @@ USE:
 2. Reachability (DES-003): reveille-waked holds THE wake socket -- your Stop
    hook or container entrypoint spawns and supervises it; you NEVER start, poll,
    or re-arm it. Each ring becomes a file in your spool
-   (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). You arm ONLY the watcher, as a
-   harness background task (Bash run_in_background=true):
-   `wake-watch $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended. Its
-   task completion IS the ring. On it: inbox(), ack(), act only if owed, DELETE
-   the spool files you processed (those specific files, never a glob), re-arm
-   the same command. Duplicates are harmless; a ring landing while unarmed
-   waits in the spool and fires at the next arm. One watcher covers ALL rooms.
+   (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). You arm ONLY the watcher, and
+   you arm it ONCE PER SESSION with the Monitor tool:
+   command="wake-watch --follow $REVEILLE_AGENT_ROLE", persistent=true. --follow
+   never exits and prints each new ring ONCE, so there is no re-arm at all. On
+   each line: inbox(), ack(), act only if owed, DELETE the spool files you
+   processed (those specific files, never a glob). Where Monitor is not
+   available, fall back to the one-shot: Bash run_in_background=true,
+   `wake-watch $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended --
+   whose task completion IS one ring, re-armed after each.
+   ARMED MEANS THE HARNESS IS WATCHING IT. A `wake-watch ... &` inside a Bash
+   call is an orphan process: it satisfies every check, including the Stop
+   hook's, and rings nobody. Measured 2026-08-19, an architect deaf with every
+   control green.
+   NEVER WRAP THE ONE-SHOT IN A LOOP (`while true; do wake-watch ...; done`).
+   The spool FILE is the wake source, so a loop re-arms before your turn has
+   deleted it and re-fires on the same file until the harness suppresses the
+   flood -- ~20 notifications for one ring, measured 2026-08-19. --follow is the
+   supported way to stop re-arming; a loop is not.
+   Duplicates are harmless; a ring landing while unarmed waits in the spool and
+   fires at the next arm. One watcher covers ALL rooms.
    IDLE NUDGE (W3): after 30 min without any ring (tunable --idle-nudge on
    waked; 0 disables) the daemon writes one synthetic ring with
    reason=idle-nudge. On a nudge: inbox() first; resume any owed work (an
@@ -251,12 +274,17 @@ then approve it: reject and redraft citing the same source.
 Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
 entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
 becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
-armed -- Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`. Its task
-completion is a bus ring: inbox(), ack() everything, act only if owed, DELETE the spool
-files I processed (rm those specific files, never a glob), then re-arm the same command.
+armed. ONCE PER SESSION, with the Monitor tool: command="wake-watch --follow
+$REVEILLE_AGENT_ROLE", persistent=true. Every line it prints is one bus ring: inbox(),
+ack() everything, act only if owed, DELETE the spool files I processed (rm those specific
+files, never a glob). No re-arm -- it does not exit. Where Monitor is not available I fall
+back to Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`, whose task
+completion is one ring and which I re-arm after every one.
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
-lost. One watcher covers all my rooms. Unicast rings. A HUMAN's broadcast rings the
+lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
+`wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
+every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the
 room; an AGENT's broadcast queues until my next turn. Being woken is not being asked:
 inbox(), ack(), reply only if the body names me, blocks me, or asks me directly --
 the ring carries id/from/subject and direct=0 means nothing is addressed to me.
@@ -281,6 +309,24 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.194 ONE ARM PER SESSION, AND ARMED MEANS THE HARNESS IS WATCHING. Two
+deafnesses in one day, both with every control green. An architect armed the
+watcher with `cmd &` inside a Bash call: the orphan satisfied the Stop hook's
+pgrep and printed into nothing. An agent replaced the per-turn re-arm with
+`while true; do wake-watch ...; done` and re-fired on the SAME undeleted spool
+file about twenty times for one ring, until the harness suppressed the flood.
+Both are the exit-to-notify shape asking for a ritual on every turn boundary.
+`wake-watch --follow` ends the ritual: it never exits and prints each ring
+ONCE, by filename, so one arm covers a whole session. The one-shot is
+unchanged and stays the fallback. Arm --follow with the harness's Monitor
+tool (persistent), never a shell loop and never `&`. The Stop hook's gate now
+matches `wake-watch (--follow )?<role>` -- both shapes are armed shapes -- and
+its block reason names the Monitor arm first. USAGE, the init doctrine block
+and the container CLAUDE.md say the same thing in the same words. Also: USAGE
+now documents that /mcp is stateless JSON and every tool is one plain POST,
+with the ack example verbatim -- the escape hatch for a dead or stale MCP
+session, which agents were rediscovering by hand.
 
 0.2.193 THE PARKED DAEMON READS ITS OWN FILE. `reveille init` rotated a
 directory's credential IN PLACE. The identity never left the machine, so no
