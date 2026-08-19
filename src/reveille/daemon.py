@@ -310,6 +310,24 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.196 THE SPENT SECRET SURVIVES A RESTART (ruling 12393). A return ticket is
+written against the hash of the credential the displaced body holds, and
+claiming one OVERWRITES that credential file with the secret it just minted. So
+after a claim that never arrived, the spent secret -- the only thing any future
+ticket matches -- existed nowhere but the running daemon's memory. Restarting
+that daemon threw the identity's return path away and nothing anywhere said so:
+the new one booted on the dead claim, polled with a secret no ticket is written
+against, and exited at ORPHAN_POLL_S looking orderly. R1 covered a body
+superseded while STOPPED; it did not cover one superseded, restored once, and
+then restarted. On PARKED the daemon now writes the spent secret to
+`.claude/.reveille-parked` (0600, beside the credential file and never in it),
+prefers it over the env credential when the broker refuses that as unknown, and
+unlinks it the moment anything attaches. THE INVARIANT: THAT FILE IS CLAIM-ONLY
+-- no code path joins, sends or hands it to a session, and it is already spent
+for every purpose except proving which machine this is. The bounded wait is
+unchanged: remembering a secret buys a body no immortality, and an unparked
+daemon still frees the flock.
+
 0.2.195 THE SELF-HEAL MUST NOT EAT THE TICKET. 0.2.193 taught a parked daemon
 to re-read its own credential file and adopt a secret that arrived by a path it
 did not take. Claiming a return ticket writes the new secret to THAT SAME FILE,

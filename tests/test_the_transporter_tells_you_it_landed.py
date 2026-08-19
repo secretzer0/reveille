@@ -177,7 +177,7 @@ def test_a_claimed_return_ticket_rings_before_it_celebrates(tmp_path, monkeypatc
     assert [r["reason"] for r in _rings(tmp_path)] == ["recalled"]
 
 
-def _scripted(codes, calls, monkeypatch, tickets=("claimed-secret",)):
+def _scripted(codes, calls, monkeypatch, tickets=("claimed-secret",), cwd=None):
     """Drive _run's decisions without a broker: _session hands back the codes in
     order, and every _park call is recorded as (secret, deadline). `tickets` is
     what successive claims return -- "" once it runs out, which is a window that
@@ -196,9 +196,15 @@ def _scripted(codes, calls, monkeypatch, tickets=("claimed-secret",)):
     monkeypatch.setattr(waked, "_session", session)
     monkeypatch.setattr(waked, "_park", park)
     monkeypatch.setattr(waked, "_converge", lambda url, state: None)
+    # _run REMEMBERS THE SPENT SECRET ON DISK, at cwd/.claude/.reveille-parked
+    # (ruling 12393). A test that drives _run without owning its cwd writes into
+    # the repo and the next test reads it back -- measured, two green tests went
+    # red from a third.
+    if cwd is not None:
+        monkeypatch.chdir(cwd)
 
 
-def test_a_window_that_closed_parks_again_instead_of_dying(monkeypatch):
+def test_a_window_that_closed_parks_again_instead_of_dying(tmp_path, monkeypatch):
     """Architect 12284. A claimed credential nobody landed inside the arrival
     window is SWEPT, so the next dial presents a secret the broker has never
     heard of. The old shape exited on that, which cost the box its daemon for a
@@ -207,7 +213,7 @@ def test_a_window_that_closed_parks_again_instead_of_dying(monkeypatch):
     ticket."""
     monkeypatch.setenv("REVEILLE_TOKEN", "spent-secret")
     calls = []
-    _scripted([waked.PARKED, waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    _scripted([waked.PARKED, waked.DEAD_CREDENTIAL], calls, monkeypatch, cwd=tmp_path)
     rc = asyncio.run(waked._run("ws://b.example/wake", "nr1", 0))
     assert rc == waked.PARKED
     # SECOND park is on the SPENT credential, not on the claimed one that died:
@@ -217,7 +223,7 @@ def test_a_window_that_closed_parks_again_instead_of_dying(monkeypatch):
     assert calls[1][1] is None, "a body that WAS parked waits as long as it takes"
 
 
-def test_a_body_that_was_never_parked_asks_before_it_gives_up(monkeypatch):
+def test_a_body_that_was_never_parked_asks_before_it_gives_up(tmp_path, monkeypatch):
     """RULING 12320 R1. PARKED is only reachable from a LIVE socket -- the
     credential-superseded frame -- so a body superseded while STOPPED, or
     restarted afterwards, comes up holding a spent secret and could never claim
@@ -226,20 +232,21 @@ def test_a_body_that_was_never_parked_asks_before_it_gives_up(monkeypatch):
     now, and the secret it polls with is the one it holds."""
     monkeypatch.setenv("REVEILLE_TOKEN", "spent-but-unparked")
     calls = []
-    _scripted([waked.DEAD_CREDENTIAL], calls, monkeypatch, tickets=())
+    _scripted([waked.DEAD_CREDENTIAL], calls, monkeypatch, tickets=(), cwd=tmp_path)
     assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == 1
     assert calls == [("spent-but-unparked", waked.ORPHAN_POLL_S)], \
         "it asked with what it holds, and under a deadline"
 
 
-def test_an_unparked_body_that_gets_its_ticket_carries_on(monkeypatch):
+def test_an_unparked_body_that_gets_its_ticket_carries_on(tmp_path, monkeypatch):
     """And when a ticket does come, nothing about it is special: the claimed
     credential becomes this body's, and the spent one becomes the fallback -- so
     a second window that closes lands on the same path as a body that parked
     the ordinary way."""
     monkeypatch.setenv("REVEILLE_TOKEN", "spent-but-unparked")
     calls = []
-    _scripted([waked.DEAD_CREDENTIAL, waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    _scripted([waked.DEAD_CREDENTIAL, waked.DEAD_CREDENTIAL], calls, monkeypatch,
+              cwd=tmp_path)
     assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == waked.PARKED
     assert [c[0] for c in calls] == ["spent-but-unparked", "spent-but-unparked"]
     assert calls[0][1] == waked.ORPHAN_POLL_S and calls[1][1] is None
@@ -279,14 +286,14 @@ def test_a_body_that_was_parked_waits_as_long_as_it_takes(monkeypatch):
     assert got == "fresh-secret" and len(tries) == 4
 
 
-def test_an_attached_session_spends_the_fallback(monkeypatch):
+def test_an_attached_session_spends_the_fallback(tmp_path, monkeypatch):
     """Once a session attaches, THIS credential speaks for the identity. Keeping
     the old one would let a later unrelated refusal park on a secret two swaps
     old, claiming a ticket meant for a body that no longer exists."""
     monkeypatch.setenv("REVEILLE_TOKEN", "spent-secret")
     calls = []
     _scripted([waked.PARKED, None, waked.DEAD_CREDENTIAL], calls, monkeypatch,
-              tickets=("claimed-secret",))
+              tickets=("claimed-secret",), cwd=tmp_path)
     assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == 1
     # The second park is the ORPHAN path -- deadline set, and asking with the
     # credential this body now holds. If the fallback had survived the arrival
@@ -426,3 +433,123 @@ def test_a_claimed_credential_that_died_does_not_eat_the_next_ticket(tmp_path,
         "both claims present the SPENT secret -- the tombstone every ticket is "
         f"written against; got {claims}")
     assert disk["secret"] == "ticket-2"
+
+
+# THE PATH IS THE CONTRACT, so the tests spell it rather than borrowing the
+# writer: a gate that builds the file with the code under test cannot fail when
+# that code is absent for the right reason, and the red would be a missing
+# symbol instead of a missing claim.
+PARKED = os.path.join(".claude", ".reveille-parked")
+
+
+def _remember(dirpath, secret):
+    d = pathlib.Path(dirpath) / ".claude"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".reveille-parked").write_text(secret)
+    return d / ".reveille-parked"
+
+
+def test_a_restarted_body_still_claims_on_the_secret_it_parked_on(tmp_path,
+                                                                  monkeypatch):
+    """RULING 12393. Claiming a ticket overwrites the directory's credential
+    with the secret it just minted, so after a claim that never arrived the
+    SPENT secret -- the only one any future ticket is written against -- lived
+    nowhere but the daemon's memory. Restarting the daemon threw the identity's
+    return path away, and nothing on the machine said so: the new one booted on
+    the dead claim, polled with a secret no ticket matches, and exited at
+    ORPHAN_POLL_S looking orderly.
+
+    The parked file is CLAIM-ONLY: it is read here and nowhere else."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
+    monkeypatch.setenv("REVEILLE_TOKEN", "dead-claim")
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+    monkeypatch.setattr(waked, "_converge", lambda url, state: None)
+    _remember(tmp_path, "spent")
+    codes = iter([waked.DEAD_CREDENTIAL, 7])
+    claims = []
+
+    async def session(uri, agent, state):
+        return next(codes)
+
+    async def claim(url, secret):
+        claims.append(secret)
+        return "ticket-2"
+
+    monkeypatch.setattr(waked, "_session", session)
+    monkeypatch.setattr(waked, "_claim", claim)
+    rc = asyncio.run(waked._run("ws://b.example/wake", "nr1", 0,
+                                write_env=lambda s: True))
+    assert rc == 7, "the second ticket brought it back"
+    assert claims == ["spent"], (
+        f"the claim must present the SPENT secret, not the dead one the env "
+        f"still holds; got {claims}")
+
+
+def test_an_attach_forgets_the_spent_secret(tmp_path, monkeypatch):
+    """A secret kept past its use is just a secret at rest. Once a credential
+    attaches, the remembered one can claim nothing and must not survive."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
+    monkeypatch.setenv("REVEILLE_TOKEN", "live")
+    monkeypatch.setattr(waked, "_converge", lambda url, state: None)
+    kept = _remember(tmp_path, "spent")
+    codes = iter([None, 7])          # attached, dropped, attached again
+
+    async def session(uri, agent, state):
+        return next(codes)
+
+    monkeypatch.setattr(waked, "_session", session)
+    rc = asyncio.run(waked._run("ws://b.example/wake", "nr1", 0))
+    assert rc == 7
+    assert not kept.exists(), "an attach unlinks it"
+
+
+def test_a_parked_secret_nobody_writes_a_ticket_for_still_gives_up(tmp_path,
+                                                                   monkeypatch):
+    """The remembered secret buys a bounded wait, never an immortal daemon:
+    a body that was never parked in THIS process must still free the flock
+    (ruling 12320 R1), and remembering a secret does not change that."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
+    monkeypatch.setenv("REVEILLE_TOKEN", "dead-claim")
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+    monkeypatch.setattr(waked, "ORPHAN_POLL_S", 0)
+    monkeypatch.setattr(waked, "_converge", lambda url, state: None)
+    _remember(tmp_path, "spent")
+    tries = []
+
+    async def session(uri, agent, state):
+        return waked.DEAD_CREDENTIAL
+
+    async def never(url, secret):
+        tries.append(secret)
+        return ""
+
+    monkeypatch.setattr(waked, "_session", session)
+    monkeypatch.setattr(waked, "_claim", never)
+    rc = asyncio.run(waked._run("ws://b.example/wake", "nr1", 0))
+    assert rc == 1, "no ticket inside the window -- it exits so the lock frees"
+    assert tries == ["spent"], tries
+
+
+def test_the_parked_secret_is_ignored_before_it_exists(tmp_path, monkeypatch):
+    """Architect blocking on #151. In the native shape .claude sits in a git
+    working tree, and the handover doctrine commits and pushes that tree at
+    swap-pending -- the same window PARKED writes this file. The spent secret
+    is the hash every return ticket for the identity is matched against, so
+    untracked-but-not-ignored is not a leaked dead credential: it is the
+    identity's NEXT credential, published.
+
+    The dir here carries a pre-existing .gitignore naming only
+    settings.local.json -- an old init's file, the worst case, because the old
+    ignore writer's early return meant it could never gain a line."""
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / ".gitignore").write_text("settings.local.json\n")
+    assert waked.write_parked("spent")
+    gi = (d / ".gitignore").read_text()
+    assert ".reveille-parked" in gi.split(), gi
+    assert "settings.local.json" in gi.split()   # appended, never replaced
+    assert (d / ".reveille-parked").read_text() == "spent"

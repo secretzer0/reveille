@@ -190,16 +190,21 @@ def ignore_the_credential(workdir):
     d = pathlib.Path(workdir) / ".claude"
     d.mkdir(parents=True, exist_ok=True)
     path = d / ".gitignore"
-    want = "settings.local.json\n"
-    if path.exists():
-        text = path.read_text()
-        if "settings.local.json" in text.split():
-            return path, False
-        path.write_text(text if text.endswith("\n") else text + "\n")
-        with path.open("a") as fh:
-            fh.write(want)
-        return path, True
-    path.write_text(want)
+    # BOTH SECRETS THIS DIRECTORY CAN HOLD, not just the one this function was
+    # named for (architect blocking on #151): waked writes the spent credential
+    # to .reveille-parked in the same directory, and an ignore file that names
+    # only one of two secrets is a published-identity hole with a green install.
+    # Appends WHICHEVER is missing -- the old single-name early return meant a
+    # dir init had ever touched could never gain a line.
+    want = ["settings.local.json", ".reveille-parked"]
+    text = path.read_text() if path.exists() else ""
+    have = text.split()
+    missing = [w for w in want if w not in have]
+    if not missing:
+        return path, False
+    if text and not text.endswith("\n"):
+        text += "\n"
+    path.write_text(text + "".join(w + "\n" for w in missing))
     return path, True
 
 
@@ -298,6 +303,16 @@ def write_credential(url, name, token, workdir):
         f.write("\n")
     os.replace(tmp, path)
     os.chmod(path, 0o600)          # explicit, in case the file already existed
+    # A FRESH CREDENTIAL SPENDS THE PARKED ONE (architect nit on #151). The
+    # sibling .reveille-parked is a spent secret waked remembered so a restart
+    # could still claim a return ticket -- for the identity this directory HAD.
+    # init just gave it a live credential (possibly a different identity), so a
+    # daemon booting here must never prefer that stale secret and poll a
+    # foreign claim for fifteen minutes. Same rule as clear_parked-on-attach.
+    try:
+        os.unlink(d / ".reveille-parked")
+    except OSError:
+        pass
     return path
 
 

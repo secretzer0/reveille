@@ -265,6 +265,91 @@ def read_env(agent):
     return env.get("REVEILLE_TOKEN") or ""
 
 
+# ---- THE SPENT SECRET SURVIVES A RESTART (ruling 12393) ----------------------
+# A return ticket is written against the hash of the credential the displaced
+# body holds, and claiming one OVERWRITES that credential file with the secret
+# it just minted. So after a claim that never arrived, the spent secret -- the
+# only thing any future ticket matches -- existed nowhere but this process's
+# memory, and restarting the daemon threw the identity's return path away with
+# nothing anywhere saying so. R1 covers a body superseded while STOPPED; it did
+# not cover one superseded, restored once, and then restarted.
+#
+# THE INVARIANT, and it is the whole reason this file is acceptable: THE PARKED
+# FILE IS CLAIM-ONLY. Nothing joins on it, sends on it, or hands it to a
+# session -- the only call that may read it is the recall claim. It is a secret
+# already spent for every purpose except proving which machine this is, and it
+# is unlinked the moment any credential attaches.
+PARKED_NAME = os.path.join(".claude", ".reveille-parked")
+
+
+def parked_path():
+    return os.path.join(os.getcwd(), PARKED_NAME)
+
+
+def _ignore_parked(claude_dir):
+    """The ignore line lands BEFORE the secret does (architect blocking on
+    #151). In the native shape .claude sits in a GIT WORKING TREE, and the
+    handover doctrine commits and pushes that tree at swap-pending -- the same
+    window PARKED writes this file. The spent secret is the hash every return
+    ticket for the identity is matched against; untracked-but-not-ignored, one
+    `git add -A` publishes the identity's next credential. Inline, not
+    imported: waked deliberately has no CLI dependency (read_env's rule), and
+    this is four lines of text handling.
+
+    Existing dirs matter as much as new ones: init's ignore writer used to
+    early-return once settings.local.json was present, so no directory it had
+    ever touched could gain a line -- this covers them at the moment the new
+    secret appears."""
+    path = os.path.join(claude_dir, ".gitignore")
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError:
+        text = ""
+    if ".reveille-parked" in text.split():
+        return
+    if text and not text.endswith("\n"):
+        text += "\n"
+    with open(path, "w") as f:
+        f.write(text + ".reveille-parked\n")
+
+
+def write_parked(secret):
+    """Remember the spent credential, 0600, beside the live one and never in
+    it: the credential file is what sessions read, and this must never be
+    mistaken for it."""
+    if not secret:
+        return False
+    path = parked_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _ignore_parked(os.path.dirname(path))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secret)
+        return True
+    except OSError:
+        return False
+
+
+def read_parked():
+    """The spent credential this directory was last parked on, or ""."""
+    try:
+        with open(parked_path()) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def clear_parked():
+    """An attached credential makes the spent one worthless -- and a secret
+    kept past its use is just a secret at rest."""
+    try:
+        os.unlink(parked_path())
+    except OSError:
+        pass
+
+
 async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
                 tried=None):
     """Poll for a return ticket until one arrives. Prints once on entry (silence
@@ -604,13 +689,21 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         # it simply was not connected when the swap committed,
                         # which is the whole of the difference. So it asks, for
                         # a bounded while, and then gets out of the way.
+                        # THE SECRET A TICKET IS ACTUALLY WRITTEN AGAINST. If
+                        # this directory was parked before and claimed once,
+                        # the credential in its env is that claim -- long
+                        # swept -- and the spent one it remembered is the only
+                        # thing a ticket matches. Claim-only, by invariant.
+                        spent = read_parked() or token
                         print(f"reveille-waked: the broker does not know this "
                               f"credential. If {agent} was moved off this "
                               f"machine while nothing was running here, a "
                               f"return ticket can still bring it back -- "
                               f"polling for one for "
-                              f"{ORPHAN_POLL_S // 60} minutes.", file=sys.stderr)
-                        got = await _park(url, agent, token, write_env,
+                              f"{ORPHAN_POLL_S // 60} minutes"
+                              f"{' on the credential this directory was parked on' if spent != token else ''}.",
+                              file=sys.stderr)
+                        got = await _park(url, agent, spent, write_env,
                                           deadline=ORPHAN_POLL_S,
                                           read_env=read_env, tried=tried)
                         if not got:
@@ -620,7 +713,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                                   f"fresh credential, and the Stop hook starts a "
                                   f"daemon on it at the next turn.", file=sys.stderr)
                             return 1
-                        parked_secret = token
+                        parked_secret = spent
                         token = got
                         tried.add(token)
                         uri = f"{url}{sep}name={agent}" + f"&token={token}"
@@ -630,6 +723,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                           f"window has closed -- PARKED again on the one this "
                           f"machine was superseded on, waiting for another "
                           f"return ticket for {agent}.", file=sys.stderr)
+                    write_parked(parked_secret)
                     got = await _park(url, agent, parked_secret, write_env,
                                       read_env=read_env, tried=tried)
                     if not got:
@@ -646,6 +740,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # that lands, the URI is rebuilt on the new secret and the
                     # loop simply carries on.
                     parked_secret = token
+                    write_parked(token)
                     got = await _park(url, agent, token, write_env,
                                       read_env=read_env, tried=tried)
                     if not got:
@@ -660,8 +755,10 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # ATTACHED, so this credential speaks for the identity and
                     # the spent one no longer does. Holding it any longer would
                     # let a later unrelated refusal park on a secret two swaps
-                    # old.
+                    # old -- and a secret kept past its use is just a secret at
+                    # rest, so the remembered copy goes too.
                     parked_secret = None
+                    clear_parked()
                     if code is not None:
                         return code
             except (OSError, websockets.WebSocketException) as e:
