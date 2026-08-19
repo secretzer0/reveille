@@ -177,17 +177,20 @@ def test_a_claimed_return_ticket_rings_before_it_celebrates(tmp_path, monkeypatc
     assert [r["reason"] for r in _rings(tmp_path)] == ["recalled"]
 
 
-def _scripted(codes, calls, monkeypatch):
+def _scripted(codes, calls, monkeypatch, tickets=("claimed-secret",)):
     """Drive _run's decisions without a broker: _session hands back the codes in
-    order, and every _park call is recorded with the secret it was given."""
+    order, and every _park call is recorded as (secret, deadline). `tickets` is
+    what successive claims return -- "" once it runs out, which is a window that
+    closed with nobody opening another."""
     seq = iter(codes)
+    got = iter(tickets)
 
     async def session(uri, agent, state):
         return next(seq)
 
-    async def park(url, agent, secret, write_env):
-        calls.append(secret)
-        return "claimed-secret" if len(calls) == 1 else ""
+    async def park(url, agent, secret, write_env, deadline=None):
+        calls.append((secret, deadline))
+        return next(got, "")
 
     monkeypatch.setattr(waked, "_session", session)
     monkeypatch.setattr(waked, "_park", park)
@@ -209,19 +212,70 @@ def test_a_window_that_closed_parks_again_instead_of_dying(monkeypatch):
     # SECOND park is on the SPENT credential, not on the claimed one that died:
     # the claimed secret can never claim anything, and the tombstone the ticket
     # matches is the spent one's.
-    assert calls == ["spent-secret", "spent-secret"], calls
+    assert [c[0] for c in calls] == ["spent-secret", "spent-secret"], calls
+    assert calls[1][1] is None, "a body that WAS parked waits as long as it takes"
 
 
-def test_a_body_that_was_never_parked_still_exits_on_a_dead_credential(monkeypatch):
-    """Nothing to fall back to is not the same situation: a materialised body
-    holding an expired mint has no superseded credential of its own, and a
-    daemon looping on a secret nobody will ever honour is the deafness this
-    whole file exists to prevent."""
-    monkeypatch.setenv("REVEILLE_TOKEN", "never-landed")
+def test_a_body_that_was_never_parked_asks_before_it_gives_up(monkeypatch):
+    """RULING 12320 R1. PARKED is only reachable from a LIVE socket -- the
+    credential-superseded frame -- so a body superseded while STOPPED, or
+    restarted afterwards, comes up holding a spent secret and could never claim
+    the ticket written against exactly that secret. Measured 2026-08-19: a
+    running container, zero waked, and a ticket nobody could take. It polls
+    now, and the secret it polls with is the one it holds."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "spent-but-unparked")
     calls = []
-    _scripted([waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    _scripted([waked.DEAD_CREDENTIAL], calls, monkeypatch, tickets=())
     assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == 1
-    assert calls == [], "there was no ticket to poll for"
+    assert calls == [("spent-but-unparked", waked.ORPHAN_POLL_S)], \
+        "it asked with what it holds, and under a deadline"
+
+
+def test_an_unparked_body_that_gets_its_ticket_carries_on(monkeypatch):
+    """And when a ticket does come, nothing about it is special: the claimed
+    credential becomes this body's, and the spent one becomes the fallback -- so
+    a second window that closes lands on the same path as a body that parked
+    the ordinary way."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "spent-but-unparked")
+    calls = []
+    _scripted([waked.DEAD_CREDENTIAL, waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == waked.PARKED
+    assert [c[0] for c in calls] == ["spent-but-unparked", "spent-but-unparked"]
+    assert calls[0][1] == waked.ORPHAN_POLL_S and calls[1][1] is None
+
+
+def test_the_unparked_wait_is_bounded_so_the_lock_frees(monkeypatch):
+    """Bounded, because the flock must eventually free for a hook respawn on a
+    hand-written credential -- a daemon polling for ever on a secret nobody will
+    write a ticket for is the deafness the rest of this file exists to prevent.
+    The bound covers the 5-minute ticket plus the minutes it takes a person to
+    notice."""
+    assert waked.ORPHAN_POLL_S >= 3 * 5 * 60
+
+    async def never(url, secret):
+        return ""
+
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+    monkeypatch.setattr(waked, "_claim", never)
+    got = asyncio.run(waked._park("http://b.example", "nr1", "spent", lambda s: True,
+                                  deadline=0))
+    assert got == "", "the deadline is what makes it give up"
+
+
+def test_a_body_that_was_parked_waits_as_long_as_it_takes(monkeypatch):
+    """No deadline on the parked path: its owner has already been told where the
+    identity went, and the machine is doing nothing else with that credential.
+    Giving up there would turn a slow human into a dead daemon."""
+    tries = []
+
+    async def twice(url, secret):
+        tries.append(secret)
+        return "fresh-secret" if len(tries) > 3 else ""
+
+    monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
+    monkeypatch.setattr(waked, "_claim", twice)
+    got = asyncio.run(waked._park("http://b.example", "nr1", "spent", lambda s: True))
+    assert got == "fresh-secret" and len(tries) == 4
 
 
 def test_an_attached_session_spends_the_fallback(monkeypatch):
@@ -230,9 +284,13 @@ def test_an_attached_session_spends_the_fallback(monkeypatch):
     old, claiming a ticket meant for a body that no longer exists."""
     monkeypatch.setenv("REVEILLE_TOKEN", "spent-secret")
     calls = []
-    _scripted([waked.PARKED, None, waked.DEAD_CREDENTIAL], calls, monkeypatch)
+    _scripted([waked.PARKED, None, waked.DEAD_CREDENTIAL], calls, monkeypatch,
+              tickets=("claimed-secret",))
     assert asyncio.run(waked._run("ws://b.example/wake", "nr1", 0)) == 1
-    assert calls == ["spent-secret"], "the arrival ended the parked state"
+    # The second park is the ORPHAN path -- deadline set, and asking with the
+    # credential this body now holds. If the fallback had survived the arrival
+    # it would be asking with a secret two swaps old, for a body that is gone.
+    assert calls == [("spent-secret", None), ("claimed-secret", waked.ORPHAN_POLL_S)]
 
 
 def test_the_ring_asks_for_the_one_act_a_daemon_cannot_perform():

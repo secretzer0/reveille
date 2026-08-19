@@ -577,8 +577,11 @@ def ask_agent(agents, stdin=None):
 def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
                create=False, confirm_create=None, cookie=None, keep_session=False):
     """Log in (unless a session cookie is handed in), mint a token BOUND to
-    `agent`, attach rooms. Returns (secret, rooms-attached, note) or raises
-    RuntimeError with what to fix.
+    `agent`, attach rooms. Returns (secret, rooms-attached, note, pending) or
+    raises RuntimeError with what to fix. `pending` is the broker's word for "an
+    existing body still holds this identity and keeps it until this credential
+    joins" -- the caller needs it, because what a pending mint may disturb
+    locally is nothing at all (ruling 12320 R5).
 
     Binding supersedes the account's previous token for that name -- the broker's
     existing one-identity-one-live-credential rule, not something this adds. So
@@ -686,7 +689,7 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
     if n:
         note += (f" (discarded {n} unclaimed move(s) for {agent}: whatever was "
                  f"minted for them cannot arrive)")
-    return tok["secret"], attached, note
+    return tok["secret"], attached, note, bool(tok.get("pending"))
 
 
 def room_listing(payload):
@@ -1105,6 +1108,7 @@ def cmd_init(a):
     # Bound here so the deferred mint below reads them whether or not this block
     # runs -- `will_mint` is the only thing that decides it does.
     will_mint, user, keep, cookie = False, None, False, cookie
+    minted_pending = False
     if a.login or not usable:
         # MINT FIRST, then fall into exactly the same path as a pasted token.
         # One installer, not two: everything after this point cannot tell where
@@ -1259,7 +1263,7 @@ def cmd_init(a):
                   f"one, it is superseded:\n  the machine holding it stops working "
                   f"on its next call. Two machines means two names.")
         try:
-            token, attached, note = mint_token(
+            token, attached, note, minted_pending = mint_token(
                 url, user, None, name, a.rooms, a.tier,
                 cookie=cookie, keep_session=keep,
                 pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
@@ -1274,7 +1278,9 @@ def cmd_init(a):
                   f"finish.", file=sys.stderr)
             return 1
         steps.append(f"minted a token bound to {name}, "
-                     f"rooms: {', '.join(attached)}{note}")
+                     f"rooms: {', '.join(attached)}{note}"
+                     + (" -- PENDING: the body holding this identity keeps it "
+                        "until a turn here calls join()" if minted_pending else ""))
 
     try:
         path = write_credential(url, name, token, workdir)
@@ -1296,9 +1302,20 @@ def cmd_init(a):
                      f"(it belongs in CLAUDE.local.md, which is not tracked)")
     # THE DAEMON HOLDING THE OLD CREDENTIAL HAS TO GO (ruling 12008). It read
     # its token once, at spawn, and no file written here can reach it.
-    retired = retire_waked(name)
+    # BUT A PENDING MINT TAKES NOTHING, SO IT RETIRES NOTHING (ruling 12320 R5,
+    # measured 2026-08-19). retire_waked is keyed on the agent NAME and the
+    # spool lock is per identity per machine, so an init in a second directory
+    # killed the daemon of the body that was still live and still holding a
+    # perfectly good credential -- deaf until its next turn boundary, for a
+    # credential that had not arrived and might never. 12008 was written before
+    # the swap was two-phase: it assumed the mint had already superseded what
+    # that daemon holds. When it has, this still fires.
+    retired = "" if minted_pending else retire_waked(name)
     if retired:
         steps.append(f"wake: {retired}")
+    elif minted_pending:
+        steps.append("wake: left the running daemon alone -- it holds the live "
+                     "credential until this one arrives")
     # ALWAYS, wizard or not (operator 11879 + red-shirt, 2026-08-18): the paste
     # path skips every prompt, and an agent with no CLAUDE.md has no boot ritual
     # -- it comes up connected and doctrine-less, which is what red-shirt did.

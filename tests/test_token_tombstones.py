@@ -117,7 +117,13 @@ def test_the_refusal_is_a_signpost_for_the_former_body_only():
             daemon._agent_principal(_request(old["secret"]))
         said = str(e.value)
         assert "superseded" in said and "wanderer" in said
-        assert "reveille init --login" in said, "the way back is named"
+        # THE WAY BACK IS THE ARRIVAL, not a re-install (ruling 12320 R4). This
+        # text told a parked body to run `reveille init --login` -- a mint it
+        # does not need and, on a broker with the password door closed, a flag
+        # that is not a door. What actually returns it is a return ticket its
+        # daemon claims and a turn here that calls join().
+        assert "join()" in said and "sends it back" in said, "the way back is named"
+        assert "--login" not in said, "and it is not a re-install"
         assert old["secret"] not in said and "Bearer" not in said, (
             "a signpost never carries a credential")
 

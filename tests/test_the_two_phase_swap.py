@@ -110,6 +110,44 @@ def test_an_unclaimed_pending_expires_and_the_old_body_never_notices():
         "and the body that was working is still working -- that is the whole NAK path"
 
 
+def test_a_window_that_closed_cannot_still_take_the_identity():
+    """RULING 12320 B, measured live 2026-08-19. The ten minutes was enforced
+    only by a sweep, and the sweep ran hourly -- so a credential every screen
+    called expired stayed CLAIMABLE for up to an hour, and a body presenting it
+    at minute 45 would displace a live one. The window has to be true at the one
+    moment it matters: the arrival."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    c.execute("UPDATE tokens SET pending_ns=? WHERE id=?",
+              (store.time.time_ns() - store.PENDING_TTL_NS - 1, new["id"]))
+    with pytest.raises(store.BusError, match="expired unclaimed"):
+        store.join(c, "wanderer", "agent", room["id"], token_id=new["id"])
+    assert store.resolve_token(c, old["secret"])["id"] == old["id"], \
+        "the body that was working still is"
+
+
+def test_an_expired_pending_resolves_to_nothing_before_the_sweep_reaches_it():
+    """Every door answers the same way it will answer a minute later. Otherwise
+    the wake socket accepts a credential the arrival path would refuse, which is
+    the split that made a corpse look reachable."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    assert store.resolve_token(c, new["secret"]), "still inside the window"
+    c.execute("UPDATE tokens SET pending_ns=? WHERE id=?",
+              (store.time.time_ns() - store.PENDING_TTL_NS - 1, new["id"]))
+    assert store.resolve_token(c, new["secret"]) is None
+    assert c.execute("SELECT 1 FROM tokens WHERE id=?", (new["id"],)).fetchone(), \
+        "not deleted here -- the sweep owns the table, this owns the answer"
+
+
+def test_the_window_and_its_sweep_are_not_an_hour_apart():
+    """A 600 s promise does not get a 3600 s enforcer: the sweep that cleans the
+    table runs on its own clock, so the promise and the table cannot disagree by
+    more than a minute."""
+    from reveille import daemon
+    assert daemon.PENDING_SWEEP_SECS <= store.PENDING_TTL_NS / 1e9 / 5
+
+
 def test_expiry_leaves_no_tombstone():
     """A tombstone signposts a displaced body toward its successor. A pending
     credential displaced nothing and its successor never arrived, so a

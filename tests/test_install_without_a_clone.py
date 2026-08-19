@@ -343,6 +343,7 @@ def test_the_hook_ships_inside_the_package(tmp_path):
 class Minting(http.server.BaseHTTPRequestHandler):
     """A broker that logs in, mints and attaches -- the three calls --login makes."""
     fail_attach = False
+    pending = False          # did this mint land behind a live body (DES-012 s15)
     calls = []
 
     def _json(self, code, body, cookie=None):
@@ -364,6 +365,7 @@ class Minting(http.server.BaseHTTPRequestHandler):
         if self.path == "/tokens":
             return self._json(200, {"id": "t1", "secret": "minted-secret",
                                     "agent_name": body.get("agent_name"),
+                                    "pending": Minting.pending,
                                     "superseded": ["old"]})
         if self.path.startswith("/tokens/"):
             if Minting.fail_attach:
@@ -397,6 +399,7 @@ class Minting(http.server.BaseHTTPRequestHandler):
 def minting():
     Minting.calls = []
     Minting.fail_attach = False
+    Minting.pending = False
     srv = http.server.HTTPServer(("127.0.0.1", 0), Minting)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -405,7 +408,8 @@ def minting():
 
 def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
     monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
-    secret, rooms, note = cli.mint_token(minting, "tmelhiser", "hunter2", "roc-sso-dev")
+    secret, rooms, note, pending = cli.mint_token(minting, "tmelhiser", "hunter2",
+                                                  "roc-sso-dev")
     assert secret == "minted-secret"
     assert rooms == ["Reveille2.0"]
     assert "superseded" in note, "a rotation that supersedes must say so"
@@ -453,6 +457,50 @@ def test_a_re_mint_carries_the_agents_rooms_not_the_owners(minting, monkeypatch)
     cli.mint_token(minting, "tmelhiser", "hunter2", "reveille-architect")
     mint = [b for pth, b in Minting.calls if pth == "/tokens" and b is not None][0]
     assert mint["rooms"] == ["r1"], "its own room, and nothing the owner merely owns"
+
+
+def test_a_pending_mint_leaves_the_running_daemon_alone(tmp_path, minting, monkeypatch,
+                                                       capsys):
+    """RULING 12320 R5, measured 2026-08-19. retire_waked is keyed on the agent
+    NAME and the spool lock is per identity per machine, so an init in a SECOND
+    directory killed the daemon of the body that was still live -- deaf, holding
+    a perfectly good credential, for a credential that had not arrived and might
+    never. 12008 predates the two-phase swap: it assumed the mint had already
+    superseded what that daemon holds."""
+    Minting.pending = True
+    killed = []
+    monkeypatch.setattr(cli, "retire_waked", lambda name: killed.append(name) or "")
+    claude, _ = fake_claude(tmp_path)
+    home, work = tmp_path / "home", tmp_path / "work"
+    home.mkdir(), work.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    rc = cli.main(["init", minting, "dev-agent", "--login", "--user", "tmelhiser",
+                   "--rooms", "Reveille2.0", "--claude", claude, "--dir", str(work)])
+    assert rc == 0
+    assert killed == [], "the live body's daemon was retired for a mint that took nothing"
+    out = capsys.readouterr().out
+    assert "left the running daemon alone" in out
+    assert "PENDING" in out, "and the person is told which kind of mint they just made"
+
+
+def test_a_live_mint_still_retires_the_daemon_holding_the_old_credential(
+        tmp_path, minting, monkeypatch):
+    """The 12008 case is untouched: when the mint DID supersede, the process
+    reading the old token has to go -- it read it once, at spawn, and no file
+    written here can reach it."""
+    Minting.pending = False
+    killed = []
+    monkeypatch.setattr(cli, "retire_waked", lambda name: killed.append(name) or "")
+    claude, _ = fake_claude(tmp_path)
+    home, work = tmp_path / "home", tmp_path / "work"
+    home.mkdir(), work.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    assert cli.main(["init", minting, "dev-agent", "--login", "--user", "tmelhiser",
+                     "--rooms", "Reveille2.0", "--claude", claude,
+                     "--dir", str(work)]) == 0
+    assert killed == ["dev-agent"]
 
 
 def test_an_agent_with_no_reachable_rooms_refuses_rather_than_minting_a_deaf_body(

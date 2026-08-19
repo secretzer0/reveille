@@ -106,6 +106,9 @@ def _cookie_name():
     for the writer and every reader (DES-018 s7)."""
     return "__Host-" + COOKIE if _https_public() else COOKIE
 SWEEP_SECS = 3600
+# The arrival window is 600 s (store.PENDING_TTL_NS); its sweep runs on its
+# own clock so the promise and the table agree within a minute.
+PENDING_SWEEP_SECS = 60
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
@@ -4692,8 +4695,9 @@ def _agent_principal(request):
             raise store.AuthError(
                 f"superseded: this credential for {ts['agent_name']!r} was "
                 f"replaced on {when} -- another body holds the identity now. "
-                f"To make this machine the body again, run `reveille init "
-                f"--login` in the agent's directory; to reach the live body, "
+                f"To bring it back here, the owner sends it back from the bus "
+                f"and a turn in this directory calls join(): that call IS the "
+                f"arrival. `reveille init` also works. To reach the live body, "
                 f"use the bus web UI.")
         raise store.AuthError("bad token")
     name = (request.headers.get("x-agent") if request else "") or ""
@@ -8074,6 +8078,31 @@ async def chat_http(_request):
     return HTMLResponse(page)
 
 
+async def _pending_sweeper():
+    """The arrival window, on its OWN clock (ruling 12320 B).
+
+    THE ARRIVAL WINDOW IS THE BROKER'S TIMER (ruling 11947), not a lazy check on
+    the next request: a pending credential nobody ever presents is precisely the
+    one no request will come for, and it must still die. It used to ride the
+    hourly sweep, which made a ten-minute window into an up-to-an-hour one --
+    measured 2026-08-19, a pending sat claimable minutes past a TTL every screen
+    said had closed. A 600 s promise does not get a 3600 s enforcer. The window
+    itself is now refused at commit_pending too; this is what keeps the table
+    honest so the two never disagree.
+
+    Nothing else is disturbed by it -- a pending mint never took anything from
+    the working body, which is what lets this sweep be blunt.
+    """
+    while True:
+        await asyncio.sleep(PENDING_SWEEP_SECS)
+        try:
+            for tid in store.expire_pending(_conn):
+                log.info("pending credential %s expired unclaimed -- the previous "
+                         "body keeps the identity", tid)
+        except Exception:
+            log.exception("pending sweep failed")
+
+
 async def _sweeper():
     """Retention, expired sessions, stale presence. On the event loop, not a thread:
     _conn is used only from the loop thread, so a thread would need its own connection
@@ -8086,14 +8115,6 @@ async def _sweeper():
             store.sweep_sessions(_conn)
             store.reap_stale(_conn)
             store.sweep_expired_state(_conn)
-            # THE ARRIVAL WINDOW IS THE BROKER'S TIMER (ruling 11947), not a
-            # lazy check on the next request: a pending credential nobody ever
-            # presents is precisely the one no request will come for, and it
-            # must still die. Nothing else is disturbed -- a pending mint never
-            # took anything from the working body.
-            for tid in store.expire_pending(_conn):
-                log.info("pending credential %s expired unclaimed -- the previous "
-                         "body keeps the identity", tid)
             if dropped:
                 log.info("retention swept %s message(s)", dropped)
         except Exception:
@@ -8107,10 +8128,12 @@ def build_app():
     async def lifespan(app):
         async with mcp_app.router.lifespan_context(app):
             task = asyncio.create_task(_sweeper())
+            pending_task = asyncio.create_task(_pending_sweeper())
             try:
                 yield
             finally:
                 task.cancel()
+                pending_task.cancel()
 
     return Starlette(
         routes=[

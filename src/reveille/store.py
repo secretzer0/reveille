@@ -3022,6 +3022,19 @@ def commit_pending(conn, token_id):
                      (token_id,)).fetchone()
     if not r or r["pending_ns"] is None:
         return []
+    # THE WINDOW IS TRUE AT THE ONE MOMENT IT MATTERS (ruling 12320 B; measured
+    # 2026-08-19). The ten minutes was enforced only by a sweep, and the sweep
+    # ran hourly -- so an abandoned credential stayed CLAIMABLE for up to an
+    # hour after the window every screen said had closed, and a body presenting
+    # it at minute 45 would displace a live one. The sweep is still the thing
+    # that cleans the table; this is the thing that makes the promise real.
+    if r["pending_ns"] < time.time_ns() - PENDING_TTL_NS:
+        when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                             time.gmtime(r["pending_ns"] / 1e9 + PENDING_TTL_NS / 1e9))
+        raise BusError(
+            f"this credential expired unclaimed at {when}: the arrival window "
+            f"for it has closed, so it cannot take the identity. The body that "
+            f"was working still is. Mint again to move it.")
     conn.execute("UPDATE tokens SET pending_ns=NULL WHERE id=?", (token_id,))
     # Ordered so the identity is never without one: this token is live by the
     # line above, and named as the exception so the sweep cannot take it.
@@ -3187,6 +3200,12 @@ def resolve_token(conn, secret):
         "LEFT JOIN agents a ON a.id = t.agent_id WHERE t.secret_hash=?",
         (_sha(secret),)).fetchone()
     if not r:
+        return None
+    # AN EXPIRED PENDING IS NOT A CREDENTIAL (ruling 12320 B). It resolves to
+    # nothing rather than to something the sweep has simply not reached yet, so
+    # every door -- the wake socket included -- answers the same way it will
+    # answer a minute later, when the row is actually gone.
+    if r["pending_ns"] is not None and r["pending_ns"] < time.time_ns() - PENDING_TTL_NS:
         return None
     conn.execute("UPDATE tokens SET last_used_ns=? WHERE id=?", (time.time_ns(), r["id"]))
     return {"id": r["id"], "owner_id": r["owner_id"], "label": r["label"],
