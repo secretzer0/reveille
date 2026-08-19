@@ -66,7 +66,7 @@ from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, Plain
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from reveille import __version__, store
+from reveille import __version__, store, timings
 from reveille.devicecode import cli_code
 
 COOKIE = "rev_session"          # http; on an https public URL the reader/writer use __Host-
@@ -106,9 +106,10 @@ def _cookie_name():
     for the writer and every reader (DES-018 s7)."""
     return "__Host-" + COOKIE if _https_public() else COOKIE
 SWEEP_SECS = 3600
-# The arrival window is 600 s (store.PENDING_TTL_NS); its sweep runs on its
-# own clock so the promise and the table agree within a minute.
-PENDING_SWEEP_SECS = 60
+# The arrival window (store.PENDING_TTL_NS) gets a sweep on its OWN clock,
+# several ticks per window whatever the profile, so the promise and the table
+# agree well inside the window itself.
+PENDING_SWEEP_SECS = timings.PENDING_SWEEP_S
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
@@ -309,6 +310,25 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.198 THE CLOCKS MOVE TOGETHER (ruled 12415, amended 12418, operator 12417).
+The transporter's seven coupled clocks -- PENDING_TTL, RECALL_TTL,
+HANDOVER_GRACE, the pending sweep, the arrival ring, the claim poll and the
+orphan wait -- now come from ONE profile: REVEILLE_TIMINGS=production (default,
+exactly the values that shipped before this existed) or =fast (the acceptance
+chain in about two minutes instead of twenty-five). Never per-knob, because the
+knobs are coupled: the corpse-stop decides by asking whether a credential still
+resolves, and that answer flips exactly when the grace closes -- a lone
+override changes which body gets stopped without anyone choosing it. The
+ordering invariants hold in EVERY profile and are gated (sweep well under
+pending, poll well under ticket, grace inside pending), the handover grace may
+only ever SHORTEN, a typo'd profile refuses at startup instead of silently
+running production, and /version announces any non-production profile loudly.
+ITERATE ON fast, ACCEPT ON production: a PASS at 60 s proves the mechanism,
+never the ten-minute window the screens advertise -- ship messages name the
+profile they ran under. Operator-facing knobs (--idle-nudge, --sweep-seconds,
+ROLL_IDLE_MIN, the idle-stop window, the hourly sweep) stay on their own
+flags; where both speak, the explicit flag wins.
 
 0.2.197 THE SWEEP BELIEVES ITS OWN EYES (ruling 12401, plus nudge 900 per
 12246/12411). Four defects from one bricked container, each fixed at its root.
@@ -5901,8 +5921,13 @@ async def version_http(_request):
     doors = (f" (sign in with: {', '.join(_oidc_doors)}; signup {_signup_policy}; "
              f"password {'closed' if _password_closed() else 'open'})"
              if _oidc_doors else "")
+    # A trimmed clock that cannot be SEEN from outside is how a test-night
+    # value becomes production (12415; the TTS_BATCH_SIZE lesson). production
+    # says nothing -- the bare version is what every probe already parses.
+    fast = (f" (timings: {timings.PROFILE} -- REVEILLE_TIMINGS)"
+            if timings.PROFILE != "production" else "")
     return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "")
-                             + lan + cap + doors)
+                             + fast + lan + cap + doors)
 
 
 async def usage_http(_request):

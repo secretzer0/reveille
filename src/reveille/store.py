@@ -44,6 +44,8 @@ import sqlite3
 import time
 import uuid
 
+from reveille import timings
+
 # LIVE = heartbeat within this window. Exceeds the standup silence window (30m
 # default) so an idle-but-alive agent that only wakes on its heartbeat stays LIVE.
 LIVE_TTL_NS = 40 * 60 * 1_000_000_000
@@ -3002,7 +3004,7 @@ def create_token(conn, owner_id, label="", agent_name=None, mem_tier="state",
 # rather than lazily on the next request -- a pending nobody ever presents must
 # still die, and a lazy check would keep it alive precisely in the case where
 # nothing is coming.
-PENDING_TTL_NS = 10 * 60 * 1_000_000_000
+PENDING_TTL_NS = timings.PENDING_TTL_S * 1_000_000_000
 
 
 def commit_pending(conn, token_id):
@@ -3046,7 +3048,7 @@ def commit_pending(conn, token_id):
 # daemon polls, so this only has to outlast a poll interval and a human's click,
 # and an offer that stood for an hour would be a standing invitation to whoever
 # ends up holding that disk.
-RECALL_TTL_NS = 5 * 60 * 1_000_000_000
+RECALL_TTL_NS = timings.RECALL_TTL_S * 1_000_000_000
 
 
 def recall_offer(conn, *, agent_id, owner_id, superseded_secret_hash, rooms,
@@ -3371,7 +3373,7 @@ TOMBSTONE_TTL_NS = 30 * 86_400 * 1_000_000_000
 # own identity, and the reply that carries the five fields into the move thread.
 # Nothing else -- it cannot read, cannot join, cannot act as the identity it no
 # longer holds.
-HANDOVER_GRACE_NS = 5 * 60 * 1_000_000_000
+HANDOVER_GRACE_NS = timings.HANDOVER_GRACE_S * 1_000_000_000
 
 
 def rooms_for_agent(conn, agent_id):
