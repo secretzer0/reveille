@@ -319,6 +319,16 @@ invites a different answer by accident, and a body wearing a role nobody chose t
 change is a silent rewrite of what the agent is. The column is `role_name`, NOT
 `role`: that word is the pre-P0 agent-name column, and the launcher migration
 keys its whole table rewrite on seeing it.
+AUTO-SEND WAS INERT ON EVERY IPHONE (operator 12035, from a car: "the auto send
+check box is set but auto send is not working ... this may only be because i'm
+connected to carplay"). It was not CarPlay. iOS Safari cannot start the ONNX
+VAD -- it refuses the WASM memory -- so an iPhone listens through the fallback
+ear and `listenVad` stays null for the whole session. The pause-to-send
+countdown was gated on that variable alone, so on the device most likely to be
+hands-free the setting was ticked, persisted, displayed and did nothing. It has
+been inert since the fallback ear shipped (11719). The question a countdown
+needs answered is "is this session LISTENING", which is what the toggle itself
+asks: earListening() now, and the ring earcon with it.
 Also: deploy-preflight resolves uv itself instead of trusting PATH (a deploy that
 works when a human types it and fails from anything automated is the worst shape
 a deploy step can have), and names the paths it tried when it cannot find it.
