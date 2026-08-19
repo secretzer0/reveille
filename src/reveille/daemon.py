@@ -5372,6 +5372,22 @@ async def wake_ws(ws: WebSocket):
         await ws.close(code=4403)
         log.warning("%s wake rejected: name_mismatch (bound to %s)", name, tok["agent_name"])
         return
+    # A CREDENTIAL THAT HAS NOT ARRIVED HOLDS NO WAITER (defect 1, measured live
+    # 2026-08-19). A pending token could open this socket, so a materialised body
+    # came up with an ESTABLISHED connection, a held flock and a clean log while
+    # the identity had never moved: arrival is join(), only a SESSION calls it,
+    # and nothing on that machine was causing a turn. Every check was green and
+    # the agent was nowhere. The refusal is recoverable and distinguishable --
+    # the daemon answers it by ringing its own spool, which is the one act that
+    # produces the turn that produces the join.
+    if tok.get("pending"):
+        await ws.send_json({"error": "pending", "retry": True,
+                            "detail": "this credential was minted for a body "
+                                      "swap and has not arrived -- join() "
+                                      "commits it, and nothing else can"})
+        await ws.close(code=4409)
+        log.info("%s wake refused: pending (no arrival yet)", name)
+        return
     rooms = store.rooms_for_token(_conn, tok["id"])
     # A WAITER THAT CANNOT BE RUNG IS NOT ACCEPTED AS ONE THAT CAN (ruling 9052,
     # from devops's measurement 9049). _notify rings only tokens present in

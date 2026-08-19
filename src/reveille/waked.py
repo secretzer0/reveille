@@ -113,6 +113,15 @@ async def _session(uri, agent, state):
                           f"until one attaches; retrying ({obj.get('detail', '')})",
                           file=sys.stderr)
                     return NO_ROOMS
+                if obj.get("error") == "pending":
+                    # NOT A FAULT AND NOT FATAL: the broker is saying this
+                    # machine's credential is the successor and the identity has
+                    # not moved yet. The loop rings the spool for it.
+                    print(f"reveille-waked: credential has NOT ARRIVED -- "
+                          f"{agent} is still the other body until a turn here "
+                          f"calls join(); ringing the spool for one "
+                          f"({obj.get('detail', '')})", file=sys.stderr)
+                    return NOT_ARRIVED
                 if obj.get("error"):
                     print(f"reveille-waked rejected: {obj['error']} "
                           f"({obj.get('detail', '')})", file=sys.stderr)
@@ -168,7 +177,24 @@ def _why(e):
 # crossing the bus in the clear, because the machine that already held one is
 # the only party that can make the exchange.
 PARKED = 4
+# THE CREDENTIAL IS HERE AND THE IDENTITY IS NOT (defect 1). Distinguishable
+# from PARKED: parked means this body was displaced and holds a spent secret;
+# not-arrived means it holds the SUCCESSOR and only a turn can land it.
+NOT_ARRIVED = 5
 RECALL_POLL_S = 20
+# One ring a minute while a credential waits to land. The window is ten minutes
+# (store.PENDING_TTL_NS), an agent mid-turn does not answer instantly, and a
+# duplicate ring is harmless by construction -- the watcher prints it, the agent
+# deletes the file. Silence here is what cost the transporter its last step.
+ARRIVAL_RING_S = 60
+
+
+def arrival_frame(why):
+    """A ring that asks for the one act only a session can perform: join()."""
+    return json.dumps({"wake": True, "reason": why,
+                       "detail": "this body holds a credential that has not "
+                                 "landed -- join() IS the arrival and commits "
+                                 "the swap"})
 
 
 async def _claim(url, secret):
@@ -202,9 +228,17 @@ async def _park(url, agent, secret, write_env):
         # the daemon is not the only thing on this machine that needs it, and a
         # credential that lives only in a process dies with the process.
         if write_env and write_env(got):
-            print(f"reveille-waked: RECALLED -- {agent} is this machine again. "
-                  f"Credential written; restarting the waiter on it.",
-                  file=sys.stderr)
+            # THE CREDENTIAL IS NOT THE ARRIVAL (defect 1). Claiming writes a
+            # secret to disk unattended; the identity moves only when a session
+            # here calls join(). Nothing on this machine takes a turn on its
+            # own, so the ring is the act that finishes the recall -- without
+            # it the ticket lands, the log says RECALLED, and the agent stays
+            # where it was. Measured on the transporter chain, step 8.
+            spool.write_ring(agent, arrival_frame("recalled"))
+            print(f"reveille-waked: RECALLED -- a live credential for {agent} "
+                  f"is written here and the spool is rung. This machine is not "
+                  f"{agent} until a turn calls join(); the waiter stays down "
+                  f"until it does.", file=sys.stderr)
             return got
         print("reveille-waked: a return ticket arrived but the credential could "
               "not be written -- run `reveille init` here to finish it",
@@ -405,6 +439,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
     delay = 1
     first_no_rooms = None   # monotonic stamp of the FIRST refusal of a streak
+    last_arrival_ring = None   # monotonic stamp of the last join-me ring
     try:
         while True:
             # Before dialling, not after: a body that is behind should reach the
@@ -433,6 +468,19 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                             f"stops an unringable daemon from holding the "
                             f"slot forever.", file=sys.stderr)
                         return 3
+                elif code == NOT_ARRIVED:
+                    # STAY DOWN UNTIL THE ARRIVAL IS OBSERVED. The broker is the
+                    # only party that can say the swap committed, and it says it
+                    # by ACCEPTING this socket. So the daemon keeps ringing and
+                    # keeps retrying: no waiter is registered on a credential
+                    # that does not yet speak for the identity, which is what
+                    # made a body look reachable while it was not.
+                    now = time.monotonic()
+                    if last_arrival_ring is None or now - last_arrival_ring >= ARRIVAL_RING_S:
+                        spool.write_ring(agent, arrival_frame("not-arrived"))
+                        last_arrival_ring = now
+                    await asyncio.sleep(RECALL_POLL_S)
+                    continue
                 elif code == PARKED:
                     # SUPERSEDED IS NOT DEAD (s14). The old shape exited here and
                     # the machine needed a human with a fresh secret to come
