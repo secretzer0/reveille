@@ -268,6 +268,38 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.178 THE MENU ON AN AGENT IS ITS DESTINATIONS (DES-012 s13; operator GO
+11930, ruled 11932). Every verb on an agent row is the SAME act underneath -- a
+bare attach on an identity that already exists, PENDING until the new body joins
+-- and they differ only in where that body wakes and who has to agree: MY
+CONTAINER (this host, one click), MY MACHINE (a shell of mine; the command is
+shown once and this page never runs it -- a native body is that whole machine
+handed to an agent, and that is a grant a shell makes with a human at it, DES-008
+s4), ANOTHER HUMAN'S MACHINE (a visit push: they accept before anything is
+minted), and SOMEONE ELSE'S AGENT TO MINE (a visit pull, in the Visits tab,
+because it is a request and not an act).
+EVERY ONE OF THESE SCREENS NOW TELLS THE TWO-PHASE TRUTH. They were written
+against the old mint and promised that the working body "goes dark the moment
+this is minted". Since 0.2.176 that is false: the old body KEEPS WORKING until
+the new one joins, the swap commits on arrival, and an unclaimed credential
+expires in ten minutes with nothing changed. A dialog that overstates what a
+click costs is worse than one that understates it -- it deters the move that is
+now safe.
+AN AGENT ALIVE ELSEWHERE IS NOT A BROKEN AGENT (operator 11995, with a
+screenshot of both halves). Its row was painted with the failure class, because
+that class came from `status==='absent'` and an elsewhere row carries exactly
+that -- there is no container HERE, which is the entire point of the row. Broken
+is now a STATE predicate, and elsewhere/retired/erased are not it. The same row
+also landed under "no room": /tokens is owner-scoped and answers nothing for a
+body it does not hold, so three refresh paths that called tokenRooms() alone
+dropped those agents into the ungrouped bucket while the hive knew their rooms
+perfectly well. One helper (railRooms) composes both axes now, so a fourth path
+cannot reintroduce it -- the visit consent keeps the token-only axis on purpose,
+because it is asking what the CREDENTIAL carries, not where the hive has seen it.
+Also DES-010 s10.1: an agent-image tag bump is a build on EVERY provisioning
+host, not only the one that authored the change. The 0.2.177 deploy refused
+itself on exactly this -- the pin said 0.2.20 and the deploy host had 0.2.19 --
+which is the gate working, and the rule it implies was nowhere written down.
 0.2.177 THE HANDOVER NOTE, AND WHAT THE MOVE ALREADY KNEW (DES-012 s16; ruled
 12018/12019/12022 from the operator's 12015: "when an agent is asked to
 transfer, to the cloud or native, it needs to write its current memory/state to

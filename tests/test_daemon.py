@@ -1176,13 +1176,19 @@ def test_nothing_that_sends_can_ever_take_the_install_command():
     #    the host who accepted a visit, in the same <pre> and with no run
     #    affordance -- a consumer justified deliberately, which is exactly what
     #    this assertion asks for.
-    assert len(sites) == 3, f"installCmds has {len(sites)} call sites, want 3"
+    #    The FOURTH is s13's "move it to a machine of mine": the owner mints a
+    #    credential for their OWN identity and is shown the command to run at
+    #    that machine. Same <pre>, same absence of a run button, and the same
+    #    reason it may never acquire one -- installing a native agent hands it
+    #    the whole machine, and that is a grant a shell makes with a human at
+    #    it, never a grant a browser makes on their behalf (DES-008 s4).
+    assert len(sites) == 4, f"installCmds has {len(sites)} call sites, want 4"
     consumers = []
     for i in sites:
         line = PAGE[:i].rsplit("\n", 1)[-1] + PAGE[i:].split("\n", 1)[0]
         consumers.append("clipboard" if "clipboard" in line else
                          "dom" if "<pre" in line or "esc(" in line else "unknown")
-    assert sorted(consumers) == ["clipboard", "dom", "dom"], consumers
+    assert sorted(consumers) == ["clipboard", "dom", "dom", "dom"], consumers
     # 4. The token never rides a url or an anchor: those land in history, in a
     #    referer and in an access log. Checked over the whole helper region, where
     #    the command and the secret are in scope together.

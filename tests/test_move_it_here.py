@@ -91,7 +91,9 @@ def test_the_move_never_declares_creation():
 def test_the_page_offers_one_verb_on_it_and_says_what_it_costs():
     row = PAGE[PAGE.index("const b=(k,icon,label,cls)"):PAGE.index("function stateSentence")]
     assert "st==='elsewhere'" in row and "materialize" in row
-    assert "goes dark" in row, "the button says what happens to the other body"
+    assert "the old one keeps working until this one arrives" in row, (
+        "the button says what happens to the other body -- and under two-phase "
+        "(ruling 11945) what happens is NOTHING until the new one joins")
     # destroy is NOT offered on a body this host does not have
     assert "!gone&&st!=='elsewhere'" in row
     dlg = PAGE[PAGE.index("async function openMaterialize"):PAGE.index("async function openCreate")]

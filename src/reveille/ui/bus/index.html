@@ -2558,7 +2558,21 @@ function tabActions(t){
  // shell anywhere in the path. Never offered beside a container of its own:
  // that is start/stop, not a swap.
  if(st==='elsewhere')out+=b('materialize','&#11015;',
-   'move '+t.agent+' here -- new body on this host, its current body goes dark');
+   'move '+t.agent+' here -- new body on this host; '+
+   'the old one keeps working until this one arrives');
+ // DES-012 s13: the rest of the menu, by ownership. Every one of these is the
+ // SAME act underneath -- a bare attach on an existing identity, pending until
+ // the new body joins -- and they differ only in where that body wakes and who
+ // has to agree:
+ //   my container   this host, one click            (materialize, above)
+ //   my machine     a shell of mine, command shown  (mine to install)
+ //   send to <user> another human's host            (a VISIT: they accept)
+ // Bringing someone ELSE's agent here is the fourth, and it lives in the
+ // Visits tab because it is a request, not an act.
+ if(!gone)out+=b('tomachine','&#128421;',
+   'move '+t.agent+' to a machine of mine -- shows the install command once');
+ if(!gone)out+=b('sendto','&#128101;',
+   'send '+t.agent+' to another human -- they accept before anything is minted');
  if(!gone&&st!=='elsewhere')out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
  return '<span class="acts">'+out+'</span>';
 }
@@ -2573,7 +2587,7 @@ function stateSentence(name){
      'is this, not "no repo was asked for". Fix the cause and recreate, or clone '+
      'by hand inside it.'
   :st==='elsewhere'
-   ? 'Alive on another machine -- this host has no body for it. "Move it here" mints a new credential for the SAME identity and supersedes the one it is running on now: its name, history, memories and rooms come with it, and the other body goes dark on its next call.'
+   ? 'Alive on another machine -- this host has no body for it. "Move it here" mints a new credential for the SAME identity, PENDING: the machine it is on now keeps working, and is displaced only when the new body actually joins. Its name, history, memories and rooms come with it. If the new body never arrives, the credential expires and nothing changed.'
   :st==='retired'
    ? 'Retired -- its container is gone and its files are kept. Recreating this name resumes everything it learned locally.'
   :st==='erased'
@@ -2643,6 +2657,8 @@ function drawTabs(){
   else if(k==='destroy')openDestroy(n);
   else if(k==='recreate')openCreate(n);
   else if(k==='materialize')openMaterialize(n);
+  else if(k==='tomachine')openToMachine(n);
+  else if(k==='sendto')openSendTo(n);
   else agLifecycle(n,k);
  };
  if(refocus){
@@ -2688,6 +2704,14 @@ function drawNote(){
 // its rooms. Later tokens win: a mint SUPERSEDES the previous bound token for
 // a name, and list_tokens is ordered oldest-first, so the last write is the
 // live membership.
+// BROKEN = a launcher record with no container and nowhere else to be. An
+// `elsewhere` row also has no container here, and a `retired`/`erased` one has
+// none by design -- none of those are faults, and painting them as faults is
+// how a healthy agent read as a defect (operator 11995).
+function broken(a){
+ const st=a.state||(a.status==='running'?'running':'stopped');
+ return a.status==='absent' && st!=='elsewhere' && st!=='retired' && st!=='erased';
+}
 const agRoomNames={};   // room id -> name, as the tokens themselves report it
 async function tokenRooms(){
  try{
@@ -2720,6 +2744,13 @@ async function tokenRooms(){
 // it remembers agents whose container is stopped, which presence cannot.
 // Tokens still win where they exist: they are the live membership, this is the
 // hive's recollection of who has been in the room.
+// THE RAIL'S GROUPING, COMPOSED THE ONE CORRECT WAY. Tokens first, then the
+// room-scoped fallback for every name they cannot answer for -- which is what
+// an ELSEWHERE agent is: alive on another machine, its rooms known to the hive,
+// and its bound token holding none this owner can read. Three refresh paths
+// called tokenRooms() alone and dropped those agents into "no room" (operator
+// 11995, with a screenshot of exactly that). One helper, so a fourth cannot.
+async function railRooms(){return seenRooms(await tokenRooms());}
 async function seenRooms(m){
  // Snapshot the token-backed names FIRST: testing m[name] inside the loop
  // would treat the first room this fallback added as "already answered" and
@@ -2789,13 +2820,19 @@ function drawRoster(){
   return '<button type="button" class="agent'+
    (agActive()===a.agent?' sel':'')+
    (a.status==='running'?' run':'')+(gone(a)?' gone':'')+
-   (a.status==='absent'?' bad':'')+'"'+
+   // BROKEN IS A STATE, NOT A MISSING CONTAINER (operator 11995). This painted
+   // the "bad" class from `status==='absent'`, and an ELSEWHERE row carries
+   // exactly that -- there is no container HERE because the body is on another
+   // machine, which is the whole point of the row. So an agent working
+   // perfectly well somewhere else rendered in the red of a broken one. The
+   // question is whether the STATE is broken, and only one state is.
+   (broken(a)?' bad':'')+'"'+
    (agActive()===a.agent?' aria-current="true"':'')+' data-rost="'+esc(a.agent)+'" '+
    'aria-label="'+esc(a.agent+' -- '+s+(word&&word!==s?', '+word:'')+imgs)+
    '" title="'+esc(a.agent+' -- '+s+imgs)+'">'+
    '<span class="swatch" style="background:'+color(a.agent)+'"></span>'+
    '<span class="nm">'+esc(a.agent)+'</span>'+
-   '<span class="st'+(a.status==='absent'?' err':'')+'">'+esc(word)+'</span>'+
+   '<span class="st'+(broken(a)?' err':'')+'">'+esc(word)+'</span>'+
    '<span class="dot" aria-hidden="true"></span></button>';
  };
  // ONE LEVEL OF TREE, and an agent in three rooms appears three times --
@@ -2948,7 +2985,7 @@ function renderEdit(){
    const keep=agDlgReturn;renderEdit();agDlgReturn=keep;
    // A restart just rotated the credential and may have moved the agent's
    // rooms, so the rail's grouping is stale the moment this returns.
-   agTokRooms=await tokenRooms();
+   agTokRooms=await railRooms();
    refreshAgents();
   }catch(e){
    b.disabled=false;
@@ -3002,7 +3039,7 @@ function openDestroy(name){
   closeAgDlg();
   const t=agTabs.find(x=>x.agent===name);
   if(t)await closeTab(t.gid);
-  agTokRooms=await tokenRooms();
+  agTokRooms=await railRooms();
   refreshAgents();
  };
  // Retire: plain DELETE, no purge -- the data root survives, so re-creating
@@ -3072,6 +3109,103 @@ function roomChips(axes, attr){
 }
 
 // ---- MOVE IT TO A MACHINE OF MINE (DES-012 s13) ---------------------------
+// The native half of the same swap. The page MINTS -- a bare attach, so the
+// identity is unchanged and the body it is on now keeps working until the new
+// one joins -- and then SHOWS the install command once. It never runs it: DES-008
+// s4 is the security half of that design and does not soften, because a native
+// agent's reach is the whole MACHINE and that is a grant a shell makes.
+let toMachineTok=null;
+async function openToMachine(name){
+ me=await api('/me');
+ const mine=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
+ const axes=await agentRoomAxes(name, mine);
+ openAgDlg(
+  '<div class="pRow"><b id="agDlgTitle">Move '+esc(name)+' to a machine of mine</b></div>'+
+  '<div class="pAsk">This mints ONE credential for the SAME identity and shows you '+
+  'the command that makes a machine its body. Its name, history, memories, lessons '+
+  'and the rooms you tick travel with it. Whatever body holds it now KEEPS WORKING '+
+  'until this one joins: the swap commits on arrival, not on the mint. Unclaimed '+
+  'for ten minutes the credential expires and nothing about that machine changes. '+
+  'This panel does not run the command and never will -- installing a native agent '+
+  'gives it that whole machine, and that is a grant a shell makes, not a browser.</div>'+
+  '<div class="pChips" id="tmRooms">'+roomChips(axes,'data-tmroom')+'</div>'+
+  '<div id="tmLost" class="pDim"></div>'+
+  '<div class="pRow"><button id="tmGo">mint and show the command</button> '+
+   '<button id="tmNo">cancel</button></div>'+
+  '<div id="tmOut"></div>','#tmGo');
+ const lost=()=>{
+  const off=axes.offer.filter(r=>!document.querySelector(
+    '#tmRooms input[data-tmroom="'+CSS.escape(r.id)+'"]:checked')).map(r=>r.name);
+  $('tmLost').textContent=(off.length||axes.hidden)
+   ? 'WILL NOT TRAVEL: '+off.join(', ')+
+     (axes.hidden?(off.length?', plus ':'')+axes.hidden+' room'+(axes.hidden>1?'s':'')+
+       ' you do not hold (this screen cannot carry those)':'')
+   : '';
+ };
+ lost();
+ for(const c of document.querySelectorAll('#tmRooms input'))c.addEventListener('change',lost);
+ $('tmNo').onclick=closeAgDlg;
+ $('tmGo').onclick=async()=>{
+  const picked=[...document.querySelectorAll('#tmRooms input:checked')]
+   .map(c=>c.dataset.tmroom);
+  if(!picked.length){toast('tick at least one room -- a body with none reaches nothing');return;}
+  try{
+   // create is NOT sent: this attaches to the identity that already exists.
+   const t=await api('/tokens',{method:'POST',body:JSON.stringify({
+    label:name,agent_name:name,mem_tier:'state',rooms:picked})});
+   toMachineTok=t;
+   $('tmOut').innerHTML='<div class="pSec">RUN THIS ON THAT MACHINE</div>'+
+    '<div class="pDim">Shown once, here, and nowhere else -- the broker keeps only '+
+    'a hash. cd to the directory that should BE the agent first.</div>'+
+    '<pre class="tokOut">'+esc(installCmds(t, location.origin))+'</pre>';
+   toast(name+' is now waiting for that machine -- its old body is dark',true);
+   refreshAgents();
+  }catch(e){toast(e.message);}
+ };
+}
+
+// ---- SEND IT TO ANOTHER HUMAN (DES-012 s13 -> the visit handshake) --------
+// The one act in this menu that is NOT the mover's alone: the agent lands on
+// someone else's machine, on their account and bill, reading their files, so
+// they accept before anything is minted (DES-012 s3). This screen only writes
+// the request; the mint happens on THEIR accept screen.
+async function openSendTo(name){
+ me=await api('/me');
+ const mine=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
+ const axes=await agentRoomAxes(name, mine);
+ openAgDlg(
+  '<div class="pRow"><b id="agDlgTitle">Send '+esc(name)+' to another human</b></div>'+
+  '<div class="pAsk">Nothing is minted here. This asks them; if they accept, ONE '+
+  'credential is minted on their screen and '+esc(name)+' wakes on their machine, '+
+  'on their Claude account and bill, reading their files. You keep it: its name, '+
+  'its revoke and its recall stay yours, and you can recall it at any time. It may '+
+  'act only in the rooms you tick, and every one of those must be a room you are '+
+  'BOTH in -- the broker refuses the rest by name.</div>'+
+  '<div class="pRow"><input id="stHost" placeholder="their username" aria-label="host person">'+
+   '<input id="stMachine" placeholder="which machine (optional)"></div>'+
+  '<div class="pRow"><input id="stCoord" style="flex:1" '+
+   'placeholder="repo + SHA it should check out (optional)"></div>'+
+  '<div class="pChips" id="stRooms">'+roomChips(axes,'data-stroom')+'</div>'+
+  '<div class="pRow"><button id="stGo">ask them</button> '+
+   '<button id="stNo">cancel</button></div>'+
+  '<div id="stStatus" class="pDim"></div>','#stHost');
+ $('stNo').onclick=closeAgDlg;
+ $('stGo').onclick=async()=>{
+  const picked=[...document.querySelectorAll('#stRooms input:checked')]
+   .map(c=>c.dataset.stroom);
+  const host=$('stHost').value.trim();
+  if(!host){toast('name the person it is going to');return;}
+  if(!picked.length){toast('tick at least one room -- a visit with none reaches nothing');return;}
+  try{
+   await api('/visits',{method:'POST',body:JSON.stringify({
+    agent:name,host:host,rooms:picked,
+    host_machine:$('stMachine').value.trim(),coordinate:$('stCoord').value.trim()})});
+   closeAgDlg();
+   toast('asked '+host+' -- nothing is minted until they accept; watch the Visits tab',true);
+  }catch(e){$('stStatus').textContent='';toast(e.message);}
+ };
+}
+
 // ---- MOVE IT HERE (DES-011 s2.1, operator 11883) --------------------------
 // A body swap from the WEB. The operator's words: "no remote user will EVER be
 // able to ssh into this box... the Transfer step MUST be a clickable interface".
@@ -3110,8 +3244,9 @@ async function openMaterialize(name){
   'new credential for the SAME identity and starts a container for it on this '+
   'host. Its name, history, memories, lessons and rooms travel with it, because '+
   'they belong to the identity and not to the body. The credential it is using '+
-  'now is superseded in the same transaction -- that body goes dark on its next '+
-  'call and cannot act afterwards. Files on the other machine do NOT travel; '+
+  'now KEEPS WORKING until the new body joins: the swap commits on arrival, and '+
+  'the old credential is superseded only then. Unclaimed for ten minutes this one '+
+  'expires and nothing changed. Files on the other machine do NOT travel; '+
   'anything uncommitted there stays there.</div>'+
   '<div class="pChips" id="agmRooms">'+roomChips(axes,'value')+'</div>'+
   '<div id="agmLost" class="pDim"></div>'+
@@ -3257,7 +3392,7 @@ async function openCreate(name){
     repo_url:$('agRepo').value.trim(),
     model:$('agModel').value.trim()})});
    st.textContent='container up; waiting for the agent to reach the bus...';
-   agTokRooms=await tokenRooms();
+   agTokRooms=await railRooms();
    for(let i=0;i<60;i++){
     await new Promise(r=>setTimeout(r,2000));
     const a=await lapi('/agents/'+encodeURIComponent(n));
@@ -3379,7 +3514,7 @@ async function refreshAgents(){
  agAll=d.agents;
  agRows={};
  for(const a of d.agents)agRows[a.agent]=a;
- if(!agTokRooms)agTokRooms=await seenRooms(await tokenRooms());
+ if(!agTokRooms)agTokRooms=await railRooms();
  drawRoster();
  // A tab whose agent no longer exists (erased in another browser) must not
  // keep a frame open over nothing.
@@ -3763,7 +3898,8 @@ function visitConsent(v){
  return '<div class="pAsk">'+
   '<b>'+esc(v.agent)+'</b> belongs to <b>'+esc(v.owner)+'</b> and stays theirs: they keep '+
   'its name, its revoke and its recall. Accepting mints ONE credential for that same '+
-  'identity, so its body at home goes dark the moment this one is minted.<br>'+
+  'identity. Its body at home KEEPS WORKING until this one joins -- the swap '+
+  'commits when the visiting body reaches the bus, not when you accept.<br>'+
   'It may act in '+esc(v.rooms.map(r=>r.name).join(', '))+' and in nothing else — '+
   'rooms you are both already in.<br>'+
   visitDelta(v)+
