@@ -74,9 +74,25 @@ mkdir -p "$data"
 # Same rows through the same code as the migration and the seeder: it calls
 # store.unresolved_agent_names, so the three cannot drift into a preflight that
 # passes a database the migration will refuse.
+# RESOLVE uv, DO NOT TRUST $PATH (ruled 12019; measured 2026-08-18). A deploy
+# over non-login ssh has no ~/.local/bin on its PATH, so `make up` died here with
+# `uv: command not found` -- a deploy that works when a human types it and fails
+# from anything automated is the worst shape a deploy step can have. Look where
+# uv actually installs, and if it is nowhere, say WHICH paths were tried.
+uv_bin="$(command -v uv || true)"
+for c in "$HOME/.local/bin/uv" /usr/local/bin/uv; do
+  [ -n "$uv_bin" ] && break
+  [ -x "$c" ] && uv_bin="$c"
+done
+if [ -z "$uv_bin" ]; then
+  echo "REFUSING to deploy: uv not found on PATH, \$HOME/.local/bin/uv or /usr/local/bin/uv." >&2
+  echo "  install it, or put it on PATH for non-login shells." >&2
+  exit 1
+fi
+
 if [ -f "$data/broker.db" ]; then
   repo="$(cd "$(dirname "$0")/.." && pwd)"
-  if ! (cd "$repo" && uv run --quiet python - "$data/broker.db" <<'PY'
+  if ! (cd "$repo" && "$uv_bin" run --quiet python - "$data/broker.db" <<'PY'
 import sys
 from reveille import store
 

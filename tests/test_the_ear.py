@@ -349,12 +349,17 @@ def test_pause_to_send_is_a_deliberate_setting_hands_free_only_with_a_visible_co
     assert "if($('autosendWrap'))$('autosendWrap').hidden=!(me&&me.ear);" in UI
     # Armed ONLY from the hands-free take path, only when text landed, only while listening.
     assert ear.count("pauseSendArm()") == 2 and \
-        "if(earHeard(d)){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in ear
+        "if(earHeard(d)){earconRing();if(earListening()&&pauseSendOn())pauseSendArm();}" in ear
     talk = ear[:ear.index("const EAR_SILENCE_MS=")]
     assert "autosend" not in talk, "push-to-talk never auto-sends"
     # Counted from landing, shown, aborted by cancel / keystroke / listening off / empty box.
     assert "listenPaint('sending in '+left+'...')" in b
-    assert "if(!listenVad||!$('body').value.trim()){pauseSendAbort();return;}" in b
+    assert "if(!earListening()||!$('body').value.trim()){pauseSendAbort();return;}" in b
+    # EITHER EAR COUNTS. iOS Safari cannot start the ONNX VAD, so an iPhone
+    # listens through listenSimple and `listenVad` stays null -- gating on it
+    # alone left auto-send ticked, saved, shown and inert on the device most
+    # likely to be hands-free (operator 12035, reported from a car).
+    assert "function earListening(){return !!(listenVad||listenSimple);}" in UI
     assert "$('body').addEventListener('keydown',()=>pauseSendAbort());" in b
     run = ear[ear.index("function earRun(c){"):ear.index("const EAR_RATIO_MAX=2.4")]
     assert "if(typeof pauseSendAbort==='function')pauseSendAbort();" in run, "a spoken cancel aborts"
@@ -374,11 +379,11 @@ def test_the_earcon_rings_once_when_words_land_in_listen_mode_only():
     the WAV ships with the page at /ui/earcon.wav. Since 0.2.146 the bell is the
     "ding" of the vocabulary (11577); the same rules hold through earcon()."""
     page = daemon._ui_read("index.html")
-    assert "if(earHeard(d)){earconRing();if(listenVad&&pauseSendOn())pauseSendArm();}" in page
+    assert "if(earHeard(d)){earconRing();if(earListening()&&pauseSendOn())pauseSendArm();}" in page
     assert page.count("earconRing()") == 2, "the listen chain, and the definition"
     talk = page[page.index("function talkStop"):page.index("function talkStop") + 3000]
     assert "earconRing" not in talk, "no bell in push-to-talk"
-    assert "function earconRing(){if(listenVad)earcon('ding');}" in page
+    assert "function earconRing(){if(earListening())earcon('ding');}" in page
     assert " if(vBusy){earconQ.push(name);return;}" in page, "never over an utterance"
     assert "function vDone(){vCtl=null;vBusy=false;paintStop();earconDrain();vPump();}" in page
     assert "fetch('/ui/earcon.wav'" in page
@@ -481,7 +486,7 @@ def test_the_earcon_vocabulary_is_one_table_one_function_one_toggle():
     assert "if(!info&&typeof earcon==='function')earcon('bonk');" in page, "any red toast bonks; an info toast does not"
     assert "if(!voiceOn&&m.from&&m.from!==myName&&(m.to===myName||(m.to==='*'&&humanNames.has(m.from))))earcon('pop');" in page, \
         "pop only with voice OFF (voice ON speaks it), never my own words, a human's broadcast or a message to me"
-    assert "if(!quiet){listenPaint(listenVad?'listening':'');earcon('plip');}" in page, "the cancel that a person made"
+    assert "if(!quiet){listenPaint(earListening()?'listening':'');earcon('plip');}" in page, "the cancel that a person made"
     assert 'id="miSounds"' in page and 'id="phSounds"' in page and "function setSounds(on){" in page
     # the eight ring nowhere the ruling skipped: not in the countdown tick, not in the degenerate drop, not in talk
     tick = page[page.index("function pauseSendArm(){"):page.index("(function wirePauseSend(){")]

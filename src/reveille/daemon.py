@@ -268,6 +268,70 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.177 THE HANDOVER NOTE, AND WHAT THE MOVE ALREADY KNEW (DES-012 s16; ruled
+12018/12019/12022 from the operator's 12015: "when an agent is asked to
+transfer, to the cloud or native, it needs to write its current memory/state to
+reveille specific for itself to resume in the new location"). Buildable only
+now: under the old mint the outgoing body was dead the instant the credential
+landed, so there was no moment in which it could write anything down. Two-phase
+created that moment. At a PENDING mint the broker now RINGS the body that is
+still live with `reason: swap-pending` (successor named when known) -- a ring,
+not a close, because that body is still the live one and may keep working. The
+doctrine block teaches the response, in two acts and in this order (operator
+12023, ruled 12024). (1) SAVE THE WORK: files do not travel, so a note
+describing uncommitted work the new body cannot reach is a description of
+something lost -- commit everything uncommitted to wip/<agent>/<utc-ts> and push
+it, never onto main and never force, because that branch exists so the far side
+can FETCH it, not so it can overwrite anything. (2) WRITE THE NOTE: memory_add
+kind=state with the task, that branch and sha, next step, open threads and what
+is still undone; if the push was impossible, say exactly "unpushed at
+<host>:<path>" so the new body knows the work is stranded rather than assuming
+it travelled. The new body fetches that branch before it does anything else.
+Then carry on -- if the swap never arrives, nothing about the old body's
+situation changed. The note is the AGENT'S act, never synthesised: the broker
+cannot know what is worth saying, and a fabricated handover is a record of work
+nobody did. State notes are already identity-scoped, so they travel; FILES do
+not move (s2.1 stands), which is exactly why act (1) exists.
+FOUND WHILE CHECKING THAT SCOPE: join()'s brief_available counted state notes at
+agent:<token_id> while every writer stores them at agent:<agent_id>. A bound
+agent's own resume point was invisible in the one number the boot ritual
+advertises. Both sides go through store.agent_scope() now -- the same
+reader/writer split that docstring already records as having cost the fleet its
+data once.
+R1: the move dialog NAMES what a container body cannot do -- "no docker, no host
+shell; work that needs the host stays behind" -- in the same register as WILL
+NOT TRAVEL. Not a refusal: the launcher holds no fact "this role needs a socket",
+and the owner is the one who knows whether this agent's work needs the host.
+R2: THE CLONE THAT NEVER RAN. The entrypoint guarded on "~/repos is empty" --
+and `reveille init --dir /home/agent/repos` runs above it, writing .mcp.json and
+.claude/ into exactly that directory. The answer was always "not empty", so the
+clone was SKIPPED on every boot that carried a repo URL and the report said
+"already had content" as though a human had put it there. reveille-red-shirt came
+up with a repo URL, no repo, and every control green. The guard is on the WORK
+TREE now, the boot report carries `repo: <url> @ <sha>`, and a failure writes a
+fact the launcher reads: a running container whose repo never arrived is
+DEGRADED in the Agents pane, with the reason, instead of looking identical to one
+that never wanted a repo.
+R3: the move CARRIES the role the launcher last provisioned with -- prefilled,
+editable, and a change said out loud ("ROLE CHANGES from X to Y"). The picker is
+demanded only when no role is known. Asking again for something already recorded
+invites a different answer by accident, and a body wearing a role nobody chose to
+change is a silent rewrite of what the agent is. The column is `role_name`, NOT
+`role`: that word is the pre-P0 agent-name column, and the launcher migration
+keys its whole table rewrite on seeing it.
+AUTO-SEND WAS INERT ON EVERY IPHONE (operator 12035, from a car: "the auto send
+check box is set but auto send is not working ... this may only be because i'm
+connected to carplay"). It was not CarPlay. iOS Safari cannot start the ONNX
+VAD -- it refuses the WASM memory -- so an iPhone listens through the fallback
+ear and `listenVad` stays null for the whole session. The pause-to-send
+countdown was gated on that variable alone, so on the device most likely to be
+hands-free the setting was ticked, persisted, displayed and did nothing. It has
+been inert since the fallback ear shipped (11719). The question a countdown
+needs answered is "is this session LISTENING", which is what the toggle itself
+asks: earListening() now, and the ring earcon with it.
+Also: deploy-preflight resolves uv itself instead of trusting PATH (a deploy that
+works when a human types it and fails from anything automated is the worst shape
+a deploy step can have), and names the paths it tried when it cannot find it.
 0.2.176 A BODY SWAP IS TWO PHASE (DES-012 s15; ruling 11941 Part A, 11945,
 11947, 12008). The mint used to seize the identity -- it superseded the working
 body in its own transaction, BEFORE the new body existed -- so everything that
@@ -2663,6 +2727,33 @@ def _successor_note():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _swap_pending(token_ids, successor=""):
+    """Ring the CURRENT live body when a pending credential is minted for its
+    identity (operator 12015, ruled 12018/12022).
+
+    THE WINDOW ONLY EXISTS BECAUSE THE SWAP IS TWO-PHASE. Under the old mint the
+    old body was dead the instant the credential landed, so there was no moment
+    in which it could write anything down; between mint and arrival it is alive,
+    holds the working context, and is the only party that knows what it was
+    doing. So it is told, and what it does about it is its own act: the ring is
+    the trigger, the note is the agent's (12022 B -- a synthesised handover
+    would be a fabricated record of work nobody did).
+
+    A ring, not a close: this body is still the live one and may keep working.
+    It may also never arrive at all, in which case this was a false alarm that
+    cost one frame.
+    """
+    n = 0
+    for tid in token_ids or ():
+        for q in list(_waiters.get(tid, ())):
+            q.put_nowait({"swap_pending": successor})
+            n += 1
+    if n:
+        log.info("rang %s live body(ies) with swap-pending%s", n,
+                 f" (successor {successor})" if successor else "")
+    return n
+
+
 def _credential_superseded(token_ids, successor):
     """Close the wake socket of every credential a swap just displaced.
 
@@ -4371,11 +4462,19 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
     rooms = [{"id": r, "name": n, "as": called.get(r, p.name)} for r, n in p.rooms.items()
              if r not in {s["id"] for s in skipped}]
     # A COUNT, not the pack: joining stays cheap, brief() pulls the pack on demand.
+    # THROUGH state_scope(), NEVER agent:<token_id> BY HAND. This counted at the
+    # token scope while every writer stores at the IDENTITY scope, so a bound
+    # agent's own state notes -- the resume point this number exists to
+    # advertise -- were invisible in it, and the one place the miscount showed
+    # was the boot ritual. Exactly the reader/writer split store.agent_scope's
+    # own docstring records as having cost the fleet its data once already: "a
+    # data move without its readers is a dual-name check with the two names in
+    # different files". One function, both sides.
     scopes = ["global"] + list(p.rooms)
     brief_available = _conn.execute(
         f"SELECT count(*) FROM memories WHERE status='live' AND "
         f"(scope IN ({','.join('?' * len(scopes))}) OR scope=?)",
-        scopes + [f"agent:{p.token_id}"]).fetchone()[0]
+        scopes + [store.agent_scope(_conn, p.token_id)]).fetchone()[0]
     log.info("%s join url=%s rooms=%s skipped=%s unread=%s brief=%s", p.name,
              url or "-", len(rooms), len(skipped), unread, brief_available)
     return {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
@@ -4981,6 +5080,29 @@ async def wake_ws(ws: WebSocket):
             # committed elsewhere. Distinct frame from the attachment supersede
             # above -- that one says "another daemon holds your slot", this one
             # says "you are not this agent any more". waked parks on it.
+            # A swap is COMING, not done: the credential minted for this
+            # identity has not arrived, and this body is still the live one.
+            # It rings rather than closes precisely so the agent can write its
+            # handover while it still holds the context (ruled 12018).
+            if any(isinstance(v, dict) and "swap_pending" in v for v in vals):
+                nxt = next(v["swap_pending"] for v in vals
+                           if isinstance(v, dict) and "swap_pending" in v)
+                await ws.send_json({"wake": True, "reason": "swap-pending",
+                    **({"successor": nxt} if nxt else {}),
+                    "note": "a new credential was minted for your identity and is "
+                            "waiting to arrive. You are STILL the live body. Two "
+                            "acts, in order: (1) SAVE THE WORK -- files do not "
+                            "travel, so commit anything uncommitted to "
+                            "wip/<agent>/<utc-ts> and push it; never main, never "
+                            "force. (2) WRITE THE NOTE -- memory_add kind=state "
+                            "with the task, that branch and sha, next step, open "
+                            "threads, and what is undone; if you could not push, "
+                            "say 'unpushed at <host>:<path>'. The new body fetches "
+                            "that branch first. If the swap never arrives, nothing "
+                            "changes for you."})
+                # Its own ring, then back to waiting: this frame is not mail and
+                # must not consume the poke gate or be counted as unread.
+                continue
             swap = next((v.get("credential_superseded") for v in vals
                          if isinstance(v, dict) and "credential_superseded" in v), None)
             if swap:
@@ -7069,8 +7191,17 @@ async def tokens_http(request):
                            mem_tier=(d.get("mem_tier") or "state"),
                            rooms=d.get("rooms"), create=bool(d.get("create")))
     superseded = t["superseded"]
-    log.info("%s minted token %s%s%s", p.name, t["id"],
+    if t.get("pending"):
+        # TELL THE BODY THAT IS STILL WORKING (operator 12015, ruled 12018). It
+        # is the only party holding the context, and the two-phase window is the
+        # only moment it can write it down -- after the arrival it is gone, and
+        # before the mint there was nothing to write about.
+        _swap_pending(store.live_token_ids(_conn, p.user_id, t["agent_id"],
+                                           except_id=t["id"]),
+                      (d.get("host_machine") or "").strip())
+    log.info("%s minted token %s%s%s%s", p.name, t["id"],
              f" bound to {t['agent_name']}" if t["agent_name"] else "",
+             " PENDING" if t.get("pending") else "",
              f" (superseded {len(superseded)})" if superseded else "")
     # The secret is returned exactly once here; only its hash is stored.
     return JSONResponse(dict(t, superseded=superseded))
