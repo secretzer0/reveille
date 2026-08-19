@@ -321,3 +321,50 @@ Unversioned branch, three commits, gates named:
 - **No speaking a message back to its own author.** Humans are spoken to
   everyone else (§5); the author is the one listener who already knows what they
   said.
+
+## S3 (2026-08-18): the synthesizer as a host service (ruled 11961/11965)
+
+The TTS runs perfectly well as compose's `voices` profile. What it does not do
+there is start without something holding the docker socket -- and S2 ruled that
+the launcher's read verbs never gain `exec`, `run` or a compose file, so the
+agent that keeps this fleet alive has no way to bring the synthesizer back and
+**must not be given one**.
+
+`deploy/reveille-tts.service` moves that authority to the machine's own init.
+The operator installs it once; afterwards the service survives reboots, restarts
+on failure, and is controlled with `systemctl` by a human at that host. The
+image, port, volumes and GPU reservation are the compose service's, unchanged:
+this is the same container under a different supervisor, **not a second way to
+configure it**.
+
+Two details that are load-bearing rather than incidental:
+
+- **Published on `127.0.0.1`.** The synthesizer is unauthenticated by design
+  (§3: one caller, no public port). A host unit is not on the compose network,
+  so the port has to be published somewhere -- and binding `0.0.0.0` would hand
+  an unauthenticated speech endpoint to the whole LAN, which is precisely the
+  boundary the off-network rule refuses to cross without https and an
+  authenticating proxy. The broker reaches it at
+  `REVEILLE_TTS_URL=http://127.0.0.1:8004`.
+- **`TimeoutStartSec=20min`.** The model loads at start and downloads on a fresh
+  cache. A default timeout kills it mid-download, then kills the retry, forever,
+  while the journal says only "timed out" -- the same reason §4.1's healthcheck
+  carries `start_period: 15m`.
+
+`ExecStartPre` removes a stale container by name and ignores failure: a host
+that lost power mid-run, or an operator who once ran `docker run` by hand, must
+not turn every later start into "name already in use".
+
+### The laptop that hosts an agent
+
+`deploy/reveille-laptop-awake.conf` (logind drop-in) is shipped beside it,
+installed by nobody. A laptop is a fine host for a native agent, but the
+defaults are written for a laptop someone CARRIES: suspend on lid close, blank
+on idle. An agent whose host is suspended has gone deaf with no error anywhere
+-- which reads exactly like the wake-path defects of 2026-08-18 and cost an
+evening to tell apart from one. Ignoring the lid rules that class out at the
+machine instead of debugging it again from the bus.
+
+It is not installed by any deploy and never should be: it changes how a person's
+own machine behaves when they shut the lid, and that is their deliberate call,
+not a side effect of updating a broker.

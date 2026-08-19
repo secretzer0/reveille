@@ -268,6 +268,31 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.182 THE SYNTHESIZER AS A HOST SERVICE (S3, ruled 11961/11965). The TTS runs
+fine as compose's `voices` profile; what it cannot do there is start without
+something holding the docker socket -- and S2 ruled the launcher never gains
+exec/run/compose, so the agent that keeps this fleet alive has no way to bring
+the synthesizer back and MUST NOT BE GIVEN ONE. deploy/reveille-tts.service
+moves that authority to the machine's own init: the operator installs it once,
+and afterwards it survives reboots, restarts on failure, and is controlled by a
+human with systemctl. Same image, port, volumes and GPU reservation as the
+compose service -- one container under a different supervisor, not a second way
+to configure it. Published on 127.0.0.1 ONLY: the synthesizer is unauthenticated
+by design (DES-009 s3, one caller, no public port), and a host unit is not on
+the compose network, so binding 0.0.0.0 would hand an unauthenticated speech
+endpoint to the whole LAN -- the exact boundary the off-network rule refuses to
+cross without https and an authenticating proxy. TimeoutStartSec=20min because
+the model downloads on a fresh cache and a default timeout kills it mid-download,
+then kills the retry, forever, while the journal says only "timed out".
+ALSO deploy/reveille-laptop-awake.conf, shipped and installed by NOBODY. A
+laptop is a fine host for a native agent, but the defaults are written for a
+laptop someone CARRIES: suspend on lid close, blank on idle. An agent whose host
+is suspended has gone deaf with no error anywhere -- which reads exactly like
+this week's wake-path defects and cost an evening to tell apart from one (the
+operator's black screen, 2026-08-18, was a lid flap). No deploy installs it and
+none may: it changes how a person's own machine behaves when they shut the lid,
+and that is their deliberate call, not a side effect of updating a broker. Gated
+both ways.
 0.2.181 THE LAUNCHER READS, AND THE LINE AROUND WHAT IT WILL DO (S1+S2, DES-006
 s7.3; ruled 11961, hard line 11965, host rule 12066). S1 -- auto-roll on deploy
 under an idle rule -- has been shipping since 0.2.170 and is now written down as

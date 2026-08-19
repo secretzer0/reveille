@@ -1,0 +1,88 @@
+# /etc/systemd/system/reveille-tts.service -- the synthesizer as a HOST service
+# (S3, ruled 11961/11965: "write the unit, the operator installs it").
+#
+# WHY THIS EXISTS AT ALL. The TTS already runs perfectly well as compose's
+# `voices` profile. What it does NOT do there is run without something holding
+# the docker socket to start it -- and S2 ruled that the launcher's read verbs
+# never gain exec/run/compose, so the agent that keeps this fleet alive has no
+# way to bring the synthesizer back and must not be given one. A systemd unit
+# moves that authority to the machine's own init, where it belongs: the operator
+# installs it once, and afterwards the service survives reboots, restarts on
+# failure, and is controlled with `systemctl` by a human at that host.
+#
+# The image, port, volumes and GPU reservation are the compose service's,
+# unchanged -- this is the same container under a different supervisor, not a
+# second way to configure it. The broker still reaches it at
+# REVEILLE_TTS_URL=http://127.0.0.1:8004 (loopback here, because a host unit
+# is not on the compose network; see DES-009 section 3 -- the off-network rule
+# is what makes that distinction matter).
+#
+# INSTALL (operator, once):
+#   sudo cp deploy/reveille-tts.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now reveille-tts
+#   systemctl status reveille-tts          # and `journalctl -u reveille-tts -f`
+# Then set REVEILLE_TTS_URL=http://127.0.0.1:8004 in $SERVER_DATA/reveille.env
+# and `make up`. Unset it and the broker simply runs no voice worker: voices
+# off beats a transcript in flight, and that refusal is unchanged.
+#
+# UNINSTALL: `sudo systemctl disable --now reveille-tts`. The named volumes are
+# NOT removed with it -- the model cache is about a gigabyte and re-downloading
+# it is a ten-minute first start that the operator would meet on their next
+# deploy rather than their first.
+
+[Unit]
+Description=reveille TTS (Chatterbox-TTS-Server, pinned by docker/tts.upstream)
+Documentation=https://github.com/secretzer0/reveille/blob/main/docs/DES-009-agent-voices.md
+# The daemon, not the network: this starts a container, and docker is the
+# dependency that actually has to be up. network-online alone would let it race
+# dockerd on a cold boot and fail into the restart ladder for no reason.
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+# The tag the deploy builds. Bumping it is the same act as bumping any other
+# pinned image (ruling 10877): move the pin, rebuild, restart the unit -- an
+# image bump without a moved pin is red in CI, and a moved pin without a
+# restart here is a unit still running the old one.
+Environment=TTS_IMAGE=reveille-tts:dev
+Environment=TTS_NAME=reveille-tts
+Environment=TTS_PORT=8004
+# Upstream PR #161 on our fork batches a request's chunks through the turbo
+# decoder. 4 is what an 8 GB card holds with real chunks (7.7 GB peak; 8 OOMs).
+# A 12 GB card can take 8 once that is MEASURED on it -- not before.
+Environment=TTS_BATCH_SIZE=4
+
+# Idempotent start: a container left behind by a kill -9, a host that lost power
+# mid-run, or an operator who ran `docker run` by hand once must not turn every
+# later start into "name already in use". Failure here is ignored on purpose --
+# there is usually nothing to remove.
+ExecStartPre=-/usr/bin/docker rm -f ${TTS_NAME}
+# LOOPBACK ONLY. The synthesizer is unauthenticated by design (DES-009 s3: one
+# caller, no public port). Published on 127.0.0.1 it is reachable by the broker
+# on this host and by nothing else on the LAN; binding 0.0.0.0 here would hand
+# an unauthenticated speech endpoint to every machine on the network, which is
+# exactly the boundary the off-network rule refuses to cross without https and
+# an authenticating proxy.
+ExecStart=/usr/bin/docker run --rm --name ${TTS_NAME} \
+    -p 127.0.0.1:${TTS_PORT}:8004 \
+    -e TTS_BATCH_SIZE=${TTS_BATCH_SIZE} \
+    -v reveille_tts-reference:/app/reference_audio \
+    -v reveille_tts-cache:/app/hf_cache \
+    --gpus all \
+    ${TTS_IMAGE}
+ExecStop=/usr/bin/docker stop -t 30 ${TTS_NAME}
+
+Restart=on-failure
+RestartSec=10
+# THE MODEL LOADS AT START, and downloads on a fresh cache: minutes, not
+# seconds. A short start timeout would kill it mid-download and then kill the
+# retry too, forever, while the log said only "timed out" (DES-009's own
+# start_period is 15m for the same reason).
+TimeoutStartSec=20min
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
