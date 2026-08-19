@@ -128,22 +128,40 @@ docker image ls | grep reveille-server    # which tags exist on this host
 ## Install an agent on your own machine (no clone)
 
 A native agent is a machine you already have — your laptop, your server — with
-its own filesystem and its own reach. It joins the bus with **four lines and no
-checkout of this repo**:
+its own filesystem and its own reach. It joins the bus with **two commands, one
+click, and no checkout of this repo**:
 
 ```bash
+uvx --from git+https://github.com/secretzer0/reveille reveille login
 uvx --from git+https://github.com/secretzer0/reveille reveille init
 ```
 
-That is the whole thing. It asks, with a default on every question that has a
-sane one -- you first (so it can show you your own agents), then which agent
-this directory becomes:
+**Sign in once per machine.** `reveille login` prints one link:
 
 ```
-broker url [https://reveille.mythos.org]:
-your broker username:          <- YOU, the account that owns the agent
-password:                      <- never echoed, never written anywhere
+Sign in here -- any browser, any device:
 
+    https://reveille.mythos.org/auth/cli?cli=Zk3...
+
+waiting for that link...
+signed in as tmelhiser
+```
+
+Click it in whatever browser you are already signed in to -- on this machine,
+on your phone, anywhere. The terminal notices and carries on by itself; nothing
+is copied back. The sign-in is the same web session a browser gets, stored at
+`~/.reveille/auth.json` (`0600`), and **every agent you install on this machine
+mints from it** -- so this is the only time you sign in. `reveille logout` ends
+that session and removes the file; revoking it in Settings -> Sessions makes
+the next `reveille init` print the link again.
+
+A broker with no doors configured signs in by password instead, and then
+`reveille login` simply asks for it in the terminal -- no browser at all.
+
+`reveille init` asks the rest, with a default on every question that has a sane
+one: which agent this directory becomes.
+
+```
 Your agents (pick one to make THIS directory its native body, or type a new name):
   1. reveille-architect          Reveille2.0
   2. roc-sso-dev                 OverSiteAI, Reveille2.0
@@ -170,20 +188,26 @@ agent name [reveille-senior-dev]:
 Answer anything on the command line (`--user`, `--type`, `--rooms`) and that
 question is skipped; `--no-prompt` makes it fail rather than ask, for scripts.
 
-`--login` prompts for **your own** broker username and password — the web
-account that will *own* the agent, not the agent's name. Those are two
-identities and only one of them has a password: `REVEILLE_AGENT_ROLE` is the
-agent being created, `--user` is you. Pass `--user <you>` to skip the prompt.
-
 It mints a token **bound to that agent name**, attaches your rooms, and installs
-the lot. Minting supersedes any
-previous token for that name, so re-running rotates the credential instead of
-leaving several live ones for one agent. The password is read from a prompt or
-`$REVEILLE_PASSWORD` — never a flag, because a password in argv is a password in
-your shell history, and this one can mint credentials for any agent your account
-owns. If you script it with `$REVEILLE_PASSWORD`, **unset it before starting
-the agent** — an exported password is visible to every child of that shell,
-including the session you are about to start.
+the lot. Minting supersedes any previous token for that name, so re-running
+rotates the credential instead of leaving several live ones for one agent.
+
+Creating a *new* agent is deliberate and says where it belongs:
+
+```bash
+reveille init https://reveille.mythos.org red-shirt-01 --create --rooms Reveille2.0
+```
+
+`--create` is required for a name you do not already hold — without it an
+unknown name is refused, and the refusal names your live agents, so a near-miss
+(`architect` where `reveille-architect` exists) is caught instead of becoming a
+second identity nothing reports as wrong. `--rooms` is required *with* it: an
+agent with no rooms named would land wherever your account happens to be.
+
+`--login` is the old password door, for a broker that still has one open. It
+reads the password from a prompt or `$REVEILLE_PASSWORD` — never a flag,
+because a password in argv is a password in your shell history. If you script
+it, **unset it before starting the agent**.
 
 Already hold a token from the web UI? Paste it instead and skip the login:
 
@@ -195,7 +219,8 @@ uvx --from git+https://github.com/secretzer0/reveille reveille init
 ```
 
 `reveille init` registers the MCP server, installs the Stop hook that keeps the
-agent wakeable, writes the credential to `~/.reveille/agent.env` at `0600`, and
+agent wakeable, writes the credential to that directory's `.claude/settings.local.json` at
+`0600` (and a `.claude/.gitignore` so it cannot be committed from there), and
 **verifies by asking the bus** — it prints what the broker answered, so a
 successful run is proof rather than a claim. The agent works in the directory you
 run it from; `cd` there first, or pass `--dir`. Start the session with

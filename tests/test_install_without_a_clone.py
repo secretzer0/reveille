@@ -261,8 +261,12 @@ def test_missing_configuration_names_what_is_missing(tmp_path, monkeypatch, caps
     # gets the wizard, which is the point of the wizard.
     assert cli.main(["init", "--no-prompt", "--dir", str(tmp_path)]) == 2
     err = capsys.readouterr().err
-    for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
+    for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE"):
         assert var in err
+    # NOT REVEILLE_TOKEN (DES-022 s4): a token is no longer something the caller
+    # has to have -- the machine's own sign-in mints one -- so demanding it here
+    # would send the reader to the web UI for something the CLI now does.
+    assert "REVEILLE_TOKEN" not in err
 
 
 def test_the_hook_command_is_a_name_on_path_not_a_clone_path(tmp_path, monkeypatch):

@@ -166,3 +166,13 @@ def sit(web, name, role="user"):
     u = dict(row) if row else store.create_user(web.conn, name, "pw-not-a-real-secret", role=role)
     web.cookies.set(daemon._cookie_name(), store.create_session(web.conn, u["id"]))
     return u
+
+
+@pytest.fixture(autouse=True)
+def home_is_not_the_developers(tmp_path_factory, monkeypatch):
+    """NO TEST WRITES INTO THE PERSON RUNNING IT. `reveille login` stores a
+    session at ~/.reveille/auth.json and the spool lives beside it, so a suite
+    that leaves $HOME alone would read -- and overwrite -- the credential of
+    whoever ran it. One fixture, autouse, rather than a line every test has to
+    remember."""
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))

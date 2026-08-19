@@ -30,12 +30,15 @@ import re
 import json
 import os
 import pathlib
+import secrets
 import signal
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
+import webbrowser
 
 from reveille import __version__
 
@@ -322,6 +325,143 @@ def _get(url, path, cookie, timeout=15):
         return json.loads(r.read().decode() or "{}")
 
 
+def _call(url, path, method="GET", cookie=None, timeout=15):
+    """(status, body) for the calls whose STATUS is the answer -- the sign-in
+    poll replies 202, 200 or 404 and none of those is an error to raise on."""
+    req = urllib.request.Request(url.rstrip("/") + path, method=method)
+    if cookie:
+        req.add_header("Cookie", cookie)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode()
+            return r.status, (json.loads(body) if body.strip() else {})
+    except urllib.error.HTTPError as e:
+        with contextlib.suppress(Exception):
+            return e.code, json.loads(e.read().decode() or "{}")
+        return e.code, {}
+
+
+# ---- DES-022: one sign-in per machine, every agent minted from it ------------------
+
+def auth_file():
+    """ONE file per machine, outside every project (DES-022 s3). Resolved on
+    every call rather than at import: $HOME is a runtime fact -- a container
+    entrypoint sets it, and a test that pinned it at import time would write
+    into the developer's own home."""
+    return pathlib.Path.home() / ".reveille" / "auth.json"
+
+
+POLL_EVERY_S = 2
+LOGIN_WINDOW_S = 300
+
+
+def auth_cookie(d):
+    """The stored session as a Cookie header. The NAME comes from the broker
+    (it is __Host-rev_session on https and rev_session on http), because
+    guessing it here would fail exactly on the deployments that matter."""
+    return f"{d['cookie']}={d['session']}"
+
+
+def read_auth(url=""):
+    """This machine's sign-in, or {} -- and {} for a session belonging to a
+    DIFFERENT broker: one file holds one, and using it elsewhere would be a
+    401 dressed up as a configuration."""
+    try:
+        d = json.loads(auth_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    if not (d.get("session") and d.get("cookie")):
+        return {}
+    if url and d.get("url", "").rstrip("/") != url.rstrip("/"):
+        return {}
+    return d
+
+
+def write_auth(d):
+    """0600 in a 0700 directory (DES-022 s6): the file holds a session that can
+    mint agents, which is the same power as a signed-in browser tab."""
+    path = auth_file()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.touch(mode=0o600)
+    path.chmod(0o600)                     # a pre-existing file keeps its mode
+    path.write_text(json.dumps(d, indent=1) + "\n")
+    return d
+
+
+def device_login(url, open_browser=True, sleep=time.sleep, window=LOGIN_WINDOW_S):
+    """Print ONE link, wait for it to be used (DES-022 s3). No loopback
+    listener: that needs the browser on this machine, which rules out ssh,
+    containers and the phone in the reader's hand. The state is 256 bits and
+    single-use, so polling it is worth nothing to anyone who did not make it."""
+    state = secrets.token_urlsafe(32)
+    code, body = _call(url, f"/auth/cli/{state}", "POST")
+    if code == 404:
+        raise RuntimeError(
+            f"{url} does not offer CLI sign-in (needs broker 0.2.187+) -- mint the "
+            f"token in the web UI, Settings -> Tokens, and pass it to `reveille init`")
+    if code != 200:
+        raise RuntimeError(f"{url} refused to start a sign-in ({code}): "
+                           f"{body.get('error') or body}")
+    link = f"{url.rstrip('/')}/auth/cli?cli={state}"
+    print(f"\nSign in here -- any browser, any device:\n\n    {link}\n")
+    if open_browser:
+        with contextlib.suppress(Exception):
+            webbrowser.open(link)
+    print("waiting for that link", end="", flush=True)
+    deadline = time.monotonic() + window
+    while time.monotonic() < deadline:
+        sleep(POLL_EVERY_S)
+        code, body = _call(url, f"/auth/cli/{state}")
+        if code == 200 and body.get("session"):
+            print(f"\nsigned in as {body['user']}")
+            return dict(body, url=url.rstrip("/"))
+        if code == 404:
+            break
+        print(".", end="", flush=True)
+    print()
+    raise RuntimeError("that link was not used in time -- run `reveille login` again")
+
+
+def sign_in(url, no_prompt=False, open_browser=True):
+    """A fresh sign-in for this machine, by whichever way in the broker has."""
+    doors = json.loads(urllib.request.urlopen(
+        url.rstrip("/") + "/auth/doors", timeout=15).read().decode())
+    if doors.get("doors"):
+        # A LINK IS A PROMPT (it waits for a human to click it), so --no-prompt
+        # refuses it rather than parking a script on a poll for five minutes at
+        # a terminal nobody is watching.
+        if no_prompt:
+            raise RuntimeError(f"no sign-in stored for {url}; run `reveille login "
+                               f"{url}` and click the link, then re-run this")
+        return device_login(url, open_browser=open_browser)
+    # NO DOORS MEANS THE PASSWORD DOOR IS OPEN (the broker's own rule: the two
+    # are exclusive, daemon._password_closed). A password is something this
+    # terminal can take directly, so it does -- sending someone to a browser to
+    # type one, then polling for the result, would be a round trip that exists
+    # only because the OTHER kind of door needs one.
+    if no_prompt:
+        raise RuntimeError(f"{url} signs in by password; run `reveille login` where "
+                           f"it can prompt, or pass a token")
+    user = os.environ.get("REVEILLE_USER") or ask("your broker username")
+    name, secret = login(url, user, read_password(user)).split("=", 1)
+    return {"url": url.rstrip("/"), "user": user, "session": secret, "cookie": name,
+            "expires_ns": 0}
+
+
+def session_cookie(url, no_prompt=False, open_browser=True):
+    """(Cookie header, whose it is) for this machine -- the stored sign-in if the
+    broker still honours it, else a fresh one, saved for the next agent here.
+
+    THE 401 IS THE RE-AUTH TRIGGER (DES-022 s4): a session revoked from the
+    Sessions view means the next init prints the link again, rather than failing
+    with something the reader has to translate into an action."""
+    d = read_auth(url)
+    if d and _call(url, "/tokens", cookie=auth_cookie(d))[0] == 200:
+        return auth_cookie(d), d.get("user", "")
+    d = write_auth(sign_in(url, no_prompt=no_prompt, open_browser=open_browser))
+    return auth_cookie(d), d.get("user", "")
+
+
 def login(url, user, password):
     """One web session for the installer's few calls; the cookie, or a
     RuntimeError naming why the broker refused."""
@@ -331,11 +471,9 @@ def login(url, user, password):
         # so there is no password for this installer to send. Name the door that
         # IS open rather than repeating a refusal the reader cannot act on.
         raise RuntimeError(
-            f"password sign-in is closed on {url} -- sign in with a door in the web UI, "
-            f"mint the agent's token there (Settings -> Tokens; tick \"this is a NEW "
-            f"agent\" for one that does not exist yet), then run: "
-            f"REVEILLE_URL={url} REVEILLE_AGENT_ROLE=<name> REVEILLE_TOKEN=<secret> "
-            f"reveille init")
+            f"password sign-in is closed on {url} -- there is nothing to send. Run "
+            f"`reveille login {url}`, click the link, and then `reveille init {url} "
+            f"<name>` mints from that sign-in (no --login, no paste)")
     if code != 200 or not cookie:
         raise RuntimeError(f"login failed ({code}): {body.get('error') or body}")
     return cookie.split(";", 1)[0]
@@ -390,7 +528,7 @@ def ask_agent(agents, stdin=None):
 
 
 def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
-               create=False, confirm_create=None, cookie=None):
+               create=False, confirm_create=None, cookie=None, keep_session=False):
     """Log in (unless a session cookie is handed in), mint a token BOUND to
     `agent`, attach rooms. Returns (secret, rooms-attached, note) or raises
     RuntimeError with what to fix.
@@ -469,8 +607,13 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
     # session behind on every machine it ever ran on (architect, msg 8987).
     # Best effort: the mint succeeded and a logout that fails must not fail the
     # install, since the credential the caller needs is already in hand.
-    with contextlib.suppress(Exception):
-        _post(url, "/logout", {}, cookie)
+    # NOT THE MACHINE'S OWN SIGN-IN (DES-022): that one is deliberately durable
+    # -- it exists so the NEXT agent here mints without asking again -- and
+    # ending it would make one init per sign-in, which is the round trip this
+    # whole design removes. Only a session this call created is closed by it.
+    if not keep_session:
+        with contextlib.suppress(Exception):
+            _post(url, "/logout", {}, cookie)
 
     note = ""
     if tok.get("superseded"):
@@ -852,17 +995,22 @@ def cmd_init(a):
     if wizard and not (url and name and usable):
         print("reveille: setting this machine up as an agent.\n")
         url = url or ask("broker url", DEFAULT_URL)
-        a.login = a.login or not usable
-        if not name and a.login:
-            # LOG IN FIRST, THEN PICK: the account's own agents are the menu, so
+        if not name:
+            # SIGN IN FIRST, THEN PICK: the account's own agents are the menu, so
             # becoming the native body of an existing agent is a number, not a
-            # name remembered exactly (operator ask, 2026-08-17). One password
-            # prompt: the session is handed on to the mint below.
-            print("Log in as YOURSELF -- the web account that owns (or will own) "
-                  "the agent.")
-            a.user = a.user or os.environ.get("REVEILLE_USER") or ask("your broker username")
+            # name remembered exactly (operator ask, 2026-08-17). ONE sign-in per
+            # machine (DES-022): the stored session answers here if it still
+            # works, and the link is printed only when it does not -- the session
+            # is handed on to the mint below either way.
+            print("Signing in as YOURSELF -- the web account that owns (or will "
+                  "own) the agent.")
             try:
-                cookie = login(url, a.user, read_password(a.user))
+                if a.login:
+                    a.user = (a.user or os.environ.get("REVEILLE_USER")
+                              or ask("your broker username"))
+                    cookie = login(url, a.user, read_password(a.user))
+                else:
+                    cookie, a.user = session_cookie(url)
                 name, is_new = ask_agent(my_agents(url, cookie))
             except (RuntimeError, urllib.error.URLError, OSError) as e:
                 print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
@@ -883,7 +1031,7 @@ def cmd_init(a):
                       "letter or digit")
                 name = ask("agent name", suggested)
     minted = ""
-    if a.login:
+    if a.login or not usable:
         # MINT FIRST, then fall into exactly the same path as a pasted token.
         # One installer, not two: everything after this point cannot tell where
         # the credential came from, so there is one flow to get right.
@@ -894,15 +1042,42 @@ def cmd_init(a):
         # apart, and getting it wrong creates an agent named after them that
         # posts in the room under their own name.
         user = a.user or os.environ.get("REVEILLE_USER")
-        if not user and not cookie:
-            print(f"Creating the agent '{name}'.")
-            print("Now log in as YOURSELF -- the web account that will OWN it. "
-                  "This is not the agent's name.")
-            user = input("your broker username: ")
         if not url or not name:
-            print("reveille init --login: needs REVEILLE_URL and an agent name "
+            print("reveille init: needs REVEILLE_URL and an agent name "
                   "(REVEILLE_AGENT_ROLE or the second argument).", file=sys.stderr)
             return 2
+        # A NEW IDENTITY WITH NO ROOMS NAMED IS A THROWAWAY (DES-022 s4, ruled
+        # 12165). --create already says "yes, a new agent"; --rooms says which
+        # bus it is for, and defaulting it to every room the owner is in makes a
+        # typo reach everything. The wizard asks instead, so it is exempt.
+        if a.create and not a.rooms and not wizard:
+            print("reveille init --create: --rooms is required when creating a new "
+                  "agent -- name the rooms it is for.", file=sys.stderr)
+            return 2
+        # A SESSION THIS RUN DID NOT CREATE OUTLIVES IT. --login's is the
+        # installer's own and is closed after the mint; the machine's sign-in
+        # is not, whether it was loaded here or by the wizard above.
+        keep = not a.login
+        if not cookie:
+            try:
+                if a.login:
+                    # The password door, for a broker that still has one open.
+                    if not user:
+                        print(f"Creating the agent '{name}'.")
+                        print("Now log in as YOURSELF -- the web account that will "
+                              "OWN it. This is not the agent's name.")
+                        user = input("your broker username: ")
+                    cookie = login(url, user, read_password(user))
+                else:
+                    # DES-022 s4: THIS MACHINE'S SIGN-IN mints it. Missing,
+                    # expired or revoked -> the link is printed here, inline, and
+                    # the init carries on where it left off. That is the whole
+                    # re-auth path, and there is no other.
+                    cookie, user = session_cookie(url, no_prompt=a.no_prompt)
+            except (RuntimeError, urllib.error.URLError, OSError) as e:
+                print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
+                      file=sys.stderr)
+                return 1
         # SAY WHAT MINTING DOES TO AN EXISTING NAME BEFORE ASKING FOR A PASSWORD.
         # Binding supersedes this account's previous token for that name, so
         # re-running on a second machine MOVES the agent rather than cloning it
@@ -915,8 +1090,8 @@ def cmd_init(a):
                   f"on its next call. Two machines means two names.")
         try:
             token, attached, minted = mint_token(
-                url, user, None if cookie else read_password(user), name, a.rooms, a.tier,
-                cookie=cookie,
+                url, user, None, name, a.rooms, a.tier,
+                cookie=cookie, keep_session=keep,
                 pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
                      if wizard else None,
                 create=a.create,
@@ -1042,6 +1217,42 @@ def cmd_init(a):
     return 0
 
 
+def cmd_login(a):
+    """Sign this MACHINE in. One session, one file, every agent here minted
+    from it (DES-022 s2)."""
+    url = (a.url or read_auth().get("url") or os.environ.get("REVEILLE_URL", "")
+           or (ask("broker url", DEFAULT_URL) if sys.stdin.isatty() and not a.no_prompt
+               else ""))
+    if not url:
+        print("reveille login: which broker? Pass the url or set REVEILLE_URL.",
+              file=sys.stderr)
+        return 2
+    try:
+        d = write_auth(sign_in(url, no_prompt=a.no_prompt,
+                               open_browser=not a.no_browser))
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        print(f"reveille login: {e}", file=sys.stderr)
+        return 1
+    print(f"signed in as {d['user']} on {d['url']} -- {auth_file()} (0600).\n"
+          f"`reveille init {d['url']} <agent>` now mints without asking again.")
+    return 0
+
+
+def cmd_logout(a):
+    """End the machine's sign-in AND remove the file. Both, always: a deleted
+    file with a live session leaves a credential the reader thinks is gone, and
+    a revoked session with the file still there is a 401 at the next init."""
+    d = read_auth()
+    if not d:
+        print(f"not signed in ({auth_file()} holds nothing).")
+        return 0
+    with contextlib.suppress(Exception):
+        _post(d["url"], "/logout", {}, auth_cookie(d))
+    auth_file().unlink(missing_ok=True)
+    print(f"signed out of {d['url']} -- {auth_file()} removed.")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="reveille", description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1057,19 +1268,22 @@ def main(argv=None):
                                  "current directory)")
     i.add_argument("--claude", help="path to the claude binary")
     i.add_argument("--login", action="store_true",
-                   help="log in and mint the token instead of pasting one. Reads "
-                        "the password from $REVEILLE_PASSWORD or a prompt, never "
-                        "from a flag")
+                   help="mint through the PASSWORD door, for a broker that still "
+                        "has one open. Reads the password from $REVEILLE_PASSWORD "
+                        "or a prompt, never from a flag. Everywhere else the "
+                        "machine's own sign-in mints (`reveille login`), which is "
+                        "what happens by default when no token is supplied")
     i.add_argument("--user", help="broker username for --login (or $REVEILLE_USER)")
-    i.add_argument("--rooms", help="comma-separated room names for --login "
-                                   "(default: every room your account is in)")
+    i.add_argument("--rooms", help="comma-separated room names for the minted "
+                                   "token. REQUIRED with --create; without it, "
+                                   "defaults to every room your account is in")
     i.add_argument("--tier", default="state",
                    help="memory tier for the minted token (default: state, which "
                         "is least privilege -- everything else lands as a draft)")
     i.add_argument("--type", help="agent type (architect, senior-dev, ui-ux, "
                                   "devops, ...) -- seeds a starter CLAUDE.md")
     i.add_argument("--create", action="store_true",
-                   help="with --login: deliberately create a NEW agent when the "
+                   help="deliberately create a NEW agent when the "
                         "name has no live identity. Without it, an unknown name "
                         "is refused (the wizard asks instead) -- attaching to an "
                         "existing agent never needs this")
@@ -1079,6 +1293,18 @@ def main(argv=None):
     i.add_argument("--force", action="store_true",
                    help="install even if the broker did not answer")
     i.set_defaults(fn=cmd_init)
+    lg = sub.add_parser("login", help="sign this machine in -- one link, one click, "
+                                      "and every agent here mints from it")
+    lg.add_argument("url", nargs="?", help="broker url (default: the stored one, "
+                                           "then $REVEILLE_URL)")
+    lg.add_argument("--no-browser", action="store_true",
+                    help="print the link, do not open a browser (ssh, containers)")
+    lg.add_argument("--no-prompt", action="store_true",
+                    help="never ask: fail on anything not supplied")
+    lg.set_defaults(fn=cmd_login)
+    lo = sub.add_parser("logout", help="end this machine's sign-in and remove it "
+                                       "from disk")
+    lo.set_defaults(fn=cmd_logout)
     a = ap.parse_args(argv)
     return a.fn(a)
 
