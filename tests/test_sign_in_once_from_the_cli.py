@@ -263,10 +263,11 @@ def test_the_machines_sign_in_outlives_the_mint(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_get", lambda url, path, cookie, **k:
                         {"owned": [{"id": "r1", "name": "Reveille2.0"}],
                          "member": [], "public": []})
-    cli.mint_token("http://b.example", "ada", None, "a1", cookie="rev_session=live",
-                   keep_session=True)
+    cli.mint_token("http://b.example", "ada", None, "a1", rooms="Reveille2.0",
+                   cookie="rev_session=live", keep_session=True)
     assert "/logout" not in posted
-    cli.mint_token("http://b.example", "ada", None, "a1", cookie="rev_session=mine")
+    cli.mint_token("http://b.example", "ada", None, "a1", rooms="Reveille2.0",
+                   cookie="rev_session=mine")
     assert "/logout" in posted
 
 

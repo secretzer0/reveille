@@ -401,19 +401,42 @@ def minting():
 
 def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
     monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
-    secret, rooms, note = cli.mint_token(minting, "tmelhiser", "hunter2", "dev-agent")
+    secret, rooms, note = cli.mint_token(minting, "tmelhiser", "hunter2", "roc-sso-dev")
     assert secret == "minted-secret"
     assert rooms == ["Reveille2.0"]
     assert "superseded" in note, "a rotation that supersedes must say so"
     paths = [p for p, _ in Minting.calls]
     # /logout last, and NO second attach call: rooms ride the mint (ruling 9010),
-    # and a session minted for its few calls must not outlive them.
-    assert paths == ["/login", "/rooms", "/tokens", "/logout"], paths
+    # and a session minted for its few calls must not outlive them. The middle
+    # /tokens is the READ that says where this identity already lives.
+    assert paths == ["/login", "/rooms", "/tokens", "/tokens", "/logout"], paths
+    assert len([b for pth, b in Minting.calls if pth == "/tokens" and b is not None]) == 1
     # BOUND, and least privilege by default: an unbound or write-tier token here
     # would hand a fresh machine more than it needs.
     mint = [b for pth, b in Minting.calls if pth == "/tokens" and b is not None][0]
-    assert mint["agent_name"] == "dev-agent"
+    assert mint["agent_name"] == "roc-sso-dev"
     assert mint["mem_tier"] == "state"
+
+
+def test_a_re_mint_carries_the_agents_rooms_not_the_owners(minting, monkeypatch):
+    """Defect, measured live 2026-08-19: materialising red-shirt-01 -- an agent
+    in ONE room -- handed its new body every room its OWNER could reach, three
+    of them, including one its old body had deliberately left. The owner's reach
+    is what they MAY grant, not where this agent belongs."""
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    cli.mint_token(minting, "tmelhiser", "hunter2", "reveille-architect")
+    mint = [b for pth, b in Minting.calls if pth == "/tokens" and b is not None][0]
+    assert mint["rooms"] == ["r1"], "its own room, and nothing the owner merely owns"
+
+
+def test_an_agent_with_no_reachable_rooms_refuses_rather_than_minting_a_deaf_body(
+        minting, monkeypatch):
+    """Silently minting a credential that reaches nothing is the failure this
+    default used to hide: it looked installed and the agent never heard a thing."""
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    with pytest.raises(RuntimeError, match="--rooms"):
+        cli.mint_token(minting, "tmelhiser", "hunter2", "nobody-home")
+    assert [b for pth, b in Minting.calls if pth == "/tokens" and b is not None] == []
 
 
 def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsys):

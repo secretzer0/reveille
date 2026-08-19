@@ -574,7 +574,21 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
         print(f"\nRooms this agent can be assigned to:\n{text}")
         want_ids = choose_rooms(pick(), ordered, n_mine)
     else:
-        want_ids = [r["id"] for r in ordered[:n_mine]]
+        # A BOUND RE-MINT CARRIES THE IDENTITY'S ROOMS, NEVER THE OWNER'S
+        # (defect, measured live 2026-08-19). This used to default to every
+        # room the OWNER could reach, so materialising red-shirt-01 -- an agent
+        # in one room -- silently handed its new body three, including rooms
+        # its old body had deliberately left. An owner's reach is what they may
+        # grant; it is not a statement about where this agent belongs. Widening
+        # a scope is a deliberate act and it has a flag: --rooms.
+        by_name = {r["name"]: r["id"] for r in ordered}
+        held = dict(my_agents(url, cookie)).get(agent) or []
+        want_ids = [by_name[n] for n in held if n in by_name]
+        if not want_ids:
+            raise RuntimeError(
+                f"{agent!r} carries no rooms you can reach, so a token minted "
+                f"here would reach nothing. Name the rooms with --rooms"
+                + (f" (it is in: {', '.join(held)})." if held else "."))
     by_id = {r["id"]: r["name"] for r in ordered}
     want = [by_id[i] for i in want_ids]
 
