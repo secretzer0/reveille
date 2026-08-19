@@ -1338,15 +1338,20 @@ def _inspect_container(name):
     container (which is the prompt path, not an error)."""
     res = _docker("inspect", "-f",
                   "{{json .Config.Env}}\t{{.Config.Image}}\t{{json .Config.Cmd}}"
-                  "\t{{.HostConfig.NetworkMode}}\t{{.State.Running}}",
+                  "\t{{.HostConfig.NetworkMode}}\t{{.State.Running}}\t{{.Image}}",
                   name, check=False, capture=True)
     if res.returncode != 0:
         return None
     try:
-        env_json, image, cmd_json, network, running = (res.stdout or "").strip().split("\t")
+        (env_json, image, cmd_json, network, running,
+         image_id) = (res.stdout or "").strip().split("\t")
         return {"env": env_of(json.loads(env_json)), "image": image.strip(),
                 "cmd": json.loads(cmd_json) or [], "network": network.strip(),
-                "running": running.strip() == "true"}
+                "running": running.strip() == "true",
+                # .Image is the ID of what the container actually RUNS;
+                # .Config.Image is only the name it was created with. They come
+                # apart the moment a tag is rebuilt (ruling 8433's ambiguity).
+                "image_id": image_id.strip()}
     except ValueError:
         return None
 
@@ -1377,6 +1382,15 @@ def _token_alive(health_url, agent, token):
         return f"broker unreachable at {health_url} ({e}) -- not upgrading"
 
 
+def image_id_of(tag):
+    """The image ID a tag currently points at, or "" when docker cannot say --
+    and "" deliberately makes the same-image check below FALSE, because a
+    comparison that cannot be made must not refuse an upgrade."""
+    res = _docker("image", "inspect", "-f", "{{.Id}}", tag,
+                  check=False, capture=True)
+    return (res.stdout or "").strip() if res.returncode == 0 else ""
+
+
 def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH,
                   timeout=120):
     """Re-provision an agent's container on `image`, carrying the bound token
@@ -1401,7 +1415,13 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
             f"{user}/{agent} has no container to carry a token from -- re-provision it "
             f"(reveille-launch new {user} {agent} <repo_url> --replace, or the Agents "
             f"form), which asks for the token")
-    if old["image"] == image:
+    # IDENTITY, NOT NAME (found 2026-08-19). Two builds raced onto one tag: a
+    # container rolled from the stale build could not be rolled again, because
+    # this check compared the tag STRING it was created with against the tag
+    # string requested -- equal, while the image underneath had moved. The 8433
+    # ambiguity living inside the check meant to enforce 8433. A container is
+    # "already on" an image only when the ID it runs is the ID the tag names.
+    if old.get("image_id") and old["image_id"] == image_id_of(image):
         raise LaunchError(f"{user}/{agent} is already on {image}")
     token = old["env"]["REVEILLE_TOKEN"]
     why = _token_alive(health_url, agent, token)
