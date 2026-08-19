@@ -30,12 +30,14 @@ import asyncio
 import fcntl
 import json
 import os
+import shutil
 import sys
 import time
 
 import websockets
 
 from reveille import __version__, spool
+from reveille.cli import GIT_SOURCE
 
 HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))
 
@@ -210,6 +212,189 @@ async def _park(url, agent, secret, write_env):
         return got
 
 
+# --- The toolchain converges to the broker ------------------------------------
+# WHAT ACTUALLY GOES STALE. The MCP is not a local program: .mcp.json points at
+# the broker's /mcp, so its tools are whatever the broker serves and cannot lag.
+# What lags is the TOOLCHAIN on this machine -- this daemon, the Stop hook, the
+# cli, the upload headers. "The MCP upgrades itself" therefore means "the local
+# toolchain converges to the broker" (architect 12128).
+#
+# Measured cost of NOT doing it, 2026-08-19: the operator's laptop sat at 0.2.178
+# against a 0.2.184 broker for six releases with nobody aware. The recall-claim
+# path below shipped in 0.2.179, so a body on that laptop would have passed six
+# steps of the DES-012 acceptance chain and died on the seventh looking like a
+# protocol defect rather than a stale install.
+#
+# HERE, NOT IN THE STOP HOOK. The hook must never probe the broker (ruling 8573,
+# the 21-hours-deaf lesson): it runs at every turn boundary and anything slow or
+# unreachable there costs the session. This daemon already dials the broker, is
+# the only long-lived local process, and can fail-open without anyone waiting.
+#
+# UPGRADE-ONLY, AND THE COMPARISON IS `<` (architect Q1; the loop it avoids was
+# caught in review). main is normally AHEAD of the deployed broker -- it moves on
+# merge, the deploy lags -- and the install source is main's HEAD, not a version.
+# So `!=` would see a body that just installed 0.2.185 against a 0.2.184 broker,
+# call it divergent, reinstall the same 0.2.185, and do that once an hour for
+# ever. Running newer-than-broker is the ordinary state for the minutes after a
+# merge and must not be pathological. Behind: converge. Equal or ahead: nothing.
+UPGRADE_INTERVAL_S = 3600
+
+
+def version_tuple(text):
+    """Leading dotted-integer run of `text` as a tuple, else ().
+
+    /version answers `0.2.184 (LAN plaintext: ...)`, so the version is the first
+    token and everything after it is prose that must not affect the comparison.
+    """
+    head = (text or "").strip().split()[0] if (text or "").strip() else ""
+    parts = []
+    for chunk in head.split("."):
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts)
+
+
+def upgrade_due(installed, broker):
+    """True when the local toolchain is BEHIND the broker and both parse.
+
+    Unparsable either side means do nothing: a broker that answered something
+    unexpected is not a reason to reinstall the fleet.
+    """
+    if not installed or not broker:
+        return False
+    return installed < broker
+
+
+def _broker_version(url):
+    """The broker's version string, or "" -- unauthenticated, short timeout, and
+    every failure is silence. An unreachable broker means no upgrade, never an
+    error: the wake path matters more than the convergence."""
+    import urllib.request
+    base = url.replace("wss://", "https://").replace("ws://", "http://")
+    base = base.split("/wake")[0]
+    try:
+        with urllib.request.urlopen(base + "/version", timeout=5) as r:
+            return r.read().decode().strip()
+    except Exception:
+        return ""
+
+
+def _uv_or_bootstrap():
+    """Path to uv, installing it first if this machine has none.
+
+    UV IS A BOOTSTRAP DEPENDENCY, NOT A PREREQUISITE (operator 12140: "without
+    forcing the user to know how to build our toolchain deps"). It is a single
+    self-contained binary that brings its own python and needs no admin, so a
+    machine that lacks it is one curl away from having it -- and the agent image
+    already installs it exactly this way. Returns "" when it is absent and could
+    not be fetched, which is a reason to skip converging, never to fail.
+
+    Windows takes the same shape with install.ps1 and is DES-021's, not this
+    slice's: nothing else in this file runs there yet (fcntl is imported at
+    module top), so branching for it here would be dead code pretending to be
+    support.
+    """
+    import subprocess
+    found = shutil.which("uv") or (
+        os.path.expanduser("~/.local/bin/uv")
+        if os.path.exists(os.path.expanduser("~/.local/bin/uv")) else "")
+    if found:
+        return found
+    print("reveille-waked: uv not found -- installing it", file=sys.stderr)
+    try:
+        subprocess.run(["sh", "-c",
+                        "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+                       capture_output=True, text=True, timeout=300, check=True)
+    except Exception as e:
+        print(f"reveille-waked: uv bootstrap failed ({e!r})", file=sys.stderr)
+        return ""
+    return shutil.which("uv") or (
+        os.path.expanduser("~/.local/bin/uv")
+        if os.path.exists(os.path.expanduser("~/.local/bin/uv")) else "")
+
+
+def _converge(url, state):
+    """Bring the toolchain up to the broker, then re-exec so it is RUNNING it.
+
+    Returns without doing anything unless a full hour has passed, the broker
+    answered, and this install is genuinely behind. Never raises, never exits,
+    never blocks the wake -- a failed convergence is a log line and the old code
+    keeps working, which is the whole point of doing it here.
+
+    THE WHOLE BODY IS SHIELDED, not just the network call. This runs inside the
+    daemon's reconnect loop, so an exception escaping here would kill the wake
+    path outright -- the agent would go deaf to fix a version number. Nothing
+    about staying on old code is worth that.
+    """
+    try:
+        _converge_inner(url, state)
+    except Exception as e:      # noqa: BLE001 -- deliberately total
+        print(f"reveille-waked: convergence check failed ({e!r}) -- staying on "
+              f"{__version__}", file=sys.stderr)
+
+
+def _converge_inner(url, state):
+    import subprocess
+    now = time.monotonic()
+    if state.get("upgrade_checked") and now - state["upgrade_checked"] < UPGRADE_INTERVAL_S:
+        return
+    state["upgrade_checked"] = now
+
+    broker = version_tuple(_broker_version(url))
+    installed = version_tuple(__version__)
+    if not upgrade_due(installed, broker):
+        return
+
+    print(f"reveille-waked: toolchain {__version__} is behind the broker "
+          f"{'.'.join(str(n) for n in broker)} -- converging", file=sys.stderr)
+    uv = _uv_or_bootstrap()
+    if not uv:
+        print("reveille-waked: uv is missing and could not be installed -- "
+              f"staying on {__version__}", file=sys.stderr)
+        return
+    try:
+        r = subprocess.run([uv, "tool", "install", "--force", "--from",
+                            GIT_SOURCE, "reveille"],
+                           capture_output=True, text=True, timeout=600)
+    except Exception as e:
+        print(f"reveille-waked: convergence failed ({e!r}) -- staying on "
+              f"{__version__}", file=sys.stderr)
+        return
+    if r.returncode != 0:
+        print(f"reveille-waked: convergence failed -- staying on {__version__}: "
+              f"{(r.stderr or r.stdout).strip().splitlines()[-1:] or ['']}"[:400],
+              file=sys.stderr)
+        return
+
+    # BOTH THE PROBE AND THE EXEC GO THROUGH THE CONSOLE SCRIPT, never `-m`
+    # (architect, blocking on the first draft). Re-execing as
+    # `python -m reveille.waked` leaves sys.argv[0] pointing at the MODULE FILE,
+    # which is not executable -- so the next hour's `--version` probe raises,
+    # the shield catches it, and convergence reports "check failed" for ever
+    # after. The feature would have worked exactly once per machine and then
+    # gone quiet, which is the failure mode this whole PR exists to end.
+    me = shutil.which("reveille-waked") or sys.argv[0]
+
+    # DID IT ACTUALLY MOVE? An install that exits 0 without changing the version
+    # (a stale cache, a source that did not advance) would otherwise re-exec into
+    # the same code and check again next hour for ever. Re-exec only on evidence.
+    after = version_tuple(subprocess.run(
+        [me, "--version"], capture_output=True, text=True).stdout)
+    if after and after <= installed:
+        print(f"reveille-waked: convergence produced no change (still "
+              f"{__version__}) -- not restarting", file=sys.stderr)
+        return
+
+    print("reveille-waked: converged -- restarting on the new code",
+          file=sys.stderr)
+    # os.execv REPLACES this process: the environment carries REVEILLE_TOKEN, the
+    # flock is retaken by the new image of the daemon, and the spool is untouched.
+    # A ring that lands during the swap waits in the spool and fires at the next
+    # arm -- the wake path is designed for exactly this and loses nothing.
+    os.execv(me, [me, *sys.argv[1:]])
+
+
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                write_env=None):
     sep = "&" if "?" in url else "?"
@@ -221,6 +406,11 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     first_no_rooms = None   # monotonic stamp of the FIRST refusal of a streak
     try:
         while True:
+            # Before dialling, not after: a body that is behind should reach the
+            # broker already running the code the broker expects. Rate-limited
+            # and fail-open inside, so this is a no-op on all but one pass an
+            # hour and never delays a reconnect that matters.
+            _converge(url, state)
             try:
                 code = await _session(uri, agent, state)
                 if code == NO_ROOMS:

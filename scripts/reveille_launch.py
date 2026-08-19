@@ -3145,6 +3145,17 @@ def build_api(auth_url):
             return JSONResponse({"agent": name, "verb": verb, "here": True,
                                  "lines": (out.stdout or "") + (out.stderr or "")})
         if verb == "version":
+            # ONE VERSION HERE, DELIBERATELY, AND THE OTHER IS NOT THIS ROUTE'S
+            # TO FETCH. Since waked converges the toolchain to the broker, a
+            # container can legitimately run newer reveille than the image it
+            # was built from, and reporting only the image pin now understates
+            # what is running. The obvious fix -- ask the container --  is
+            # `docker exec`, and THE READ ROUTE MAY NOT EXEC (ruling 11965: this
+            # process holds the docker socket, so a verb that runs something in
+            # a container hands an HTTP caller the host). A drift this route
+            # cannot see is not a reason to hand out that capability; the
+            # toolchain version belongs on the agent's own report to the broker,
+            # where it costs nobody the socket. Left for that.
             return JSONResponse({"agent": name, "verb": verb, "here": True,
                                  "image": row["image"], "default": DEFAULT_IMAGE,
                                  "behind": row["image"] != DEFAULT_IMAGE})

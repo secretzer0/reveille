@@ -268,6 +268,68 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.185 THE TOOLCHAIN CONVERGES TO THE BROKER (architect 12128, operator ask
+12126). The MCP is not a local program -- .mcp.json points at the broker's /mcp,
+so its tools are whatever the broker serves and cannot lag. What lags is the
+TOOLCHAIN on the machine: waked, the Stop hook, the cli, the upload headers. So
+"the MCP upgrades itself" means "the local toolchain converges to the broker",
+and waked now does it: once an hour, before dialling, GET /version and compare.
+
+MEASURED, WHICH IS WHY THIS EXISTS. On 2026-08-19 the operator's laptop was on
+0.2.178 against a 0.2.184 broker and nobody knew until it was grepped -- six
+releases, and the recall-claim path shipped in 0.2.179, so a body there would
+have passed six steps of the DES-012 acceptance chain and DIED ON THE SEVENTH
+looking like a protocol defect rather than a stale install. The live architect
+CONTAINER was worse: 0.2.132, fifty-two releases behind, because a container's
+toolchain is baked at image build and nothing moved it afterwards.
+
+UPGRADE-ONLY, AND THE COMPARISON IS `<` NOT `!=`. The install source is main's
+HEAD, not a version, and main is normally AHEAD of the deployed broker -- it
+moves on merge, the deploy lags. `!=` would see a body that just installed
+0.2.185 against a 0.2.184 broker, call it divergent, reinstall the same 0.2.185,
+and repeat once an hour for ever, on every body, silently. Running
+newer-than-broker is the ordinary state for the minutes after a merge and must
+not be pathological. Behind: converge. Equal or ahead: nothing. There is a test
+named for that loop.
+
+IN WAKED, NOT THE STOP HOOK. The hook must never probe the broker (ruling 8573,
+the 21-hours-deaf lesson): it runs at every turn boundary and anything slow or
+unreachable there costs the session. waked already dials the broker, is the only
+long-lived local process, and can fail open with nobody waiting. Every failure
+path is one stderr line and the old code keeps working; the whole call is
+shielded because it runs inside the reconnect loop, and an exception escaping
+there would kill the wake path -- going deaf to fix a version number is not a
+trade worth making. The interval is burned even when the probe throws, so a
+broker outage cannot become a probe-per-reconnect storm. On success it
+os.execv's itself: the environment carries the credential, the flock is retaken,
+and a ring that lands mid-swap waits in the spool and fires at the next arm.
+
+BOTH THE PROBE AND THE EXEC GO THROUGH THE CONSOLE SCRIPT, never `python -m`
+(caught in review). Re-execing as a module leaves argv[0] pointing at the module
+FILE, which is not executable, so the next hour's --version probe raises, the
+shield catches it, and convergence reports "check failed" for ever after -- the
+feature would have worked exactly once per machine and then gone quiet. A thing
+that silently stops converging is indistinguishable from the stale toolchain it
+was meant to fix.
+
+UV IS A BOOTSTRAP DEPENDENCY, NOT A PREREQUISITE (operator 12140). It is one
+self-contained binary that brings its own python and needs no admin, so a
+machine without it is one curl away -- the same install the agent image already
+runs. A uv that is missing AND unfetchable skips the convergence; it never fails
+the daemon. Windows takes the same shape with install.ps1 and belongs to DES-021,
+not here: nothing in waked runs on Windows yet (fcntl is imported at module top),
+so branching for it now would be dead code pretending to be support.
+
+NATIVE AND CONTAINER ARE THE SAME CODE, because waked runs in both. The
+container consequence the architect accepted: its toolchain can now legitimately
+exceed the image pin. The launcher's `version` read verb still reports only the
+image -- asking the container would mean `docker exec`, and THE READ ROUTE MAY
+NOT EXEC (11965: the launcher holds the docker socket, so a verb that runs
+something in a container hands an HTTP caller the host). A drift this route
+cannot see is not worth that capability; the toolchain version belongs on the
+agent's own report to the broker, and the verb now says so where the next reader
+will look.
+
 0.2.184 THE CACHE OUTLIVED THE OUTAGE, AND A FALLBACK RENDITION IS NEVER KEPT
 (ruled 12101). THE ROOT FIX, because the purge below is only the symptom:
 tts_voice() with an ASSIGNED bank clip that the synthesizer cannot see now
