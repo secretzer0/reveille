@@ -241,7 +241,31 @@ async def _claim(url, secret):
         return ""
 
 
-async def _park(url, agent, secret, write_env, deadline=None):
+def read_env(agent):
+    """The credential THIS DIRECTORY currently holds, or "".
+
+    Symmetric with write_env: one home, one writer, and now one reader. A
+    daemon parked on a spent secret has no other way to learn that a live one
+    arrived by a path it did not take.
+    """
+    # READ, NOT IMPORTED. waked deliberately does not depend on the CLI at
+    # module scope -- a daemon that will not start is worse than one that cannot
+    # self-heal -- and this file is three lines of JSON, so borrowing a reader
+    # would trade that independence for nothing.
+    try:
+        with open(os.path.join(os.getcwd(), ".claude", "settings.local.json")) as f:
+            env = json.load(f).get("env") or {}
+    except (OSError, ValueError, AttributeError):
+        return ""
+    # ONE DIRECTORY, ONE AGENT: if this file now names somebody else, its
+    # credential is not ours to adopt -- taking it would be the clobber bug
+    # wearing a daemon's face.
+    if env.get("REVEILLE_AGENT_ROLE") != agent:
+        return ""
+    return env.get("REVEILLE_TOKEN") or ""
+
+
+async def _park(url, agent, secret, write_env, deadline=None, read_env=None):
     """Poll for a return ticket until one arrives. Prints once on entry (silence
     is the defect, ruling 11947) and once when it comes back.
 
@@ -255,6 +279,25 @@ async def _park(url, agent, secret, write_env, deadline=None):
     while True:
         await asyncio.sleep(RECALL_POLL_S)
         waited += RECALL_POLL_S
+        # A CREDENTIAL CAN ARRIVE BY A PATH THIS DAEMON DID NOT TAKE (measured
+        # 2026-08-19, and it made me deaf for ten minutes with every control
+        # green). `reveille init` rotated this directory's credential in place;
+        # the identity never left the machine, so no return ticket was ever
+        # written and this loop would have polled for one until the process
+        # died. Meanwhile it held the spool flock, so the Stop hook saw a live
+        # daemon and never started the one that would have worked: armed
+        # watcher, no rings, nothing anywhere disagreeing.
+        # The file is the identity (write_credential's own rule), so reading it
+        # is how a parked body asks "am I still the spent one?". Cheap, local,
+        # and it needs no broker.
+        if read_env:
+            fresh = read_env(agent)
+            if fresh and fresh != secret:
+                print(f"reveille-waked: this directory's credential changed while "
+                      f"{agent} was parked -- adopting it and reconnecting. No "
+                      f"return ticket was needed: the identity never left this "
+                      f"machine.", file=sys.stderr)
+                return fresh
         got = await _claim(url, secret)
         if not got:
             if deadline is not None and waited >= deadline:
@@ -467,7 +510,7 @@ def _converge_inner(url, state):
 
 
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
-               write_env=None):
+               write_env=None, read_env=None):
     sep = "&" if "?" in url else "?"
     token = os.environ.get("REVEILLE_TOKEN", "")
     uri = f"{url}{sep}name={agent}" + (f"&token={token}" if token else "")
@@ -546,7 +589,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                               f"polling for one for "
                               f"{ORPHAN_POLL_S // 60} minutes.", file=sys.stderr)
                         got = await _park(url, agent, token, write_env,
-                                          deadline=ORPHAN_POLL_S)
+                                          deadline=ORPHAN_POLL_S, read_env=read_env)
                         if not got:
                             print(f"reveille-waked: no return ticket for {agent} "
                                   f"in {ORPHAN_POLL_S // 60} minutes -- exiting so "
@@ -563,7 +606,8 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                           f"window has closed -- PARKED again on the one this "
                           f"machine was superseded on, waiting for another "
                           f"return ticket for {agent}.", file=sys.stderr)
-                    got = await _park(url, agent, parked_secret, write_env)
+                    got = await _park(url, agent, parked_secret, write_env,
+                                      read_env=read_env)
                     if not got:
                         return PARKED
                     token = got
@@ -577,7 +621,8 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # that lands, the URI is rebuilt on the new secret and the
                     # loop simply carries on.
                     parked_secret = token
-                    got = await _park(url, agent, token, write_env)
+                    got = await _park(url, agent, token, write_env,
+                                      read_env=read_env)
                     if not got:
                         return PARKED
                     token = got
@@ -666,7 +711,7 @@ def main():
 
     return asyncio.run(_run(a.url, a.name, a.idle_nudge,
                             no_rooms_window_s=a.no_rooms_window,
-                            write_env=write_env))
+                            write_env=write_env, read_env=read_env))
 
 
 if __name__ == "__main__":
