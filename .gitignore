@@ -11,8 +11,13 @@ dist/
 build/
 *.egg-info/
 
-# playwright MCP scratch output (snapshots, console logs)
+# playwright MCP scratch output (snapshots, console logs). The bare
+# filename form too: browser_snapshot(filename=...) writes to the repo
+# ROOT, not into .playwright-mcp/, and one of those rode a PR on
+# 2026-08-19 before review caught it.
 .playwright-mcp/
+*-page.yml
+page-*.yml
 
 # migration snapshots are operational artifacts, never source
 *.bak

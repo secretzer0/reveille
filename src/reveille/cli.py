@@ -530,8 +530,14 @@ def my_agents(url, cookie):
     for t in _get(url, "/tokens", cookie).get("tokens", []):
         name = t.get("agent_name")
         if name:
-            seen.setdefault(name, set()).update(
-                r if isinstance(r, str) else r.get("name", "") for r in t.get("rooms") or [])
+            # THE PAYLOAD IS {room_id: room_name} (store.rooms_for_token), so the
+            # VALUES are the names. Iterating it produced room IDs -- which the
+            # picker printed at people as if they were names, and which made the
+            # room-carrying mint refuse a live agent with "carries no rooms you
+            # can reach" while naming the id it had just failed to match
+            # (measured 2026-08-19, red-shirt-01). The stub that gated this
+            # returned a list of {id, name} dicts: a fake shape no route serves.
+            seen.setdefault(name, set()).update((t.get("rooms") or {}).values())
     return sorted((name, sorted(rooms)) for name, rooms in seen.items())
 
 
