@@ -102,6 +102,12 @@ for mk in caveman ponytail; do
     note "- ${mk}: **MISSING** from the image (expected ${src})"
     continue
   fi
+  if ! command -v claude >/dev/null 2>&1; then
+    # Not FAILED: there is no claude to install into. The old wording sent a
+    # reader chasing the plugin while the binary was the missing thing.
+    note "- ${mk}: skipped -- no claude binary on PATH"
+    continue
+  fi
   if claude plugin list 2>/dev/null | grep -qi "^${mk}\b"; then
     say "- ${mk}: already installed in this home"
     continue
@@ -149,8 +155,19 @@ mcp_force_note() {
   say "  init said: ${1%%$'\n'*}"
   say "  waked will keep retrying the bus"
 }
+BOOT_DEGRADED=""
 if init_said=$(reveille init --no-prompt --dir /home/agent/repos 2>&1 >/dev/null); then
-  say "- mcp: registered via reveille init (project scope, headersHelper) in ~/repos"
+  if printf '%s' "$init_said" | grep -q "DEGRADED"; then
+    # Ruling 12401: a configured directory with the claude binary transiently
+    # absent BOOTS, degraded and saying so -- a crash-looping entrypoint was
+    # how a bricked claude (interrupted self-update) turned one bad stop into
+    # a container that could never come back. The row reads this through the
+    # same file the repo status rides; no new state, no new file.
+    note "- mcp: DEGRADED -- ${init_said%%$'\n'*}"
+    BOOT_DEGRADED="failed: claude binary missing -- init ran degraded; re-provision this container (an interrupted claude self-update leaves no binary)"
+  else
+    say "- mcp: registered via reveille init (project scope, headersHelper) in ~/repos"
+  fi
 else
   reveille init --no-prompt --force --dir /home/agent/repos >/dev/null
   mcp_force_note "$init_said"
@@ -241,7 +258,15 @@ fi
 # needs one word, and health that ignores the repo is the hole r2 names -- an
 # agent whose repo never arrived looked identical to one that never wanted a
 # repo. The data root is bind-mounted, so this file is the launcher's window.
-printf '%s\n' "$REPO_STATUS" > /home/agent/.reveille-repo-status 2>/dev/null || true
+# UNDER ~/.claude, BECAUSE THAT IS WHAT IS MOUNTED (found 2026-08-19): when the
+# home mount became two subdir mounts this file kept landing on container-local
+# FS, so the launcher read a host path nothing wrote and repo failures could
+# never show state=degraded. A degraded INIT rides the same file -- the row has
+# one degraded reason, and a repo failure outranks it only because it is rarer.
+if [ -n "$BOOT_DEGRADED" ] && [ "$REPO_STATUS" = ok ]; then
+  REPO_STATUS="$BOOT_DEGRADED"
+fi
+printf '%s\n' "$REPO_STATUS" > /home/agent/.claude/.reveille-repo-status 2>/dev/null || true
 
 # DES-005 P3 / architect ruling msg 8607: the chosen role's prompt lives in the
 # agent's CLAUDE.md between a DELIMITER PAIR, and the entrypoint rewrites what

@@ -364,9 +364,25 @@ def test_the_ring_asks_for_the_one_act_a_daemon_cannot_perform():
         assert "join()" in frame["detail"]
 
 
-@pytest.mark.parametrize("name", ["ARRIVAL_RING_S", "NOT_ARRIVED"])
+@pytest.mark.parametrize("name", ["ARRIVAL_RING_S", "NOT_ARRIVED", "IDLE_NUDGE_S"])
 def test_the_knobs_are_named_not_buried(name):
     assert hasattr(waked, name)
+
+
+def test_the_nudge_default_is_the_ruled_constant():
+    """Ruled 12246, rebuilt per 12411: the announcement floor is 900s, and it
+    went missing the first time BECAUSE it was a bare argparse literal nothing
+    could gate -- a live memory asserted 900 while the tree shipped 1800. The
+    default must BE the constant, and the constant must be the ruled value.
+    NO_ROOMS_WINDOW_S stays a separate 1800 (ruling 9119); their old collision
+    is part of why this hid."""
+    assert waked.IDLE_NUDGE_S == 900
+    assert waked.NO_ROOMS_WINDOW_S == 1800
+    import re
+    src = pathlib.Path(waked.__file__).read_text()
+    m = re.search(r"--idle-nudge.*?default=([A-Za-z_0-9]+)", src, re.S)
+    assert m and m.group(1) == "IDLE_NUDGE_S", (
+        "the --idle-nudge default must be the named constant, not a literal")
 
 
 def test_it_does_not_re_adopt_a_credential_it_already_watched_die(monkeypatch):

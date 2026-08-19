@@ -410,15 +410,55 @@ def test_role_prompts_are_the_four_sec9_drafts():
 def test_idle_decision_matrix():
     H = 3600 * 10**9
     # attached client is never idle, however old the activity
-    assert rl.is_idle(True, 0, 0, 100 * H, 24 * H) is False
+    assert rl.is_idle(True, 0, 0, 100 * H, 24 * H, 0) is False
     # fresh session activity (an autonomous agent working) is not idle
-    assert rl.is_idle(False, 99 * H, 0, 100 * H, 24 * H) is False
+    assert rl.is_idle(False, 99 * H, 0, 100 * H, 24 * H, 0) is False
     # a waiting ring resets the clock even with stale activity
-    assert rl.is_idle(False, 0, 99 * H, 100 * H, 24 * H) is False
+    assert rl.is_idle(False, 0, 99 * H, 100 * H, 24 * H, 0) is False
     # everything stale past the window: idle
-    assert rl.is_idle(False, 10 * H, 10 * H, 100 * H, 24 * H) is True
+    assert rl.is_idle(False, 10 * H, 10 * H, 100 * H, 24 * H, 10 * H) is True
     # window 0 disables the reclaim entirely
-    assert rl.is_idle(False, 0, 0, 100 * H, 0) is False
+    assert rl.is_idle(False, 0, 0, 100 * H, 0, 0) is False
+
+
+def test_a_container_never_observed_is_idle_since_boot_not_the_epoch():
+    """Ruling 12401. The launcher idle-stopped a 22-second-old container
+    (audit: IDLESTOP at 22:01:02Z against a 22:00:40Z provision) because the
+    probe landed before tmux was up, read (False, 0, 0), and now-0 cleared any
+    window. That SIGKILL interrupted the body's claude self-update and bricked
+    it -- the second brick of the night. started_at is IN the max: boot-time
+    fixes the race with no grace knob, and a month-old untouched container
+    still reclaims."""
+    H = 3600 * 10**9
+    now = 100 * H
+    # just booted, nothing observed yet: NOT idle
+    assert rl.is_idle(False, 0, 0, now, 24 * H, now - 22 * 10**9) is False
+    # booted a month ago, never once observed: idle, reclamation preserved
+    assert rl.is_idle(False, 0, 0, now, 24 * H, now - 720 * H) is True
+    # recent activity still outranks an old boot
+    assert rl.is_idle(False, now - H, 0, now, 24 * H, now - 720 * H) is False
+
+
+def test_a_probe_that_could_not_tell_says_none_not_idle(monkeypatch):
+    """Ruling 12401 / doctrine 8866: a failed exec and "observed nothing" are
+    different facts, and only the second is evidence. None means the sweep
+    SKIPS -- could-not-tell must never stop a container."""
+    import types
+
+    def failing(*args, check=True, capture=False):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(rl, "_docker", failing)
+    assert rl._idle_probe("u", "a") is None
+
+
+def test_docker_started_at_parses_to_ns():
+    assert rl.rfc3339_ns("2026-08-19T22:00:39.610387848Z") == \
+        rl.rfc3339_ns("2026-08-19T22:00:39Z") + 610387848
+    assert rl.rfc3339_ns("") == 0 and rl.rfc3339_ns("garbage") == 0
+    # docker also emits offset forms
+    assert rl.rfc3339_ns("2026-08-19T22:00:39.5+00:00") == \
+        rl.rfc3339_ns("2026-08-19T22:00:39Z") + 500000000
 
 
 def test_a_role_less_agent_is_refused_like_a_credential_less_one(tmp_path, monkeypatch):
@@ -1706,14 +1746,16 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.21", (
+    assert tag == "reveille-agent:0.2.22", (
         "the entrypoint changed and the tag did not -- two images, one name")
-    # 0.2.21 IS THE FIRST IMAGE THAT CONVERGES ITSELF (ruling 12320 R3). Every
-    # body materialised from 0.2.20 came up on toolchain 0.2.177 against a
-    # 0.2.189 broker -- measured from inside on 2026-08-19 -- because the image
-    # pins the toolchain and convergence only runs at a turn boundary, so a NEW
-    # body's FIRST turn ran old code by construction. That first turn is exactly
-    # the one that has to arrive.
+    # 0.2.22 TURNS CLAUDE SELF-UPDATE OFF (ruling 12401 D1): the image pin is
+    # the claude pin, because an interrupted in-container update bricked the
+    # binary twice on 2026-08-19 -- once by an operator stop, once by the
+    # launcher's own idle sweep -- and the update state rides the shared
+    # ~/.claude mount, so one body's half-update poisoned every next boot. It
+    # also carries the degraded-boot entrypoint (init DEGRADED on a missing
+    # binary instead of a set -e crash-loop) and the status-file bridge moved
+    # onto the mounted ~/.claude.
 
 
 def test_the_wheel_scrolls_the_view_not_the_prompt_history():
@@ -1805,3 +1847,16 @@ def test_login_status_reports_the_container_after_reaping_it(monkeypatch, tmp_pa
         "the fixture did not exercise the reap, so the ordering is unproven"
     assert body["container"] is False, \
         "container was read BEFORE the reap -- it describes one this call deleted"
+
+
+def test_cmd_new_carries_the_flag_its_refusal_prescribes():
+    """Ruling 12401 D4. provision_refusal has said "pass one with --role-prompt"
+    since r3, and the CLI parser never had the flag -- a doc false as written,
+    met exactly when re-provisioning a broken container from a shell."""
+    import re
+    src = open(rl.__file__).read()
+    assert '"--role-prompt"' in src and '"--role"' in src
+    # and cmd_new resolves them the same way the web route does
+    m = re.search(r"def cmd_new\(a\):(.*?)\ndef ", src, re.S)
+    assert m and "ROLE_PROMPTS.get(a.role" in m.group(1)
+    assert "role_prompt=prompt" in m.group(1)

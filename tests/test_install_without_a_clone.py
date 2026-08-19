@@ -1180,3 +1180,104 @@ def test_is_durable_names_the_three_broken_shapes(tmp_path):
     assert install.is_durable("reveille-stop-hook")
     here = _durable_copy(tmp_path)
     assert install.is_durable(str(here))
+
+
+def test_a_missing_binary_refuses_by_name_before_any_local_step(tmp_path, broker,
+                                                               monkeypatch, capsys):
+    """Ruling 12401. The old resolution ended `or "claude"` -- a literal whose
+    only reachable effect was a FileNotFoundError traceback at whichever of
+    three call sites ran first. Measured 2026-08-19: an interrupted claude
+    self-update deleted the binary and every docker start died on the
+    traceback instead of a sentence. Unconfigured directory + no binary =
+    refusal, by name, with nothing installed."""
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    os.environ["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    monkeypatch.setenv("PATH", str(tmp_path / "emptybin"))  # no claude anywhere
+    monkeypatch.setattr(cli.pathlib.Path, "home", staticmethod(lambda: home))
+    rc = cli.main(["init", broker, "dev-agent", "-", "--dir", str(work)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "claude" in err and "REFUSING" in err
+    assert "Traceback" not in err
+    assert not (work / ".claude").exists(), "a refusal leaves nothing behind"
+
+
+def test_a_configured_directory_boots_degraded_without_the_binary(tmp_path, broker,
+                                                                 monkeypatch,
+                                                                 capsys):
+    """The other world of ruling 12401: credential and registration already
+    stand, the binary is transiently absent (interrupted self-update), and a
+    container entrypoint under set -e re-runs init on every docker start. Init
+    exits 0, says DEGRADED, skips the claude-dependent steps and still
+    converges everything local -- a crash-looping entrypoint was how one bad
+    stop became a container that could never come back."""
+    claude, log = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    monkeypatch.setattr(cli.pathlib.Path, "home", staticmethod(lambda: home))
+    # first init: binary present, registration lands in ~/.claude.json
+    assert cli.main(argv) == 0
+    (home / ".claude.json").write_text(json.dumps(
+        {"projects": {str(work): {"mcpServers": {"reveille": {}}}}}))
+    capsys.readouterr()
+    calls_before = log.read_text()
+    # second init: the binary is gone -- and ONLY the binary. The refusal test
+    # above may empty PATH because it refuses before any local step; this path
+    # keeps converging locally, and the local steps use real tools.
+    real_which = cli.shutil.which
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: None if "claude" in str(name)
+                        else real_which(name))
+    rc = cli.main(["init", broker, "dev-agent", "-", "--dir", str(work)])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    # ON STDERR SPECIFICALLY, never the sum of the streams: the entrypoint's
+    # capture is `2>&1 >/dev/null` -- stderr kept, stdout discarded -- so a
+    # sum-assertion passes whichever stream carries the sentence while the one
+    # consumer reads exactly one (architect blocking on #153; lesson
+    # a-gate-that-reads-through-the-same-wrong-accessor).
+    assert "DEGRADED" in out.err
+    assert log.read_text() == calls_before, "no claude call was attempted"
+    env = json.loads((work / ".claude" / "settings.local.json").read_text())["env"]
+    assert env["REVEILLE_TOKEN"] == "sekrit", "local convergence still ran"
+
+
+def test_the_entrypoints_own_capture_sees_the_degraded_sentence(tmp_path):
+    """The wiring, driven through the entrypoint's OWN lines. The capture idiom
+    and the grep are read out of docker/entrypoint.sh -- not retyped here -- so
+    this test rots the moment the entrypoint changes shape, which is the point:
+    bash -n proves syntax, never wiring, and the first version of this bridge
+    shipped with init speaking stdout to a capture that keeps stderr."""
+    import re
+    import subprocess as sp
+    entry = (pathlib.Path(cli.__file__).parents[2] / "docker" /
+             "entrypoint.sh").read_text()
+    m = re.search(r'^if (init_said=\$\(reveille init[^)]*\)); then$', entry,
+                  re.M)
+    assert m, "the entrypoint no longer captures init the way this test drives"
+    capture = m.group(1)
+    assert re.search(r'grep -q "DEGRADED"', entry), \
+        "the entrypoint no longer greps for the DEGRADED sentence"
+    # a stub `reveille` that speaks the fixed contract: DEGRADED on stderr
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    stub = bindir / "reveille"
+    stub.write_text("#!/bin/sh\n"
+                    "echo 'mcp: converged' \n"
+                    "echo 'reveille init: DEGRADED -- no binary' >&2\n"
+                    "exit 0\n")
+    stub.chmod(0o755)
+    script = (capture + '\n'
+              'if printf \'%s\' "$init_said" | grep -q "DEGRADED"; then\n'
+              '  echo WIRED\n'
+              'else\n'
+              '  echo NOT-WIRED\n'
+              'fi\n')
+    r = sp.run(["bash", "-c", script], capture_output=True, text=True,
+               env={"PATH": f"{bindir}:/usr/bin:/bin"})
+    assert r.stdout.strip().endswith("WIRED") and "NOT-WIRED" not in r.stdout, (
+        r.stdout, r.stderr)

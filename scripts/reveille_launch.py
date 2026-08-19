@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.21")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.22")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -289,14 +289,38 @@ def resolve_quotas(row):
     return q
 
 
-def is_idle(attached, last_activity_ns, last_ring_ns, now_ns, window_ns):
+def rfc3339_ns(stamp):
+    """docker's .State.StartedAt (RFC3339, nanosecond fraction) as epoch ns,
+    0 when unparseable -- and 0 is safe here only because is_idle treats it as
+    "no boot reading", which fails toward the other clocks."""
+    import datetime
+    m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?"
+                 r"(Z|[+-]\d{2}:\d{2})$", (stamp or "").strip())
+    if not m:
+        return 0
+    base, frac, tz = m.groups()
+    dt = datetime.datetime.fromisoformat(base + ("+00:00" if tz == "Z" else tz))
+    return int(dt.timestamp()) * 10**9 + int((frac or "0").ljust(9, "0")[:9])
+
+
+def is_idle(attached, last_activity_ns, last_ring_ns, now_ns, window_ns,
+            started_at_ns):
     """The 24h-idle-stop decision (sec 7.1), pure. Idle = no attached tmux
     client AND no session activity AND no wake ring inside the window. An agent
     working autonomously overnight shows session activity (its panes update on
-    every bus turn) and is never reclaimed -- that case is the point."""
+    every bus turn) and is never reclaimed -- that case is the point.
+
+    started_at_ns is the container's boot, and it is IN the max (ruling 12401):
+    a container never observed has been idle since it BOOTED, not since the
+    epoch. Without it, a probe landing in the seconds before tmux comes up read
+    (False, 0, 0) and now-0 cleared any window -- the launcher idle-stopped a
+    22-second-old container, whose SIGKILL then interrupted a claude
+    self-update and bricked the body (measured 2026-08-19, twice). One clock,
+    no grace knob: boot-time fixes the race and a 30-day untouched container
+    still reclaims."""
     if window_ns <= 0 or attached:
         return False
-    newest = max(last_activity_ns or 0, last_ring_ns or 0)
+    newest = max(last_activity_ns or 0, last_ring_ns or 0, started_at_ns or 0)
     return now_ns - newest >= window_ns
 
 
@@ -1673,12 +1697,23 @@ def revoke_grant(conn, user, agent, grant_id, actor):
 
 def cmd_new(a):
     conn = _db()
+    # THE FLAG THE REFUSAL PRESCRIBES EXISTS (ruling 12401 D4). provision_refusal
+    # has demanded a role prompt since r3 and its text said "pass one with
+    # --role-prompt" -- a flag this parser never had, so the CLI path was a doc
+    # that was false as written. --role picks a template by name; --role-prompt
+    # is the explicit text; both is template + appended text, the same shape the
+    # web form sends.
+    prompt = (ROLE_PROMPTS.get(a.role, "") + ("\n\n" + a.role_prompt
+              if a.role_prompt else "")).strip() or None
+    if a.role and a.role not in ROLE_PROMPTS:
+        conn.close()
+        die(f"unknown role {a.role!r} -- one of {', '.join(sorted(ROLE_PROMPTS))}")
     try:
         token = read_secret(f"bound broker token for {a.agent}")
         name, kind = provision_agent(conn, a.user, a.agent, a.repo_url, token,
                                      image=a.image, network=a.network,
                                      broker=a.broker, boot_cmd=a.boot_cmd,
-                                     replace=a.replace)
+                                     replace=a.replace, role_prompt=prompt)
     except LaunchError as e:
         conn.close()
         die(str(e))
@@ -1992,9 +2027,11 @@ def _live_grant_sessions(user, agent):
 
 def _idle_probe(user, agent):
     """One exec, three observations (sec 7.1): any attached tmux client, the
-    newest session activity, the newest spool entry (a ring that arrived but has
-    not fired yet). Epoch seconds; a stopped container or absent tmux reads as
-    (False, 0, 0) and the caller skips it -- already-stopped needs no stop."""
+    newest session activity, the newest spool entry (a ring that arrived but
+    has not fired yet). Epoch seconds. An exec that FAILS returns None -- the
+    caller skips, because could-not-tell is not an observation. An exec that
+    succeeds and sees nothing (no tmux yet) returns (False, 0, 0), and is_idle
+    reads that against the container's boot time, never the epoch."""
     res = _docker("exec", container_name(user, agent), "sh", "-c",
                   "tmux list-clients -F x 2>/dev/null | wc -l;"
                   " tmux list-sessions -F '#{session_activity}' 2>/dev/null"
@@ -2003,7 +2040,11 @@ def _idle_probe(user, agent):
                   " 2>/dev/null | sort -rn | head -1 | cut -d. -f1",
                   check=False, capture=True)
     if res.returncode != 0:
-        return False, 0, 0
+        # COULD-NOT-TELL IS NEVER READ AS IDLE (ruling 12401, doctrine 8866,
+        # same discipline _credential_known keeps): a failed exec and "observed
+        # nothing" are different facts, and only the second is evidence. None
+        # means SKIP -- the sweep must not stop a container it could not probe.
+        return None
     lines = (res.stdout or "").splitlines() + ["", "", ""]
     def n(s):
         return int(s.strip()) if s.strip().isdigit() else 0
@@ -2169,12 +2210,17 @@ def _sweep_once(conn, idle_window_ns=0):
         # window by construction -- but skip it explicitly: stopping the
         # stopped is noise.
         if idle_window_ns > 0:
-            st = _docker("inspect", "-f", "{{.State.Running}}",
+            st = _docker("inspect", "-f",
+                         "{{.State.Running}} {{.State.StartedAt}}",
                          container_name(user, agent), check=False, capture=True)
-            if (st.stdout or "").strip() == "true":
-                attached, act_s, ring_s = _idle_probe(user, agent)
-                if is_idle(attached, act_s * 10**9, ring_s * 10**9, now,
-                           idle_window_ns):
+            running, _, started_at = (st.stdout or "").strip().partition(" ")
+            if running == "true":
+                # None = the exec failed = could-not-tell, and could-not-tell
+                # never stops a container (ruling 12401, doctrine 8866).
+                probe = _idle_probe(user, agent)
+                if probe is not None and is_idle(
+                        probe[0], probe[1] * 10**9, probe[2] * 10**9, now,
+                        idle_window_ns, rfc3339_ns(started_at)):
                     _docker("stop", container_name(user, agent),
                             check=False, capture=True)
                     _audit("IDLESTOP", user=user, agent=agent,
@@ -2515,8 +2561,14 @@ def repo_status(user, agent):
     R2 (ruling 11938): HEALTH THAT IGNORES THE REPO IS THE HOLE. An agent whose
     clone never happened looked exactly like one that never wanted a repo, and
     red-shirt came up with a repo URL, no repo, and every control green."""
+    # UNDER claude/, BECAUSE THAT IS WHAT IS MOUNTED. The entrypoint used to
+    # write this to /home/agent/ -- container-local since the home mount became
+    # two subdir mounts -- so the launcher read a host path nothing wrote and
+    # repo failures could never show state=degraded (found 2026-08-19 while
+    # wiring the degraded boot through the same file).
     try:
-        with open(os.path.join(data_root(user, agent), ".reveille-repo-status")) as f:
+        with open(os.path.join(data_root(user, agent), "claude",
+                               ".reveille-repo-status")) as f:
             return f.read().strip()
     except OSError:
         return ""
@@ -3732,6 +3784,12 @@ def build_parser():
     n.add_argument("--boot-cmd", default=None,
                    help="override the image command (default: claude reveille); "
                         "e.g. agent-probe to health-check without an Anthropic login")
+    n.add_argument("--role", default="",
+                   help="role template for the new body's CLAUDE.md "
+                        "(architect, senior-dev, ...) -- same list the web form offers")
+    n.add_argument("--role-prompt", default="",
+                   help="explicit role prompt text; with --role it is appended "
+                        "to the template")
     n.set_defaults(fn=cmd_new)
 
     sub.add_parser("ls", help="list provisioned containers").set_defaults(fn=cmd_ls)
