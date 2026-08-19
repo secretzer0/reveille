@@ -217,6 +217,27 @@ def test_an_existing_claude_gitignore_is_appended_to_not_replaced(tmp_path):
     path, wrote = cli.ignore_the_credential(tmp_path)
     text = path.read_text()
     assert wrote and "something-else" in text and "settings.local.json" in text
+    # BOTH secrets this directory can hold (architect blocking on #151): waked
+    # writes the spent credential to .reveille-parked beside the live one, and
+    # an ignore file naming one of two secrets is a published-identity hole.
+    assert ".reveille-parked" in text.split()
+
+
+def test_a_dir_init_already_touched_still_gains_the_parked_line(tmp_path):
+    """The early return `if "settings.local.json" in text.split(): return` was
+    a permanent ceiling wearing a check's face: no directory init had ever
+    touched could gain a line, so fixing the wanted set alone would have fixed
+    new dirs and zero existing ones."""
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / ".gitignore").write_text("settings.local.json\n")   # an old init's file
+    path, wrote = cli.ignore_the_credential(tmp_path)
+    text = path.read_text()
+    assert wrote and ".reveille-parked" in text.split()
+    assert text.split().count("settings.local.json") == 1
+    # And still idempotent once complete.
+    _, wrote2 = cli.ignore_the_credential(tmp_path)
+    assert wrote2 is False
 
 
 def test_the_helper_the_registration_names_is_shipped(tmp_path):
