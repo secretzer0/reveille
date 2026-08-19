@@ -42,3 +42,9 @@ commit that rides. Ritual: branch wip/red-shirt-01/20260819T183834Z, push, state
 Swap-pending ring received by body C (laptop native) at 20260819T183932Z, waked pid 3546705 on
 0.2.188, ring file 1787164701265177372.3546705.1.ring. Tree was clean (HEAD e252941);
 this line is the commit that rides. Ritual: branch wip/red-shirt-01/20260819T183932Z, push, state note.
+Park result: pushed wip/red-shirt-01/20260819T183932Z sha a02e9bd. memory_add(kind=state)
+REFUSED: "superseded: this credential for 'red-shirt-01' was replaced on 2026-08-19" --
+new body joined between push and note (12259-class race, note lost to bus). State lives
+here instead: task DES-012 walk; next = new body fetches this branch, appends arrival;
+open threads none; undone none; local-only files (.mcp.json del, .claude/, CLAUDE.local.md)
+stay on laptop by design.
