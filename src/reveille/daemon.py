@@ -268,6 +268,58 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.186 NOTHING PER-AGENT IS TRACKED (architect 12167/12169, operator 12164 and
+the hash requirement). `reveille init` used to write two per-agent files into
+the project's working tree and rely on the person's own git config to keep the
+credential out of a commit.
+
+THE LEAK, MEASURED. The agent credential lands in
+<dir>/.claude/settings.local.json. On the machine where this was built, a
+PERSONAL ~/.config/git/ignore covered it; the reveille repo's own .gitignore says
+nothing about .claude, and init never touched any ignore file. So on any other
+host, any other user, any CI checkout or fresh clone, a live agent token sat
+untracked-but-not-ignored, visible in `git status`, one `git add -A` from a
+public repo. init now writes `.claude/.gitignore` containing
+`settings.local.json` -- a normal ignore file in a directory THIS INSTALLER
+CREATES, so it ships beside the credential and a clone that gets one gets the
+other. NOT the repo's own .gitignore (the project's file, not ours) and NOT
+.git/info/exclude: that is the user's git config, and a tool that writes there to
+protect its own mess is fixing the wrong layer (operator). Verified in a real
+repo: `git add -A` now stages the ignore file and stages NOTHING containing the
+token.
+
+THE REGISTRATION MOVES TO LOCAL SCOPE. <dir>/.mcp.json carried no secret -- the
+headersHelper is a mechanism name, not a credential -- but it was still
+per-agent configuration in a shared tree, and in a checkout two people share it
+is one more thing to collide over and commit. `claude mcp add-json --scope local`
+keys the same registration to this project path in ~/.claude.json: read
+identically, never in the tree, and needing no enableAllProjectMcpServers
+approval. An earlier init's project-scope entry is MIGRATED AWAY on the next run,
+because two registrations for one server is how a body ends up authenticating
+twice by different rules; every other server in that file is somebody else's and
+survives, and a file left holding nothing is removed.
+
+THE DOCTRINE BLOCK MOVES TO CLAUDE.local.md. Claude Code loads both, but
+CLAUDE.md is the PROJECT's file -- tracked, shared, written by whoever owns the
+repo -- and this block carries the agent's own name and role. In a shared
+checkout two people's agents would overwrite each other's block in a tracked file
+and commit the fight. A block an earlier init left in CLAUDE.md is lifted out by
+its markers on the next run, and nothing outside them is touched.
+
+THE MARKER IS NOW A SIGNATURE, not just a fence (operator). It carries the
+writing version AND a sha256 of the block body, which separates three states the
+old version-only check collapsed into two: file==marker==expected is current;
+file==marker!=expected means the doctrine moved on; and file!=marker means
+SOMEBODY EDITED INSIDE THE MARKERS. Only the third is silent under a version
+check, and it is exactly how a stale doctrine survives -- a person tweaks one
+line, the version still reads current, and every later boot agrees with the edit
+instead of correcting it. That case is now repaired and said out loud.
+
+WHAT IS STILL NOT COVERED, said rather than implied: CLAUDE.local.md lives at the
+project root, where a .gitignore of ours cannot reach it. It is per-agent text,
+not a secret, so init WARNS and names the one line that fixes it rather than
+reaching into a repo file or a git config that is not ours to write.
+
 0.2.185 THE TOOLCHAIN CONVERGES TO THE BROKER (architect 12128, operator ask
 12126). The MCP is not a local program -- .mcp.json points at the broker's /mcp,
 so its tools are whatever the broker serves and cannot lag. What lags is the

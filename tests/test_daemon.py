@@ -138,8 +138,14 @@ def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
     assert "BUS DOCTRINE" in (daemon.send.__doc__ or "") and "ULTRA-TERSE" in daemon.send.__doc__
     assert '"doctrine": BUS_DOCTRINE' in inspect.getsource(daemon.join), "join() hands it over on every boot"
     assert "ULTRA-TERSE" in daemon.BUS_DOCTRINE and "never for the ear" in daemon.BUS_DOCTRINE and "quoted verbatim" in daemon.BUS_DOCTRINE
-    src = inspect.getsource(cli.doctrine_block)
-    assert "BUS DOCTRINE" in src and "ULTRA-TERSE" in src, "the seeded CLAUDE.md carries it"
+    # The RENDERED block, not the source of whichever function happens to hold
+    # the text: the doctrine moved from doctrine_block to doctrine_body when the
+    # body became separately hashable, and a gate reading source would have gone
+    # green on the wrong function or red on a pure refactor. What an agent
+    # actually reads is the block.
+    seeded = cli.doctrine_block("any-agent", "devops")
+    assert "BUS DOCTRINE" in seeded and "ULTRA-TERSE" in seeded, \
+        "the seeded CLAUDE.local.md carries it"
 
 
 def test_wake_url_from_http():

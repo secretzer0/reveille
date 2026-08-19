@@ -213,8 +213,9 @@ async def _park(url, agent, secret, write_env):
 
 
 # --- The toolchain converges to the broker ------------------------------------
-# WHAT ACTUALLY GOES STALE. The MCP is not a local program: .mcp.json points at
-# the broker's /mcp, so its tools are whatever the broker serves and cannot lag.
+# WHAT ACTUALLY GOES STALE. The MCP is not a local program: its registration
+# points at the broker's /mcp, so its tools are whatever the broker serves and
+# cannot lag.
 # What lags is the TOOLCHAIN on this machine -- this daemon, the Stop hook, the
 # cli, the upload headers. "The MCP upgrades itself" therefore means "the local
 # toolchain converges to the broker" (architect 12128).
