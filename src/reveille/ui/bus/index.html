@@ -2582,7 +2582,7 @@ function tabActions(t){
    'claims it with the credential it already holds');
  if(!gone)out+=b('sendto','&#128101;',
    'send '+t.agent+' to another human -- they accept before anything is minted');
- if(!gone&&st!=='elsewhere')out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
+ if(!gone&&st!=='elsewhere'&&st!=='moving')out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
  return '<span class="acts">'+out+'</span>';
 }
 // Why this agent has no terminal, said in the well where the terminal would
@@ -2590,7 +2590,15 @@ function tabActions(t){
 function stateSentence(name){
  const a=agRows[name]||{};
  const st=a.state||(a.status==='running'?'running':'stopped');
- const say=st==='degraded'
+ const say=st==='moving'
+   ? 'Moving -- a credential has been minted for this identity and is waiting for '+
+     'its new body to join. Whatever body it has now KEEPS WORKING until then, and '+
+     'if the new one never arrives the credential expires and nothing changes.'
+  :st==='no-live-body'
+   ? 'NO LIVE BODY -- the hive remembers this agent and no credential can act as '+
+     'it. Its name, history, memories and lessons are untouched. Give it one: mint '+
+     'a credential in the Tokens tab, or move it here.'
+  :st==='degraded'
    ? 'Running, but its repo never arrived: '+esc(a.repo_status||'the clone failed')+
      '. The agent is reachable and its work tree is not there -- an empty ~/repos '+
      'is this, not "no repo was asked for". Fix the cause and recreate, or clone '+
@@ -2720,7 +2728,8 @@ function drawNote(){
 // how a healthy agent read as a defect (operator 11995).
 function broken(a){
  const st=a.state||(a.status==='running'?'running':'stopped');
- return a.status==='absent' && st!=='elsewhere' && st!=='retired' && st!=='erased';
+ return a.status==='absent' && st!=='elsewhere' && st!=='retired' && st!=='erased'
+        && st!=='moving';
 }
 const agRoomNames={};   // room id -> name, as the tokens themselves report it
 async function tokenRooms(){
