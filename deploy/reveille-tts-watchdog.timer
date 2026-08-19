@@ -1,0 +1,25 @@
+# /etc/systemd/system/reveille-tts-watchdog.timer -- probe every 60s (S3.1).
+#
+# 60s is chosen against the escalation ladder, not for its own sake: three
+# consecutive failures before the first restart means a wedged container is
+# noticed in about three minutes, and the full ladder to a reboot takes about
+# nine. Faster would restart things during transient hiccups; slower would leave
+# the fleet mute for longer than a human would tolerate before asking.
+
+[Unit]
+Description=Probe the reveille TTS model every minute
+Documentation=https://github.com/secretzer0/reveille/blob/main/docs/DES-009-agent-voices.md
+
+[Timer]
+# Start probing a minute after boot rather than immediately: the host has just
+# come up, docker has not necessarily started the container yet, and the unit's
+# own 15-minute grace window is measured from when the UNIT started, not boot.
+OnBootSec=60s
+OnUnitActiveSec=60s
+AccuracySec=5s
+# A missed tick (host asleep, host rebooting) fires once on resume rather than
+# replaying every tick it slept through.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
