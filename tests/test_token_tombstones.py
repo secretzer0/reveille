@@ -130,6 +130,78 @@ def test_the_note_comes_first_and_the_signpost_after():
         daemon._conn = prev
 
 
+def test_the_new_body_can_read_the_note_the_old_one_left():
+    """THE ACT, READ BY THE PARTY IT IS FOR (architect, blocking on #145).
+
+    Two bugs, one behind the other. The first: _mem_ctx read the tier off the
+    token row the supersede had DELETED, so memory_add crashed and the note
+    could not be written at all. The second, one layer down and invisible until
+    the first was fixed: kind='state' scopes through agent_scope(conn,
+    token_id), and a handover principal has token_id "" -- so the note landed at
+    scope "agent:", an empty bucket that the arriving body never reads and that
+    EVERY handover body of EVERY identity would share.
+
+    My first gate read the note back through the same empty scope and passed,
+    which proved only that a write and a read agreed with each other. This one
+    reads as the NEW principal, which is the only reader that matters, and
+    checks that a second identity's handover cannot see it."""
+    c = db()
+    admin, old, new = minted_twice(c)
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        p_old = daemon._agent_principal(_request(old["secret"]))
+        assert p_old.handover is True and p_old.token_id == "", "no token row survives"
+        bound, tier, adm, owned = daemon._mem_ctx(p_old)
+        store.memory_add(
+            c, author=p_old.name, token_id=p_old.token_id, agent_id=p_old.agent_id,
+            agent_bound=bound, tier=tier, is_admin=adm, rooms=p_old.rooms,
+            owned_rooms=owned, kind="state",
+            fact="handover: branch wip/wanderer/x sha abc123, next step, nothing undone")
+
+        # THE READER THAT MATTERS: the body that arrived, on its own credential.
+        p_new = daemon._agent_principal(_request(new["secret"]))
+        assert p_new.handover is False and p_new.token_id
+        got = store.recall(c, rooms=p_new.rooms, token_id=p_new.token_id,
+                           agent_id=p_new.agent_id, caller=p_new.name, kind="state")
+        assert any("wip/wanderer/x" in m["fact"] for m in got["memories"]), (
+            "the new body cannot see the note the old one left -- which is the "
+            "entire purpose of the five-minute grace")
+        # and it is at the IDENTITY's scope, not an empty bucket
+        assert store.agent_scope(c, p_old.token_id, p_old.agent_id) == \
+            store.agent_scope(c, p_new.token_id), "one identity, one bucket"
+
+    finally:
+        daemon._conn = prev
+
+
+def test_one_handover_bucket_is_not_every_handover_bucket():
+    """The leak the empty scope created: with token_id "" every superseded body
+    of every identity wrote to "agent:" and read each other's notes."""
+    c = db()
+    admin, old, new = minted_twice(c)
+    other_old = store.create_token(c, admin["id"], "o1", agent_name="rover", create=True)
+    other_new = store.create_token(c, admin["id"], "o2", agent_name="rover")
+    store.commit_pending(c, other_new["id"])
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        a = daemon._agent_principal(_request(old["secret"]))
+        b = daemon._agent_principal(_request(other_old["secret"]))
+        assert a.handover and b.handover and a.agent_id != b.agent_id
+        bound, tier, adm, owned = daemon._mem_ctx(a)
+        store.memory_add(c, author=a.name, token_id=a.token_id, agent_id=a.agent_id,
+                         agent_bound=bound, tier=tier, is_admin=adm, rooms=a.rooms,
+                         owned_rooms=owned, fact="wanderer's private handover",
+                         kind="state")
+        seen = store.recall(c, rooms=b.rooms, token_id=b.token_id,
+                            agent_id=b.agent_id, caller=b.name, kind="state")
+        assert not any("wanderer" in m["fact"] for m in seen["memories"]), (
+            "another identity's handover note is not yours to read")
+    finally:
+        daemon._conn = prev
+
+
 def test_the_refusal_is_a_signpost_for_the_former_body_only():
     c = db()
     _, old, _ = minted_twice(c)

@@ -293,6 +293,27 @@ that already names a different agent -- both names, the path, and both remedies
 (--dir for the one you meant, --force to replace this body deliberately) -- and
 it refuses before the mint, so nothing is left behind.
 
+0.2.191 THE GRACE CAN ACTUALLY WRITE THE NOTE, WHERE THE NEW BODY READS IT. 0.2.190 gave a just-superseded
+credential five minutes to write its handover note (R2) and then crashed on the
+attempt: _mem_ctx reads the memory tier off the token row, and the supersede
+DELETES that row -- which is exactly what makes revocation instant here. So
+memory_add answered "'NoneType' object is not subscriptable" and the one act the
+window exists to permit was the one act that could not happen. Measured on
+devops' own handover, minutes after shipping it. The identity is the source when
+the credential is gone: bound (the grace is granted only to a bound credential),
+tier `state` (memory_add refuses every other kind from this principal), owner
+from the identity the tombstone names. The gate writes the note and reads it
+back AS THE ARRIVING BODY -- a permission's gate has to exercise the act the
+permission is for, read by the party it is for, or it proves only that the door
+opens onto a wall.
+  AND ONE LAYER DOWN, caught in review before it shipped: kind='state' scopes
+  through agent_scope(conn, token_id), and a handover principal's token_id is
+  "" -- so the note landed at scope "agent:", an empty bucket the arriving body
+  never reads and EVERY handover body of EVERY identity would have shared. The
+  identity is the answer and the caller already holds it: agent_scope prefers
+  agent_id when given, and memory_add, recall, brief and join's state count all
+  pass it.
+
 0.2.190 WHAT THE ACCEPTANCE CHAIN FOUND (rulings 12305/12320, all measured live
 on 2026-08-19 while running DES-012's chain end to end).
   B THE ARRIVAL WINDOW IS TRUE NOW. Ten minutes was enforced only by a sweep and
@@ -5017,7 +5038,7 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
     brief_available = _conn.execute(
         f"SELECT count(*) FROM memories WHERE status='live' AND "
         f"(scope IN ({','.join('?' * len(scopes))}) OR scope=?)",
-        scopes + [store.agent_scope(_conn, p.token_id)]).fetchone()[0]
+        scopes + [store.agent_scope(_conn, p.token_id, p.agent_id)]).fetchone()[0]
     log.info("%s join url=%s rooms=%s skipped=%s unread=%s brief=%s", p.name,
              url or "-", len(rooms), len(skipped), unread, brief_available)
     return {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
@@ -5075,6 +5096,18 @@ def _mem_ctx(p):
     behind. Admin memory powers flow only through web principals (S6 UI)."""
     tok = _conn.execute("SELECT agent_id, mem_tier, owner_id FROM tokens WHERE id=?",
                         (p.token_id,)).fetchone()
+    if tok is None:
+        # A HANDOVER PRINCIPAL HAS NO TOKEN ROW (R2). The supersede DELETED the
+        # credential -- that is what makes revocation instant -- so the row this
+        # reads is gone and token_id is "". Reading a tier off it raised
+        # 'NoneType' object is not subscriptable, which meant the one act the
+        # five-minute grace exists to permit was the one act that crashed:
+        # measured 2026-08-19, on my own handover, minutes after shipping it.
+        # The identity is the source here, and it is still on disk: bound
+        # because the grace is only granted to a bound credential, tier `state`
+        # because that is the only kind this principal may write (memory_add
+        # refuses every other), owner from the identity the tombstone named.
+        return True, "state", False, {r["id"] for r in store.list_rooms(_conn, p.user_id)}
     owned = {r["id"] for r in store.list_rooms(_conn, tok["owner_id"])}
     return bool(tok["agent_id"]), tok["mem_tier"], False, owned
 
@@ -5102,7 +5135,8 @@ async def memory_add(fact: str, kind: str, scope: str = "", entities: str = "",
         raise store.AccessError(HANDOVER_ACT)
     bound, tier, adm, owned = _mem_ctx(p)
     out = store.memory_add(
-        _conn, author=p.name, token_id=p.token_id, agent_bound=bound, tier=tier,
+        _conn, author=p.name, token_id=p.token_id, agent_id=p.agent_id,
+        agent_bound=bound, tier=tier,
         is_admin=adm, rooms=p.rooms, owned_rooms=owned, fact=fact, kind=kind,
         scope=scope, entities=entities, source=source, supersedes=supersedes,
         occurred_ns=_when_ns(occurred))
@@ -5126,7 +5160,8 @@ async def recall(query: str = "", kind: str = "", scope: str = "", entity: str =
     p = _me(ctx.request_context.request)
     bound, tier, adm, owned = _mem_ctx(p)
     return store.recall(
-        _conn, rooms=p.rooms, token_id=p.token_id, caller=p.name, tier=tier,
+        _conn, rooms=p.rooms, token_id=p.token_id, agent_id=p.agent_id,
+        caller=p.name, tier=tier,
         is_admin=adm, owned_rooms=owned, query=query, kind=kind, scope=scope,
         entity=entity, author=author, since_ns=_when_ns(since),
         until_ns=_when_ns(until), status=status, limit=limit, explain=explain)
@@ -5141,7 +5176,8 @@ async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> dic
     text; nothing is silently capped. Call it at boot after join() and lessons();
     call it again anytime -- it always reflects the live tips."""
     p = _me(ctx.request_context.request)
-    out = store.brief(_conn, rooms=p.rooms, token_id=p.token_id, role=role,
+    out = store.brief(_conn, rooms=p.rooms, token_id=p.token_id,
+                      agent_id=p.agent_id, role=role,
                       budget=budget)
     log.info("%s brief role=%r -> %s chars, sections=%s", p.name, role,
              out["chars"], out["sections"])
