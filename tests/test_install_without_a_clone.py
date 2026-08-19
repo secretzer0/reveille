@@ -42,21 +42,47 @@ def broker():
     srv.shutdown()
 
 
-def fake_claude(tmp_path, rc=0, listed="", fail_add=False):
+def fake_claude(tmp_path, rc=0, listed="", fail_add=False, registry=False):
     """A `claude` that records its argv. The real binary is not on this box and
     would not be on a fresh host either -- what matters is the command we hand
     it, which is the same one docker/entrypoint.sh already runs.
 
     fail_add makes only `mcp add-json` fail, so a test can exercise a refused
     registration without also breaking the `mcp remove` that runs before it.
+
+    registry=True MAKES THE STUB STATEFUL, and that is the whole point of it
+    existing. A fake that only ever SUCCEEDS cannot gate idempotence: 0.2.186
+    dropped the `mcp remove` that used to run before `add-json`, every test
+    stayed green because this stub said yes twice, and the real binary refuses
+    the second one -- "MCP server reveille already exists in local config",
+    with no --force. That shipped, and it broke the one path a recalled body
+    needs (defect 2, chain step 8). So this mode keeps a file as its registry:
+    add-json REFUSES a name already there, remove clears it and fails when
+    there is nothing to clear, exactly like the real thing.
     """
     log = tmp_path / "claude.log"
     p = tmp_path / "claude"
+    reg = tmp_path / "mcp-registry"
     add_fail = 'if [ "$2" = "add-json" ]; then echo "no such flag" >&2; exit 1; fi' if fail_add else ""
+    stateful = f'''
+if [ "$2" = "add-json" ]; then
+  if [ -e "{reg}/$5" ]; then
+    echo "MCP server $5 already exists in local config" >&2; exit 1
+  fi
+  mkdir -p "{reg}"; : > "{reg}/$5"
+fi
+if [ "$2" = "remove" ]; then
+  if [ ! -e "{reg}/$3" ]; then
+    echo "No MCP server found with name: $3" >&2; exit 1
+  fi
+  rm -f "{reg}/$3"
+fi
+''' if registry else ""
     p.write_text(f'''#!/bin/sh
 if [ "$2" = "list" ]; then printf '%s' '{listed}'; exit 0; fi
 printf '%s\\n' "$*" >> {log}
 {add_fail}
+{stateful}
 exit {rc}
 ''')
     p.chmod(0o755)
@@ -190,6 +216,30 @@ def test_an_unreachable_broker_does_not_discard_a_credential(tmp_path, monkeypat
     ok, said = cli.verify("http://127.0.0.1:1", "dev-agent", "probably-fine", timeout=2)
     assert ok is None, "unreachable is a third answer, not a refusal"
     assert "did not answer" in said
+
+
+def test_a_second_run_survives_a_claude_that_refuses_a_duplicate(tmp_path, broker,
+                                                                 monkeypatch, capsys):
+    """THE REAL `claude mcp add-json` REFUSES A NAME IT ALREADY HAS, and carries
+    no --force. Without a remove first, init is a one-shot command: the second
+    run on any directory fails at step 1 and installs nothing.
+
+    That is not hypothetical. It shipped in 0.2.186 and was found when a
+    recalled body could not run the recovery its own daemon told it to run
+    (waked's PARKED message: "`reveille init` also works"). It stayed hidden
+    because the stub said yes twice; this test uses the stateful one, so it is
+    RED without the remove in register_mcp_local and green with it.
+    """
+    claude, log = fake_claude(tmp_path, registry=True)
+    argv, home, work = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 0
+    assert cli.main(argv) == 0, capsys.readouterr().err
+    # and the registration is still THERE afterwards -- a remove that ran
+    # without a re-add would leave the directory unregistered, which reads as
+    # success and is not.
+    adds = [ln for ln in log.read_text().splitlines() if "add-json" in ln]
+    assert len(adds) == 2, adds
 
 
 def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
@@ -351,19 +401,42 @@ def minting():
 
 def test_login_mints_a_bound_token_and_attaches_rooms(minting, monkeypatch):
     monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
-    secret, rooms, note = cli.mint_token(minting, "tmelhiser", "hunter2", "dev-agent")
+    secret, rooms, note = cli.mint_token(minting, "tmelhiser", "hunter2", "roc-sso-dev")
     assert secret == "minted-secret"
     assert rooms == ["Reveille2.0"]
     assert "superseded" in note, "a rotation that supersedes must say so"
     paths = [p for p, _ in Minting.calls]
     # /logout last, and NO second attach call: rooms ride the mint (ruling 9010),
-    # and a session minted for its few calls must not outlive them.
-    assert paths == ["/login", "/rooms", "/tokens", "/logout"], paths
+    # and a session minted for its few calls must not outlive them. The middle
+    # /tokens is the READ that says where this identity already lives.
+    assert paths == ["/login", "/rooms", "/tokens", "/tokens", "/logout"], paths
+    assert len([b for pth, b in Minting.calls if pth == "/tokens" and b is not None]) == 1
     # BOUND, and least privilege by default: an unbound or write-tier token here
     # would hand a fresh machine more than it needs.
     mint = [b for pth, b in Minting.calls if pth == "/tokens" and b is not None][0]
-    assert mint["agent_name"] == "dev-agent"
+    assert mint["agent_name"] == "roc-sso-dev"
     assert mint["mem_tier"] == "state"
+
+
+def test_a_re_mint_carries_the_agents_rooms_not_the_owners(minting, monkeypatch):
+    """Defect, measured live 2026-08-19: materialising red-shirt-01 -- an agent
+    in ONE room -- handed its new body every room its OWNER could reach, three
+    of them, including one its old body had deliberately left. The owner's reach
+    is what they MAY grant, not where this agent belongs."""
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    cli.mint_token(minting, "tmelhiser", "hunter2", "reveille-architect")
+    mint = [b for pth, b in Minting.calls if pth == "/tokens" and b is not None][0]
+    assert mint["rooms"] == ["r1"], "its own room, and nothing the owner merely owns"
+
+
+def test_an_agent_with_no_reachable_rooms_refuses_rather_than_minting_a_deaf_body(
+        minting, monkeypatch):
+    """Silently minting a credential that reaches nothing is the failure this
+    default used to hide: it looked installed and the agent never heard a thing."""
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    with pytest.raises(RuntimeError, match="--rooms"):
+        cli.mint_token(minting, "tmelhiser", "hunter2", "nobody-home")
+    assert [b for pth, b in Minting.calls if pth == "/tokens" and b is not None] == []
 
 
 def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsys):
@@ -380,6 +453,30 @@ def test_a_wrong_password_installs_nothing(tmp_path, minting, monkeypatch, capsy
     assert not log.exists()
     assert not (work / ".claude" / "settings.local.json").exists()
     assert "login failed" in capsys.readouterr().err
+
+
+def test_a_refused_local_step_mints_nothing(tmp_path, minting, monkeypatch, capsys):
+    """THE MINT IS THE LAST ACT (ruling #126, re-ruled 12271). 0.2.186 minted
+    before the MCP registration, so a `claude mcp add-json` that refused printed
+    "Nothing else was installed" while a credential already existed on the
+    broker -- and, being bound, it superseded the name's live token and rang the
+    working body into a full handover for an install that never happened. The
+    gate is the token count, not the message: a local step that refuses leaves
+    ZERO new token rows."""
+    claude, log = fake_claude(tmp_path, fail_add=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("REVEILLE_PASSWORD", "hunter2")
+    rc = cli.main(["init", minting, "dev-agent", "--login", "--user", "tmelhiser",
+                   "--claude", claude, "--dir", str(work)])
+    assert rc == 1
+    assert "REFUSING at step 1 of 3" in capsys.readouterr().err
+    assert [b for pth, b in Minting.calls if pth == "/tokens" and b is not None] == [], \
+        "the registration refused, so no credential may exist on the broker"
+    assert not (work / ".claude" / "settings.local.json").exists()
 
 
 def test_the_wizard_lists_your_agents_and_a_number_makes_this_directory_one_of_them(

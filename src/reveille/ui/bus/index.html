@@ -3203,7 +3203,11 @@ async function openSendBack(name){
   'crosses the bus. Its current body keeps working until the returning one '+
   'joins; if nobody claims, the window closes and nothing changed.</div>'+
   '<div class="pChips" id="sbRooms">'+roomChips(axes,'data-sbroom')+'</div>'+
-  '<div class="pRow"><button id="sbGo">open the window</button> '+
+  '<div class="pAsk pDim">What happens after you click: the old machine\'s '+
+  'daemon claims the ticket within 20 seconds and writes the credential; '+
+  esc(name)+' lands there when a turn on that machine calls join(). Until then '+
+  'its current body is still the live one.</div>'+
+  '<div class="pRow"><button id="sbGo">allow it back (5 min)</button> '+
    '<button id="sbNo">cancel</button></div>'+
   '<div id="sbStatus" class="pDim"></div>','#sbGo');
  $('sbNo').onclick=closeAgDlg;
@@ -3215,7 +3219,8 @@ async function openSendBack(name){
    const r=await api('/recalls',{method:'POST',body:JSON.stringify({
     agent:name,rooms:picked})});
    closeAgDlg();
-   toast(name+' can come back for the next 5 minutes -- watch for it to join',true);
+   toast(name+' may come back for the next 5 minutes -- it lands when that '+
+    'machine takes a turn and joins',true);
    refreshAgents();
   }catch(e){$('sbStatus').textContent='';toast(e.message);}
  };

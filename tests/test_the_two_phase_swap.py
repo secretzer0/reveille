@@ -61,6 +61,44 @@ def test_the_first_mint_for_an_identity_with_no_body_is_live_at_once():
     assert again["pending"] is False, "nothing to displace, nothing to wait for"
 
 
+def test_a_second_mint_retracts_the_move_nobody_took():
+    """ONE PENDING PER IDENTITY (defect 3, measured live 2026-08-19). Three
+    unclaimed pending credentials for one agent coexisted, because every re-mint
+    added one and only an arrival or the ten-minute sweep removed one -- so the
+    body that arrived was whichever joined first, not the one just minted. The
+    gate is the tokens table itself, not the return value."""
+    c, u, room, old = world()
+    first = store.create_token(c, u["id"], "body-2", agent_name="wanderer",
+                               rooms=[room["id"]])
+    second = store.create_token(c, u["id"], "body-3", agent_name="wanderer",
+                                rooms=[room["id"]])
+    assert second["discarded_pending"] == [first["id"]]
+    agent_id = old["agent_id"]
+    rows = c.execute("SELECT id, pending_ns FROM tokens WHERE agent_id=?",
+                     (agent_id,)).fetchall()
+    assert sorted(r["id"] for r in rows) == sorted([old["id"], second["id"]]), \
+        "one live body, one pending move, and nothing else claimable"
+    assert len([r for r in rows if r["pending_ns"] is not None]) == 1
+    assert store.resolve_token(c, first["secret"]) is None, "the retracted move cannot arrive"
+    assert store.resolve_token(c, old["secret"])["id"] == old["id"], \
+        "and the body that is working is still working -- a retraction takes nothing from it"
+
+
+def test_a_retracted_move_does_not_supersede_the_live_body_when_the_next_one_arrives():
+    """The retraction must not leak into the arrival path: the credential that
+    DOES arrive supersedes the live body once, and the discarded one was never
+    a party to it."""
+    c, u, room, old = world()
+    store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    second = store.create_token(c, u["id"], "body-3", agent_name="wanderer",
+                                rooms=[room["id"]])
+    store.join(c, "wanderer", "agent", room["id"], token_id=second["id"])
+    assert store.resolve_token(c, old["secret"]) is None
+    live = c.execute("SELECT id FROM tokens WHERE agent_id=?",
+                     (old["agent_id"],)).fetchall()
+    assert [r["id"] for r in live] == [second["id"]], "exactly one body, the one that arrived"
+
+
 def test_an_unclaimed_pending_expires_and_the_old_body_never_notices():
     c, u, room, old = world()
     new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])

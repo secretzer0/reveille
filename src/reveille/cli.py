@@ -101,6 +101,16 @@ def register_mcp_local(url, workdir, claude):
         "url": url.rstrip("/") + "/mcp",
         "headersHelper": "reveille-headers",
     })
+    # REMOVE FIRST, AND IT IS NOT BELT-AND-BRACES. `claude mcp add-json` REFUSES
+    # a name already registered ("MCP server reveille already exists in local
+    # config") and carries no --force, so without this init is a ONE-SHOT
+    # command: every directory it has already touched refuses it forever. That
+    # is exactly the directory that needs it -- waked's own PARKED message says
+    # "`reveille init` also works", and on 2026-08-19 it did not, which left a
+    # recalled body with no way back (defect 2, chain step 8). The remove is
+    # best-effort: a first run has nothing to remove and must not fail on that.
+    subprocess.run([claude, "mcp", "remove", "reveille", "--scope", "local"],
+                   capture_output=True, text=True, cwd=str(workdir))
     r = subprocess.run([claude, "mcp", "add-json", "--scope", "local", "reveille", spec],
                        capture_output=True, text=True, cwd=str(workdir))
     if r.returncode != 0:
@@ -108,6 +118,19 @@ def register_mcp_local(url, workdir, claude):
             f"`claude mcp add-json --scope local` failed: "
             f"{(r.stderr or r.stdout).strip()}")
     return "~/.claude.json (local scope)"
+
+
+def tracked_by_git(path):
+    """Is this path committed to a git repo? Anything that is not a clean yes --
+    no git, no repo, an error -- is a no, because the only thing this answer
+    guards is whether to delete somebody's file."""
+    try:
+        return subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(path)],
+            cwd=str(pathlib.Path(path).parent), capture_output=True,
+            text=True).returncode == 0
+    except OSError:
+        return False
 
 
 def drop_project_mcp_entry(workdir):
@@ -134,8 +157,15 @@ def drop_project_mcp_entry(workdir):
         return None
     servers.pop("reveille")
     if not servers and set(cfg) <= {"mcpServers"}:
-        path.unlink()
-        return path
+        # A TRACKED FILE IS NOT THIS INSTALLER'S TO DELETE. Removing our entry
+        # is correctness -- two registrations for one server is how a body
+        # authenticates twice by different rules -- but deleting a file git is
+        # watching turns an install into a staged deletion the person did not
+        # ask for and may not notice until a commit takes it. So: empty it and
+        # leave it, and let the removal be their commit.
+        if not tracked_by_git(path):
+            path.unlink()
+            return path
     cfg["mcpServers"] = servers
     path.write_text(json.dumps(cfg, indent=2) + "\n")
     return path
@@ -564,7 +594,21 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
         print(f"\nRooms this agent can be assigned to:\n{text}")
         want_ids = choose_rooms(pick(), ordered, n_mine)
     else:
-        want_ids = [r["id"] for r in ordered[:n_mine]]
+        # A BOUND RE-MINT CARRIES THE IDENTITY'S ROOMS, NEVER THE OWNER'S
+        # (defect, measured live 2026-08-19). This used to default to every
+        # room the OWNER could reach, so materialising red-shirt-01 -- an agent
+        # in one room -- silently handed its new body three, including rooms
+        # its old body had deliberately left. An owner's reach is what they may
+        # grant; it is not a statement about where this agent belongs. Widening
+        # a scope is a deliberate act and it has a flag: --rooms.
+        by_name = {r["name"]: r["id"] for r in ordered}
+        held = dict(my_agents(url, cookie)).get(agent) or []
+        want_ids = [by_name[n] for n in held if n in by_name]
+        if not want_ids:
+            raise RuntimeError(
+                f"{agent!r} carries no rooms you can reach, so a token minted "
+                f"here would reach nothing. Name the rooms with --rooms"
+                + (f" (it is in: {', '.join(held)})." if held else "."))
     by_id = {r["id"]: r["name"] for r in ordered}
     want = [by_id[i] for i in want_ids]
 
@@ -629,6 +673,13 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
     note = ""
     if tok.get("superseded"):
         note = f" (superseded {len(tok['superseded'])} previous token(s) for {agent})"
+    # SAY THAT AN EARLIER MOVE WAS RETRACTED. A person re-running init after a
+    # failed materialisation is holding a link or a container that will now be
+    # refused, and the only place they can learn that is here.
+    n = len(tok.get("discarded_pending") or ())
+    if n:
+        note += (f" (discarded {n} unclaimed move(s) for {agent}: whatever was "
+                 f"minted for them cannot arrive)")
     return tok["secret"], attached, note
 
 
@@ -846,6 +897,10 @@ def doctrine_body(name, agent_type):
         f"   the new body knows the work is stranded rather than assuming it came.\n"
         f"The new body FETCHES that branch before it does anything else. Then carry\n"
         f"on: if the swap never arrives, nothing about your situation changed.\n\n"
+        f"On a `reason=\"recalled\"` or `reason=\"not-arrived\"` ring: the credential\n"
+        f"in THIS directory is a successor that has not landed. `join()` -- that call\n"
+        f"IS the arrival, it commits the swap, and until it happens the identity is\n"
+        f"still the other body and nothing else here will work.\n\n"
         f"WHO HEARS WHAT: a unicast (`to=\"<name>\"`) WAKES that agent. YOUR\n"
         f"broadcast (`to=\"*\"`) does not wake anyone -- it is read on each\n"
         f"recipient's next turn; a HUMAN's broadcast does ring the room. So: needed\n"
@@ -1041,7 +1096,9 @@ def cmd_init(a):
                 print("  names are letters, digits, _ and -, starting with a "
                       "letter or digit")
                 name = ask("agent name", suggested)
-    minted = ""
+    # Bound here so the deferred mint below reads them whether or not this block
+    # runs -- `will_mint` is the only thing that decides it does.
+    will_mint, user, keep, cookie = False, None, False, cookie
     if a.login or not usable:
         # MINT FIRST, then fall into exactly the same path as a pasted token.
         # One installer, not two: everything after this point cannot tell where
@@ -1089,33 +1146,20 @@ def cmd_init(a):
                 print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
                       file=sys.stderr)
                 return 1
-        # SAY WHAT MINTING DOES TO AN EXISTING NAME BEFORE ASKING FOR A PASSWORD.
-        # Binding supersedes this account's previous token for that name, so
-        # re-running on a second machine MOVES the agent rather than cloning it
-        # -- the first machine goes dead on its next call. That is the design
-        # (one identity, one live credential) and it is the kind of thing a
-        # person should read before it happens rather than after.
-        if wizard:
-            print(f"\nMinting a token bound to '{name}'. If that name already has "
-                  f"one, it is superseded:\n  the machine holding it stops working "
-                  f"on its next call. Two machines means two names.")
-        try:
-            token, attached, minted = mint_token(
-                url, user, None, name, a.rooms, a.tier,
-                cookie=cookie, keep_session=keep,
-                pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
-                     if wizard else None,
-                create=a.create,
-                confirm_create=(lambda n: ask(
-                    f"create NEW agent {n!r}? [y/N]", "N").lower().startswith("y"))
-                    if wizard else None)
-        except RuntimeError as e:
-            print(f"reveille init: REFUSING -- {e}\nNothing was installed.",
-                  file=sys.stderr)
-            return 1
-        minted = f"minted a token bound to {name}, rooms: {', '.join(attached)}{minted}"
+        # THE SIGN-IN HAPPENS HERE; THE MINT DOES NOT. Everything above this
+        # point either asks the person something or reads a session off disk --
+        # none of it creates a credential on the broker, so a refusal below
+        # still leaves nothing behind. The mint itself runs at the END of the
+        # install (see `will_mint`), because it is the one act with a remote
+        # consequence and it must not happen before the local steps that can
+        # refuse.
+        will_mint = True
     missing = [n for n, v in (("REVEILLE_URL", url), ("REVEILLE_AGENT_ROLE", name),
-                              ("REVEILLE_TOKEN", token)) if not v]
+                              # not the token when one is about to be minted --
+                              # demanding it here is what sent readers to the web
+                              # UI for something the CLI now does (DES-022 s4)
+                              ("REVEILLE_TOKEN", token if not will_mint else "-"))
+               if not v]
     if missing:
         print(f"reveille init: missing {', '.join(missing)}.\n"
               f"  export REVEILLE_URL=<broker url>\n"
@@ -1136,7 +1180,10 @@ def cmd_init(a):
     # The environment's credential was already asked about above -- once is the
     # whole point, and a second probe of the same secret is a second chance for
     # a flaky network to answer differently about a token nothing has changed.
-    ok, said = checked[1:] if (checked and checked[0] == token) else verify(url, name, token)
+    # A CREDENTIAL ABOUT TO BE MINTED HAS NOTHING TO VERIFY: there is no token
+    # yet, and the mint below either succeeds or refuses on its own terms.
+    ok, said = (True, "") if will_mint else (
+        checked[1:] if (checked and checked[0] == token) else verify(url, name, token))
     if not ok and not a.force:
         print(f"reveille init: REFUSING -- {said}.\n"
               f"  url:   {url}\n  agent: {name}\n"
@@ -1149,8 +1196,6 @@ def cmd_init(a):
     persisted = ensure_on_path()
     if persisted:
         steps.append(persisted)
-    if minted:
-        steps.append(minted)
     # THE REGISTRATION LIVES IN THE DIRECTORY. A stale user-scope registration
     # is converged AWAY, never left: its ${VAR} headers expand from the process
     # env at connect time, before project settings env exists, so it either
@@ -1185,6 +1230,45 @@ def cmd_init(a):
               "this is fixed.", file=sys.stderr)
         return 1
     steps.append("hook: installed")
+
+    # THE MINT IS THE LAST ACT WITH A REMOTE CONSEQUENCE (ruling #126, regressed
+    # in 0.2.186, re-ruled 12271). It used to run ~50 lines earlier, before the
+    # MCP registration and the hook -- both of which can refuse. On 2026-08-19 a
+    # refused `claude mcp add-json` printed "Nothing else was installed" while a
+    # credential ALREADY EXISTED on the broker; and because a bound mint
+    # supersedes the name's previous token, it also rang the working body with a
+    # swap-pending, costing that agent a full handover cycle -- a push, a state
+    # memory and a bus post -- for an install that never happened.
+    # A refusal has to be true about the BROKER, not just about this disk. So
+    # everything that can refuse locally has already run by here, and the only
+    # steps after this one write files whose failure the message names.
+    if will_mint:
+        # SAY WHAT MINTING DOES TO AN EXISTING NAME. Binding supersedes this
+        # account's previous token for that name, so re-running on a second
+        # machine MOVES the agent rather than cloning it -- the first machine
+        # goes dead on its next call. That is the design (one identity, one live
+        # credential) and a person should read it before it happens, not after.
+        if wizard:
+            print(f"\nMinting a token bound to '{name}'. If that name already has "
+                  f"one, it is superseded:\n  the machine holding it stops working "
+                  f"on its next call. Two machines means two names.")
+        try:
+            token, attached, note = mint_token(
+                url, user, None, name, a.rooms, a.tier,
+                cookie=cookie, keep_session=keep,
+                pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
+                     if wizard else None,
+                create=a.create,
+                confirm_create=(lambda n: ask(
+                    f"create NEW agent {n!r}? [y/N]", "N").lower().startswith("y"))
+                    if wizard else None)
+        except RuntimeError as e:
+            print(f"reveille init: REFUSING -- {e}\nThe MCP registration and Stop "
+                  f"hook above stand and NO credential was minted; re-run to "
+                  f"finish.", file=sys.stderr)
+            return 1
+        steps.append(f"minted a token bound to {name}, "
+                     f"rooms: {', '.join(attached)}{note}")
 
     try:
         path = write_credential(url, name, token, workdir)

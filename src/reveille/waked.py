@@ -113,6 +113,27 @@ async def _session(uri, agent, state):
                           f"until one attaches; retrying ({obj.get('detail', '')})",
                           file=sys.stderr)
                     return NO_ROOMS
+                if obj.get("error") == "pending":
+                    # NOT A FAULT AND NOT FATAL: the broker is saying this
+                    # machine's credential is the successor and the identity has
+                    # not moved yet. The loop rings the spool for it.
+                    print(f"reveille-waked: credential has NOT ARRIVED -- "
+                          f"{agent} is still the other body until a turn here "
+                          f"calls join(); ringing the spool for one. This is "
+                          f"the EXPECTED state for a freshly materialised body: "
+                          f"the entrypoint starts this daemon before the agent's "
+                          f"first turn, and every dial is refused until that "
+                          f"turn joins ({obj.get('detail', '')})", file=sys.stderr)
+                    return NOT_ARRIVED
+                if obj.get("error") == "bad_token":
+                    # WHOSE token is unknown decides what happens next, and only
+                    # the loop knows that: a body that was parked can go back to
+                    # the credential it was superseded on and wait for another
+                    # ticket, while a body that never had one has nothing to
+                    # fall back to. So this reports the fact and judges nothing.
+                    print(f"reveille-waked: the broker does not know this "
+                          f"credential ({obj.get('detail', '')})", file=sys.stderr)
+                    return DEAD_CREDENTIAL
                 if obj.get("error"):
                     print(f"reveille-waked rejected: {obj['error']} "
                           f"({obj.get('detail', '')})", file=sys.stderr)
@@ -168,7 +189,29 @@ def _why(e):
 # crossing the bus in the clear, because the machine that already held one is
 # the only party that can make the exchange.
 PARKED = 4
+# THE CREDENTIAL IS HERE AND THE IDENTITY IS NOT (defect 1). Distinguishable
+# from PARKED: parked means this body was displaced and holds a spent secret;
+# not-arrived means it holds the SUCCESSOR and only a turn can land it.
+NOT_ARRIVED = 5
+# The credential this machine holds is not merely unlanded -- the broker does not
+# know it at all. On a claimed ticket that means the arrival window closed with
+# no turn to land it, and the answer is to park again, not to die (architect
+# 12284).
+DEAD_CREDENTIAL = 6
 RECALL_POLL_S = 20
+# One ring a minute while a credential waits to land. The window is ten minutes
+# (store.PENDING_TTL_NS), an agent mid-turn does not answer instantly, and a
+# duplicate ring is harmless by construction -- the watcher prints it, the agent
+# deletes the file. Silence here is what cost the transporter its last step.
+ARRIVAL_RING_S = 60
+
+
+def arrival_frame(why):
+    """A ring that asks for the one act only a session can perform: join()."""
+    return json.dumps({"wake": True, "reason": why,
+                       "detail": "this body holds a credential that has not "
+                                 "landed -- join() IS the arrival and commits "
+                                 "the swap"})
 
 
 async def _claim(url, secret):
@@ -202,9 +245,17 @@ async def _park(url, agent, secret, write_env):
         # the daemon is not the only thing on this machine that needs it, and a
         # credential that lives only in a process dies with the process.
         if write_env and write_env(got):
-            print(f"reveille-waked: RECALLED -- {agent} is this machine again. "
-                  f"Credential written; restarting the waiter on it.",
-                  file=sys.stderr)
+            # THE CREDENTIAL IS NOT THE ARRIVAL (defect 1). Claiming writes a
+            # secret to disk unattended; the identity moves only when a session
+            # here calls join(). Nothing on this machine takes a turn on its
+            # own, so the ring is the act that finishes the recall -- without
+            # it the ticket lands, the log says RECALLED, and the agent stays
+            # where it was. Measured on the transporter chain, step 8.
+            spool.write_ring(agent, arrival_frame("recalled"))
+            print(f"reveille-waked: RECALLED -- a live credential for {agent} "
+                  f"is written here and the spool is rung. This machine is not "
+                  f"{agent} until a turn calls join(); the waiter stays down "
+                  f"until it does.", file=sys.stderr)
             return got
         print("reveille-waked: a return ticket arrived but the credential could "
               "not be written -- run `reveille init` here to finish it",
@@ -405,6 +456,12 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
     delay = 1
     first_no_rooms = None   # monotonic stamp of the FIRST refusal of a streak
+    last_arrival_ring = None   # monotonic stamp of the last join-me ring
+    # THE CREDENTIAL TO FALL BACK TO. Set when this body is superseded and kept
+    # until a session actually attaches: between those two points the daemon is
+    # holding a credential that may never land, and the spent one it was parked
+    # on is the only thing that can claim the NEXT ticket.
+    parked_secret = None
     try:
         while True:
             # Before dialling, not after: a body that is behind should reach the
@@ -433,6 +490,41 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                             f"stops an unringable daemon from holding the "
                             f"slot forever.", file=sys.stderr)
                         return 3
+                elif code == NOT_ARRIVED:
+                    # STAY DOWN UNTIL THE ARRIVAL IS OBSERVED. The broker is the
+                    # only party that can say the swap committed, and it says it
+                    # by ACCEPTING this socket. So the daemon keeps ringing and
+                    # keeps retrying: no waiter is registered on a credential
+                    # that does not yet speak for the identity, which is what
+                    # made a body look reachable while it was not.
+                    now = time.monotonic()
+                    if last_arrival_ring is None or now - last_arrival_ring >= ARRIVAL_RING_S:
+                        spool.write_ring(agent, arrival_frame("not-arrived"))
+                        last_arrival_ring = now
+                    await asyncio.sleep(RECALL_POLL_S)
+                    continue
+                elif code == DEAD_CREDENTIAL:
+                    # A MISSED WINDOW IS RETRIED AT THE NEXT TICKET, NEVER A DEAD
+                    # DAEMON (architect 12284). A claimed credential that nobody
+                    # landed inside PENDING_TTL is swept away, so this machine is
+                    # holding a secret the broker has never heard of -- and the
+                    # old shape exited, which meant one missed arrival window
+                    # cost the box its daemon until a human noticed. Back to the
+                    # credential it was superseded on, and back to polling for a
+                    # ticket. A body that was never parked has nothing to fall
+                    # back to and still exits.
+                    if not parked_secret:
+                        return 1
+                    print(f"reveille-waked: that credential never landed and the "
+                          f"window has closed -- PARKED again on the one this "
+                          f"machine was superseded on, waiting for another "
+                          f"return ticket for {agent}.", file=sys.stderr)
+                    got = await _park(url, agent, parked_secret, write_env)
+                    if not got:
+                        return PARKED
+                    token = got
+                    uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                    delay = 1
                 elif code == PARKED:
                     # SUPERSEDED IS NOT DEAD (s14). The old shape exited here and
                     # the machine needed a human with a fresh secret to come
@@ -440,6 +532,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # and exchanges the credential it already holds -- and when
                     # that lands, the URI is rebuilt on the new secret and the
                     # loop simply carries on.
+                    parked_secret = token
                     got = await _park(url, agent, token, write_env)
                     if not got:
                         return PARKED
@@ -449,6 +542,11 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                 else:
                     first_no_rooms = None
                     delay = 1
+                    # ATTACHED, so this credential speaks for the identity and
+                    # the spent one no longer does. Holding it any longer would
+                    # let a later unrelated refusal park on a secret two swaps
+                    # old.
+                    parked_secret = None
                     if code is not None:
                         return code
             except (OSError, websockets.WebSocketException) as e:

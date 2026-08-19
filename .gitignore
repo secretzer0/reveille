@@ -24,3 +24,4 @@ build/
 broker.db
 *.db
 shots/
+.mcp.json

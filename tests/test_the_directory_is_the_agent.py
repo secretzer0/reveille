@@ -172,6 +172,20 @@ def test_a_file_left_holding_nothing_is_removed(tmp_path):
     assert not (tmp_path / ".mcp.json").exists()
 
 
+def test_a_tracked_mcp_json_is_emptied_and_left_for_its_owner_to_delete(tmp_path):
+    """Removing OUR entry is correctness. Deleting a file git is watching is a
+    staged deletion the person did not ask for and may not notice until a commit
+    takes it -- so the file stays and the removal is their commit."""
+    import subprocess
+    (tmp_path / ".mcp.json").write_text(json.dumps({"mcpServers": {
+        "reveille": {"type": "http", "url": "http://old/mcp"}}}))
+    for argv in (["git", "init", "-q"], ["git", "add", ".mcp.json"]):
+        subprocess.run(argv, cwd=tmp_path, capture_output=True, check=True)
+    cli.drop_project_mcp_entry(tmp_path)
+    assert (tmp_path / ".mcp.json").exists(), "not ours to delete"
+    assert json.loads((tmp_path / ".mcp.json").read_text())["mcpServers"] == {}
+
+
 def test_a_mcp_json_we_cannot_parse_is_left_alone(tmp_path):
     """It may name servers this installer does not own -- refusing to touch it
     is the same discipline the write path had."""
