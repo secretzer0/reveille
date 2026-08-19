@@ -267,7 +267,7 @@ def test_the_accept_screen_consents_to_a_sentence():
     """DES-012 s7: the human consents to what travels, not to a button."""
     start = PAGE.index("// ---- DES-012: a visit is a body swap")
     panel = PAGE[start:PAGE.index("async function openTokens()")]
-    for phrase in ("stays theirs", "goes dark", "and in nothing else",
+    for phrase in ("stays theirs", "KEEPS WORKING until this one joins", "and in nothing else",
                    "YOUR Claude account and bill", "state notes travel",
                    "container harbor" if "container harbor" in panel else "recommended",
                    "evict it at any time", "recall it at any time"):
