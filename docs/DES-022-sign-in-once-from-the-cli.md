@@ -1,6 +1,6 @@
 # DES-022: Sign in once from the CLI -- a human's session mints their agents
 
-Status: RULED 2026-08-19 (operator 12161 "no switching back and forth from
+Status: RULED 2026-08-19; built as #141 = 0.2.187 with the deviations accepted at 12182 and the user-code defense required at 12183 (operator 12161 "no switching back and forth from
 browser to cli ... a clickable link ... on success the cli updates the
 user-wide token"; architect 12162/12165, devops 12163; ordered 12176 as PR B
 after the init cleanup, before the broker deploy and the red-shirt chain).
@@ -29,27 +29,39 @@ browser, exactly as DES-018 built it.
 ## 3. The flow: link, click, poll (device authorization, no loopback)
 
 - `reveille login [url]` (url defaults to the stored one, else asks):
-  1. CLI makes `state = secrets.token_urlsafe(32)` and prints ONE link,
-     `<url>/ui/login?cli=<state>`, opening the default browser if there is
-     one. The sign-in page forwards `cli` onto every door link, so
-     `/auth/<door>/login?cli=<state>` carries it into the OIDC marker beside
-     `invite`/`note` (the browser's data, never the provider's).
-  2. The human signs in with Google/GitHub in ANY browser on ANY device.
-  3. At `auth_callback_http`, on a successful `federated_login`, when the
-     marker holds `cli`: the broker creates a SECOND session for the CLI
-     (`store.create_session`, its own row -- browser logout does not kill the
-     CLI, and the Sessions view can revoke it by itself) and parks its secret
-     in `oidc_state` under `cli:<state>` for 5 min. The browser gets its own
-     cookie and a page that says "signed in; you can close this -- the
-     terminal continues".
-  4. CLI polls `GET /auth/cli/<state>` every 2 s: `202 pending`, or
-     `200 {"session": ..., "user": ..., "expires_ns": ...}` ONCE (the park is
-     deleted on read), or `404` when expired/unknown. 5 min, then the CLI says
-     so and stops.
-  5. CLI writes `~/.reveille/auth.json` (0600, dir 0700):
-     `{"url", "user", "session", "expires_ns"}`. One file per machine, outside
-     every project. The session secret is the ONLY thing on disk; its hash is
-     what the broker stores.
+  1. CLI makes `state = secrets.token_urlsafe(32)`, REGISTERS it
+     (`POST /auth/cli/<state>` -> a 5-min `pending` row, so that a later 404
+     truly means expired and not "not yet"), and prints ONE link,
+     `<url>/auth/cli?cli=<state>`, plus a **code** derived from the state
+     (`base32(sha256(state))[:8]`, hyphenated, one pure function used by both
+     sides). Opens the default browser if there is one.
+  2. `/auth/cli` is a server-rendered page of door links (not the SPA's
+     sign-in card, which only renders to someone NOT signed in -- and the
+     person at the terminal usually is). It shows the SAME code and says:
+     "A terminal wants to sign in as you. Its code is XXXX-XXXX. Continue
+     only if that code is on your screen." **That sentence is the defense
+     against a link someone else sent you** (RFC 8628's user_code): without
+     it, any ≥32-char state in a link a victim clicks would park the
+     victim's session for the sender. Each door link carries `cli` into the
+     OIDC marker beside `invite`/`note` (the browser's data, never the
+     provider's). A broker with no doors (password open) sends nobody here:
+     the CLI asks for the password in the terminal and opens no browser.
+  3. The human signs in with Google/GitHub in ANY browser on ANY device.
+  4. At `auth_callback_http`, on a successful `federated_login`, when the
+     marker holds `cli` AND the pending row exists: the broker creates a
+     SECOND session for the CLI (`store.create_session`, its own row --
+     browser logout does not kill the CLI, and the Sessions view can revoke
+     it by itself), replaces the pending row with the session under
+     `cli:<state>` (5 min), logs the client IP, and answers the browser with
+     "signed in; you can close this -- the terminal continues".
+  5. CLI polls `GET /auth/cli/<state>` every 2 s: `202 pending`, or `200
+     {"session", "user", "expires_ns"}` ONCE (the park is deleted on read), or
+     `404` expired. 5 min, then the CLI says so and stops. A state shorter
+     than 32 chars is refused at all three entry points.
+  6. CLI writes `~/.reveille/auth.json` (0600, dir 0700): `{"url", "user",
+     "session", "expires_ns"}`. One file per machine, outside every project.
+     The session secret is the ONLY thing on disk; its hash is what the
+     broker stores.
 - Why poll, not a loopback redirect: a listener on 127.0.0.1 needs the browser
   on the same machine -- dead over SSH, in a container, on a phone. A link
   plus a poll works everywhere with no port and no paste (devops 12163 point
@@ -61,7 +73,8 @@ browser, exactly as DES-018 built it.
 ## 4. `reveille init` mints from the session
 
 - `reveille init <url> <name> [--create --rooms r1,r2]` with no token and no
-  `--login`: reads `~/.reveille/auth.json`; session missing, for another url,
+  `--login` (`--no-prompt` with doors and no stored session = refusal naming
+  `reveille login`; a script is never parked on a 5-min poll): reads `~/.reveille/auth.json`; session missing, for another url,
   or refused by the broker (401) -> runs s3 INLINE (prints the link, polls),
   then continues. That IS the re-auth path (operator 12161).
 - Mint: `POST /tokens {agent_name, create, rooms}` with the session cookie --
@@ -93,6 +106,8 @@ in the project directory. No browser-to-terminal copying, ever.
   logout` deletes the row (`POST /logout` with the cookie) and the file.
 - The park is single-use and 5 min; the state never appears in a URL the
   provider sees (it rides the marker, server-side, like `invite`).
+- The code on both screens is what stops a sent link from signing the
+  sender's terminal in as you; the register row is hygiene, not defense.
 - `GET /auth/cli/<state>` is unauthenticated by construction (the CLI has
   nothing yet) and answers nothing useful to anyone without the state.
 
