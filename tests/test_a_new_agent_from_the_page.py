@@ -46,7 +46,10 @@ def test_a_closed_password_door_names_the_open_one(monkeypatch):
         cli.login("https://reveille.mythos.org", "someone", "x")
     said = str(e.value)
     assert "password sign-in is closed" in said
-    assert "this is a NEW agent" in said and "reveille init" in said
+    # DES-022 s4: the remedy is a COMMAND now, not a walk through the web UI --
+    # the whole point of `reveille login` is that nothing is copied by hand.
+    assert "reveille login" in said and "reveille init" in said
+    assert "Tokens" not in said
     assert "login failed" not in said
 
 
