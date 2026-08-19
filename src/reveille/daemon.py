@@ -268,7 +268,18 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
-0.2.184 THE CACHE OUTLIVED THE OUTAGE.
+0.2.184 THE CACHE OUTLIVED THE OUTAGE, AND A FALLBACK RENDITION IS NEVER KEPT
+(ruled 12101). THE ROOT FIX, because the purge below is only the symptom:
+tts_voice() with an ASSIGNED bank clip that the synthesizer cannot see now
+returns None -- silent, no bytes, nothing cached -- instead of falling through
+to the digest pick. Falling through sounds like the generous choice and is the
+opposite: some audio does NOT beat none when the audio is kept. The next play
+POSTs /audio/<mid>, finds no file, and re-queues it against a synthesizer that
+has since reconciled, so the silence lasts one click rather than forever. The
+predefined digest pick stays exactly as it was for UNASSIGNED speakers, who were
+never promised a particular voice; a speaker WITH an assignment is owed that
+voice or none (DES-009 section 7, silent by design).
+
 
 ONE MORE DEFECT, FOUND BY THE OPERATOR'S EAR AND CAUSED BY THIS WORK. Moving
 the synthesizer meant restarting it repeatedly -- host move, two image builds, a
@@ -3552,19 +3563,36 @@ def tts_voice(speaker, *, clips, predefined, assigned=None):
     DES-013 section 3).
 
     An ASSIGNED bank voice (`bank-<id>.wav`, present in the synthesizer's
-    listing) is cloned first; assigned but not visible logs a line that names
-    the likely cause and falls through. Then a dropped `voices/<speaker>.wav`
-    is CLONED -- never a `bank-*` file, that prefix is the bank's (an agent
-    named bank-7 must not steal a bank voice). Otherwise the server's
-    PREDEFINED SET is indexed by the name's digest and the SAME digest offsets
-    the knobs, so two names on one predefined voice do not sound identical.
+    listing) is cloned. ASSIGNED BUT NOT VISIBLE RETURNS None -- silent, and
+    deliberately so (DES-009 section 7: silence beats the wrong voice).
+
+    It used to fall through to the digest pick, which sounds harmless and is
+    not: the rendition is CACHED as tts-<mid>.webm and outlives the outage
+    that caused it. The operator heard this as a transcript drifting between
+    characters while scrolling -- 156 bank pushes had failed Connection
+    refused during a synthesizer restart, and every message voiced in that
+    window kept the wrong voice permanently. Nothing downstream can tell a
+    stale-correct file from a fresh-wrong one, so the only place to refuse is
+    here, before a byte is written. Returning None writes no file, and the
+    next play POSTs /audio/<mid>, finds none, and re-queues it against a
+    synthesizer that has since reconciled (ruled 12101).
+
+    Then a dropped `voices/<speaker>.wav` is CLONED -- never a `bank-*` file,
+    that prefix is the bank's (an agent named bank-7 must not steal a bank
+    voice). Otherwise, FOR AN UNASSIGNED SPEAKER ONLY, the server's PREDEFINED
+    SET is indexed by the name's digest and the SAME digest offsets the knobs,
+    so two names on one predefined voice do not sound identical. That path is
+    for speakers who were never promised a particular voice; a speaker WITH an
+    assignment is owed that voice or none.
+
     None when there is nothing to speak with -- a silent message, not an
     error. Pure, so the resolution is testable without a server."""
     if assigned:
         if assigned in clips:
             return {"voice_mode": "clone", "reference_audio_filename": assigned}
-        log.warning("tts: bank clip %s is not visible to the synthesizer even after "
-                    "a push -- speaking with the digest pick", assigned)
+        log.warning("tts: bank clip %s not visible after push -- silent, will retry",
+                    assigned)
+        return None
     if not speaker.startswith("bank-") and f"{speaker}.wav" in clips:
         return {"voice_mode": "clone", "reference_audio_filename": f"{speaker}.wav"}
     if not predefined:

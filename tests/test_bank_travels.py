@@ -6,9 +6,10 @@ POST /upload_reference, multipart) under the versioned name
 bank-<id>-<updated_ns>.wav; a replace is a NEW name; the worker reconciles at
 start (list theirs, push what the bank has and they lack); an assigned clip
 missing from the listing triggers a reconcile and the utterance clones the
-pushed name; a synthesizer that refuses the push leaves the message spoken with
-the digest pick, never stalled; compose no longer bind-mounts the broker's
-voices dir into the synthesizer -- its reference dir is its own volume.
+pushed name; a synthesizer that refuses the push leaves the message SILENT
+rather than miscast, because a fallback rendition would be cached and outlive
+the outage (ruled 12101); compose no longer bind-mounts the broker's voices dir
+into the synthesizer -- its reference dir is its own volume.
 
 Measured on tts-vet before writing (11115): arbitrary sanitized filename
 accepted, duplicate is a no-op 200, /tts clones by the pushed name.
@@ -212,7 +213,18 @@ def test_an_assigned_clip_missing_from_the_listing_triggers_a_push_then_clones_i
                               "reference_audio_filename": name}
 
 
-def test_a_synthesizer_that_refuses_the_push_leaves_the_message_spoken_not_stalled(broker, caplog):
+def test_a_synthesizer_that_refuses_the_push_leaves_the_message_silent_not_miscast(broker, caplog):
+    """Ruled 12101, after the operator heard the old behaviour.
+
+    This used to speak with the digest pick rather than stall, on the reasoning
+    that some audio beats none. It does not: the rendition is CACHED as
+    tts-<mid>.webm and outlives the outage that produced it. 156 bank pushes
+    failed Connection refused during a synthesizer restart, and every message
+    voiced in that window kept the wrong voice permanently -- heard as a
+    transcript drifting between characters while scrolling. Nothing downstream
+    can tell a stale-correct file from a fresh-wrong one, so the refusal has to
+    happen here, before a byte is written. No file means the next play POSTs
+    /audio/<mid>, finds none, and re-queues against a reconciled synthesizer."""
     daemon._tts_on = False
     st, row = _put_clip("quark", wav(6))
     daemon._tts_on = True
@@ -220,8 +232,7 @@ def test_a_synthesizer_that_refuses_the_push_leaves_the_message_spoken_not_stall
     _Synth.refuse_upload = True
     with caplog.at_level("WARNING"):
         chunks = daemon._tts_speak(broker["url"], "", "picard", "hello", 5, assigned=name)
-    assert b"".join(chunks) == SPOKEN
-    assert _Synth.tts[-1]["voice_mode"] == "predefined", "digest pick, not silence"
+    assert chunks is None, "silent: no bytes, so nothing wrong can be cached"
     assert "push of " in caplog.text and "not visible" in caplog.text
     # And a PUT while the synthesizer refuses still lands locally, reporting pushed=False.
     st, row = _put_clip("rom", wav(6))
