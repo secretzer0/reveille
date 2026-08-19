@@ -42,21 +42,47 @@ def broker():
     srv.shutdown()
 
 
-def fake_claude(tmp_path, rc=0, listed="", fail_add=False):
+def fake_claude(tmp_path, rc=0, listed="", fail_add=False, registry=False):
     """A `claude` that records its argv. The real binary is not on this box and
     would not be on a fresh host either -- what matters is the command we hand
     it, which is the same one docker/entrypoint.sh already runs.
 
     fail_add makes only `mcp add-json` fail, so a test can exercise a refused
     registration without also breaking the `mcp remove` that runs before it.
+
+    registry=True MAKES THE STUB STATEFUL, and that is the whole point of it
+    existing. A fake that only ever SUCCEEDS cannot gate idempotence: 0.2.186
+    dropped the `mcp remove` that used to run before `add-json`, every test
+    stayed green because this stub said yes twice, and the real binary refuses
+    the second one -- "MCP server reveille already exists in local config",
+    with no --force. That shipped, and it broke the one path a recalled body
+    needs (defect 2, chain step 8). So this mode keeps a file as its registry:
+    add-json REFUSES a name already there, remove clears it and fails when
+    there is nothing to clear, exactly like the real thing.
     """
     log = tmp_path / "claude.log"
     p = tmp_path / "claude"
+    reg = tmp_path / "mcp-registry"
     add_fail = 'if [ "$2" = "add-json" ]; then echo "no such flag" >&2; exit 1; fi' if fail_add else ""
+    stateful = f'''
+if [ "$2" = "add-json" ]; then
+  if [ -e "{reg}/$5" ]; then
+    echo "MCP server $5 already exists in local config" >&2; exit 1
+  fi
+  mkdir -p "{reg}"; : > "{reg}/$5"
+fi
+if [ "$2" = "remove" ]; then
+  if [ ! -e "{reg}/$3" ]; then
+    echo "No MCP server found with name: $3" >&2; exit 1
+  fi
+  rm -f "{reg}/$3"
+fi
+''' if registry else ""
     p.write_text(f'''#!/bin/sh
 if [ "$2" = "list" ]; then printf '%s' '{listed}'; exit 0; fi
 printf '%s\\n' "$*" >> {log}
 {add_fail}
+{stateful}
 exit {rc}
 ''')
     p.chmod(0o755)
@@ -190,6 +216,30 @@ def test_an_unreachable_broker_does_not_discard_a_credential(tmp_path, monkeypat
     ok, said = cli.verify("http://127.0.0.1:1", "dev-agent", "probably-fine", timeout=2)
     assert ok is None, "unreachable is a third answer, not a refusal"
     assert "did not answer" in said
+
+
+def test_a_second_run_survives_a_claude_that_refuses_a_duplicate(tmp_path, broker,
+                                                                 monkeypatch, capsys):
+    """THE REAL `claude mcp add-json` REFUSES A NAME IT ALREADY HAS, and carries
+    no --force. Without a remove first, init is a one-shot command: the second
+    run on any directory fails at step 1 and installs nothing.
+
+    That is not hypothetical. It shipped in 0.2.186 and was found when a
+    recalled body could not run the recovery its own daemon told it to run
+    (waked's PARKED message: "`reveille init` also works"). It stayed hidden
+    because the stub said yes twice; this test uses the stateful one, so it is
+    RED without the remove in register_mcp_local and green with it.
+    """
+    claude, log = fake_claude(tmp_path, registry=True)
+    argv, home, work = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    assert cli.main(argv) == 0
+    assert cli.main(argv) == 0, capsys.readouterr().err
+    # and the registration is still THERE afterwards -- a remove that ran
+    # without a re-add would leave the directory unregistered, which reads as
+    # success and is not.
+    adds = [ln for ln in log.read_text().splitlines() if "add-json" in ln]
+    assert len(adds) == 2, adds
 
 
 def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):

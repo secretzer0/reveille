@@ -101,6 +101,16 @@ def register_mcp_local(url, workdir, claude):
         "url": url.rstrip("/") + "/mcp",
         "headersHelper": "reveille-headers",
     })
+    # REMOVE FIRST, AND IT IS NOT BELT-AND-BRACES. `claude mcp add-json` REFUSES
+    # a name already registered ("MCP server reveille already exists in local
+    # config") and carries no --force, so without this init is a ONE-SHOT
+    # command: every directory it has already touched refuses it forever. That
+    # is exactly the directory that needs it -- waked's own PARKED message says
+    # "`reveille init` also works", and on 2026-08-19 it did not, which left a
+    # recalled body with no way back (defect 2, chain step 8). The remove is
+    # best-effort: a first run has nothing to remove and must not fail on that.
+    subprocess.run([claude, "mcp", "remove", "reveille", "--scope", "local"],
+                   capture_output=True, text=True, cwd=str(workdir))
     r = subprocess.run([claude, "mcp", "add-json", "--scope", "local", "reveille", spec],
                        capture_output=True, text=True, cwd=str(workdir))
     if r.returncode != 0:
