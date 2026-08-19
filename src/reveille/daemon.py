@@ -277,11 +277,24 @@ moves that authority to the machine's own init: the operator installs it once,
 and afterwards it survives reboots, restarts on failure, and is controlled by a
 human with systemctl. Same image, port, volumes and GPU reservation as the
 compose service -- one container under a different supervisor, not a second way
-to configure it. Published on 127.0.0.1 ONLY: the synthesizer is unauthenticated
-by design (DES-009 s3, one caller, no public port), and a host unit is not on
-the compose network, so binding 0.0.0.0 would hand an unauthenticated speech
-endpoint to the whole LAN -- the exact boundary the off-network rule refuses to
-cross without https and an authenticating proxy. TimeoutStartSec=20min because
+to configure it. WHERE IT LISTENS IS A DEPLOYMENT FACT, NOT A CONSTANT: the
+first draft hardcoded 127.0.0.1:8004, which is right for a broker on the same
+host and WRONG for this fleet, where the synthesizer runs on the operator's
+workstation and the VM broker calls it across the LAN at
+REVEILLE_TTS_URL=http://192.168.90.136:18004 -- installed as first written it
+would have SILENCED THE FLEET'S VOICE the moment it replaced what runs there now
+(caught in review). Bind and published port come from Environment= with the
+same-host case as the default, and the unit's header carries this deployment's
+override measured from the running container: image tag, both data paths, and
+the working tree bind-mounted over /app. That last one rides an UNBRACED
+$TTS_EXTRA because systemd word-splits $VAR and passes ${VAR} as a single
+argument -- and it matters, because the server's own CODE comes from disk here,
+so a unit that silently ran the image's copy would be different software under
+the same name. Always ONE address, never 0.0.0.0: unauthenticated by design
+(DES-009 s3, one caller, no public port) means it answers where the broker was
+told to call it and nowhere else, and the LAN_PLAINTEXT allowlist naming one
+host is the operator's ruled acceptance of that hop in the clear -- not a
+licence to answer on every interface. TimeoutStartSec=20min because
 the model downloads on a fresh cache and a default timeout kills it mid-download,
 then kills the retry, forever, while the journal says only "timed out".
 ALSO deploy/reveille-laptop-awake.conf, shipped and installed by NOBODY. A

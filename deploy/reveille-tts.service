@@ -10,21 +10,45 @@
 # installs it once, and afterwards the service survives reboots, restarts on
 # failure, and is controlled with `systemctl` by a human at that host.
 #
-# The image, port, volumes and GPU reservation are the compose service's,
-# unchanged -- this is the same container under a different supervisor, not a
-# second way to configure it. The broker still reaches it at
-# REVEILLE_TTS_URL=http://127.0.0.1:8004 (loopback here, because a host unit
-# is not on the compose network; see DES-009 section 3 -- the off-network rule
-# is what makes that distinction matter).
+# WHERE IT LISTENS IS A DEPLOYMENT FACT, NOT A CONSTANT (architect, blocking on
+# the first draft of this file). That draft hardcoded 127.0.0.1:8004, which is
+# right for a broker on the same host and WRONG for this fleet: the synthesizer
+# runs on the operator's workstation and the VM broker reaches it across the LAN
+# at REVEILLE_TTS_URL=http://192.168.90.136:18004. Installed as first written,
+# this unit would have silenced the fleet's voice the moment it replaced what
+# runs there now. So the bind address and published port come from Environment=,
+# the defaults are the same-host case, and THIS deployment overrides them.
+#
+# A LAN IP, NEVER 0.0.0.0. The synthesizer is unauthenticated by design (DES-009
+# section 3: one caller, no public port), so it is bound to exactly the address
+# the broker was told to call and no other. `REVEILLE_LAN_PLAINTEXT` naming
+# 192.168.90.136 is the operator's ruled acceptance of that hop in the clear on
+# their own LAN -- it is not a licence to answer on every interface the host has.
 #
 # INSTALL (operator, once):
 #   sudo cp deploy/reveille-tts.service /etc/systemd/system/
+#   sudo systemctl edit reveille-tts        # add the [Service] block below
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now reveille-tts
-#   systemctl status reveille-tts          # and `journalctl -u reveille-tts -f`
-# Then set REVEILLE_TTS_URL=http://127.0.0.1:8004 in $SERVER_DATA/reveille.env
-# and `make up`. Unset it and the broker simply runs no voice worker: voices
-# off beats a transcript in flight, and that refusal is unchanged.
+#   systemctl status reveille-tts           # and `journalctl -u reveille-tts -f`
+#
+# FOR THIS DEPLOYMENT (WorldBuilder, 192.168.90.136 -- measured from the running
+# container, 2026-08-18), the override is:
+#   [Service]
+#   Environment=TTS_BIND=192.168.90.136
+#   Environment=TTS_PUBLISH_PORT=18004
+#   Environment=TTS_IMAGE=reveille-tts:cu128-try
+#   Environment=TTS_REFERENCE=/home/vyzon/tts/reference_audio
+#   Environment=TTS_CACHE=/home/vyzon/tts/hf_cache
+#   Environment=TTS_EXTRA=-v /home/vyzon/tts/ctts-fork:/app
+#   User=vyzon
+# matching the broker's existing REVEILLE_TTS_URL exactly. Nothing about the
+# broker changes; that is the point of overriding rather than editing.
+#
+# A same-host broker needs no override at all: the defaults below are
+# 127.0.0.1:8004 with named volumes, and REVEILLE_TTS_URL=http://127.0.0.1:8004
+# in $SERVER_DATA/reveille.env. Unset that variable and the broker simply runs no
+# voice worker -- voices off beats a transcript in flight, unchanged.
 #
 # UNINSTALL: `sudo systemctl disable --now reveille-tts`. The named volumes are
 # NOT removed with it -- the model cache is about a gigabyte and re-downloading
@@ -49,7 +73,23 @@ Type=exec
 # restart here is a unit still running the old one.
 Environment=TTS_IMAGE=reveille-tts:dev
 Environment=TTS_NAME=reveille-tts
-Environment=TTS_PORT=8004
+# Where it LISTENS. Defaults are the same-host case; a deployment whose broker
+# is elsewhere overrides both to the address it told the broker to call.
+Environment=TTS_BIND=127.0.0.1
+Environment=TTS_PUBLISH_PORT=8004
+# The mount sources. Named volumes by default; a deployment that keeps them on
+# disk names the paths instead.
+Environment=TTS_REFERENCE=reveille_tts-reference
+Environment=TTS_CACHE=reveille_tts-cache
+# ANYTHING ELSE THIS HOST NEEDS, and the reason it is a variable: this
+# deployment bind-mounts a working tree over /app, so the SERVER'S OWN CODE
+# comes from disk rather than from the image. A unit that quietly ran the
+# image's copy instead would be running different software under the same name
+# -- the hardest kind of difference to see, and the one nobody thinks to check
+# when the voice sounds wrong. Written UNBRACED on purpose: systemd splits
+# $VAR into words and passes ${VAR} as ONE argument, so a braced form here
+# would hand docker a single unparsable blob.
+Environment=TTS_EXTRA=
 # Upstream PR #161 on our fork batches a request's chunks through the turbo
 # decoder. 4 is what an 8 GB card holds with real chunks (7.7 GB peak; 8 OOMs).
 # A 12 GB card can take 8 once that is MEASURED on it -- not before.
@@ -60,18 +100,14 @@ Environment=TTS_BATCH_SIZE=4
 # later start into "name already in use". Failure here is ignored on purpose --
 # there is usually nothing to remove.
 ExecStartPre=-/usr/bin/docker rm -f ${TTS_NAME}
-# LOOPBACK ONLY. The synthesizer is unauthenticated by design (DES-009 s3: one
-# caller, no public port). Published on 127.0.0.1 it is reachable by the broker
-# on this host and by nothing else on the LAN; binding 0.0.0.0 here would hand
-# an unauthenticated speech endpoint to every machine on the network, which is
-# exactly the boundary the off-network rule refuses to cross without https and
-# an authenticating proxy.
+# ONE ADDRESS, NAMED. ${TTS_BIND} is an address, never a wildcard: the
+# synthesizer answers where the broker was told to call it and nowhere else.
 ExecStart=/usr/bin/docker run --rm --name ${TTS_NAME} \
-    -p 127.0.0.1:${TTS_PORT}:8004 \
+    -p ${TTS_BIND}:${TTS_PUBLISH_PORT}:8004 \
     -e TTS_BATCH_SIZE=${TTS_BATCH_SIZE} \
-    -v reveille_tts-reference:/app/reference_audio \
-    -v reveille_tts-cache:/app/hf_cache \
-    --gpus all \
+    -v ${TTS_REFERENCE}:/app/reference_audio \
+    -v ${TTS_CACHE}:/app/hf_cache \
+    --gpus all $TTS_EXTRA \
     ${TTS_IMAGE}
 ExecStop=/usr/bin/docker stop -t 30 ${TTS_NAME}
 

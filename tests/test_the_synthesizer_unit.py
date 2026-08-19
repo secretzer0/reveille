@@ -17,14 +17,55 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 UNIT = (ROOT / "deploy" / "reveille-tts.service").read_text()
 LID = (ROOT / "deploy" / "reveille-laptop-awake.conf").read_text()
 
+# The DIRECTIVES, with every comment line cut away. Lesson
+# `a-gate-must-not-grep-the-prose-that-names-the-rule`, filed an hour before this
+# file was written and earned again by it: the header NAMES 0.0.0.0 in order to
+# forbid it, so a gate reading the whole file fires on the rule instead of the
+# code -- and gets more certain to fire the better the rule is explained.
+DIRECTIVES = "\n".join(ln for ln in UNIT.splitlines() if not ln.lstrip().startswith("#"))
 
-def test_the_port_is_published_to_loopback_only():
-    """DES-009 s3: the synthesizer is unauthenticated by design -- one caller, no
-    public port. A host unit is not on the compose network, so the port has to be
-    published somewhere, and 0.0.0.0 would hand an unauthenticated speech
-    endpoint to the whole LAN."""
-    assert "-p 127.0.0.1:${TTS_PORT}:8004" in UNIT
-    assert "-p 0.0.0.0" not in UNIT and "-p 8004" not in UNIT
+
+def test_where_it_listens_is_a_deployment_fact_not_a_constant():
+    """The first draft hardcoded 127.0.0.1:8004 -- right for a broker on the same
+    host, WRONG for this fleet, where the synthesizer runs on the operator's
+    workstation and the VM broker calls it across the LAN at
+    REVEILLE_TTS_URL=http://192.168.90.136:18004. Installed as first written it
+    would have silenced the fleet's voice the moment it replaced what runs there
+    (architect, blocking on #134)."""
+    assert "-p ${TTS_BIND}:${TTS_PUBLISH_PORT}:8004" in UNIT
+    execstart = DIRECTIVES[DIRECTIVES.index("ExecStart=/usr/bin/docker run"):
+                           DIRECTIVES.index("ExecStop=")]
+    assert "127.0.0.1" not in execstart, "the address must come from the environment"
+    assert "Environment=TTS_BIND=127.0.0.1" in UNIT, "and default to the same-host case"
+    assert "Environment=TTS_PUBLISH_PORT=8004" in UNIT
+
+
+def test_it_binds_one_address_and_never_a_wildcard():
+    """DES-009 s3: unauthenticated by design, one caller, no public port. The LAN
+    exception names ONE address; it is not a licence to answer on every
+    interface the host has."""
+    assert "0.0.0.0" not in DIRECTIVES, "a wildcard bind is never the answer here"
+    assert "NEVER 0.0.0.0" in UNIT, "and the header says why"
+
+
+def test_the_deployment_example_matches_what_actually_runs():
+    """Measured from the running container on WorldBuilder, 2026-08-18. An
+    example that does not reproduce the live shape is a trap: it looks like
+    instructions and installs a different service."""
+    for fact in ("TTS_BIND=192.168.90.136", "TTS_PUBLISH_PORT=18004",
+                 "TTS_IMAGE=reveille-tts:cu128-try",
+                 "/home/vyzon/tts/reference_audio", "/home/vyzon/tts/hf_cache",
+                 "-v /home/vyzon/tts/ctts-fork:/app"):
+        assert fact in UNIT, f"the documented override must carry: {fact}"
+
+
+def test_the_working_tree_mount_survives_as_a_word_split_variable():
+    """This deployment bind-mounts a working tree over /app, so the server's own
+    CODE comes from disk rather than the image. systemd splits $VAR into words
+    and passes ${VAR} as one argument -- the braced form would hand docker a
+    single unparsable blob, and the mount would silently not happen."""
+    assert "--gpus all $TTS_EXTRA" in UNIT
+    assert "${TTS_EXTRA}" not in UNIT, "braced would not word-split"
 
 
 def test_it_waits_for_docker_not_merely_for_the_network():
