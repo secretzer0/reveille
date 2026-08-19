@@ -162,6 +162,34 @@ Each proven RED before it is trusted, on a commit that carries the defect:
    backup exists before the migration runs.
 5. **Rollback restores service** from a green-but-bad release.
 
+## 10.1 An agent-image tag bump is a build on EVERY provisioning host
+
+Measured 2026-08-18, deploying 0.2.177. `docker/entrypoint.sh` changed, so the
+agent image tag moved with it (`reveille-agent:0.2.19` -> `0.2.20`) at all three
+pinned sites. The deploy host then refused itself:
+
+```
+REFUSING to deploy: the agent image this build provisions does not exist.
+  DEFAULT_IMAGE: reveille-agent:0.2.20
+  present here:  reveille-agent:0.2.19 reveille-agent:0.2.18 ...
+```
+
+That refusal is the gate working -- without it every provision would have failed
+one at a time, at the moment a human was waiting for an agent, with nothing
+naming the cause. But the rule it implies has to be written down, because the
+build that satisfies the pin and the host that needs it are not the same
+machine:
+
+**Bumping the agent image tag requires `make agent-image AGENT_IMAGE=<tag>` on
+every host that provisions agents, not only on the host where the change was
+authored.** The pin is a repo fact; the image is a per-host artifact. A dev box
+whose suite passes proves nothing about the deploy host's docker store.
+
+Order for a release that touches the agent image: bump the three pinned sites in
+one commit (Makefile `AGENT_IMAGE`, launcher `DEFAULT_IMAGE`, and the guarding
+test), build locally, merge, build on the deploy host, then `make up`. The
+auto-roll behind the new tag follows on that deploy and the one after it.
+
 ## 11. Non-goals
 
 - High availability, multi-host, or failover. One VM (§5).
