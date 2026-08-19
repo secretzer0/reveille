@@ -3021,6 +3021,52 @@ function openDestroy(name){
   }catch(e){toast(e.message);}
  };
 }
+// THE ROOM AXES, ONE IMPLEMENTATION (operator 11917/11924, ruled 11926). Three
+// sets, and conflating any two of them is how a move silently grants or drops
+// reach:
+//   token   what the agent's CURRENT credential carries
+//   mine    what the human driving this screen holds
+//   joined  where the agent actually works today
+// LIST = token INTERSECT mine. Never the whole of `mine` (granting reach is the
+// Tokens tab's job, where the act reads as what it is) and never a room outside
+// `mine` (this screen must not reveal a room to someone who is not in it).
+// TICKED = joined INTERSECT mine. A room on the token it never joined is
+// offered UNTICKED: carrying it is a choice, not a default.
+async function agentRoomAxes(name, mine){
+ let tok=new Set(), joined=new Set();
+ try{tok=new Set(((await tokenRooms())||{})[name]||[]);}catch(e){}
+ try{const pr=await api('/presence');
+  for(const a of (pr.agents||[]))if(a.name===name&&a.room)joined.add(a.room);
+ }catch(e){}
+ // ASKING FOR SOMEONE ELSE'S AGENT reads an empty token axis: /tokens is
+ // owner-scoped, so a pull would offer nothing and the form would look broken
+ // with the answer one call away. The ROOMS answer instead -- /agents-seen is
+ // room-scoped and remembers agents whose body is stopped, which presence
+ // cannot. It is a weaker axis (where the hive has SEEN it, not what its
+ // credential holds) and it is only ever consulted when the stronger one is
+ // silent. The broker re-checks both humans on every named room anyway.
+ if(!tok.size)for(const r of mine){
+  try{const d=await api('/agents-seen?room='+encodeURIComponent(r.id));
+   if((d.agents||[]).some(a=>a.name===name))tok.add(r.id);
+  }catch(e){/* soft, per room: one unreadable room must not empty the list */}
+ }
+ return {tok, joined, offer: mine.filter(r=>tok.has(r.id)),
+         // What this screen cannot carry BECAUSE the driver does not hold it.
+         // Named, never silently dropped -- and named as a count, not by name:
+         // a room you are not in is not a room this page may spell out.
+         hidden: [...tok].filter(id=>!mine.some(r=>r.id===id)).length};
+}
+function roomChips(axes, attr){
+ return axes.offer.length ? axes.offer.map(r=>
+   '<label class="chip"><input type="checkbox" '+attr+'="'+esc(r.id)+'"'+
+   (axes.joined.has(r.id)?' checked':'')+'> '+esc(r.name)+
+   (axes.joined.has(r.id)?'':' <span class="pDim">(on its token, not joined)</span>')+
+   '</label>').join('')
+  : '<span class="pDim">its credential carries no room you can see -- nothing to '+
+    'carry. Give it a room in the Tokens tab first.</span>';
+}
+
+// ---- MOVE IT TO A MACHINE OF MINE (DES-012 s13) ---------------------------
 // ---- MOVE IT HERE (DES-011 s2.1, operator 11883) --------------------------
 // A body swap from the WEB. The operator's words: "no remote user will EVER be
 // able to ssh into this box... the Transfer step MUST be a clickable interface".
@@ -3039,21 +3085,16 @@ async function openMaterialize(name){
  // Pre-tick what the identity already reaches: a swap that quietly narrowed an
  // agent's rooms would be a demotion wearing a move's clothes. Still ticks, not
  // a fixed list -- the mint attaches exactly what is ticked here.
- const has=new Set((agTokRooms&&agTokRooms[name])||[]);
  const roles=(agMeta&&agMeta.roles)||[];
- // ROOMS THAT CANNOT TRAVEL ARE NAMED, NEVER DROPPED QUIETLY (ruled 11902).
- // The mint attaches exactly what is ticked, so anything the identity holds
- // that this screen cannot offer -- a room you no longer reach -- would
- // otherwise vanish from its reach with nothing said. Silence there is a
- // demotion the mover did not choose and the owner cannot see.
- const visible=new Set(rooms.map(r=>r.id));
- const unreachable=[...has].filter(id=>!visible.has(id));
- // ONLY WHERE YOU AND IT ALREADY MEET (operator 11913). A move offers the
- // INTERSECTION of your rooms and the agent's, never your whole list: a body
- // swap is not the place to hand an agent reach it never had. Granting reach
- // is the Tokens tab, deliberately, where that is the entire point of the
- // screen and the act reads as what it is.
- const offer=rooms.filter(r=>has.has(r.id));
+ // THE THREE AXES, THROUGH THE ONE HELPER (operator 11917/11924). The LIST is
+ // the agent's token INTERSECT my rooms -- a body swap never hands an agent
+ // reach it never had, and never offers reach I do not hold. The TICKS are
+ // where it is actually joined, so the default carries what it uses and
+ // leaves what it has stepped away from. Rooms on its token that I cannot see
+ // are counted, never named: a room I am not in is not a room this page may
+ // spell out. Granting new reach stays the Tokens tab, deliberately.
+ const axes=await agentRoomAxes(name, rooms);
+ const offer=axes.offer;
  openAgDlg(
   '<div class="pRow"><b id="agDlgTitle">Move '+esc(name)+' here</b></div>'+
   '<div class="pAsk">'+esc(name)+' is alive on another machine. This mints ONE '+
@@ -3063,12 +3104,7 @@ async function openMaterialize(name){
   'now is superseded in the same transaction -- that body goes dark on its next '+
   'call and cannot act afterwards. Files on the other machine do NOT travel; '+
   'anything uncommitted there stays there.</div>'+
-  '<div class="pChips" id="agmRooms">'+(offer.length?offer.map(r=>
-    '<label class="chip"><input type="checkbox" value="'+esc(r.id)+'" checked> '+
-    esc(r.name)+'</label>').join('')
-   :'<span class="pDim">you and '+esc(name)+' share no room -- nothing to carry, '+
-    'so there is nothing to move. Give it a room in the Tokens tab first.</span>')+
-   '</div>'+
+  '<div class="pChips" id="agmRooms">'+roomChips(axes,'value')+'</div>'+
   '<div id="agmLost" class="pDim"></div>'+
   // A CONTAINER BODY BOOTS FROM A ROLE PROMPT. The launcher refuses without
   // one -- "an agent provisioned without one boots with no CLAUDE.md role
@@ -3089,13 +3125,13 @@ async function openMaterialize(name){
  // Live, because the answer changes with every tick: what this move would
  // take away from the identity's reach, by name.
  const lost=()=>{
-  const off=[...has].filter(id=>visible.has(id)&&
-    !document.querySelector('#agmRooms input[value="'+CSS.escape(id)+'"]:checked'));
-  const names=off.concat(unreachable).map(id=>roomName(id)||id);
+  const off=axes.offer.filter(r=>!document.querySelector(
+    '#agmRooms input[value="'+CSS.escape(r.id)+'"]:checked')).map(r=>r.name);
+  const names=off.concat(axes.hidden
+   ? [axes.hidden+' room'+(axes.hidden>1?'s':'')+' you do not hold'] : []);
   $('agmLost').textContent=names.length
    ? 'WILL NOT TRAVEL: '+names.join(', ')+
-     ' -- the new body will not reach '+(names.length>1?'those rooms':'that room')+
-     (unreachable.length?' (some are rooms you no longer hold, so this screen cannot carry them)':'')
+     ' -- the new body will not reach '+(names.length>1?'those rooms':'that room')
    : '';
  };
  lost();
@@ -3667,6 +3703,23 @@ function visitLine(v){
   '</div>'+
   (v.state==='asked'&&v.decider===myName?visitConsent(v):'');
 }
+// THE OWNER'S ACCEPT SEES THE FULL DELTA (operator 11917/11924). On a pull it
+// is the OWNER who decides, and they are the one person who can see everything
+// their agent holds -- so name every room staying behind, by name, not as a
+// count. The host decider gets no such line: the agent is not theirs, its other
+// rooms are not theirs to be told about, and a count of rooms they cannot see
+// tells them nothing they could act on.
+function visitDelta(v){
+ if(v.owner!==myName)return '';
+ const has=(agTokRooms&&agTokRooms[v.agent])||[];
+ const carried=new Set(v.rooms.map(r=>r.id));
+ const stay=has.filter(id=>!carried.has(id)).map(id=>roomName(id));
+ return stay.length
+  ? '<b>WILL NOT TRAVEL: '+esc(stay.join(', '))+'</b> — '+esc(v.agent)+' holds '+
+    (stay.length>1?'those rooms':'that room')+' now and the visiting body will not '+
+    'reach '+(stay.length>1?'them':'it')+'.<br>'
+  : '';
+}
 // What the decider is agreeing to, in the order DES-012 §7 lists it.
 function visitConsent(v){
  return '<div class="pAsk">'+
@@ -3675,6 +3728,7 @@ function visitConsent(v){
   'identity, so its body at home goes dark the moment this one is minted.<br>'+
   'It may act in '+esc(v.rooms.map(r=>r.name).join(', '))+' and in nothing else — '+
   'rooms you are both already in.<br>'+
+  visitDelta(v)+
   (v.coordinate?'It checks out <b>'+esc(v.coordinate)+'</b>.<br>':'')+
   'It runs as YOUR user, on YOUR Claude account and bill, and reaches exactly the repos '+
   'and files you can reach. It reads this directory’s CLAUDE.md and MCP config — '+
@@ -3717,6 +3771,9 @@ async function openVisits(){
  me=await api('/me');
  const d=await api('/visits');
  const rooms=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
+ // The consent line needs the FULL delta for an agent of mine, and /tokens is
+ // owner-scoped, so this is exactly the axis it can read and nothing more.
+ agTokRooms=await tokenRooms();
  const rows=d.visits.map(visitLine).join('')||
   '<div class="pDim">no visits — yours or anyone’s to you</div>';
  panel('visits',
@@ -3732,12 +3789,37 @@ async function openVisits(){
   '<input id="vHost" placeholder="host person (blank = you)"></div>'+
   '<div class="pRow"><input id="vMachine" placeholder="which machine (optional)">'+
   '<input id="vCoord" placeholder="repo + SHA it should check out (optional)"></div>'+
-  '<div class="pChips" id="vRooms">'+(rooms.length?rooms.map(r=>
-   '<label class="chip"><input type="checkbox" data-vroom="'+esc(r.id)+'"> '+
-   esc(r.owner&&r.owner!==myName?r.owner+' → '+r.name:r.name)+'</label>').join('')
-   :'<span class="pDim">you hold no rooms yet</span>')+'</div>'+
+  '<div class="pChips" id="vRooms"><span class="pDim">name the agent and its rooms '+
+   'appear here</span></div>'+
+  '<div id="vLost" class="pDim"></div>'+
   '<div class="pRow"><button id="vAsk">ask</button>'+
   '<span class="pDim">a visit may hold only rooms you are BOTH in</span></div>');
+ // THE SAME THREE AXES AS THE MOVE (operator 11917/11924). A visit is a body
+ // swap with a second consent bolted on, so its room list must obey the rule
+ // the move obeys: offer its token INTERSECT mine, tick where it is joined,
+ // count what I cannot see. Recomputed when the name changes because the agent
+ // here is TYPED, not clicked -- an empty box has no axes to read.
+ let vAxes={offer:[],joined:new Set(),hidden:0};
+ const vLost=()=>{
+  const off=vAxes.offer.filter(r=>!document.querySelector(
+    '#vRooms input[data-vroom="'+CSS.escape(r.id)+'"]:checked')).map(r=>r.name);
+  $('vLost').textContent=(off.length||vAxes.hidden)
+   ? 'WILL NOT TRAVEL: '+off.join(', ')+
+     (vAxes.hidden?(off.length?', plus ':'')+vAxes.hidden+' room'+(vAxes.hidden>1?'s':'')+
+       ' you do not hold (this screen cannot carry those)':'')
+   : '';
+ };
+ const vDraw=async()=>{
+  const n=$('vAgent').value.trim();
+  if(!n){vAxes={offer:[],joined:new Set(),hidden:0};
+   $('vRooms').innerHTML='<span class="pDim">name the agent and its rooms appear here</span>';
+   $('vLost').textContent='';return;}
+  vAxes=await agentRoomAxes(n, rooms);
+  $('vRooms').innerHTML=roomChips(vAxes,'data-vroom');
+  for(const c of document.querySelectorAll('#vRooms input'))c.addEventListener('change',vLost);
+  vLost();
+ };
+ $('vAgent').addEventListener('change',vDraw);
  for(const b of document.querySelectorAll('[data-vacc]'))b.onclick=async()=>{
   const body=(document.querySelector('input[name=vbody]:checked')||{}).value||'container';
   try{const out=await api('/visits/'+b.dataset.vacc+'/accept',

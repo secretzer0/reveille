@@ -120,22 +120,65 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     assert "reveille-agent" not in out
 
 
+class FakeIn:
+    def __init__(self, text="from-stdin\n", tty=False):
+        self.text, self.tty = text, tty
+
+    def isatty(self):
+        return self.tty
+
+    def read(self):
+        return self.text
+
+
 def test_the_token_never_has_to_ride_argv(tmp_path, broker, monkeypatch):
     """A documented form that puts the token in argv puts it in .bash_history on
-    every machine that runs it. Environment first, stdin second, flag last."""
-    monkeypatch.setenv("REVEILLE_TOKEN", "from-env")
-    assert cli.read_token(None) == "from-env"
-    monkeypatch.delenv("REVEILLE_TOKEN")
-
-    class FakeIn:
-        def isatty(self):
-            return False
-
-        def read(self):
-            return "from-stdin\n"
-
+    every machine that runs it, so stdin is the path and the flag is the one
+    nobody should use."""
+    monkeypatch.delenv("REVEILLE_TOKEN", raising=False)
     assert cli.read_token(None, FakeIn()) == "from-stdin"
     assert cli.read_token("-", FakeIn()) == "from-stdin"
+
+
+def test_a_supplied_token_beats_the_one_the_directory_carries(monkeypatch):
+    """THE LOOP THE OPERATOR HIT. Claude Code injects this directory's own
+    settings.local.json env into every shell it starts, so inside an agent
+    directory $REVEILLE_TOKEN is ALWAYS set -- to the credential being replaced.
+    Reading the environment first meant the pasted secret was discarded, the
+    dead one verified, and the refusal blamed on the paste."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "the-dead-one")
+    assert cli.read_token("-", FakeIn("the-new-one\n")) == "the-new-one"
+    assert cli.read_token("the-new-one", FakeIn(tty=True)) == "the-new-one"
+    # Supplying nothing still falls back to it: a re-run that offers no
+    # credential is asking to keep the one it has.
+    assert cli.read_token(None, FakeIn(tty=True)) == "the-dead-one"
+
+
+def test_a_dead_credential_in_the_directory_is_not_reinstalled(tmp_path, broker,
+                                                               monkeypatch, capsys):
+    """Re-running the installer to REPLACE a broken credential is the case it
+    could not handle: a token in the environment counted as "already
+    configured", so it skipped the login, rewrote the dead value over itself and
+    exited 0. The file's mtime moved while its contents never changed."""
+    Broker.code = 401
+    claude, _ = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "the-dead-one")
+    assert cli.main(argv + ["--no-prompt"]) == 1
+    assert not (work / ".claude" / "settings.local.json").exists(), \
+        "it reinstalled a credential the broker had just refused"
+    out = capsys.readouterr()
+    assert "no longer works" in out.out, "and it says so, in the words of the refusal"
+
+
+def test_an_unreachable_broker_does_not_discard_a_credential(tmp_path, monkeypatch):
+    """Only a REFUSAL proves a token is dead. Silence proves nothing about it,
+    so a broker that is down must not cost the machine its credential -- that is
+    what --force installs against."""
+    monkeypatch.setenv("REVEILLE_TOKEN", "probably-fine")
+    ok, said = cli.verify("http://127.0.0.1:1", "dev-agent", "probably-fine", timeout=2)
+    assert ok is None, "unreachable is a third answer, not a refusal"
+    assert "did not answer" in said
 
 
 def test_a_second_run_changes_nothing(tmp_path, broker, monkeypatch, capsys):
