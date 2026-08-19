@@ -65,3 +65,14 @@ Two things measured at arrival, neither of them the swap:
   the first turn of every new body runs old code by construction.
 - zero waked processes and an empty spool at first turn. The body is deaf until
   its Stop hook spawns the daemon -- arrival and reachability are not one act.
+
+Body C again (re-run step 8): laptop native, same interactive session that
+parked at 18:38Z. recalled ring 18:41:29Z (waked 3546705, 0.2.188, rang twice:
+recalled + not-arrived); tool join() refused -- the session's MCP still carried
+the superseded header -- so the turn POSTed tools/call join to /mcp with the
+credential waked had written to .claude/settings.local.json. Arrival 18:42:45Z,
+bare join() skipped [] verbatim, rooms [Reveille2.0]. No paste, no restart.
+Found on return: a SECOND session in this same directory had run the step-6
+ritual too (a02e9bd, f32c003, 71 s after my e252941) and moved the shared
+worktree's HEAD -- one directory, two sessions, two actors on one ring. Fast-
+forwarded to body D's 833064c; continuing on wip/red-shirt-01/20260819T183932Z.
