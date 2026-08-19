@@ -120,6 +120,19 @@ def register_mcp_local(url, workdir, claude):
     return "~/.claude.json (local scope)"
 
 
+def tracked_by_git(path):
+    """Is this path committed to a git repo? Anything that is not a clean yes --
+    no git, no repo, an error -- is a no, because the only thing this answer
+    guards is whether to delete somebody's file."""
+    try:
+        return subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(path)],
+            cwd=str(pathlib.Path(path).parent), capture_output=True,
+            text=True).returncode == 0
+    except OSError:
+        return False
+
+
 def drop_project_mcp_entry(workdir):
     """Remove OUR entry from a <workdir>/.mcp.json an earlier init wrote.
 
@@ -144,8 +157,15 @@ def drop_project_mcp_entry(workdir):
         return None
     servers.pop("reveille")
     if not servers and set(cfg) <= {"mcpServers"}:
-        path.unlink()
-        return path
+        # A TRACKED FILE IS NOT THIS INSTALLER'S TO DELETE. Removing our entry
+        # is correctness -- two registrations for one server is how a body
+        # authenticates twice by different rules -- but deleting a file git is
+        # watching turns an install into a staged deletion the person did not
+        # ask for and may not notice until a commit takes it. So: empty it and
+        # leave it, and let the removal be their commit.
+        if not tracked_by_git(path):
+            path.unlink()
+            return path
     cfg["mcpServers"] = servers
     path.write_text(json.dumps(cfg, indent=2) + "\n")
     return path

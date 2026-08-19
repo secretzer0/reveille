@@ -183,6 +183,11 @@ USE:
    peer ONCE; otherwise do NOTHING and end the turn -- silence is a valid
    response to a nudge and never a fault. A nudge is a restart of YOUR parked
    work, not an invitation to manufacture traffic.
+   ARRIVAL (DES-012 s15): a ring with reason=recalled or reason=not-arrived
+   means the credential in THIS directory is a successor that has not landed.
+   join() -- that call IS the arrival and commits the swap. Until it happens
+   the identity is still the other body, your wake socket is refused
+   ({"error":"pending"}), and nothing else here works.
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
    BEING WOKEN IS NOT BEING ASKED. A ring means mail arrived, never that you owe a
    reply. Reply ONLY if: it names you in NEED:, blocks your work, or asks you a
@@ -269,6 +274,47 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
+of the day it changed; USAGE above is what is true now. An entry that disagrees
+with USAGE is history, and USAGE wins -- never work a released entry backwards
+into a procedure.
+
+0.2.188 THE TRANSPORTER TELLS YOU IT LANDED (DES-012; the acceptance chain's
+step 8, measured live 2026-08-19). Five defects, one shape: every one of them
+let a move LOOK finished while the identity had not gone anywhere.
+  (1) ARRIVAL. A pending credential could open a wake socket, so a materialised
+  body showed HTTP 101, a held flock and a clean log while the identity had
+  never moved -- arrival is join(), only a SESSION calls it, and nothing on that
+  machine was causing a turn. The broker now REFUSES that socket
+  ({"error":"pending","retry":true}, close 4409), so accepting one IS the
+  arrival observation; waked answers by ringing its own spool
+  (reason=not-arrived, one a minute) and rings it on a claimed return ticket too
+  (reason=recalled). The ring is the one act a daemon has that produces the turn
+  that produces the join. Doctrine and USAGE carry the instruction.
+  (2) ONE PENDING PER IDENTITY. Three unclaimed pending credentials for one
+  agent coexisted; any could claim, so the body that arrived was whichever
+  joined first, not the one just minted. A bound mint now deletes the identity's
+  unclaimed pendings (discarded_pending in the reply; init prints it, because
+  the person holds a link or container that is now refused).
+  (3) MINT LAST (ruling #126, regressed in 0.2.186, re-ruled 12271). init
+  minted BEFORE the MCP registration, so a refused `claude mcp add-json`
+  printed "nothing installed" over a credential that already existed -- and,
+  being bound, rang the working body into a full handover cycle for an install
+  that never happened. The mint is now the last act, after every local step that
+  can refuse.
+  (4) IDEMPOTENT REGISTRATION. 0.2.186 dropped the `mcp remove` before
+  `add-json`; the real binary refuses a duplicate ("already exists in local
+  config", no --force), which is what killed step 8 on the second run.
+  (5) ROOMS. A bound re-mint with no rooms named carried every room the OWNER
+  could reach -- an agent in one room materialised into three, including one it
+  had deliberately left. It now carries the IDENTITY's rooms, and refuses rather
+  than minting a credential that reaches nothing.
+  ALSO: the Send-it-back dialog says what happens after the click and its button
+  is "allow it back (5 min)"; scripts/deploy-launcher finds uv the way
+  deploy-preflight does (non-login ssh has no ~/.local/bin, and it failed AFTER
+  the broker was recreated); init no longer DELETES a .mcp.json that git tracks
+  -- it empties it and leaves the removal to its owner.
+
 0.2.187 SIGN IN ONCE FROM THE CLI (DES-022; operator 12161, architect 12162/12165).
   `reveille login [url]` prints ONE link, you click it in any browser on any
   device, and the terminal continues on its own -- then `reveille init <url>

@@ -56,8 +56,24 @@ if [ -z "$(commit_of)" ]; then
   exit 1
 fi
 
+# SAME PATH PROBLEM AS THE PREFLIGHT (deploy-preflight, and measured again here
+# 2026-08-19): `make up` over non-login ssh has no ~/.local/bin on its PATH, so
+# this step died with `uv: command not found` AFTER the broker had already been
+# recreated -- a deploy that half-lands is worse than one that refuses. Look
+# where uv actually installs, and name the paths tried if it is nowhere.
+uv_bin="$(command -v uv || true)"
+for c in "$HOME/.local/bin/uv" /usr/local/bin/uv; do
+  [ -n "$uv_bin" ] && break
+  [ -x "$c" ] && uv_bin="$c"
+done
+if [ -z "$uv_bin" ]; then
+  echo "REFUSED: uv not found on PATH, \$HOME/.local/bin/uv or /usr/local/bin/uv."
+  echo "  The launcher was NOT touched, so what is serving is what was serving."
+  exit 1
+fi
+
 echo "launcher: pinning $PIN to origin/main"
-if ! (cd "$REPO" && uv run python scripts/reveille_launch.py pin --path "$PIN"); then
+if ! (cd "$REPO" && "$uv_bin" run python scripts/reveille_launch.py pin --path "$PIN"); then
   echo "REFUSED by pin -- read its message above. Nothing was restarted, so what"
   echo "is serving is exactly what was serving before this command."
   exit 1
