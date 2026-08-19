@@ -114,7 +114,7 @@ every host the same way. Nothing else decides, nothing else checks.
 - `MIN_BODY_VERSION` (daemon constant, bumped DELIBERATELY with a CHANGES line
   when a wire or credential contract moves -- never on every release) gates
   attach and join: below it = `{"error":"too_old","detail":"body 0.2.178 <
-  minimum 0.2.179; run `reveille converge` or `uv tool upgrade reveille`"}`
+  minimum 0.2.179; run `uv tool upgrade reveille`"}`
   and close 4426. A loud refusal at join, never six passing steps and a
   seventh that looks like a design defect. Belt and braces that fail in
   different directions: s2-s6 keep a body current; s7 names the one that is
