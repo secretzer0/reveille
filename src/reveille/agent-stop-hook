@@ -100,8 +100,16 @@ fi
 # block is the LAST thing and blocks the stop when unarmed -- including while the
 # broker is down, because wake-watch reads a local directory and an armed watcher
 # is what makes the agent recover by itself when the bus returns.
-pgrep -f "wake-watch $role( |\$)" >/dev/null 2>&1 && exit 0
+#
+# BOTH SHAPES MATCH, because both are armed: `--follow` runs for the session and
+# is the one to prefer, the bare form is one ring and a re-arm. The gate stays a
+# PROXY and cannot stop being one: a process exists is not the harness will be
+# notified, which is exactly how an architect armed a watcher with `cmd &`,
+# satisfied this pgrep with an orphan writing to nothing, and went deaf with
+# every control green (2026-08-19). Naming the Monitor arm in the block reason
+# is the fix that is available here.
+pgrep -f "wake-watch (--follow )?$role( |\$)" >/dev/null 2>&1 && exit 0
 
 watch_bin="$bindir/wake-watch"; [ -x "$watch_bin" ] || watch_bin="wake-watch"
-printf '{"decision":"block","reason":"Wake watcher not armed -- you are deaf to bus rings. Arm it now with Bash run_in_background=true: %s %s . Its task completion is a ring: inbox(), ack(), act only if owed, DELETE the spool entries you processed (rm the specific files under %s/new/), then re-arm the same command."}\n' "$watch_bin" "$role" "$spool"
+printf '{"decision":"block","reason":"Wake watcher not armed -- you are deaf to bus rings. Arm it ONCE for this session with the Monitor tool: command=\"%s --follow %s\", persistent=true. Every line it prints is one ring: inbox(), ack(), act only if owed, DELETE the spool entries you processed (rm the specific files under %s/new/). No re-arm. Where Monitor is not available, fall back to Bash run_in_background=true: %s %s , whose task completion is one ring and which you must re-arm after every one."}\n' "$watch_bin" "$role" "$spool" "$watch_bin" "$role"
 exit 0

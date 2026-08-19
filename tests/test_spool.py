@@ -151,3 +151,28 @@ def test_waked_flock_singleton_second_start_exits_zero(tmp_path):
     assert r.returncode == 0
     assert "already held" in r.stderr
     lock.close()
+
+
+def test_follow_emits_each_ring_once_and_never_exits(tmp_path):
+    # THE STORM, measured 2026-08-19 (red-shirt-01, msg 12378): wrapping the
+    # one-shot in `while true; do wake-watch ...; done` re-fires on the SAME
+    # undeleted spool file until the harness suppresses the flood -- ~20
+    # notifications for one ring. --follow is what replaces that loop, so it
+    # must emit a file ONCE and then stay silent on it whether or not the
+    # session has drained it, and it must not exit (that is the whole point:
+    # one arm covers a session, no re-arm ritual).
+    spool.write_ring("a1", RING, base=str(tmp_path))
+    w = subprocess.Popen(
+        [sys.executable, "-m", "reveille.watch", "--follow", "a1"],
+        env=_env(tmp_path), stdout=subprocess.PIPE, text=True)
+    try:
+        time.sleep(1.0)          # the pre-existing ring is delivered at arm
+        spool.write_ring("a1", '{"wake":true,"unread":1}', base=str(tmp_path))
+        time.sleep(3.0)          # several poll cycles with both files present
+        assert w.poll() is None, "--follow exited; it is meant to run the session"
+    finally:
+        w.terminate()
+    out, _ = w.communicate(timeout=10)
+    unread = [json.loads(line)["unread"] for line in out.splitlines() if line.strip()]
+    assert unread == [3, 1], f"each ring exactly once, in order: {out!r}"
+    assert len(spool.entries("a1", base=str(tmp_path))) == 2   # I4: deletes nothing
