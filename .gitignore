@@ -30,3 +30,5 @@ broker.db
 *.db
 shots/
 .mcp.json
+CLAUDE.local.md
+.claude/

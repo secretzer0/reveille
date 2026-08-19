@@ -180,7 +180,11 @@ def test_the_state_note_count_is_read_at_the_scope_it_is_written_to():
     src = open(daemon.__file__).read()
     j = src[src.index("brief_available = _conn.execute"):]
     j = j[:j.index("log.info")]
-    assert "store.agent_scope(_conn, p.token_id)" in j
+    # AND THE IDENTITY IS PASSED, not just the token (architect, blocking on
+    # #145). A handover principal has no token row at all, so a count keyed on
+    # token_id alone reads the empty bucket -- the same reader/writer split this
+    # test was written for, one credential-state further along.
+    assert "store.agent_scope(_conn, p.token_id, p.agent_id)" in j
     assert "agent:{p.token_id}" not in j
 
 
