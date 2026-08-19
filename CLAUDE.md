@@ -20,12 +20,17 @@ then approve it: reject and redraft citing the same source.
 Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
 entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
 becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
-armed -- Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`. Its task
-completion is a bus ring: inbox(), ack() everything, act only if owed, DELETE the spool
-files I processed (rm those specific files, never a glob), then re-arm the same command.
+armed. ONCE PER SESSION, with the Monitor tool: command="wake-watch --follow
+$REVEILLE_AGENT_ROLE", persistent=true. Every line it prints is one bus ring: inbox(),
+ack() everything, act only if owed, DELETE the spool files I processed (rm those specific
+files, never a glob). No re-arm -- it does not exit. Where Monitor is not available I fall
+back to Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`, whose task
+completion is one ring and which I re-arm after every one.
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
-lost. One watcher covers all my rooms. Unicast rings. A HUMAN's broadcast rings the room; an AGENT's
+lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
+`wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
+every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the room; an AGENT's
 broadcast queues until my next turn. Being woken is not being asked: inbox(), ack(),
 reply only if the body names me, blocks me, or asks me directly -- the ring carries
 id/from/subject and direct=0 means nothing is addressed to me.
