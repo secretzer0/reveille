@@ -66,6 +66,12 @@ def test_every_screen_tells_the_two_phase_truth():
         assert "expires" in screen, f"{where} must say what happens if it never arrives"
     row = PAGE[PAGE.index("const b=(k,icon,label,cls)"):PAGE.index("function stateSentence")]
     assert "the old one keeps working until this one arrives" in row
+    # INCLUDING THE TOASTS. A dialog that reads correctly and then announces
+    # "its old body is dark" on success has told the truth and the lie in the
+    # same interaction -- and the toast is the half the person is looking at
+    # when they let go (architect, first line of the s13 review).
+    for stale in ("old body is dark", "goes dark the moment", "body goes dark"):
+        assert stale not in PAGE, f"a screen still promises the old mint: {stale!r}"
 
 
 def test_an_agent_alive_elsewhere_is_not_painted_as_broken():

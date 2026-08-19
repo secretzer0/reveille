@@ -142,11 +142,12 @@ def test_waked_parks_on_it_and_says_why():
     from reveille import waked
     src = open(waked.__file__).read()
     park = src[src.index('if obj.get("reason") == "credential-superseded"'):]
-    park = park[:park.index("return 4")]
+    park = park[:park.index("return PARKED")]
     assert "PARKED" in park
     assert "successor" in park, "it names what displaced it"
     assert "reveille init" in park, "and the way back"
     assert "Not " in park and "reconnect" in park
+    assert "return ticket" in park, "and that it does not have to be re-installed (s14)"
 
 
 def test_waked_never_logs_an_empty_reason():

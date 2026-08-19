@@ -2571,6 +2571,15 @@ function tabActions(t){
  // Visits tab because it is a request, not an act.
  if(!gone)out+=b('tomachine','&#128421;',
    'move '+t.agent+' to a machine of mine -- shows the install command once');
+ // DES-012 s14: SEND IT BACK. The other three verbs give an identity a NEW
+ // body; this one calls a parked body back to a machine it already lived on.
+ // No paste and no secret on the wire: the owner opens a ticket, and the
+ // machine still holding the superseded credential exchanges it for a live
+ // one. Offered on any live row, because "which machine did it come from" is
+ // the parked daemon's question to answer, not this page's to guess.
+ if(!gone)out+=b('sendback','&#8617;',
+   'send '+t.agent+' back to the machine it was moved off -- that machine '+
+   'claims it with the credential it already holds');
  if(!gone)out+=b('sendto','&#128101;',
    'send '+t.agent+' to another human -- they accept before anything is minted');
  if(!gone&&st!=='elsewhere')out+=b('destroy','&#128465;','destroy '+t.agent,'danger');
@@ -2659,6 +2668,7 @@ function drawTabs(){
   else if(k==='materialize')openMaterialize(n);
   else if(k==='tomachine')openToMachine(n);
   else if(k==='sendto')openSendTo(n);
+  else if(k==='sendback')openSendBack(n);
   else agLifecycle(n,k);
  };
  if(refocus){
@@ -3158,9 +3168,47 @@ async function openToMachine(name){
     '<div class="pDim">Shown once, here, and nowhere else -- the broker keeps only '+
     'a hash. cd to the directory that should BE the agent first.</div>'+
     '<pre class="tokOut">'+esc(installCmds(t, location.origin))+'</pre>';
-   toast(name+' is now waiting for that machine -- its old body is dark',true);
+   toast(name+' is waiting for that machine -- '+
+     'the old body keeps working until it joins',true);
    refreshAgents();
   }catch(e){toast(e.message);}
+ };
+}
+
+// ---- SEND IT BACK (DES-012 s14, ruling 11941 Part B) ----------------------
+// The return ticket. A body that was superseded did not have to be destroyed to
+// be replaced -- its machine is still there, still holding the credential that
+// went dead. So bringing it back should not need a fresh secret pasted by a
+// human: the owner opens a window, and that machine exchanges what it already
+// has. The bus never carries a live secret in the clear, and the only party who
+// can claim is the one that was already trusted with the identity.
+async function openSendBack(name){
+ me=await api('/me');
+ const mine=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
+ const axes=await agentRoomAxes(name, mine);
+ openAgDlg(
+  '<div class="pRow"><b id="agDlgTitle">Send '+esc(name)+' back</b></div>'+
+  '<div class="pAsk">This opens a five-minute window in which the machine '+esc(name)+
+  ' was moved OFF can take the identity back. That machine claims it with the '+
+  'credential it is still holding -- nothing is pasted, and no live secret '+
+  'crosses the bus. Its current body keeps working until the returning one '+
+  'joins; if nobody claims, the window closes and nothing changed.</div>'+
+  '<div class="pChips" id="sbRooms">'+roomChips(axes,'data-sbroom')+'</div>'+
+  '<div class="pRow"><button id="sbGo">open the window</button> '+
+   '<button id="sbNo">cancel</button></div>'+
+  '<div id="sbStatus" class="pDim"></div>','#sbGo');
+ $('sbNo').onclick=closeAgDlg;
+ $('sbGo').onclick=async()=>{
+  const picked=[...document.querySelectorAll('#sbRooms input:checked')]
+   .map(c=>c.dataset.sbroom);
+  if(!picked.length){toast('tick at least one room -- a body with none reaches nothing');return;}
+  try{
+   const r=await api('/recalls',{method:'POST',body:JSON.stringify({
+    agent:name,rooms:picked})});
+   closeAgDlg();
+   toast(name+' can come back for the next 5 minutes -- watch for it to join',true);
+   refreshAgents();
+  }catch(e){$('sbStatus').textContent='';toast(e.message);}
  };
 }
 

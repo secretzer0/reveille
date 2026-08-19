@@ -268,6 +268,33 @@ its CHANGES section says what changed and how to use it.
 """
 
 CHANGES = """
+0.2.179 THE RETURN TICKET (DES-012 s14; ruling 11941 Part B). A superseded body
+did not have to be destroyed to be replaced -- its machine is still there, still
+holding the credential that went dead. Since 0.2.176 that machine PARKS instead
+of exiting; now it can come back without anyone pasting a secret. The owner
+opens a five-minute window ("send it back" on the agent row) and the parked
+daemon claims it by presenting the SUPERSEDED credential it already holds,
+receiving a fresh PENDING one in exchange. THE EXCHANGE IS THE WHOLE DESIGN: no
+live secret crosses the bus, and the only party who can claim is the machine
+that was already trusted with this identity -- which is exactly what the owner
+is relying on when they call it back. The broker stores no credential it could
+hand back: a ticket holds only the HASH it will be shown, the same hash the
+supersede tombstone already keeps, so an offer sitting in the table is worth
+nothing to whoever reads the table. One claim per ticket, stamped in the mint's
+own transaction, because two daemons booted from one disk image would otherwise
+both return with the same right and the second would displace the first as a
+stranger. The claim route answers 204 for a miss rather than 401 -- the parked
+daemon polls it, "no ticket for you" is the ordinary answer, and making the
+normal case look like an auth failure buries the real ones. An identity with
+nothing displaced cannot be recalled, and says so, because an offer that could
+never be claimed is not an offer. Unclaimed, the window closes and the working
+body was never touched.
+Also: the last screen still promising the old mint. openToMachine's success
+toast said "its old body is dark" -- a dialog that reads correctly and then
+announces the opposite on success has told the truth and the lie in the same
+interaction, and the toast is the half the person is looking at when they let
+go. Swept, and the gate now asserts the whole page is free of that wording
+rather than checking screens one at a time.
 0.2.178 THE MENU ON AN AGENT IS ITS DESTINATIONS (DES-012 s13; operator GO
 11930, ruled 11932). Every verb on an agent row is the SAME act underneath -- a
 bare attach on an identity that already exists, PENDING until the new body joins
@@ -7023,6 +7050,57 @@ async def visits_http(request):
 
 
 @_guard
+async def recalls_http(request):
+    """GET -> this owner's return tickets. POST {agent, rooms} -> open one.
+
+    DES-012 s14 (ruling 11941 Part B). The owner offers; the machine claims. The
+    offer names no secret and the response carries none: what it records is the
+    hash of the credential the parked body is still holding, which the broker
+    already keeps as a supersede tombstone.
+    """
+    p = _user_principal(request)
+    if request.method == "GET":
+        return JSONResponse({"recalls": store.recalls_for(_conn, p.user_id)})
+    d = await request.json()
+    a = store.live_agent(_conn, p.user_id, (d.get("agent") or "").strip())
+    if a["owner_id"] != p.user_id:
+        raise store.AccessError("only an agent's owner may offer it a return ticket")
+    h = store.superseded_hash_for(_conn, a["id"])
+    if not h:
+        # NOTHING WAS DISPLACED, so there is no parked body to call back and no
+        # proof anyone could present. Said as the fact it is, rather than an
+        # offer that could never be claimed.
+        raise store.BusError(
+            f"{a['name']!r} has no superseded body to recall: nothing was "
+            f"displaced, so no machine is holding a credential to exchange. "
+            f"To give it a body somewhere, move it or mint one in the Tokens tab.")
+    out = store.recall_offer(_conn, agent_id=a["id"], owner_id=p.user_id,
+                             superseded_secret_hash=h,
+                             rooms=list(d.get("rooms") or []))
+    log.info("%s opened a return ticket for %s (expires in %.0fs)", p.name,
+             a["name"], store.RECALL_TTL_NS / 1e9)
+    return JSONResponse(out)
+
+
+async def recall_claim_http(request):
+    """A PARKED BODY EXCHANGES ITS DEAD CREDENTIAL FOR A LIVE ONE.
+
+    Unauthenticated by design -- the bearer here IS the credential being
+    presented, and it is one the broker has already refused for every other
+    purpose. That is the whole proof: only the machine that held it can offer
+    it. A miss answers 204, not 401, because the parked daemon POLLS this and
+    "no ticket for you" is the ordinary answer; making the normal case look like
+    an auth failure would bury the real ones.
+    """
+    secret = _bearer(request) or (await request.json()).get("secret", "")
+    out = store.recall_claim(_conn, secret)
+    if not out:
+        return Response(status_code=204)
+    log.info("return ticket claimed for %s -- pending until it joins", out["agent_name"])
+    return JSONResponse(out)
+
+
+@_guard
 async def visit_http(request):
     """POST /visits/<id>/<verb>: accept | reject | end.
 
@@ -7525,6 +7603,8 @@ def build_app():
             Route("/rooms/{rid}/owner", room_owner_http, methods=["PATCH"]),
             Route("/agent/activity", activity_http),
             Route("/visits", visits_http, methods=["GET", "POST"]),
+            Route("/recalls", recalls_http, methods=["GET", "POST"]),
+            Route("/recalls/claim", recall_claim_http, methods=["POST"]),
             Route("/visits/{vid}/{verb:str}", visit_http, methods=["POST"]),
             Route("/rooms/{rid}", room_http, methods=["PATCH"]),
             Route("/rooms/{rid}", purge_room_http, methods=["DELETE"]),
