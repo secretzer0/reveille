@@ -125,12 +125,16 @@ If it outgrows one screen it becomes a console script in the package
 - Anything on the v1 blocking list (msg 8795). This slice makes three of those
   items workable by giving the fleet host access; it removes none of them.
 
-## 8. Open, for the operator
+## 8. ANSWERED (operator + architect 11713, EPIC-001 item 7)
 
-- **Q1. Room.** Does the devops agent sit in Reveille2.0 or its own room?
-  Recommendation: its own — deploy chatter and design discussion have different
-  readerships, and a room is the cheapest filter we have.
-- **Q2. Name reservation.** Under DES-007's one-live-name rule, is a native
-  agent's name reserved fleet-wide or per-user? The index says per-owner today;
-  this only needs an answer if the operator wants a native name to be
-  unavailable to other users.
+- **Q1. Room. NO — devops does not own a room.** It sits in Reveille2.0 as a
+  MEMBER, not a landlord. The recommendation for a separate deploy room is
+  withdrawn: the readership argument is real but a second room splits the one
+  record the fleet reads at boot, and deploy chatter is exactly the context a
+  design ruling needs. Filtering is the reader's job, not the topology's.
+- **Q2. Name reservation. PER OWNER**, consistent with ruling 10969 and with
+  what the index already did. A native agent's name is unique per owner, not
+  fleet-wide; two owners may each hold an `architect`, and the room disambiguates
+  with the `<owner>-<name>` alias DES-011 §2 mints at join. Fleet-wide
+  reservation would make one human's naming choice a constraint on every other
+  human's, which is the opposite of where the multi-human hive is going.
