@@ -3022,6 +3022,19 @@ def commit_pending(conn, token_id):
                      (token_id,)).fetchone()
     if not r or r["pending_ns"] is None:
         return []
+    # THE WINDOW IS TRUE AT THE ONE MOMENT IT MATTERS (ruling 12320 B; measured
+    # 2026-08-19). The ten minutes was enforced only by a sweep, and the sweep
+    # ran hourly -- so an abandoned credential stayed CLAIMABLE for up to an
+    # hour after the window every screen said had closed, and a body presenting
+    # it at minute 45 would displace a live one. The sweep is still the thing
+    # that cleans the table; this is the thing that makes the promise real.
+    if r["pending_ns"] < time.time_ns() - PENDING_TTL_NS:
+        when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                             time.gmtime(r["pending_ns"] / 1e9 + PENDING_TTL_NS / 1e9))
+        raise BusError(
+            f"this credential expired unclaimed at {when}: the arrival window "
+            f"for it has closed, so it cannot take the identity. The body that "
+            f"was working still is. Mint again to move it.")
     conn.execute("UPDATE tokens SET pending_ns=NULL WHERE id=?", (token_id,))
     # Ordered so the identity is never without one: this token is live by the
     # line above, and named as the exception so the sweep cannot take it.
@@ -3188,6 +3201,12 @@ def resolve_token(conn, secret):
         (_sha(secret),)).fetchone()
     if not r:
         return None
+    # AN EXPIRED PENDING IS NOT A CREDENTIAL (ruling 12320 B). It resolves to
+    # nothing rather than to something the sweep has simply not reached yet, so
+    # every door -- the wake socket included -- answers the same way it will
+    # answer a minute later, when the row is actually gone.
+    if r["pending_ns"] is not None and r["pending_ns"] < time.time_ns() - PENDING_TTL_NS:
+        return None
     conn.execute("UPDATE tokens SET last_used_ns=? WHERE id=?", (time.time_ns(), r["id"]))
     return {"id": r["id"], "owner_id": r["owner_id"], "label": r["label"],
             "agent_name": r["agent_name"], "agent_id": r["agent_id"],
@@ -3340,6 +3359,52 @@ def supersede_bound_tokens(conn, owner_id, agent_id, except_id=None):
 # next time its hash knocks, so there is no timer to lapse and the table is
 # bounded by the supersede count within the window.
 TOMBSTONE_TTL_NS = 30 * 86_400 * 1_000_000_000
+
+
+# THE HANDOVER GRACE (ruling 12320 R2). The doctrine asks a displaced body for
+# two acts -- push the work, write the note -- and the swap commits the instant
+# the new body joins, which on 2026-08-19 was 27 seconds after the ring. A
+# refused write burns the window: one note failed for being over the fact limit,
+# the retry came back "superseded", and the note the NEW body was supposed to
+# read was the one artifact the swap deleted. So a credential that was just
+# superseded keeps exactly two acts for five minutes: the state note about its
+# own identity, and the reply that carries the five fields into the move thread.
+# Nothing else -- it cannot read, cannot join, cannot act as the identity it no
+# longer holds.
+HANDOVER_GRACE_NS = 5 * 60 * 1_000_000_000
+
+
+def rooms_for_agent(conn, agent_id):
+    """{room_id: room_name} for an IDENTITY, from its memberships rather than
+    from a token. The handover grace needs it because the credential whose rooms
+    it would otherwise read has already been deleted -- and the note it is
+    allowed to write belongs to the identity, which is exactly what still
+    exists."""
+    return {r["id"]: r["name"] for r in conn.execute(
+        "SELECT ro.id, ro.name FROM members m JOIN rooms ro ON ro.id=m.room_id "
+        "WHERE m.principal=? AND m.left_ns IS NULL ORDER BY ro.name",
+        (agent_principal(agent_id),))}
+
+
+def handover_grace(conn, secret, now=None):
+    """The identity a just-superseded credential may still write FOR, or None.
+
+    Deliberately narrow: it answers only inside HANDOVER_GRACE_NS, and the
+    caller decides what the two permitted acts are. Past the window this is
+    None and the credential is what it has been since the swap: a signpost.
+    """
+    if not secret:
+        return None
+    now = now or time.time_ns()
+    r = conn.execute(
+        "SELECT t.agent_id, t.superseded_ns, a.owner_id, a.name "
+        "FROM token_tombstones t JOIN agents a ON a.id = t.agent_id "
+        "WHERE t.secret_hash=?",
+        (_sha(secret),)).fetchone()
+    if not r or r["superseded_ns"] < now - HANDOVER_GRACE_NS:
+        return None
+    return {"agent_id": r["agent_id"], "owner_id": r["owner_id"],
+            "agent_name": r["name"], "superseded_ns": r["superseded_ns"]}
 
 
 def tombstone_for(conn, secret):

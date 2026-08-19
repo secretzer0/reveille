@@ -204,6 +204,14 @@ RECALL_POLL_S = 20
 # duplicate ring is harmless by construction -- the watcher prints it, the agent
 # deletes the file. Silence here is what cost the transporter its last step.
 ARRIVAL_RING_S = 60
+# HOW LONG A BODY THAT WAS NEVER PARKED KEEPS ASKING (ruling 12320 R1). PARKED
+# is only reachable from a LIVE socket -- the credential-superseded frame -- so a
+# body superseded while STOPPED, or restarted afterwards, comes up holding a
+# spent secret and can never claim the ticket written against exactly that
+# secret. It polls instead. Bounded, because the flock must eventually free for
+# a hook respawn on a hand-written credential: 15 minutes covers the 5-minute
+# ticket plus the minutes it takes a person to notice and open one.
+ORPHAN_POLL_S = 15 * 60
 
 
 def arrival_frame(why):
@@ -233,13 +241,24 @@ async def _claim(url, secret):
         return ""
 
 
-async def _park(url, agent, secret, write_env):
+async def _park(url, agent, secret, write_env, deadline=None):
     """Poll for a return ticket until one arrives. Prints once on entry (silence
-    is the defect, ruling 11947) and once when it comes back."""
+    is the defect, ruling 11947) and once when it comes back.
+
+    `deadline` bounds the wait in seconds and returns "" when it passes -- used
+    by a body that was never PARKED, which must not hold the flock for ever on a
+    secret nobody may ever write a ticket for (ruling 12320 R1). A body that WAS
+    parked waits indefinitely, because its owner has already been told where it
+    went and the machine is doing nothing else with that credential.
+    """
+    waited = 0
     while True:
         await asyncio.sleep(RECALL_POLL_S)
+        waited += RECALL_POLL_S
         got = await _claim(url, secret)
         if not got:
+            if deadline is not None and waited >= deadline:
+                return ""
             continue
         # THE NEW CREDENTIAL LANDS ON DISK, not in this process's memory alone:
         # the daemon is not the only thing on this machine that needs it, and a
@@ -514,7 +533,32 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # ticket. A body that was never parked has nothing to fall
                     # back to and still exits.
                     if not parked_secret:
-                        return 1
+                        # NEVER PARKED, BUT THE SECRET IS STILL THE PROOF. A
+                        # ticket is written against the hash of the credential
+                        # the displaced body holds, and this process holds it --
+                        # it simply was not connected when the swap committed,
+                        # which is the whole of the difference. So it asks, for
+                        # a bounded while, and then gets out of the way.
+                        print(f"reveille-waked: the broker does not know this "
+                              f"credential. If {agent} was moved off this "
+                              f"machine while nothing was running here, a "
+                              f"return ticket can still bring it back -- "
+                              f"polling for one for "
+                              f"{ORPHAN_POLL_S // 60} minutes.", file=sys.stderr)
+                        got = await _park(url, agent, token, write_env,
+                                          deadline=ORPHAN_POLL_S)
+                        if not got:
+                            print(f"reveille-waked: no return ticket for {agent} "
+                                  f"in {ORPHAN_POLL_S // 60} minutes -- exiting so "
+                                  f"the lock frees. `reveille init` here mints a "
+                                  f"fresh credential, and the Stop hook starts a "
+                                  f"daemon on it at the next turn.", file=sys.stderr)
+                            return 1
+                        parked_secret = token
+                        token = got
+                        uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                        delay = 1
+                        continue
                     print(f"reveille-waked: that credential never landed and the "
                           f"window has closed -- PARKED again on the one this "
                           f"machine was superseded on, waiting for another "

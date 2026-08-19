@@ -110,6 +110,81 @@ def test_an_unclaimed_pending_expires_and_the_old_body_never_notices():
         "and the body that was working is still working -- that is the whole NAK path"
 
 
+def test_a_window_that_closed_cannot_still_take_the_identity():
+    """RULING 12320 B, measured live 2026-08-19. The ten minutes was enforced
+    only by a sweep, and the sweep ran hourly -- so a credential every screen
+    called expired stayed CLAIMABLE for up to an hour, and a body presenting it
+    at minute 45 would displace a live one. The window has to be true at the one
+    moment it matters: the arrival."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    c.execute("UPDATE tokens SET pending_ns=? WHERE id=?",
+              (store.time.time_ns() - store.PENDING_TTL_NS - 1, new["id"]))
+    with pytest.raises(store.BusError, match="expired unclaimed"):
+        store.join(c, "wanderer", "agent", room["id"], token_id=new["id"])
+    assert store.resolve_token(c, old["secret"])["id"] == old["id"], \
+        "the body that was working still is"
+
+
+def test_an_expired_pending_resolves_to_nothing_before_the_sweep_reaches_it():
+    """Every door answers the same way it will answer a minute later. Otherwise
+    the wake socket accepts a credential the arrival path would refuse, which is
+    the split that made a corpse look reachable."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    assert store.resolve_token(c, new["secret"]), "still inside the window"
+    c.execute("UPDATE tokens SET pending_ns=? WHERE id=?",
+              (store.time.time_ns() - store.PENDING_TTL_NS - 1, new["id"]))
+    assert store.resolve_token(c, new["secret"]) is None
+    assert c.execute("SELECT 1 FROM tokens WHERE id=?", (new["id"],)).fetchone(), \
+        "not deleted here -- the sweep owns the table, this owns the answer"
+
+
+def test_the_window_and_its_sweep_are_not_an_hour_apart():
+    """A 600 s promise does not get a 3600 s enforcer: the sweep that cleans the
+    table runs on its own clock, so the promise and the table cannot disagree by
+    more than a minute."""
+    from reveille import daemon
+    assert daemon.PENDING_SWEEP_SECS <= store.PENDING_TTL_NS / 1e9 / 5
+
+
+def test_the_old_body_can_still_write_its_note_a_minute_after_the_swap():
+    """RULING 12320 R2, the gate as written: state at supersede+60 s, every
+    other act refused. The doctrine asks the displaced body for two acts and the
+    swap commits the moment the far side joins -- 27 seconds after the ring, on
+    2026-08-19 -- so the note kept losing a race nobody had told it about."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    store.join(c, "wanderer", "agent", room["id"], token_id=new["id"])
+    assert store.resolve_token(c, old["secret"]) is None, "the credential is spent"
+    minute = store.time.time_ns() + 60 * 1_000_000_000
+    g = store.handover_grace(c, old["secret"], now=minute)
+    assert g and g["agent_name"] == "wanderer" and g["agent_id"] == old["agent_id"]
+    # and it is over when the window says, not when the tombstone is pruned
+    assert store.handover_grace(
+        c, old["secret"],
+        now=store.time.time_ns() + store.HANDOVER_GRACE_NS + 1) is None
+
+
+def test_the_grace_writes_as_the_identity_and_reaches_its_rooms():
+    """The note is identity-scoped and the five fields go to the room, so the
+    grace has to resolve both -- from the MEMBERSHIPS, because the credential
+    whose rooms it would otherwise read has already been deleted."""
+    c, u, room, old = world()
+    new = store.create_token(c, u["id"], "body-2", agent_name="wanderer", rooms=[room["id"]])
+    store.join(c, "wanderer", "agent", room["id"], token_id=new["id"])
+    assert store.rooms_for_agent(c, old["agent_id"]) == {room["id"]: "Hive"}
+
+
+def test_a_plain_revoke_grants_no_grace():
+    """The grace is for a body the SWAP displaced. A revoked credential was
+    taken deliberately, and handing it five more minutes of writes would be
+    handing back part of what the revoke removed."""
+    c, u, room, old = world()
+    store.revoke_token(c, old["id"], u["id"])
+    assert store.handover_grace(c, old["secret"]) is None
+
+
 def test_expiry_leaves_no_tombstone():
     """A tombstone signposts a displaced body toward its successor. A pending
     credential displaced nothing and its successor never arrived, so a

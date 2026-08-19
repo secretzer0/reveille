@@ -2386,6 +2386,15 @@ function railMode(manage){
  const h=document.querySelector('#rail h2');
  if(h)h.textContent=manage?'MANAGE AGENTS':'AGENTS';
 }
+// THE ROW GOES STALE THE MOMENT ANYTHING BUT A CLICK CHANGES IT (operator,
+// 2026-08-19). refreshAgents ran on user actions only, so a container stopped
+// from the launcher -- by `reveille-launch stop`, by the idle sweep, or by the
+// arrival teardown ruled in 12320 A -- kept its green dot, its stop button and
+// its terminal tab until someone reloaded. The operator watched a dead body
+// offer a terminal. Presence and unread already poll at 15 s; this is the same
+// cadence for the same reason, and it runs ONLY while the panel is open,
+// because a rail nobody is looking at does not need the launcher's attention.
+let agPoll=null;
 function openAgentsWell(){
  $('chatWell').classList.add('hidden');
  $('agentsWell').classList.add('on');
@@ -2393,8 +2402,10 @@ function openAgentsWell(){
  if(nav){nav.textContent='← Back to chat';nav.setAttribute('aria-pressed','true');}
  railMode(true);
  refreshAgents();
+ if(!agPoll)agPoll=setInterval(()=>{if(!document.hidden)refreshAgents();},15000);
 }
 function closeAgentsWell(){
+ if(agPoll){clearInterval(agPoll);agPoll=null;}
  $('agentsWell').classList.remove('on');
  $('chatWell').classList.remove('hidden');
  const nav=$('agentsNav');

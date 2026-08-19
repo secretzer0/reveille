@@ -106,6 +106,9 @@ def _cookie_name():
     for the writer and every reader (DES-018 s7)."""
     return "__Host-" + COOKIE if _https_public() else COOKIE
 SWEEP_SECS = 3600
+# The arrival window is 600 s (store.PENDING_TTL_NS); its sweep runs on its
+# own clock so the promise and the table agree within a minute.
+PENDING_SWEEP_SECS = 60
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
@@ -278,6 +281,43 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.190 WHAT THE ACCEPTANCE CHAIN FOUND (rulings 12305/12320, all measured live
+on 2026-08-19 while running DES-012's chain end to end).
+  B THE ARRIVAL WINDOW IS TRUE NOW. Ten minutes was enforced only by a sweep and
+  the sweep ran hourly, so an abandoned pending credential stayed CLAIMABLE long
+  past the window every screen advertised -- a body presenting it at minute 45
+  would have displaced a live one. commit_pending refuses a pending older than
+  PENDING_TTL_NS and names when it closed; resolve_token treats one as unknown,
+  so every door answers now what it will answer at the sweep; and that sweep
+  runs on its own 60 s clock.
+  R2 THE HANDOVER NOTE GETS ITS FIVE MINUTES. A credential superseded in the
+  last five minutes keeps exactly two acts -- memory_add(kind='state') about its
+  own identity, and one send carrying the five fields -- and nothing else. The
+  swap commits the instant the far side joins, 27 seconds after the ring here,
+  and the note kept losing that race: once refused for length, once refused as
+  superseded on the retry. Doctrine order follows: commit and push, then the
+  note (short, five fields), then verify the push.
+  A THE LAUNCHER CLEARS THE CORPSE. A body superseded by an arrival kept its
+  CPU, its tmux and its ttyd, and the Agents page went on offering a terminal
+  into it -- found by the operator, twice in one afternoon. The launcher now
+  STOPS (never destroys) a container whose credential the broker no longer
+  knows, borrowing that body's own secret for one read so no standing
+  credential is introduced and G4 is untouched. An unreachable broker stops
+  nothing. The agent rail also polls while open, because a row that only
+  refreshes on a click cannot show a container something else stopped.
+  R1 A BODY SUPERSEDED WHILE STOPPED CAN COME BACK. PARKED was reachable only
+  from a live socket, so a body superseded while stopped -- or restarted after
+  -- held a spent secret and could never claim the ticket written against
+  exactly that secret. It polls with what it holds, bounded so the lock still
+  frees.
+  R5 A PENDING MINT RETIRES NOTHING. retire_waked is keyed on the agent name and
+  the spool lock is per identity per machine, so `reveille init` in a second
+  directory killed the daemon of the body that was still live.
+  R3 EVERY NEW BODY CONVERGES. reveille-agent:0.2.21 is the first agent image
+  whose toolchain is not behind the broker: bodies materialised from 0.2.20 came
+  up on 0.2.177, and a new body's FIRST turn is exactly the one that must arrive.
+  R4 the superseded refusal names the arrival instead of `reveille init --login`.
 
 0.2.189 THE PICKER READS THE SHAPE THE BROKER SERVES. GET /tokens serves
 store.list_tokens, whose `rooms` is {room_id: room_name}; cli.my_agents iterated
@@ -4641,6 +4681,7 @@ class Principal:
     rooms: dict = field(default_factory=dict)   # room_id -> room_name
     agent_id: str = ""              # agents.id for a BOUND token; "" unbound / user
     pending: bool = False           # minted, not yet arrived (DES-012 s15): join() only
+    handover: bool = False          # just superseded (R2): the note and the note only
 
 
 def speaker_key(p):
@@ -4686,14 +4727,27 @@ def _agent_principal(request):
         # a word the predicate cannot establish stays unsaid (flagged to the
         # architect). A never-valid secret stays the generic "bad token" --
         # the two must be distinguishable or the signpost teaches nothing.
+        # THE HANDOVER GRACE COMES FIRST (ruling 12320 R2). A body displaced
+        # seconds ago is still the only party holding the context, and the swap
+        # commits the instant the new body joins -- 27 seconds after the ring,
+        # measured. Refusing it here is what deleted the note the new body was
+        # supposed to read. Two acts, five minutes, write-only; _handover_only
+        # below is the gate that keeps it to two.
+        grace = store.handover_grace(_conn, secret)
+        if grace:
+            return Principal(kind="agent", name=grace["agent_name"],
+                             user_id=grace["owner_id"], agent_id=grace["agent_id"],
+                             rooms=store.rooms_for_agent(_conn, grace["agent_id"]),
+                             handover=True)
         ts = store.tombstone_for(_conn, secret)
         if ts:
             when = time.strftime("%Y-%m-%d", time.gmtime(ts["superseded_ns"] / 1e9))
             raise store.AuthError(
                 f"superseded: this credential for {ts['agent_name']!r} was "
                 f"replaced on {when} -- another body holds the identity now. "
-                f"To make this machine the body again, run `reveille init "
-                f"--login` in the agent's directory; to reach the live body, "
+                f"To bring it back here, the owner sends it back from the bus "
+                f"and a turn in this directory calls join(): that call IS the "
+                f"arrival. `reveille init` also works. To reach the live body, "
                 f"use the bus web UI.")
         raise store.AuthError("bad token")
     name = (request.headers.get("x-agent") if request else "") or ""
@@ -4751,6 +4805,27 @@ PENDING_ACT = ("pending: join first. This credential was minted for a body swap 
                "else; that call IS the arrival and commits the swap.")
 
 
+HANDOVER_ACT = ("superseded: another body holds this identity now. This credential "
+                "keeps exactly two acts for five minutes, and only these two: "
+                "memory_add(kind='state') about this identity, and one send carrying "
+                "the five fields into the move thread. That is the handover note, and "
+                "it is the last thing this body is for.")
+
+
+def _handover_only(p, allowed=False):
+    """A JUST-SUPERSEDED CREDENTIAL WRITES THE NOTE AND NOTHING ELSE (R2).
+
+    The grace exists because the doctrine's second act kept losing a race it was
+    never told about: act 1 has to beat the far side's FETCH, act 2 has to beat
+    its JOIN, and nothing serialises them. It is not a reprieve -- the identity
+    has moved, and reading or acting as it here would be the fork the two-phase
+    design closes. So every route says no except the two the note needs.
+    """
+    if p.kind == "agent" and p.handover and not allowed:
+        raise store.AccessError(HANDOVER_ACT)
+    return p
+
+
 def _not_pending(p):
     """A PENDING CREDENTIAL MAY ONLY ARRIVE (ruling 11945). Its single permitted
     call is join(), because the readiness act IS join -- so every other route
@@ -4779,7 +4854,21 @@ def _act(p):
     closed at the mint). Web users are not tokens and pass."""
     if p.kind == "agent" and not p.agent_id:
         raise store.AuthError(UNBOUND_ACT)
-    return _not_pending(p)
+    return _not_pending(_handover_only(p))
+
+
+def _handing_over(request) -> Principal:
+    """The two acts a just-superseded credential keeps (R2): the state note and
+    the send that carries the five fields. Same binding requirement as _acting,
+    and the same poke clear -- writing the note IS that body's last turn. A
+    LIVE credential passes through here unchanged, so these two routes are not
+    a second door: they are the ordinary one, with the grace not refused."""
+    p = _me(request)
+    if p.kind == "agent" and not p.agent_id:
+        raise store.AuthError(UNBOUND_ACT)
+    _not_pending(p)
+    _poke_pending.pop(p.token_id, None)
+    return p
 
 
 def _acting(request) -> Principal:
@@ -4992,7 +5081,14 @@ async def memory_add(fact: str, kind: str, scope: str = "", entities: str = "",
     live). occurred: when the fact became TRUE (ISO/relative), not when recorded.
     Below your tier the write lands as status='draft', invisible until ratified.
     kind='state' needs a BOUND token and is always scoped to yourself."""
-    p = _acting(ctx.request_context.request)
+    # THE HANDOVER NOTE IS WHY THE GRACE EXISTS (R2): a body superseded seconds
+    # ago may still write kind='state' about ITSELF, and nothing else. Any other
+    # kind from that credential is refused below, because doctrine or a contract
+    # written by a body that no longer holds the identity is a ruling from a
+    # ghost.
+    p = _handing_over(ctx.request_context.request)
+    if p.handover and kind != "state":
+        raise store.AccessError(HANDOVER_ACT)
     bound, tier, adm, owned = _mem_ctx(p)
     out = store.memory_add(
         _conn, author=p.name, token_id=p.token_id, agent_bound=bound, tier=tier,
@@ -5150,7 +5246,9 @@ async def send(to: str, body: str, subject: str = "",
     are read on each recipient's next turn (a HUMAN's broadcast from the web does
     ring the room -- a wake is a human gesture). Returns {id, thread_id, parents,
     delivered_to}."""
-    p = _acting(ctx.request_context.request)
+    # The other half of the handover grace (R2): the five fields have to reach
+    # the room, not just the memory, or the peers watching a move learn nothing.
+    p = _handing_over(ctx.request_context.request)
     _seen(speaker_key(p), p.name, p.rooms, p.token_id)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))
@@ -8074,6 +8172,31 @@ async def chat_http(_request):
     return HTMLResponse(page)
 
 
+async def _pending_sweeper():
+    """The arrival window, on its OWN clock (ruling 12320 B).
+
+    THE ARRIVAL WINDOW IS THE BROKER'S TIMER (ruling 11947), not a lazy check on
+    the next request: a pending credential nobody ever presents is precisely the
+    one no request will come for, and it must still die. It used to ride the
+    hourly sweep, which made a ten-minute window into an up-to-an-hour one --
+    measured 2026-08-19, a pending sat claimable minutes past a TTL every screen
+    said had closed. A 600 s promise does not get a 3600 s enforcer. The window
+    itself is now refused at commit_pending too; this is what keeps the table
+    honest so the two never disagree.
+
+    Nothing else is disturbed by it -- a pending mint never took anything from
+    the working body, which is what lets this sweep be blunt.
+    """
+    while True:
+        await asyncio.sleep(PENDING_SWEEP_SECS)
+        try:
+            for tid in store.expire_pending(_conn):
+                log.info("pending credential %s expired unclaimed -- the previous "
+                         "body keeps the identity", tid)
+        except Exception:
+            log.exception("pending sweep failed")
+
+
 async def _sweeper():
     """Retention, expired sessions, stale presence. On the event loop, not a thread:
     _conn is used only from the loop thread, so a thread would need its own connection
@@ -8086,14 +8209,6 @@ async def _sweeper():
             store.sweep_sessions(_conn)
             store.reap_stale(_conn)
             store.sweep_expired_state(_conn)
-            # THE ARRIVAL WINDOW IS THE BROKER'S TIMER (ruling 11947), not a
-            # lazy check on the next request: a pending credential nobody ever
-            # presents is precisely the one no request will come for, and it
-            # must still die. Nothing else is disturbed -- a pending mint never
-            # took anything from the working body.
-            for tid in store.expire_pending(_conn):
-                log.info("pending credential %s expired unclaimed -- the previous "
-                         "body keeps the identity", tid)
             if dropped:
                 log.info("retention swept %s message(s)", dropped)
         except Exception:
@@ -8107,10 +8222,12 @@ def build_app():
     async def lifespan(app):
         async with mcp_app.router.lifespan_context(app):
             task = asyncio.create_task(_sweeper())
+            pending_task = asyncio.create_task(_pending_sweeper())
             try:
                 yield
             finally:
                 task.cancel()
+                pending_task.cancel()
 
     return Starlette(
         routes=[

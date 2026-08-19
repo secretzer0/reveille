@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.20")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.21")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -2033,6 +2033,93 @@ def _harvest_gate_audit(user, agent, grants_by_id):
                grantee=(g["grantee"] if g else "unknown"), src="gate")
 
 
+def _container_credential(user, agent):
+    """The token the RUNNING container holds, read from its env, or "".
+
+    Read, never stored: launcher.db persists no credential (R1) and this one
+    lives exactly as long as the probe below. The launcher already handles this
+    secret at provision -- it pipes it into `docker run` -- so asking the
+    container what it is holding adds no new exposure, and it is the only way
+    to ask the broker a question ABOUT that body without the launcher holding a
+    standing credential of its own.
+    """
+    res = _docker("inspect", "-f", "{{json .Config.Env}}",
+                  container_name(user, agent), check=False, capture=True)
+    if res.returncode != 0:
+        return ""
+    try:
+        env = json.loads((res.stdout or "").strip() or "[]")
+    except ValueError:
+        return ""
+    for e in env:
+        k, _, v = str(e).partition("=")
+        if k == "REVEILLE_TOKEN":
+            return v
+    return ""
+
+
+def _credential_known(broker_url, token):
+    """Does the broker still know this credential? None when it could not say.
+
+    THE BODY'S OWN SECRET ASKS THE QUESTION, which is what keeps the launcher
+    credential-less: it borrows the credential for one read and answers only
+    about that body. A 401 is the broker saying this credential no longer
+    speaks for anyone -- the supersede deleted it. Any other failure (broker
+    down, DNS, timeout) returns None and the caller does NOTHING: an
+    unreachable broker must never be read as "every body here is dead".
+
+    The five-minute grace is the BROKER's to keep, not this loop's: a
+    just-superseded credential still resolves for its handover writes (R2), so
+    it answers 200 here for exactly as long as it is still allowed to write its
+    note, and 401 the moment that window closes. The timing ruling 12320 A asks
+    for therefore needs no clock on this side.
+    """
+    if not token or not broker_url:
+        return None
+    req = urllib.request.Request(
+        broker_url.rstrip("/") + "/presence",
+        headers={"Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except urllib.error.HTTPError as e:
+        return False if e.code == 401 else None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+
+def _stop_superseded(conn):
+    """STOP the containers whose identity has moved on (ruling 12320 A).
+
+    Measured 2026-08-19, twice in one afternoon: a body superseded by an
+    arrival kept its CPU, its tmux and its ttyd, and the Agents page went on
+    offering a terminal into it. The operator found it both times -- "the
+    container for red-shirt-01 is still running" -- because nothing in the
+    system was responsible for the corpse. The launcher is: it is the only
+    thing that touches docker, and the broker already knows the arrival
+    happened. G4 holds -- no docker awareness moves into the broker.
+
+    STOP, never destroy: the home, the image and the record stay, so the same
+    body restarts on a send-back or a materialize with its work intact. Destroy
+    would drop the data root, and a body may be sent back to this machine (s14).
+    """
+    stopped = []
+    for c in conn.execute("SELECT user, agent, broker_url FROM containers").fetchall():
+        user, agent = c["user"], c["agent"]
+        st = (_docker("inspect", "-f", "{{.State.Running}}", container_name(user, agent),
+                      check=False, capture=True).stdout or "").strip()
+        if st != "true":
+            continue
+        known = _credential_known(c["broker_url"], _container_credential(user, agent))
+        if known is not False:      # True = still ours; None = we could not tell
+            continue
+        _docker("stop", container_name(user, agent), check=False, capture=True)
+        _audit("SUPERSEDEDSTOP", user=user, agent=agent,
+               reason="the identity moved to another body")
+        stopped.append((user, agent))
+    return stopped
+
+
 def _sweep_once(conn, idle_window_ns=0):
     now = time.time_ns()
     for c in conn.execute("SELECT user, agent FROM containers").fetchall():
@@ -2092,6 +2179,12 @@ def _sweep_once(conn, idle_window_ns=0):
                             check=False, capture=True)
                     _audit("IDLESTOP", user=user, agent=agent,
                            window_s=idle_window_ns // 10**9)
+    # THE CORPSE IS THE SWEEP'S JOB TOO (ruling 12320 A). Last, so a container
+    # this tick is about to stop for supersession is not also probed for idle --
+    # and unconditional, because unlike the idle stop this one is not a policy
+    # with a window to disable: a body whose credential the broker has deleted
+    # is not running for anybody.
+    _stop_superseded(conn)
     conn.commit()
 
 

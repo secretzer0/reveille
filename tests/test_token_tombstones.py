@@ -107,9 +107,36 @@ def _request(secret):
                                  cookies={})
 
 
+def test_the_note_comes_first_and_the_signpost_after():
+    """RULING 12320 R2. For five minutes after the supersede this credential is
+    not a signpost yet -- it is the only party holding the context, and the two
+    acts the doctrine asks of it are the whole reason the two-phase window
+    exists. Measured 2026-08-19: the swap committed 27 s after the ring and the
+    note came back "superseded", so the artifact the NEW body was told to read
+    was the one thing the swap deleted."""
+    c = db()
+    _, old, _ = minted_twice(c)
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        p = daemon._agent_principal(_request(old["secret"]))
+        assert p.handover is True and p.name == "wanderer"
+        assert p.agent_id, "it writes as the IDENTITY, which is what still exists"
+        # and it is write-only: two acts, named, everything else refused
+        with pytest.raises(store.AccessError, match="two acts"):
+            daemon._handover_only(p)
+        assert daemon._handover_only(p, allowed=True) is p
+    finally:
+        daemon._conn = prev
+
+
 def test_the_refusal_is_a_signpost_for_the_former_body_only():
     c = db()
     _, old, _ = minted_twice(c)
+    # Past the handover grace: the note has had its five minutes and this
+    # credential is what it has been since the swap -- a signpost.
+    c.execute("UPDATE token_tombstones SET superseded_ns=?",
+              (store.time.time_ns() - store.HANDOVER_GRACE_NS - 1,))
     prev = daemon._conn
     daemon._conn = c
     try:
@@ -117,7 +144,13 @@ def test_the_refusal_is_a_signpost_for_the_former_body_only():
             daemon._agent_principal(_request(old["secret"]))
         said = str(e.value)
         assert "superseded" in said and "wanderer" in said
-        assert "reveille init --login" in said, "the way back is named"
+        # THE WAY BACK IS THE ARRIVAL, not a re-install (ruling 12320 R4). This
+        # text told a parked body to run `reveille init --login` -- a mint it
+        # does not need and, on a broker with the password door closed, a flag
+        # that is not a door. What actually returns it is a return ticket its
+        # daemon claims and a turn here that calls join().
+        assert "join()" in said and "sends it back" in said, "the way back is named"
+        assert "--login" not in said, "and it is not a re-install"
         assert old["secret"] not in said and "Bearer" not in said, (
             "a signpost never carries a credential")
 

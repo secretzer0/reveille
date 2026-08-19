@@ -577,8 +577,11 @@ def ask_agent(agents, stdin=None):
 def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
                create=False, confirm_create=None, cookie=None, keep_session=False):
     """Log in (unless a session cookie is handed in), mint a token BOUND to
-    `agent`, attach rooms. Returns (secret, rooms-attached, note) or raises
-    RuntimeError with what to fix.
+    `agent`, attach rooms. Returns (secret, rooms-attached, note, pending) or
+    raises RuntimeError with what to fix. `pending` is the broker's word for "an
+    existing body still holds this identity and keeps it until this credential
+    joins" -- the caller needs it, because what a pending mint may disturb
+    locally is nothing at all (ruling 12320 R5).
 
     Binding supersedes the account's previous token for that name -- the broker's
     existing one-identity-one-live-credential rule, not something this adds. So
@@ -686,7 +689,7 @@ def mint_token(url, user, password, agent, rooms=None, tier="state", pick=None,
     if n:
         note += (f" (discarded {n} unclaimed move(s) for {agent}: whatever was "
                  f"minted for them cannot arrive)")
-    return tok["secret"], attached, note
+    return tok["secret"], attached, note, bool(tok.get("pending"))
 
 
 def room_listing(payload):
@@ -891,16 +894,24 @@ def doctrine_body(name, agent_type):
         f"Nothing owed -> silence is a valid turn.\n\n"
         f"On a `reason=\"swap-pending\"` ring: a new credential was minted for your\n"
         f"identity and is waiting to arrive. You are STILL the live body -- nothing\n"
-        f"has been taken from you and nothing will be until it joins. Two acts, in\n"
-        f"this order, while you are the one holding the context:\n"
-        f"1. SAVE THE WORK. Files do NOT travel -- only the identity does. Commit\n"
+        f"has been taken from you and nothing will be until it joins. Three acts, in\n"
+        f"THIS ORDER, and the order is the whole point: the far side FETCHES before\n"
+        f"it joins, and the moment it joins your credential is spent. So the note --\n"
+        f"the one thing only you can write -- goes SECOND, not last.\n"
+        f"1. COMMIT AND PUSH. Files do NOT travel -- only the identity does. Commit\n"
         f"   everything uncommitted to `wip/$REVEILLE_AGENT_ROLE/<utc-ts>` and push\n"
         f"   it. NEVER onto main, NEVER a force-push: this branch exists so the far\n"
         f"   side can fetch it, not so it can overwrite anything.\n"
-        f"2. WRITE THE NOTE. `memory_add(kind=\"state\", ...)` -- task, the wip BRANCH\n"
-        f"   and SHA you just pushed, next step, open threads, what is still undone.\n"
-        f"   If you could NOT push, say so exactly: \"unpushed at <host>:<path>\", so\n"
-        f"   the new body knows the work is stranded rather than assuming it came.\n"
+        f"2. WRITE THE NOTE, IMMEDIATELY, AND KEEP IT SHORT (under 1000 characters --\n"
+        f"   a refused write burns the window, and the window is seconds wide).\n"
+        f"   `memory_add(kind=\"state\", ...)` with FIVE FIELDS: task, the wip BRANCH\n"
+        f"   and SHA, next step, open threads, what is undone. If you could NOT push,\n"
+        f"   say so exactly: \"unpushed at <host>:<path>\", so the new body knows the\n"
+        f"   work is stranded rather than assuming it came.\n"
+        f"3. VERIFY THE PUSH and post the five fields to the room. Verification is\n"
+        f"   last because it is the only step that can wait: if the swap lands\n"
+        f"   mid-note your credential keeps these two writes for five minutes and\n"
+        f"   NOTHING else -- so spend that grace on the note, never on a read.\n"
         f"The new body FETCHES that branch before it does anything else. Then carry\n"
         f"on: if the swap never arrives, nothing about your situation changed.\n\n"
         f"On a `reason=\"recalled\"` or `reason=\"not-arrived\"` ring: the credential\n"
@@ -1105,6 +1116,7 @@ def cmd_init(a):
     # Bound here so the deferred mint below reads them whether or not this block
     # runs -- `will_mint` is the only thing that decides it does.
     will_mint, user, keep, cookie = False, None, False, cookie
+    minted_pending = False
     if a.login or not usable:
         # MINT FIRST, then fall into exactly the same path as a pasted token.
         # One installer, not two: everything after this point cannot tell where
@@ -1259,7 +1271,7 @@ def cmd_init(a):
                   f"one, it is superseded:\n  the machine holding it stops working "
                   f"on its next call. Two machines means two names.")
         try:
-            token, attached, note = mint_token(
+            token, attached, note, minted_pending = mint_token(
                 url, user, None, name, a.rooms, a.tier,
                 cookie=cookie, keep_session=keep,
                 pick=(lambda: ask("rooms (numbers/names, Enter = yours)", ""))
@@ -1274,7 +1286,9 @@ def cmd_init(a):
                   f"finish.", file=sys.stderr)
             return 1
         steps.append(f"minted a token bound to {name}, "
-                     f"rooms: {', '.join(attached)}{note}")
+                     f"rooms: {', '.join(attached)}{note}"
+                     + (" -- PENDING: the body holding this identity keeps it "
+                        "until a turn here calls join()" if minted_pending else ""))
 
     try:
         path = write_credential(url, name, token, workdir)
@@ -1296,9 +1310,20 @@ def cmd_init(a):
                      f"(it belongs in CLAUDE.local.md, which is not tracked)")
     # THE DAEMON HOLDING THE OLD CREDENTIAL HAS TO GO (ruling 12008). It read
     # its token once, at spawn, and no file written here can reach it.
-    retired = retire_waked(name)
+    # BUT A PENDING MINT TAKES NOTHING, SO IT RETIRES NOTHING (ruling 12320 R5,
+    # measured 2026-08-19). retire_waked is keyed on the agent NAME and the
+    # spool lock is per identity per machine, so an init in a second directory
+    # killed the daemon of the body that was still live and still holding a
+    # perfectly good credential -- deaf until its next turn boundary, for a
+    # credential that had not arrived and might never. 12008 was written before
+    # the swap was two-phase: it assumed the mint had already superseded what
+    # that daemon holds. When it has, this still fires.
+    retired = "" if minted_pending else retire_waked(name)
     if retired:
         steps.append(f"wake: {retired}")
+    elif minted_pending:
+        steps.append("wake: left the running daemon alone -- it holds the live "
+                     "credential until this one arrives")
     # ALWAYS, wizard or not (operator 11879 + red-shirt, 2026-08-18): the paste
     # path skips every prompt, and an agent with no CLAUDE.md has no boot ritual
     # -- it comes up connected and doctrine-less, which is what red-shirt did.
