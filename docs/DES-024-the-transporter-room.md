@@ -238,6 +238,24 @@ materialises the body. One command, both halves of §6.1 — otherwise
 - **VIRTUAL** — `--virtual /some/dir`: a CONTAINER on the host, mounting ONLY
   that directory and linking the host's `~/.claude/.credentials.json`.
 
+### 11.1.1 RULED: the HOST picks the kind, at accept
+
+**The pad kind is the host's choice, offered as a checkbox at the moment they
+accept** — push and request alike (operator 12670). The owner decides whether
+their identity goes; **the person whose machine it is decides how much of that
+machine it reaches.** Two authorities, two questions, neither able to answer
+the other's.
+
+This is not new law: DES-012 §11 already ruled "body kind = host's choice,
+container recommended" for visits. 12670 extends the same rule to the knock
+and push flows, which is the sign it generalises rather than being a visit
+special case.
+
+The landing-pad verb (§11) is how the choice is carried out; the checkbox is
+where it is made. Default: **container**, because it is the smaller grant
+(§11.3) — a host who wants to hand over the whole machine should have to say
+so.
+
 The virtual kind is the one that matters for the multi-human story: **it turns
 the container from a cloud thing into a SANDBOX FOR A NATIVE HOST.** It answers
 "I will host your agent, but not with the run of my machine" — the host offers
