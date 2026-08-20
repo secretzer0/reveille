@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -246,6 +246,11 @@ CREATE TABLE IF NOT EXISTS rooms (
     owner_id     TEXT REFERENCES users(id),
     public       INTEGER NOT NULL DEFAULT 0,
     retention_ns INTEGER,
+    -- Gate 2's per-room threshold (operator 12550, ruling 12555): NULL = the
+    -- measured default (daemon.THREAD_WAKE_K), 0 = thread-wake off here,
+    -- owner-set through the same PATCH as retention. The scaling formula
+    -- deliberately does not exist yet -- measurement first (12554).
+    wake_k       INTEGER,
     created_ns   INTEGER NOT NULL,
     UNIQUE (owner_id, name)
 );
@@ -1949,6 +1954,17 @@ CREATE TABLE IF NOT EXISTS knocks (
 """
 
 
+def _upgrade_v38(conn, db_path):
+    """v38 -> v39 (ruling 12555): rooms.wake_k, the owner's storm-gate knob.
+    Additive; NULL is correct for every existing row (the measured default
+    applies until an owner says otherwise)."""
+    with tx(conn):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(rooms)")}
+        if "wake_k" not in have:
+            conn.execute("ALTER TABLE rooms ADD COLUMN wake_k INTEGER")
+        conn.execute("PRAGMA user_version=39")
+
+
 def _upgrade_v37(conn, db_path):
     """v37 -> v38 (ruling 12532): tokens.last_inbox_ns -- when this credential
     last READ its mail. Additive; NULL is correct for every existing row (no
@@ -2187,7 +2203,7 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37)}
+              37, 38)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -3775,13 +3791,14 @@ def create_room(conn, owner_id, name, public=False):
     except sqlite3.IntegrityError:
         raise BusError(f"you already own a room named {name!r}")
     return {"id": rid, "name": name, "owner_id": owner_id, "public": bool(public),
-            "retention_ns": None, "created_ns": now}
+            "retention_ns": None, "wake_k": None, "created_ns": now}
 
 
 def _room_dict(r, owner_name=None):
     return {"id": r["id"], "name": r["name"], "owner_id": r["owner_id"],
             "owner": owner_name, "public": bool(r["public"]),
-            "retention_ns": r["retention_ns"], "created_ns": r["created_ns"]}
+            "retention_ns": r["retention_ns"], "wake_k": r["wake_k"],
+            "created_ns": r["created_ns"]}
 
 
 def get_room(conn, room_id):
@@ -3984,6 +4001,31 @@ def set_retention(conn, room_id, owner_id, retention_ns):
     if r["owner_id"] != owner_id:
         raise AccessError("not your room")
     conn.execute("UPDATE rooms SET retention_ns=? WHERE id=?", (retention_ns, room_id))
+
+
+def set_wake_k(conn, room_id, owner_id, wake_k):
+    """The owner's storm-gate knob (ruling 12555, retention's shape exactly).
+    NULL = the measured default; 0 = thread-wake off for this room. Owner
+    only: the gate decides who gets WOKEN in the owner's room, which is
+    theirs to tune and nobody else's."""
+    if wake_k is not None:
+        if not isinstance(wake_k, int) or isinstance(wake_k, bool) or wake_k < 0:
+            raise BusError("wake_k is a whole number of agent messages "
+                           "(0 turns thread-wake off) or null for the default")
+    r = conn.execute("SELECT owner_id FROM rooms WHERE id=?", (room_id,)).fetchone()
+    if not r:
+        raise BusError("no such room")
+    if r["owner_id"] != owner_id:
+        raise AccessError("not your room")
+    conn.execute("UPDATE rooms SET wake_k=? WHERE id=?", (wake_k, room_id))
+
+
+def wake_k_override(conn, room_id):
+    """The room's explicit gate-2 threshold, or None for the default. The
+    caller composes the effective value and LOGS ITS SOURCE -- a number with
+    no provenance is how two defects hid on 2026-08-19."""
+    r = conn.execute("SELECT wake_k FROM rooms WHERE id=?", (room_id,)).fetchone()
+    return r["wake_k"] if r else None
 
 
 # ---- DES-013: the bank, who speaks with what, and the script row -----------------
