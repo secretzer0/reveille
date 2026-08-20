@@ -232,7 +232,11 @@ def test_the_refusal_is_a_signpost_for_the_former_body_only():
 
         with pytest.raises(store.AuthError) as e2:
             daemon._agent_principal(_request("garbage-never-minted"))
-        assert str(e2.value) == "bad token", (
-            "a never-valid secret stays generic -- distinguishable from the signpost")
+        # Generic no longer means TWO WORDS (rulings 12506/12526): it carries
+        # the doctrine now. Distinguishable-from-the-signpost is still the
+        # bound under test -- the generic text names NO identity.
+        assert str(e2.value) == store.BAD_TOKEN
+        assert "wanderer" not in str(e2.value), (
+            "a never-valid secret stays unspecific -- distinguishable from the signpost")
     finally:
         daemon._conn = prev

@@ -543,11 +543,42 @@ by the broker's existing sweep; so, now, are spent return tickets (the s17
 audit debt, 12396). The rail names the reason in the human's words -- "was
 this identity's body" and "never arrived" are different decisions.
 
-**The doctrine line** (USAGE section 2 and the managed CLAUDE.local.md
-block), which is what the 54k tokens bought: join() refused and no ring
-explains it -> print the refusal, take the choice it offers (knock, or idle),
-do NOTHING else. NEVER read, print, compare or copy credential files -- the
-broker's refusal is the only diagnostic. Idle is a valid life.
+**The doctrine line** (USAGE section 2, the managed CLAUDE.local.md block,
+and the refusal itself -- one sentence, word for word, rulings 12522/12525/
+12526 after operator 12518): join() refused and no ring explains it -> read
+your own spool first (~/.reveille/spool; a ring's `reason` is the system
+speaking, but reason=idle-nudge says nothing), then act on the refusal:
+`reveille knock`, `reveille init`, or stay idle. Do NOT reconstruct your
+state from anything else -- not files, not logs, not git history. Idle is a
+valid life.
+
+The distinction is PROVENANCE, not location: a broker-produced ring in the
+body's own spool (reason=message, swap-pending, recalled,
+credential-superseded) is the system speaking -- reading it is mail, not
+inference. Everything locally produced -- idle-nudge rings, logs, git
+history, credential files, the environment -- is the body's own scratch and
+is NOT an input to "who am I and what happened to me". The sanctioned set is
+exactly two: the refusal, and broker-produced rings already in the spool.
+The materialize body reconstructed its state correctly from git history, and
+that is precisely why the rule exists (operator 12518): it stood in our own
+repo, holding its own wip handover branches, with a shell -- a hometown
+advantage no generic agent has. A system that only explains itself to an
+agent standing in its author's git repo is not self-describing.
+
+**The generic refusal carries the doctrine too** (rulings 12506/12526,
+0.2.202). Tombstones are not retroactive: a credential swept before 0.2.200
+shipped has no row anywhere and can never get a story -- the materialize
+directory itself is in that cohort. So `AuthError("bad token")` stopped
+being two words: one constant, at every site that cannot identify a
+credential (the daemon principal path and knock's two refusals), naming
+`reveille init`, ask-the-owner, and the doctrine sentence -- and NOTHING
+else. Deliberately unspecific and identical for a swept pending, a typo, a
+stolen secret and a stranger: the endpoint answers unauthenticated callers,
+so it must never name an identity or its liveness. Its value is the
+instruction, not the information. Refused and staying refused: the knock
+response carrying the identity's state note (a dead secret proves
+possession, not identity -- the successor gets the note by JOINING, which is
+authenticated).
 
 **What was refused, and why it stays refused (12445).** A read-only probe
 verb (`status()` / extended whoami): it answers, in a second weaker voice,

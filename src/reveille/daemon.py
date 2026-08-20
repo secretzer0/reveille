@@ -215,10 +215,12 @@ USE:
    join() -- that call IS the arrival and commits the swap. Until it happens
    the identity is still the other body, your wake socket is refused
    ({"error":"pending"}), and nothing else here works.
-   THE BODY IN WAITING (DES-012 s18, ruling 12445): join() refused and no
-   ring explains it -> print the refusal, take the choice it offers (knock,
-   or idle), do NOTHING else. NEVER read, print, compare or copy credential
-   files -- the broker's refusal is the only diagnostic. Idle is a valid life.
+   THE BODY IN WAITING (DES-012 s18, rulings 12445/12526): join() refused
+   and no ring explains it -> read your own spool first (~/.reveille/spool;
+   a ring's `reason` is the system speaking, but reason=idle-nudge says
+   nothing), then act on the refusal: `reveille knock`, `reveille init`, or
+   stay idle. Do NOT reconstruct your state from anything else -- not files,
+   not logs, not git history. Idle is a valid life.
    THE KNOCK: `reveille knock` in the refused directory asks the owner to
    send the identity here (POST /recalls/request, authed by the dead
    credential). It records ONE row on the owner's rail and nothing else; the
@@ -319,6 +321,26 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.202 THE REFUSAL IS THE WHOLE INSTRUCTION (rulings 12506, 12522, 12526;
+operator 12518). Tombstones are not retroactive: every credential swept
+before 0.2.200 is story-less forever, and the directory the invariant was
+born from is in that cohort -- its clean-context session got bare "bad
+token" and only diagnosed itself by reading its own git history, a hometown
+advantage no generic agent has. So the generic refusal stopped being two
+words: ONE constant at every site that cannot identify a credential (the
+daemon principal path and knock's two refusals -- the field run proved the
+second matters: `reveille knock` answered the bare two words, which reads as
+"the remedy is broken"), naming `reveille init`, ask-the-owner, and the
+doctrine sentence, and never an identity or its liveness -- the endpoint
+answers unauthenticated callers, so its value is the instruction, not the
+information. The doctrine sentence itself widened and is now word for word
+identical in the constant, USAGE section 2, and the managed CLAUDE.local.md
+block: read your own spool first -- a broker-produced ring (message,
+swap-pending, recalled, credential-superseded) is the system speaking, mail
+not inference; reason=idle-nudge, logs, git history, credential files and
+the environment are the body's own scratch and not an input. Then act on
+the refusal: knock, init, or stay idle. Idle is a valid life.
 
 0.2.201 THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF
 (DES-012 s18; rulings 12445 part 3, 12485 option (a)). The knock:
@@ -4990,9 +5012,7 @@ def _agent_principal(request):
                 alive = f"The identity is alive elsewhere{seen}."
             else:
                 alive = "No live body holds the identity right now."
-            idle = ("Or stay idle -- idle is a valid life. This refusal is "
-                    "the only diagnostic: never read, print, compare or copy "
-                    "credential files.")
+            idle = store.REFUSAL_DOCTRINE
             if ts["reason"] == "expired-unclaimed":
                 when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                      time.gmtime(ts["died_ns"] / 1e9))
@@ -5012,7 +5032,11 @@ def _agent_principal(request):
                 f"it back from the bus; a turn in this directory then calls "
                 f"join(): that call IS the arrival. `reveille init` also "
                 f"works. To reach the live body, use the bus web UI. {idle}")
-        raise store.AuthError("bad token")
+        # THE GENERIC REFUSAL CARRIES THE DOCTRINE TOO (rulings 12506/12522):
+        # a credential with no story anywhere -- the pre-0.2.200 cohort, a
+        # typo, a stranger -- still learns what to do. One constant, shared
+        # with knock's refusals, so the remedy never answers in two words.
+        raise store.AuthError(store.BAD_TOKEN)
     name = (request.headers.get("x-agent") if request else "") or ""
     bound = tok.get("agent_name")
     if bound:
