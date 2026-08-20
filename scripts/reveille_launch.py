@@ -2330,6 +2330,17 @@ def _stop_superseded(conn):
 
 def _sweep_once(conn, idle_window_ns=0):
     now = time.time_ns()
+    # OBSERVE FIRST, WRITE LAST (13366, measured 2026-08-20): this walk shells
+    # out to docker two-to-three times per container, and _stop_superseded
+    # adds a docker inspect plus a broker HTTP read per running body -- one
+    # write-lock hold of 7.54s was measured across the fleet, once per tick,
+    # because the transaction used to open at the FIRST container's
+    # sessions_seen DELETE and stay open across every LATER container's
+    # observations. Every launcher open during a tick waited the remainder
+    # (the 2.1-7.5s series behind the _db timeout). SELECTs take no write
+    # lock; the writes are a handful of tiny rows and land in one short
+    # transaction at the end of the tick.
+    record = []
     for c in conn.execute("SELECT user, agent FROM containers").fetchall():
         user, agent = c["user"], c["agent"]
         # Expired grant ROWS are kept on purpose. The row is the only thing that
@@ -2365,12 +2376,7 @@ def _sweep_once(conn, idle_window_ns=0):
                    grantee=(g["grantee"] if g else "unknown"),
                    observed="sweep-tick")  # observation time, not event time
         killed = {s for s, _ in kills}
-        conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
-                     (user, agent))
-        conn.executemany(
-            "INSERT INTO sessions_seen(user, agent, session, first_seen_ns) "
-            "VALUES(?,?,?,?)",
-            [(user, agent, s, now) for s in set(live) - killed])
+        record.append((user, agent, set(live) - killed))
         # 24h idle STOP, never destroy (sec 7.1): data is on bind mounts, so a
         # restart is one `start` and loses nothing. A stopped container probes
         # as (False, 0, 0) with an exec error and is skipped above the is_idle
@@ -2392,12 +2398,21 @@ def _sweep_once(conn, idle_window_ns=0):
                             check=False, capture=True)
                     _audit("IDLESTOP", user=user, agent=agent,
                            window_s=idle_window_ns // 10**9)
-    # THE CORPSE IS THE SWEEP'S JOB TOO (ruling 12320 A). Last, so a container
-    # this tick is about to stop for supersession is not also probed for idle --
-    # and unconditional, because unlike the idle stop this one is not a policy
-    # with a window to disable: a body whose credential the broker has deleted
-    # is not running for anybody.
+    # THE CORPSE IS THE SWEEP'S JOB TOO (ruling 12320 A). Last of the
+    # observations, so a container this tick is about to stop for supersession
+    # is not also probed for idle -- and unconditional, because unlike the
+    # idle stop this one is not a policy with a window to disable: a body
+    # whose credential the broker has deleted is not running for anybody.
     _stop_superseded(conn)
+    # WRITE PHASE: everything above observed; only now does the transaction
+    # open, and it holds nothing but these rows.
+    for user, agent, sessions in record:
+        conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
+                     (user, agent))
+        conn.executemany(
+            "INSERT INTO sessions_seen(user, agent, session, first_seen_ns) "
+            "VALUES(?,?,?,?)",
+            [(user, agent, s, now) for s in sessions])
     conn.commit()
 
 
