@@ -1898,3 +1898,38 @@ def test_a_busy_list_is_not_a_failure(monkeypatch):
     args = types.SimpleNamespace(all=True, idle=True, image="img", user=None,
                                  agent=None, health_url="h", timeout=1)
     assert rl.cmd_upgrade(args) is None
+
+
+def test_the_roll_step_waits_out_a_long_write_holder(tmp_path):
+    """13245 half 2, shipped repro-first as ruled at 13280. The field crash
+    happened WITH the 5s default busy timeout in force -- measured here: a
+    write transaction held 8s makes the pre-fix _db() die at ~5.0s with
+    "database is locked" (NOT the 0.000s read-to-write upgrade signature;
+    that hypothesis was tested and did not reproduce on this path). The fix
+    is the knob the measurement names: connect(timeout=30). This gate IS the
+    repro -- red on the pre-fix head at the field's own shape, and it costs
+    the suite ~8 seconds because a contention gate that does not contend
+    proves nothing."""
+    import sqlite3
+    import threading
+    import time as _time
+    db = str(tmp_path / "launcher.db")
+    rl._db(db).close()
+
+    def holder():
+        c = sqlite3.connect(db)
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("INSERT OR IGNORE INTO agent_owners"
+                  "(agent, user, first_provisioned_ns) VALUES('x','y',1)")
+        _time.sleep(8)
+        c.commit()
+        c.close()
+
+    t = threading.Thread(target=holder)
+    t.start()
+    _time.sleep(0.5)
+    try:
+        conn = rl._db(db)
+        conn.close()
+    finally:
+        t.join()
