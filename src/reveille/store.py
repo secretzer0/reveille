@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -605,7 +605,14 @@ CREATE TABLE IF NOT EXISTS memories (
     kind          TEXT NOT NULL CHECK (kind IN
                     ('doctrine','contract','decision','lesson','state')),
     scope         TEXT NOT NULL,
-    fact          TEXT NOT NULL CHECK (length(fact) <= 1000),
+    -- NO LENGTH CHECK, DELIBERATELY (12759; operator 12754/12756/12758). The
+    -- original 1000 was a distillation POLICY wearing a schema constraint's
+    -- clothes -- SQLite gains nothing from a declared bound on TEXT, and a
+    -- CHECK can only move by rebuilding this table. Every bound now lives in
+    -- code where a constant can change without a migration: FACT_MAX is the
+    -- disaster backstop, STATE_FACT_MAX and friends are the per-kind policy,
+    -- all enforced in memory_add. The absence here is the design.
+    fact          TEXT NOT NULL,
     entities      TEXT NOT NULL DEFAULT '',
     -- A CITATION IS A HISTORICAL FACT, NOT A LIVE REFERENCE (architect, msg 8857).
     -- No FK action, deliberately: ON DELETE SET NULL made "cited message N" and
@@ -1982,6 +1989,36 @@ def _upgrade_v39(conn, db_path):
         conn.execute("PRAGMA user_version=40")
 
 
+def _upgrade_v40(conn, db_path):
+    """v40 -> v41 (ruling 12759, operator 12754/12756/12758): the memories
+    fact CHECK is REMOVED -- fact becomes bare TEXT, and every bound moves to
+    code as a named constant (FACT_MAX backstop, per-kind policy above it).
+    SQLite cannot ALTER a CHECK, so this is a table rebuild -- and the LAST
+    one this column will ever need: with no number in the schema, every
+    future tune is a constant change. Same shape as v17: rename, relay the
+    schema, copy, drop, rebuild the FTS content, verify FKs."""
+    snapshot(conn, f"{db_path}.pre-v41-{time.time_ns()}.bak")
+    with tx(conn):
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute("ALTER TABLE memories RENAME TO memories_old")
+        _exec_script(conn, _MEMORIES_SCHEMA)
+        cols = ("id, uid, kind, scope, fact, entities, source_msg_id, "
+                "author_agent_id, supersedes_id, slug, symptom, root_cause, "
+                "rule, detection, author, status, occurred_ns, created_ns, "
+                "expires_ns")
+        conn.execute(f"INSERT INTO memories({cols}) "
+                     f"SELECT {cols} FROM memories_old")
+        conn.execute("DROP TABLE memories_old")
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
+            "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
+            "rule, detection FROM memories")
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise BusError(f"v41 migration left {len(bad)} FK violations")
+        conn.execute("PRAGMA user_version=41")
+
+
 def _upgrade_v37(conn, db_path):
     """v37 -> v38 (ruling 12532): tokens.last_inbox_ns -- when this credential
     last READ its mail. Additive; NULL is correct for every existing row (no
@@ -2220,7 +2257,7 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39)}
+              37, 38, 39, 40)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -6139,6 +6176,21 @@ KINDS = ("doctrine", "contract", "decision", "lesson", "state")
 TIERS = ("state", "write", "ratify")
 STATE_TTL_NS = 30 * 24 * 3600 * 10**9   # Q2 resolved: stale open_tasks mislead
 
+# FACT SIZE POLICY LIVES HERE, NEVER IN THE SCHEMA (rulings 12744/12747/12753,
+# corrected by the operator at 12754 and ruled 12757): the schema carries only
+# the 128000 sanity bound, so every one of these is tuneable without a table
+# rebuild. state gets room because a state note has ONE reader and one
+# instance, and it is written inside a swap window seconds wide; the kinds
+# that compete for brief()'s shared budget keep the tight cap because the
+# distillation a refusal forces is the feature there.
+FACT_MAX = 128_000           # disaster backstop for ANY kind (12759): guards
+                             # beneath the per-kind policy, in the layer that
+                             # can move without a table rebuild
+MEMORY_FACT_MAX = 1000       # doctrine / contract / decision
+STATE_FACT_MAX = 8192        # hard: over this, refuse
+STATE_FACT_SOFT = 4096       # at or over: STORE, then nudge -- never refuse
+STATE_FACT_TARGET = 2048     # named in the nudge as the aim, not enforced
+
 
 def _memory_insert(conn, *, kind, scope, fact, author, status, entities="",
                    source_msg_id=None, supersedes_id=None, slug=None, symptom=None,
@@ -6191,8 +6243,15 @@ def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
         raise BusError("lessons go through lesson_add(), which owns their gate")
     if not (fact or "").strip():
         raise BusError("fact is required")
-    if len(fact) > 1000:
-        raise BusError("fact is over 1000 chars -- distill it or link a source message")
+    # Backstop first, policy second: FACT_MAX holds even if a future tune
+    # raises a kind's cap past it -- the schema deliberately carries no bound.
+    if len(fact) > FACT_MAX:
+        raise BusError(f"fact is over {FACT_MAX} chars -- that is not a memory, "
+                       f"that is a payload; link a source message instead")
+    limit = STATE_FACT_MAX if kind == "state" else MEMORY_FACT_MAX
+    if len(fact) > limit:
+        raise BusError(f"fact is over {limit} chars -- distill it or link a "
+                       f"source message")
 
     if kind == "state":
         if not agent_bound:
@@ -6242,7 +6301,19 @@ def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
         if sup_row is not None and status == "live":
             conn.execute("UPDATE memories SET status='superseded' WHERE id=? "
                          "AND status='live'", (sup_row["id"],))
-    return {"id": out["uid"], "status": status}
+    res = {"id": out["uid"], "status": status}
+    # STORE FIRST, THEN NUDGE (12747), PROCEDURAL ONLY (12750): a length
+    # comparison and a constant string. No model, no call-out, no latency --
+    # a model in a write path is a second thing that can fail, and this write
+    # often happens inside a swap window seconds wide.
+    if kind == "state" and len(fact) >= STATE_FACT_SOFT:
+        res["note"] = (
+            f"stored, {len(fact)} chars. Aim for {STATE_FACT_TARGET}: the five "
+            f"fields, the branch and sha, and exact ids are not compressible -- "
+            f"the prose around them is. To condense, call memory_add again with "
+            f"supersedes={out['uid']}. If you are mid-handover, ignore this and "
+            f"move on.")
+    return res
 
 
 def _mem_dict(r, chain=None, fork=False):
