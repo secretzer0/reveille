@@ -1872,3 +1872,29 @@ def test_cmd_new_carries_the_flag_its_refusal_prescribes():
     m = re.search(r"def cmd_new\(a\):(.*?)\ndef ", src, re.S)
     assert m and "ROLE_PROMPTS.get(a.role" in m.group(1)
     assert "role_prompt=prompt" in m.group(1)
+
+
+def test_the_trip_does_not_swallow_a_died_roll_step():
+    """Ruling 13245: two deploys in a row carried a locked-db traceback inside
+    a green `make up`, because the roll step ended in `|| true`. Busy skips
+    never needed it -- roll_idle exits 0 listing them -- so the only thing it
+    ever swallowed was a crash. Red on the pre-fix head: the swallow present."""
+    mk = (pathlib.Path(rl.__file__).parent.parent / "Makefile").read_text()
+    roll = mk[mk.index("upgrade --all --idle"):]
+    first_line = roll.splitlines()[0]
+    assert "|| true" not in first_line, (
+        "the roll step swallows its own exit status again -- a died step "
+        "inside a green trip is the trip lying about itself")
+
+
+def test_a_busy_list_is_not_a_failure(monkeypatch):
+    """The pin that makes removing the swallow safe: skipped-busy agents exit
+    the roll step 0. Only a crash may fail the trip."""
+    monkeypatch.setattr(rl, "roll_idle",
+                        lambda conn, image, health_url=None, timeout=0:
+                        ([], ["a busy: probe"]))
+    monkeypatch.setattr(rl, "_db",
+                        lambda: types.SimpleNamespace(close=lambda: None))
+    args = types.SimpleNamespace(all=True, idle=True, image="img", user=None,
+                                 agent=None, health_url="h", timeout=1)
+    assert rl.cmd_upgrade(args) is None
