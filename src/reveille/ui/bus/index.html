@@ -968,7 +968,7 @@
      knock or on reload. -->
 <div id="knockModal" hidden>
  <div id="kmCard">
-  <div class="pRow"><b>A machine is knocking</b></div>
+  <div class="pRow"><b>A machine is hailing</b></div>
   <div id="kmList"></div>
   <div class="pRow"><button type="button" id="kmLater">not now</button></div>
  </div>
@@ -2605,8 +2605,11 @@ function tabActions(t){
  // credential in its own transaction -- one identity, one live body, and no
  // shell anywhere in the path. Never offered beside a container of its own:
  // that is start/stop, not a swap.
+ // THE WORDS ARE BEAM DOWN / BEAM UP / HAIL (operator 12673, rulings 12674/
+ // 12676/12682): rendered labels only -- data-agact keys, routes and tables
+ // keep their shipped names.
  if(st==='elsewhere')out+=b('materialize','&#11015;',
-   'move '+t.agent+' here -- new body on this host; '+
+   'beam '+t.agent+' down here -- new body on this host; '+
    'the old one keeps working until this one arrives');
  // DES-012 s13: the rest of the menu, by ownership. Every one of these is the
  // SAME act underneath -- a bare attach on an existing identity, pending until
@@ -2618,7 +2621,7 @@ function tabActions(t){
  // Bringing someone ELSE's agent here is the fourth, and it lives in the
  // Visits tab because it is a request, not an act.
  if(!gone)out+=b('tomachine','&#128421;',
-   'move '+t.agent+' to a machine of mine -- shows the install command once');
+   'beam '+t.agent+' down to a machine of mine -- shows the install command once');
  // DES-012 s14: SEND IT BACK. The other three verbs give an identity a NEW
  // body; this one calls a parked body back to a machine it already lived on.
  // No paste and no secret on the wire: the owner opens a ticket, and the
@@ -2626,7 +2629,7 @@ function tabActions(t){
  // one. Offered on any live row, because "which machine did it come from" is
  // the parked daemon's question to answer, not this page's to guess.
  if(!gone)out+=b('sendback','&#8617;',
-   'send '+t.agent+' back to the machine it was moved off -- that machine '+
+   'beam '+t.agent+' back down to the machine it was moved off -- that machine '+
    'claims it with the credential it already holds');
  if(!gone)out+=b('sendto','&#128101;',
    'send '+t.agent+' to another human -- they accept before anything is minted');
@@ -2873,7 +2876,7 @@ function drawRoster(){
   const s=stateOf(a);
   // KNOCKING is a decision waiting on the human (DES-012 s18), so it
   // outranks the quiet states and carries its word.
-  const word=a.status==='absent'?'broken':agKnocks[a.agent]?'knocking'
+  const word=a.status==='absent'?'broken':agKnocks[a.agent]?'hailing'
     :gone(a)?s:differs(a)?'differs':'';
   // A DIFFERENCE IS ONLY ACTIONABLE ONCE YOU CAN SEE FROM WHAT. One word on a
   // twenty-character rail cannot carry two image tags, so they ride the
@@ -3256,12 +3259,12 @@ async function openSendBack(name){
    :'the move minted for that machine never arrived'):'';
  const kAgo=k?Math.max(1,Math.round((Date.now()-k.last_ns/1e6)/60000)):0;
  openAgDlg(
-  '<div class="pRow"><b id="agDlgTitle">Send '+esc(name)+' back</b></div>'+
-  (k?'<div class="pAsk"><b>A machine is knocking'+
+  '<div class="pRow"><b id="agDlgTitle">Beam '+esc(name)+' back down</b></div>'+
+  (k?'<div class="pAsk"><b>A machine is hailing'+
    (k.path?' from '+esc(k.path):'')+':</b> '+kWord+', and it asked '+
    'to come back ~'+kAgo+' min ago. Answering opens the window for THE '+
    'MACHINE THAT ASKED'+(k.path?' -- '+esc(k.path):'')+', and nowhere else. '+
-   'The knocking machine may be one you do not recognise; the path above is '+
+   'The hailing machine may be one you do not recognise; the path above is '+
    'the whole content of this decision.</div>'+
    // THE ANSWER MUST NOT DIE SILENTLY (ruled 12644 (a), from 12642: one waked
    // per agent per host). When the asking directory shares a host with the
@@ -3285,7 +3288,7 @@ async function openSendBack(name){
   'daemon claims the ticket within 20 seconds and writes the credential; '+
   esc(name)+' lands there when a turn on that machine calls join(). Until then '+
   'its current body is still the live one.</div>'+
-  '<div class="pRow"><button id="sbGo">allow it back (5 min)</button> '+
+  '<div class="pRow"><button id="sbGo">beam it back down (5 min)</button> '+
    '<button id="sbNo">cancel</button></div>'+
   '<div id="sbStatus" class="pDim"></div>','#sbGo');
  $('sbNo').onclick=closeAgDlg;
@@ -3719,8 +3722,8 @@ async function onKnockPush(){
  // The badge's tooltip names the askers (12626): user@host:path is the whole
  // content of the decision when two directories can both be an agent's past.
  const b=$('knockBadge');
- if(b)b.title=ks.length?ks.map(k=>k.agent+' knocking from '+(k.path||'an unnamed machine')).join('\n')
-                       :'machines knocking to come back';
+ if(b)b.title=ks.length?ks.map(k=>k.agent+' hailing from '+(k.path||'an unnamed machine')).join('\n')
+                       :'machines hailing to come back';
  if(!ks.length){closeKnockModal();knockSeen.clear();knockSnoozed=false;return;}
  if(ks.some(k=>!knockSeen.has(k.id)))knockSnoozed=false;   // a NEW knock re-arms
  for(const k of ks)knockSeen.add(k.id);
@@ -3732,7 +3735,7 @@ function renderKnockModal(ks){
   const word=k.reason==='superseded'?"that machine was this identity's body"
     :'the move minted for that machine never arrived';
   const ago=Math.max(1,Math.round((Date.now()-k.last_ns/1e6)/60000));
-  return '<div class="kmRow"><b>'+esc(k.agent)+'</b> is knocking'+
+  return '<div class="kmRow"><b>'+esc(k.agent)+'</b> is hailing'+
    (k.path?' from <span class="kmFrom">'+esc(k.path)+'</span>':'')+
    ' -- '+word+', asked ~'+ago+' min ago<br>'+
    '<button type="button" data-kmopen="'+esc(k.agent)+'">answer</button> '+
@@ -4090,7 +4093,7 @@ function visitLine(v){
     : '')+
   ((v.state==='accepted'||v.state==='visiting')
     ? '<button class="danger" data-vend="'+esc(v.id)+'">'+
-      (v.owner===myName?'recall':'evict')+'</button>':'')+
+      (v.owner===myName?'beam up (recall)':'beam up (evict)')+'</button>':'')+
   '</div>'+
   (v.state==='asked'&&v.decider===myName?visitConsent(v):'');
 }

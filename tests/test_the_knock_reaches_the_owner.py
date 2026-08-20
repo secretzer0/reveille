@@ -167,5 +167,6 @@ def test_the_page_carries_the_modal_the_ruled_shape():
     assert "knockModal" in PAGE
     assert "case 'knocks'" in PAGE, "the /feed frame is the trigger"
     assert "not now" in PAGE, "the third button (12607 limit 2)"
-    assert "knocking from" in PAGE, "the asker is named (12626)"
+    # The WORD moved to hail (12673/12682, D4 slice); the asker is still named.
+    assert "hailing from" in PAGE, "the asker is named (12626)"
     assert "knockBadge" in PAGE, "the badge stays -- the push is an addition"
