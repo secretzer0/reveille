@@ -317,8 +317,12 @@ Two notes on carrying it out, so the rename does not become churn:
   (0.2.201-0.2.208). Identifiers may keep their names; a released CLI verb
   gets an alias and a deprecation, not a silent rename. That is a deliberate
   act to schedule, not a side effect of this ruling.
-- The REQUEST is not a third word. A machine ASKS TO BE BEAMED DOWN. Whatever
-  the button says, it says that.
+- The REQUEST gets its own canon-exact word: **HAIL** (red-shirt 12681).
+  Hailing is contact plus request and it works planet-side, which is exactly
+  the act: **the pad HAILS the ship, the owner answers, the ship beams down.**
+  So the three human-facing words are HAIL, BEAM DOWN, BEAM UP. `reveille
+  knock` remains the shipped identifier until it is deliberately aliased and
+  deprecated.
 
 ### 12.2 The metaphor names three acts, not two
 
@@ -362,3 +366,16 @@ So: no option appears in that box until a body of that kind has been woken by
 a ring. Offering a runtime we cannot wake would be the dropdown equivalent of
 a button that opens a window into nothing — the defect this document already
 exists to remove (§6.2).
+
+**AND THE RULE IS PAD-LEVEL, NOT FLEET-LEVEL** (red-shirt 12681). §11.3 rules
+that the host bears the cost — which presumes THE HOST HOLDS THAT VENDOR'S
+ACCOUNT. A runtime the fleet has proven, offered to a host who has no
+credential for it, is the same button into nothing one layer down. So a
+runtime is offered on a pad only when:
+
+- the fleet has woken a body of that kind (earned, §12.4), **AND**
+- that pad's host holds that runtime's credential, **or** the invitation says
+  plainly "bring your own account".
+
+Two gates, because "we can run it" and "you can pay for it" are different
+facts and only the second is about the person clicking.
