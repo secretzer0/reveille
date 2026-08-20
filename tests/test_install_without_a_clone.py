@@ -208,6 +208,33 @@ def test_a_dead_credential_in_the_directory_is_not_reinstalled(tmp_path, broker,
     assert "no longer works" in out.out, "and it says so, in the words of the refusal"
 
 
+def test_force_installs_a_refused_credential_so_the_body_can_park(tmp_path, broker,
+                                                                  monkeypatch, capsys):
+    """THE BOOT THAT COULD NOT COME BACK (measured 2026-08-20 on
+    rev-tmelhiser-red-shirt-01). A container whose credential was superseded by
+    a move to another machine boots holding a secret the broker answers 401 to.
+    That is a state the two-phase swap DELIBERATELY creates, and the entrypoint's
+    fallback `reveille init --no-prompt --force` is what is supposed to survive
+    it -- because waked parks on that spent secret and trades it for a live one
+    at the return ticket.
+
+    It did not survive it: the refusal diverted to the mint path, which asks for
+    a human sign-in no container has, so init exited 1 under `set -e`, waked
+    never spawned, and no ticket could ever be claimed. RED before the fix -- it
+    takes the mint path and refuses (in the field: "no sign-in stored"; against
+    this fake broker: "HTTP Error 401" -- same branch, same verdict). The file
+    below is the whole point: waked reads its claim credential out of it."""
+    Broker.code = 401
+    claude, _ = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude, force=True)
+    monkeypatch.setenv("REVEILLE_TOKEN", "the-superseded-one")
+    assert cli.main(argv + ["--no-prompt"]) == 0, capsys.readouterr().err
+    env = json.loads((work / ".claude" / "settings.local.json").read_text())["env"]
+    assert env["REVEILLE_TOKEN"] == "the-superseded-one", \
+        "the spent secret IS the claim credential -- writing anything else strands the body"
+    assert "REFUSING" not in capsys.readouterr().err
+
+
 def test_an_unreachable_broker_does_not_discard_a_credential(tmp_path, monkeypatch):
     """Only a REFUSAL proves a token is dead. Silence proves nothing about it,
     so a broker that is down must not cost the machine its credential -- that is
