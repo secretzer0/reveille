@@ -351,6 +351,21 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.216 THE ROW MUST NOT LIE ABOUT WHERE THE BODY IS (ruling 12851 R5, from
+the operator's "there is no beam back button like there was for you"). A
+stopped container HERE and a live body THERE are both true at once, and the
+launcher decides `stopped` from docker alone -- lifecycle_state never
+consults the hive once a container record exists -- so the Agents pane told
+the reader the one fact they were not asking about, and the two-step that
+does work appeared nowhere. No new state and no new verb: send-back was
+already on the strip and the row already carried the hive reading. What was
+owed was the sentence, and it now names both facts and the order -- start the
+container, then send it back within the five-minute ticket window; the
+started container claims with the credential it still holds, nothing is
+pasted, and the swap commits when a turn inside it calls join(). Beam-down
+stays withheld wherever a container record exists on this host: one identity,
+one container record per host.
+
 0.2.215 A REFUSED CREDENTIAL IS A FACT TO RECORD, NOT A REASON TO REPLACE
 (ruling 12851 R2). `reveille init --force` could not do the one job the
 container entrypoint kept it for. A body moved to another machine boots
