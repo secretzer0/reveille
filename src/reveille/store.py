@@ -6819,22 +6819,39 @@ def add_lesson(conn, *, author, slug, symptom, root_cause, rule, detection, room
 
 def _lesson(r):
     room = None if r["scope"] == "global" else r["scope"]
-    return {"slug": r["slug"], "room": room, "symptom": r["symptom"],
-            "root_cause": r["root_cause"], "rule": r["rule"],
-            "detection": r["detection"], "author": r["author"],
-            "created_ns": r["created_ns"],
+    return {"id": r["uid"], "slug": r["slug"], "room": room,
+            "symptom": r["symptom"], "root_cause": r["root_cause"],
+            "rule": r["rule"], "detection": r["detection"],
+            "author": r["author"], "created_ns": r["created_ns"],
             "scope": "global" if room is None else "room"}
 
 
-def lessons(conn, rooms=()):
+def _lesson_slim(r):
+    # The boot rendering (ruling 12826): the imperative and its routing, nothing
+    # narrative. slug+rule measured at 26% of the full payload on the 120-lesson
+    # corpus that overflowed a tool-result cap.
+    room = None if r["scope"] == "global" else r["scope"]
+    return {"id": r["uid"], "slug": r["slug"], "rule": r["rule"], "room": room,
+            "scope": "global" if room is None else "room"}
+
+
+def lessons(conn, rooms=(), slug=None):
     """Every global lesson plus the caller's rooms' lessons -- chain TIPS only
-    (status='live'), newest first. Same return shape as always."""
+    (status='live'), newest first. Default rendering is id + slug + rule;
+    slug=<slug> serves that lesson's full record (symptom, root_cause,
+    detection) inside the same room wall."""
     rooms = list(rooms or [])
     scopes = ["global"] + rooms
+    if slug is not None:
+        rows = conn.execute(
+            f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
+            f"slug=? AND scope IN ({_ph(scopes)}) ORDER BY created_ns DESC",
+            [slug] + scopes)
+        return [_lesson(r) for r in rows]
     rows = conn.execute(
         f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
         f"scope IN ({_ph(scopes)}) ORDER BY created_ns DESC", scopes)
-    return [_lesson(r) for r in rows]
+    return [_lesson_slim(r) for r in rows]
 
 
 def _displace_lesson_tips(conn, scope, slug, keep_id):

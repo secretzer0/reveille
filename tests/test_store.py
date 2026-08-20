@@ -1095,8 +1095,11 @@ def test_lessons_rebacked_same_shape_and_gate():
                      rule="fix the PATH, not the doc", detection="command -v wake")
     got = store.lessons(c, [room["id"]])
     assert got[0]["slug"] == "wake-127" and got[0]["scope"] == "global"
-    assert set(got[0]) == {"slug", "room", "symptom", "root_cause", "rule",
-                           "detection", "author", "created_ns", "scope"}
+    # Boot rendering is the imperative alone (12826); the story rides the slug.
+    assert set(got[0]) == {"id", "slug", "rule", "room", "scope"}
+    full = store.lessons(c, [room["id"]], slug="wake-127")[0]
+    assert set(full) == {"id", "slug", "room", "symptom", "root_cause", "rule",
+                         "detection", "author", "created_ns", "scope"}
     # same author replaces live; other author lands as draft, tip unchanged
     store.add_lesson(c, author="carol", slug="wake-127", symptom="s2", root_cause="r",
                      rule="v2 rule", detection="d")
@@ -1110,8 +1113,7 @@ def test_lessons_rebacked_same_shape_and_gate():
                      rule="local law", detection="d", room_id=room["id"])
     store.promote_lesson(c, "room-rule", room["id"], promoted_by="travis",
                          is_admin=True)
-    tips = store.lessons(c, [room["id"]])
-    promoted = next(t for t in tips if t["slug"] == "room-rule")
+    promoted = store.lessons(c, [room["id"]], slug="room-rule")[0]
     assert promoted["scope"] == "global" and promoted["author"] == "travis"
     # F1: the global row carries the chain link to its room ancestor -- promotion is
     # the ONE sanctioned cross-scope supersede, and without the link trace loses
