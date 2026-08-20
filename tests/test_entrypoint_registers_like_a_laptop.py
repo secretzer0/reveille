@@ -297,3 +297,19 @@ def test_the_supervisor_outlives_its_child(tmp_path):
     assert spawns >= 2, (
         f"waked exited non-zero once and was never respawned "
         f"({spawns} spawn recorded)")
+
+
+def test_the_roll_record_reaches_a_reader():
+    """Rulings 13273/13335: a record nobody is told to read is a file. The
+    boot report names ~/.claude/roll-record.md when it exists, so a body
+    waking in a rolled container learns what the previous body left. Red on
+    the pre-fix head: the entrypoint never mentions the record."""
+    assert "roll-record.md" in ENTRYPOINT
+    assert ENTRYPOINT.index("roll-record.md") < ENTRYPOINT.index("## inputs"), (
+        "the pointer must sit in the boot report's opening lines, where a "
+        "rolled body reads first")
+    assert "THIS BODY WAS ROLLED" in ENTRYPOINT
+    # 13340 rider: the pointer quotes the record's own `- when:` -- a status
+    # word that cannot carry its own timestamp is read as current forever
+    assert "grep -m1 '^- when: ' /home/agent/.claude/roll-record.md" in ENTRYPOINT
+    assert "rolled_when" in ENTRYPOINT

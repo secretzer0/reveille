@@ -80,6 +80,23 @@ say "the thing you are looking for is not there."
 say ""
 say "- agent: ${REVEILLE_AGENT_ROLE}"
 say "- broker: ${REVEILLE_URL}"
+# THE ROLL RECORD REACHES A READER (rulings 13273/13335): the launcher writes
+# .claude/roll-record.md BEFORE it replaces a body -- what rolled, when, and
+# the observed state of the tree, read from the host so it works even when
+# the old body was stopped. A record nobody is told about is a file; this
+# line is what makes it a mechanism.
+if [ -f /home/agent/.claude/roll-record.md ]; then
+  # THE POINTER CARRIES THE RECORD'S OWN TIMESTAMP (13340 rider): the file is
+  # never cleared -- deliberately, a body that took no turns must not lose
+  # the only account of what it lost -- so a bare present-tense sentence
+  # would be printed forever and read as current. The observed `- when:` is
+  # what lets a reader judge freshness instead of trusting a tense.
+  rolled_when="$(grep -m1 '^- when: ' /home/agent/.claude/roll-record.md | cut -c9-)"
+  say "- THIS BODY WAS ROLLED${rolled_when:+ at ${rolled_when}}: read"
+  say "  ~/.claude/roll-record.md -- the launcher's observation of what the"
+  say "  previous body left (dirty files, unpushed commits), taken before the"
+  say "  old container was replaced"
+fi
 say ""
 say "## inputs"
 say ""
