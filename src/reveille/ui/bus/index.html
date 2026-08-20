@@ -3245,7 +3245,7 @@ async function openToMachine(name){
 // human: the owner opens a window, and that machine exchanges what it already
 // has. The bus never carries a live secret in the clear, and the only party who
 // can claim is the one that was already trusted with the identity.
-async function openSendBack(name){
+async function openSendBack(name,knock){
  me=await api('/me');
  const mine=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
  const axes=await agentRoomAxes(name, mine);
@@ -3253,7 +3253,14 @@ async function openSendBack(name){
  // asking, and the answer is keyed to the hash that asked -- so the ticket
  // can only land on the machine that knocked. The reason is the human's
  // decision input, so it is said in the human's words, not the schema's.
- const k=agKnocks[name];
+ // THE CALLER HANDS IN THE KNOCK IT ALREADY HAS (field defect a4208505): the
+ // modal opened this dialog before the rail's poll filled agKnocks, so
+ // re-deriving from that cache found nothing and the answer silently became
+ // a plain send-back keyed on the WRONG hash. A client-side cache became an
+ // authorization input. So `knock` is passed by the modal; agKnocks is only
+ // the fallback for the rail arrow, re-read at CLICK time below.
+ const k=knock||agKnocks[name];
+ const answeringKnock=!!k;   // if this dialog is a knock-answer, it must stay one
  const kWord=k?(k.reason==='superseded'
    ?"that machine was this identity's body"
    :'the move minted for that machine never arrived'):'';
@@ -3296,9 +3303,19 @@ async function openSendBack(name){
   const picked=[...document.querySelectorAll('#sbRooms input:checked')]
    .map(c=>c.dataset.sbroom);
   if(!picked.length){toast('tick at least one room -- a body with none reaches nothing');return;}
+  // RESOLVE THE KNOCK AT CLICK TIME, not at open (the cache may have filled
+  // since), and REFUSE rather than mis-target: if this dialog opened to answer
+  // a knock but no knock id is resolvable now, sending a plain send-back would
+  // key the ticket on a DIFFERENT hash than the machine that asked. A fallback
+  // that changes the target is worse than a failure (NO-TARGET-REFUSE, a4208505).
+  const kNow=knock||agKnocks[name];
+  if(answeringKnock&&!kNow){
+   toast('the hail this was answering is no longer standing -- reopen from the '+
+    'rail to answer the current one'); return;
+  }
   try{
    const r=await api('/recalls',{method:'POST',body:JSON.stringify(
-    k?{agent:name,rooms:picked,knock:k.id}:{agent:name,rooms:picked})});
+    kNow?{agent:name,rooms:picked,knock:kNow.id}:{agent:name,rooms:picked})});
    closeAgDlg();
    toast(name+' may come back for the next 5 minutes -- it lands when that '+
     'machine takes a turn and joins',true);
@@ -3728,6 +3745,11 @@ async function onKnockPush(){
  if(ks.some(k=>!knockSeen.has(k.id)))knockSnoozed=false;   // a NEW knock re-arms
  for(const k of ks)knockSeen.add(k.id);
  if(knockSnoozed)return;
+ // A REMINDER MUST NOT OBSTRUCT THE ACT IT REMINDS YOU TO DO (field defect 2):
+ // if an answer dialog is already open, the 30s nag must not re-render the
+ // modal on top of it and eat the pointer. The badge still updated above; the
+ // modal waits until the dialog the user is acting in has closed.
+ if($('agDlg')&&$('agDlg').classList.contains('on'))return;
  renderKnockModal(ks);
 }
 function renderKnockModal(ks){
@@ -3742,8 +3764,12 @@ function renderKnockModal(ks){
    '<button type="button" data-kmdecline="'+esc(k.id)+'">decline</button></div>';
  }).join('');
  for(const el of document.querySelectorAll('[data-kmopen]'))el.onclick=()=>{
+  // HAND openSendBack THE KNOCK THIS MODAL IS SHOWING (a4208505): the rail
+  // poll may not have filled agKnocks yet, so passing k is what keeps the
+  // answer keyed on the machine that actually asked.
+  const k=ks.find(x=>x.agent===el.dataset.kmopen);
   closeKnockModal();
-  if(typeof AGBASE!=='undefined'){openAgentsWell();openAgent(el.dataset.kmopen);openSendBack(el.dataset.kmopen);}
+  if(typeof AGBASE!=='undefined'){openAgentsWell();openAgent(el.dataset.kmopen);openSendBack(el.dataset.kmopen,k);}
   else toast('answering needs the agents pane -- no launcher is configured here');
  };
  for(const el of document.querySelectorAll('[data-kmdecline]'))el.onclick=async()=>{
