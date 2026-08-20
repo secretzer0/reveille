@@ -381,9 +381,12 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
         # A CREDENTIAL CAN ARRIVE BY A PATH THIS DAEMON DID NOT TAKE (measured
         # 2026-08-19, and it made me deaf for ten minutes with every control
         # green). `reveille init` rotated this directory's credential in place;
-        # the identity never left the machine, so no return ticket was ever
+        # the rotation was a mint, not a move, so no return ticket was ever
         # written and this loop would have polled for one until the process
-        # died. Meanwhile it held the spool flock, so the Stop hook saw a live
+        # died. (This used to say "the identity never left the machine" --
+        # host-scoped reasoning, ruled wrong in 12628: DES-012 scopes identity
+        # to the DIRECTORY, and the fact that matters here is that the file in
+        # THIS directory changed.) Meanwhile it held the spool flock, so the Stop hook saw a live
         # daemon and never started the one that would have worked: armed
         # watcher, no rings, nothing anywhere disagreeing.
         # The file is the identity (write_credential's own rule), so reading it

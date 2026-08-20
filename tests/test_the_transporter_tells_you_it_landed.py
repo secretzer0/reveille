@@ -585,3 +585,8 @@ def test_the_adopt_says_the_directory_scoped_reason_only():
     assert "never left this" not in window, (
         "the host-scoped justification was ruled deleted (12628)")
     assert "adopting it and reconnecting" in window
+    # The same frame one layer in: _park's comment narrated the measured
+    # incident as "the identity never left the machine". Same decision, same
+    # wrong scope -- no host-scoped justification anywhere in the adopt path.
+    park = _inspect.getsource(waked._park)
+    assert "never left the machine" not in park and "never left this" not in park

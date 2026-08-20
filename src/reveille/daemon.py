@@ -343,6 +343,18 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.207 THE ADOPT STATES THE DIRECTORY-SCOPED REASON, AND ONLY THAT (ruling
+12628). waked's adopt line said "no return ticket was needed: the identity
+never left this machine" -- host-scoped reasoning that was true that night
+only by coincidence. DES-012 scopes identity to the DIRECTORY; two
+directories on one host can both claim that sentence, and a correct action
+with a wrong stated reason is a future misdiagnosis. Second sentence deleted
+from the print, same frame fixed in _park's incident comment one layer in;
+the code comment carries the directory-vs-host boundary both ways. First
+landing of this fix was orphaned by pushing to a merged PR's branch --
+re-landed clean off the new main; once a PR is merged its branch is closed
+ground.
+
 0.2.206 THE KNOCK SHOWS FROM ANYWHERE, AND NOBODY RINGS NOBODY SILENTLY
 (rulings 12597/12600 item 2/12613/12615; the V3/V4 postmortems). Four small
 things, one theme -- decisions and non-decisions must be visible. (1) /me
