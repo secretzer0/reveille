@@ -2029,8 +2029,14 @@ def _upgrade_v41(conn, db_path):
     """v41 -> v42 (ruling 12944 R-A): the reason CHECK widens to admit
     'revoked' -- the table becomes the death register, not the supersede
     register. SQLite cannot ALTER a CHECK, so this is a table rebuild, same
-    shape as v40: rename, recreate from the canonical schema, copy, drop.
-    Every existing row is already a valid death and copies unchanged."""
+    shape as v40: snapshot, rename, recreate from the canonical schema, copy
+    BY NAME, drop. Named columns because the physical order is historical on
+    any db that predates v36 -- v35's ADD COLUMN appended `reason` after
+    `last_refusal_ns` (the production broker.db answers exactly that order),
+    and a positional SELECT * lands died_ns in reason and NULL in died_ns.
+    Snapshot because this table keys a parked body's whole recovery."""
+    snapshot(conn, f"{db_path}.pre-v42-{time.time_ns()}.bak")
+    cols = "secret_hash, agent_id, reason, died_ns, last_refusal_ns"
     with tx(conn):
         conn.execute("ALTER TABLE token_tombstones RENAME TO token_tombstones_old")
         conn.execute("""CREATE TABLE token_tombstones (
@@ -2041,8 +2047,8 @@ def _upgrade_v41(conn, db_path):
                                               'revoked')),
             died_ns         INTEGER NOT NULL,
             last_refusal_ns INTEGER)""")
-        conn.execute("INSERT INTO token_tombstones "
-                     "SELECT * FROM token_tombstones_old")
+        conn.execute(f"INSERT INTO token_tombstones({cols}) "
+                     f"SELECT {cols} FROM token_tombstones_old")
         conn.execute("DROP TABLE token_tombstones_old")
         conn.execute("PRAGMA user_version=42")
 

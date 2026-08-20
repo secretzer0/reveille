@@ -117,23 +117,40 @@ def test_revoked_rows_ride_the_existing_sweep():
 
 def test_migration_v41_widens_the_reason_check():
     """A v41 table refuses 'revoked' at the CHECK; v42 accepts it and carries
-    every existing row across unchanged."""
-    path = os.path.join(tempfile.mkdtemp(), "up.db")
+    every existing row across WITH ITS VALUES IN THE RIGHT COLUMNS.
+
+    The regressed table is seeded THE WAY HISTORY BUILT IT -- v22's CREATE
+    (superseded_ns before last_refusal_ns, no reason), then v35's RENAME and
+    ADD COLUMN -- so the physical order is (secret_hash, agent_id, died_ns,
+    last_refusal_ns, reason), which is what PRAGMA table_info answers on the
+    production broker.db (read 2026-08-20). A rebuild copying positionally
+    against the canonical order dies here (IntegrityError: NOT NULL
+    constraint failed: token_tombstones.died_ns) -- the red the architect
+    reproduced on ad0ade7; the canonical-order fixture could not express it
+    (fixture-resemblance is two-sided). The rebuild must also snapshot: this
+    table keys a parked body's whole recovery."""
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "up.db")
     c = store.connect(path)
     store.migrate(c, path)
     admin, room, tok = world(c)
-    # regress the table to the v41 shape, then a pre-existing superseded row
-    c.execute("ALTER TABLE token_tombstones RENAME TO tt_new")
+    c.execute("DROP TABLE token_tombstones")
     c.execute("""CREATE TABLE token_tombstones (
         secret_hash     TEXT PRIMARY KEY,
         agent_id        TEXT NOT NULL,
-        reason          TEXT NOT NULL DEFAULT 'superseded'
-                        CHECK (reason IN ('superseded','expired-unclaimed')),
-        died_ns         INTEGER NOT NULL,
+        superseded_ns   INTEGER NOT NULL,
         last_refusal_ns INTEGER)""")
-    c.execute("DROP TABLE tt_new")
-    c.execute("INSERT INTO token_tombstones(secret_hash, agent_id, reason, died_ns) "
-              "VALUES('aaaa', ?, 'superseded', 1)", (tok["agent_id"],))
+    c.execute("ALTER TABLE token_tombstones "
+              "RENAME COLUMN superseded_ns TO died_ns")
+    c.execute("ALTER TABLE token_tombstones ADD COLUMN reason TEXT "
+              "NOT NULL DEFAULT 'superseded' "
+              "CHECK (reason IN ('superseded','expired-unclaimed'))")
+    order = [r[1] for r in c.execute("PRAGMA table_info(token_tombstones)")]
+    assert order == ["secret_hash", "agent_id", "died_ns", "last_refusal_ns",
+                     "reason"], f"fixture lost the historical order: {order}"
+    c.execute("INSERT INTO token_tombstones"
+              "(secret_hash, agent_id, reason, died_ns, last_refusal_ns) "
+              "VALUES('aaaa', ?, 'superseded', 111, 222)", (tok["agent_id"],))
     import sqlite3
     with pytest.raises(sqlite3.IntegrityError):
         c.execute("INSERT INTO token_tombstones(secret_hash, agent_id, reason, "
@@ -141,6 +158,12 @@ def test_migration_v41_widens_the_reason_check():
     c.execute("PRAGMA user_version=41")
     assert store.migrate(c, path) == store.SCHEMA_VERSION
     old = c.execute("SELECT * FROM token_tombstones WHERE secret_hash='aaaa'").fetchone()
-    assert old is not None and old["reason"] == "superseded" and old["died_ns"] == 1
+    assert old is not None
+    assert old["reason"] == "superseded", f"reason held {old['reason']!r}"
+    assert old["died_ns"] == 111, f"died_ns held {old['died_ns']!r}"
+    assert old["last_refusal_ns"] == 222
     c.execute("INSERT INTO token_tombstones(secret_hash, agent_id, reason, died_ns) "
               "VALUES('bbbb', ?, 'revoked', 2)", (tok["agent_id"],))
+    assert any(".pre-v42-" in f for f in os.listdir(d)), (
+        "the rebuild took no snapshot -- this table keys a parked body's "
+        "whole recovery")
