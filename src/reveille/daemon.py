@@ -343,6 +343,26 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.206 THE KNOCK SHOWS FROM ANYWHERE, AND NOBODY RINGS NOBODY SILENTLY
+(rulings 12597/12600 item 2/12613/12615; the V3/V4 postmortems). Four small
+things, one theme -- decisions and non-decisions must be visible. (1) /me
+carries "knocks": the standing-knock count for the owner, painted as a count
+badge beside the Agents button on the poll the page already runs -- a knock
+was a word on the agents rail, a sign on a door you had to already be
+standing at; the operator sat next to a standing knock for an hour. Badge
+only in this release; the modal + websocket push (12607's four limits) is the
+next slice. (2) thread-wake NO-TARGETS: the one branch that rang nobody
+without saying so (reply aimed at the sender's own message -- cost V3 a full
+test cycle) now logs which branch it was; all four ring-nobody branches
+speak. (3) Every gate-1 line (RUNG/DEFERRED/FIRED/DROPPED/SUPPRESSED) names
+the TOKEN it decided for: a mid-swap agent holds two tokens and the log said
+the same name twice. The consumer's "wake ring SUPPRESSED" line also says
+WHAT it swallowed, so 12600's tripwire (a suppressed thread-reply fact = the
+double-gate race actually losing) is observable. (4) _fire_deferred's
+docstring and DES-003 s6 carry the corrected ledger: DROPPED-READ common by
+design, FIRED the rare safety net (entered once, organically, mid-handover),
+restart clears the in-memory pendings, 900 s nudge is the floor.
+
 0.2.205 THE OWNER TUNES THE STORM GATE (operator 12550, rulings 12553/12555).
 rooms.wake_k, on retention_ns's exact shape: nullable, NULL = the measured
 default (40), 0 = thread-wake off for that room, owner-set through the same
@@ -3527,6 +3547,14 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
     targets = store.thread_reply_targets(_conn, res["parents"], sender_principal,
                                          room_id)
     if not targets:
+        # EVERY BRANCH THAT RINGS NOBODY SAYS WHICH BRANCH IT WAS (ruling
+        # 12613): this was the one silent way to ring nobody, and rung=[] on
+        # the send line alone is indistinguishable from gate-2 suppression --
+        # that ambiguity cost a full test cycle (V3, msg 12587, a reply aimed
+        # at the sender's own message).
+        log.info("thread-wake NO-TARGETS (%s) -- rings nobody",
+                 "parentless broadcast" if not res["parents"] else
+                 "no other agent authored the parents or their replies")
         return out
     counter = store.agent_messages_since_human(_conn, room_id)
     out["counter"] = counter
@@ -3547,38 +3575,53 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
                                         "thread": res["thread_id"],
                                         "room": room_id, "name": name}
                 out["pended"].append(name)
-                log.info("thread-wake DEFERRED for %s (gate 1: poke "
-                         "outstanding, counter=%s, K=%s (%s)) -- fires when "
-                         "its turn ends", name, counter, k, k_src)
+                # THE LINE NAMES THE TOKEN (architect 12615): a mid-swap agent
+                # holds two tokens -- the parking body's and the arriving
+                # one's -- and a name alone printed the same word twice with
+                # no way to tell which body was decided for.
+                log.info("thread-wake DEFERRED for %s (token %.8s, gate 1: "
+                         "poke outstanding, counter=%s, K=%s (%s)) -- fires "
+                         "when its turn ends", name, tid, counter, k, k_src)
                 continue
             for q in list(_waiters.get(tid, ())):
                 q.put_nowait(fact)
             out["rung"].append(name)
-            log.info("thread-wake RUNG %s (gate 1: idle+unread, counter=%s, "
-                     "K=%s (%s))", name, counter, k, k_src)
+            log.info("thread-wake RUNG %s (token %.8s, gate 1: idle+unread, "
+                     "counter=%s, K=%s (%s))", name, tid, counter, k, k_src)
     return out
 
 
 def _fire_deferred():
     """Resolve pending thread-reply rings (gate 1's deferred half), on the
-    pending sweeper's tick. Three exits per entry, each logged: READ since the
-    message landed -> drop (ringing a body to tell it what it knows); gate 2
-    crossed K meanwhile -> drop; poke cleared -> fire once. Still mid-wake ->
-    keep waiting. Worst case for a body whose entry is lost (restart) is the
-    900 s idle nudge -- the documented floor."""
+    pending sweeper's tick. Three exits per entry, each logged with its token:
+    READ since the message landed -> drop; gate 2 crossed K meanwhile -> drop;
+    poke cleared -> fire once. Still mid-wake -> keep waiting.
+
+    DROPPED-READ IS THE COMMON EXIT, BY DESIGN (ruling 12582): the poke that
+    deferred this ring is an untyped prompt already in front of the body, and
+    a body's next act is almost always inbox() -- which stamps the read and
+    makes the ring pointless before the sweeper sees the pending. FIRED is
+    the RARE branch: the safety net for a body that sends and goes quiet
+    without reading. Entered once in the field (2026-08-20, DEFERRED 01:58:46
+    -> FIRED 02:00:16, mid-handover -- the corrected ledger, 12618/12619).
+    DO NOT FIX THE RARITY: a fleet where FIRED is common is a fleet acting
+    without reading its mail, and THAT is the defect, not this branch.
+    A broker restart clears the in-memory pendings; the 900 s idle nudge is
+    the floor under a lost entry (DES-003 s6)."""
     for tid, entry in list(_thread_pending.items()):
         counter = store.agent_messages_since_human(_conn, entry["room"])
         k, k_src = _room_wake_k(entry["room"])
         if counter >= k:
             _thread_pending.pop(tid, None)
-            log.info("thread-wake deferred ring SUPPRESSED for %s (gate 2: "
-                     "counter=%s reached K=%s (%s) while pending)",
-                     entry.get("name"), counter, k, k_src)
+            log.info("thread-wake deferred ring SUPPRESSED for %s (token %.8s, "
+                     "gate 2: counter=%s reached K=%s (%s) while pending)",
+                     entry.get("name"), tid, counter, k, k_src)
             continue
         if store.read_since(_conn, tid, entry["ts_ns"]):
             _thread_pending.pop(tid, None)
-            log.info("thread-wake deferred ring DROPPED for %s (gate 1: read "
-                     "since the message landed)", entry.get("name"))
+            log.info("thread-wake deferred ring DROPPED for %s (token %.8s, "
+                     "gate 1: read since the message landed)",
+                     entry.get("name"), tid)
             continue
         if _poke_ok(tid):
             _thread_pending.pop(tid, None)
@@ -3589,8 +3632,9 @@ def _fire_deferred():
             # it never received. The pop above is what prevents a re-fire.
             for q in list(_waiters.get(tid, ())):
                 q.put_nowait(entry["fact"])
-            log.info("thread-wake deferred ring FIRED for %s (gate 1: idle "
-                     "transition, counter=%s)", entry.get("name"), counter)
+            log.info("thread-wake deferred ring FIRED for %s (token %.8s, "
+                     "gate 1: idle transition, counter=%s)",
+                     entry.get("name"), tid, counter)
 
 # DNS-rebinding Host validation is OFF: it defaults on with an empty allow-list, so the
 # transport 421s any request whose Host is not localhost -- which rejects every remote
@@ -6183,12 +6227,17 @@ async def wake_ws(ws: WebSocket):
                             "waiter; the broker will be back shortly"})
                 break
             if not _poke_ok(key):
-                # SAY SO. This was a silent `continue`, so a suppressed ring left
-                # no trace anywhere and the only evidence of the whole defect was
-                # a human noticing an idle terminal. A dropped wake is exactly the
-                # kind of thing the log must carry.
-                log.info("%s wake ring SUPPRESSED (poke outstanding %.0fs, "
-                         "clears on its next call)", name,
+                # SAY SO. This was a silent `continue`: a dropped wake left no
+                # trace, and the only evidence was a human at an idle terminal.
+                # The line also names the token and WHAT it swallowed -- 12600's
+                # tripwire is "a SUPPRESSED line carrying a thread-reply fact"
+                # (the double-gate race losing), and a line that does not say
+                # the fact's reason can never trip it.
+                log.info("%s wake ring SUPPRESSED (token %.8s, swallowed %s, "
+                         "poke outstanding %.0fs, clears on its next call)",
+                         name, key,
+                         [v.get("why", "message") for v in vals
+                          if isinstance(v, dict)],
                          (time.time_ns() - _poke_pending[key]) / 1e9)
                 continue
             _poke_pending[key] = time.time_ns()
@@ -8016,6 +8065,10 @@ async def me_http(request):
         "public": store.public_rooms(_conn, exclude_owner=p.user_id),
         # EPIC-001 #6: what is waiting in each room this person can reach.
         "unread": store.unread_by_room(_conn, store.user_principal(p.user_id), p.rooms),
+        # Ruling 12597: a standing knock is an OWNER decision the system is
+        # blocked on, and it must be visible from the default view -- the
+        # count rides the same /me the unread badges already poll.
+        "knocks": len(store.knocks_for(_conn, p.user_id)),
     })
 
 
@@ -8643,9 +8696,15 @@ def agents_nav_html(path):
     if not base:
         return ""
     js = json.dumps(base).replace("<", "\\u003c")
+    # The knock badge is a SIBLING of the button, not a child: open/close
+    # rewrite the button's textContent, which would erase any child span. It
+    # rides this fragment because a knock is only answerable through the
+    # Agents pane -- no pane, no badge (ruling 12597; DES-006 2.2 holds).
     return (f'<script>const AGBASE={js};</script>'
             f'<button type="button" id="agentsNav" class="navlink" '
-            f'aria-pressed="false">Agents</button>')
+            f'aria-pressed="false">Agents</button>'
+            f'<span id="knockBadge" class="unread" '
+            f'title="machines knocking to come back"></span>')
 
 
 def nav_link_html(label, path):

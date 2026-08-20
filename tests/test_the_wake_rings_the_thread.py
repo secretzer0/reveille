@@ -40,6 +40,7 @@ and an agent reply-broadcast rings nobody. The room-scope negative
 import asyncio
 import inspect
 import os
+import pathlib
 import sqlite3
 import sys
 import tempfile
@@ -440,3 +441,85 @@ def test_the_migration_carries_the_knob():
     cols = {r["name"] for r in c.execute("PRAGMA table_info(rooms)")}
     assert "wake_k" in cols
     assert c.execute("PRAGMA user_version").fetchone()[0] == 39
+
+
+def test_ring_nobody_says_which_branch(caplog):
+    """Ruling 12613 (approved 12600 item 2): EVERY decision branch that ends
+    in "ring nobody" must log which branch it was. The empty-target branch
+    was the silent one, and its silence cost a full test cycle (V3, msg
+    12587: rung=[] with no line, indistinguishable from gate-2 suppression)."""
+    c, u, room, toks = world()
+    hooked(c, toks, ("bravo",))
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        res = store.send(c, ap(toks["alfa"]), "*", "shout", room=room["id"])
+        with caplog.at_level("INFO"):
+            daemon._thread_wake(room["id"], res, ap(toks["alfa"]), "shout")
+        assert any("NO-TARGETS" in r.message and "parentless" in r.message
+                   for r in caplog.records), "parentless names itself"
+        caplog.clear()
+        mine = store.send(c, ap(toks["alfa"]), "*", "root by me",
+                          room=room["id"])
+        res2 = store.send(c, ap(toks["alfa"]), "*", "self-reply",
+                          reply_to=mine["id"], room=room["id"])
+        with caplog.at_level("INFO"):
+            out = daemon._thread_wake(room["id"], res2, ap(toks["alfa"]),
+                                      "self-reply")
+        assert out["rung"] == [] and out["pended"] == []
+        assert any("NO-TARGETS" in r.message and "no other agent" in r.message
+                   for r in caplog.records), (
+            "a reply that reaches no other agent says so, instead of the "
+            "silence V3 spent a test cycle diagnosing")
+    finally:
+        daemon._conn = prev
+
+
+def test_the_gate_lines_name_the_token(caplog):
+    """Architect 12615: a mid-swap agent holds two tokens and the log said
+    the same name twice with no way to tell which body. Every gate-1 line
+    (RUNG, DEFERRED, FIRED) carries the token it decided for."""
+    c, u, room, toks = world()
+    hooked(c, toks, ("bravo", "charlie"))
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        root = thread_with_sibling(c, u, room, toks)
+        daemon._poke_pending[toks["charlie"]["id"]] = time.time_ns()
+        res = store.send(c, ap(toks["alfa"]), "*", "reply",
+                         reply_to=root["id"], room=room["id"])
+        with caplog.at_level("INFO"):
+            out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
+                                      "reply")
+        assert "bravo" in out["rung"] and "charlie" in out["pended"]
+        assert any("RUNG" in r.message and toks["bravo"]["id"][:8] in r.message
+                   for r in caplog.records), "RUNG names bravo's token"
+        assert any("DEFERRED" in r.message
+                   and toks["charlie"]["id"][:8] in r.message
+                   for r in caplog.records), "DEFERRED names charlie's token"
+        caplog.clear()
+        daemon._poke_pending.pop(toks["charlie"]["id"], None)
+        with caplog.at_level("INFO"):
+            daemon._fire_deferred()
+        assert any("FIRED" in r.message
+                   and toks["charlie"]["id"][:8] in r.message
+                   for r in caplog.records), "FIRED names the token too"
+    finally:
+        daemon._conn = prev
+
+
+def test_the_rare_branch_is_documented_as_rare():
+    """Ruling 12582 + the corrected ledger (12618/12619): DROPPED-READ is
+    the COMMON exit by design, FIRED is the rare safety net for a body that
+    sends and goes quiet -- and nobody may read the rarity as a defect. The
+    restart-clears-pendings fact lives in DES-003 with the 900 s floor."""
+    doc = " ".join((daemon._fire_deferred.__doc__ or "").split())
+    assert "DROPPED-READ IS THE COMMON EXIT, BY DESIGN" in doc
+    assert "FIRED is the RARE branch" in doc
+    assert "DO NOT FIX THE RARITY" in doc
+    des = pathlib.Path(os.path.join(
+        os.path.dirname(__file__), "..", "docs",
+        "DES-003-waiter-hardening.md")).read_text()
+    flat = " ".join(des.split())
+    assert "A broker restart clears the in-memory pendings" in flat
+    assert "900 s idle nudge is the floor" in flat

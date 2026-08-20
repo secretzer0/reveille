@@ -1262,6 +1262,14 @@ function paintMe(){
  // The phone's header and sheet (DES-016 s2), from the SAME rooms: one source, two
  // views. Picking closes the sheet -- you asked for the room, not the list.
  $('roomBtn').innerHTML=esc(r?r.name:'no room')+'<span class="chev">&#9660;</span>';
+ // Ruling 12597: a standing knock is an owner decision the system is blocked
+ // on, and it must be visible from the DEFAULT view -- a word on the agents
+ // rail is a sign on a door you have to already be standing at. The count
+ // rides /me (painted here, on every path that refreshes it); the badge span
+ // is injected beside the Agents button by agents_nav_html, so a deployment
+ // with no launcher has no badge -- and no pane to answer the knock in either.
+ const kb=$('knockBadge');
+ if(kb)kb.textContent=(me&&me.knocks)?String(me.knocks):'';
  // EPIC-001 #6: what is waiting in each room, from /me. The room you are
  // LOOKING AT never wears a badge -- reading it is what clears the mark, and a
  // count on the room in front of you is noise, not news.
@@ -3652,7 +3660,7 @@ function start(){if(polling)return;polling=true;
  setInterval(refreshUnread,15000);}
 async function refreshUnread(){
  if(document.hidden||!me)return;
- try{const d=await api('/me');if(d&&d.unread){me.unread=d.unread;paintMe();}}catch(e){}
+ try{const d=await api('/me');if(d&&d.unread){me.unread=d.unread;me.knocks=d.knocks;paintMe();}}catch(e){}
 }
 
 // A DELIBERATE CLOSE DETACHES THE RECONNECT FIRST (operator, 2026-08-17: every

@@ -329,3 +329,18 @@ def test_des_012_s18_carries_the_operators_words():
                                     "DES-012-a-visit-is-a-body-swap.md")).read_text()
     assert "## 18." in doc
     assert "THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF" in doc
+
+
+def test_the_knock_shows_from_anywhere():
+    """Ruling 12597: a knock is a request for HUMAN action, and it must be
+    visible from wherever the human is -- not only to someone already
+    standing at the Agents pane. The rail word was a sign on a door; this is
+    the count badge on the door's entry, fed by the /me poll the page
+    already runs. Generalises: any owner-blocked decision gets this shape."""
+    src = inspect.getsource(daemon)
+    me = src[src.index("async def me_http"):src.index("async def users_http")]
+    assert "knocks_for" in me, "/me carries the standing-knock count"
+    nav = src[src.index("def agents_nav_html"):src.index("def nav_link_html")]
+    assert "knockBadge" in nav, "the badge rides the Agents entry itself"
+    page = daemon._ui_read("index.html")
+    assert "knockBadge" in page, "and the page paints it from /me"
