@@ -139,8 +139,12 @@ done
 # init VERIFIES the credential against the broker before writing anything; a
 # boot that races the broker must still come up configured -- the values are
 # the launcher's own provision env, correct by construction, and waked retries
-# the bus forever -- so the retry carries --force. A second failure is a
-# missing env var, which is a launcher defect, and set -e makes it loud.
+# the bus forever -- so the retry carries --force. A SECOND FAILURE NO LONGER
+# EXITS (ruling 12851 R1): waked is already up by the time either invocation
+# runs, the body stays reachable and recallable unregistered, and the boot
+# report plus a DEGRADED row carry the reason. This sentence used to end "and
+# set -e makes it loud" -- it was true until the daemon moved in front of it,
+# and a comment that outlives its code is the defect R3 is about.
 # THE REPORT SAYS WHAT VERIFY SAID, never a cause this script did not
 # establish (architect BLOCKING 1, msg 10875). init exiting non-zero covers
 # two different worlds -- "the broker answered and refused this token" and
