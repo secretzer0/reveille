@@ -3006,7 +3006,12 @@ def _usage_text(since="", budget=24000):
             # "a clipped label is not a hidden entry" -- ruled wording, 13213:
             # what a budget may never do is make a body unable to learn that
             # an entry exists.
-            tail = (f"\n\n[{len(rest)} older entries, titles only"
+            # shown == 0 -> nothing is older than nothing (13216 nit): the
+            # honest word is just "entries", and this line is the whole map
+            # at the default.
+            tail = (f"\n\n[{len(rest)}"
+                    + (" older" if shown else "")
+                    + " entries, titles only"
                     + (" (clipped -- a clipped label is not a hidden entry)"
                        if clip else "")
                     + " -- usage(since=\"<version>\") serves any of them "
