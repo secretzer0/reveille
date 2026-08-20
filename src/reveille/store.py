@@ -605,11 +605,14 @@ CREATE TABLE IF NOT EXISTS memories (
     kind          TEXT NOT NULL CHECK (kind IN
                     ('doctrine','contract','decision','lesson','state')),
     scope         TEXT NOT NULL,
-    -- SANITY BOUND, NOT POLICY (12757): catches a runaway write (a transcript
-    -- or file stuffed into a fact), ~15x the largest policy proposed. Per-kind
-    -- policy is code-side constants (STATE_FACT_MAX and friends) precisely so
-    -- no cap tune ever needs another rebuild of this table.
-    fact          TEXT NOT NULL CHECK (length(fact) <= 128000),
+    -- NO LENGTH CHECK, DELIBERATELY (12759; operator 12754/12756/12758). The
+    -- original 1000 was a distillation POLICY wearing a schema constraint's
+    -- clothes -- SQLite gains nothing from a declared bound on TEXT, and a
+    -- CHECK can only move by rebuilding this table. Every bound now lives in
+    -- code where a constant can change without a migration: FACT_MAX is the
+    -- disaster backstop, STATE_FACT_MAX and friends are the per-kind policy,
+    -- all enforced in memory_add. The absence here is the design.
+    fact          TEXT NOT NULL,
     entities      TEXT NOT NULL DEFAULT '',
     -- A CITATION IS A HISTORICAL FACT, NOT A LIVE REFERENCE (architect, msg 8857).
     -- No FK action, deliberately: ON DELETE SET NULL made "cited message N" and
@@ -1987,13 +1990,13 @@ def _upgrade_v39(conn, db_path):
 
 
 def _upgrade_v40(conn, db_path):
-    """v40 -> v41 (rulings 12744/12753/12757, operator 12754): the memories
-    fact CHECK becomes the 128000 SANITY bound; per-kind policy (state 8192,
-    others 1000) moves to code as named constants. SQLite cannot ALTER a
-    CHECK, so this is a table rebuild -- and the LAST one this cap will ever
-    need: policy never touches the schema bound again, so every future tune
-    is a constant change. Same shape as v17: rename, relay the schema, copy,
-    drop, rebuild the FTS content, verify FKs."""
+    """v40 -> v41 (ruling 12759, operator 12754/12756/12758): the memories
+    fact CHECK is REMOVED -- fact becomes bare TEXT, and every bound moves to
+    code as a named constant (FACT_MAX backstop, per-kind policy above it).
+    SQLite cannot ALTER a CHECK, so this is a table rebuild -- and the LAST
+    one this column will ever need: with no number in the schema, every
+    future tune is a constant change. Same shape as v17: rename, relay the
+    schema, copy, drop, rebuild the FTS content, verify FKs."""
     snapshot(conn, f"{db_path}.pre-v41-{time.time_ns()}.bak")
     with tx(conn):
         conn.execute("DROP TABLE IF EXISTS memories_fts")
@@ -6180,6 +6183,9 @@ STATE_TTL_NS = 30 * 24 * 3600 * 10**9   # Q2 resolved: stale open_tasks mislead
 # instance, and it is written inside a swap window seconds wide; the kinds
 # that compete for brief()'s shared budget keep the tight cap because the
 # distillation a refusal forces is the feature there.
+FACT_MAX = 128_000           # disaster backstop for ANY kind (12759): guards
+                             # beneath the per-kind policy, in the layer that
+                             # can move without a table rebuild
 MEMORY_FACT_MAX = 1000       # doctrine / contract / decision
 STATE_FACT_MAX = 8192        # hard: over this, refuse
 STATE_FACT_SOFT = 4096       # at or over: STORE, then nudge -- never refuse
@@ -6237,6 +6243,11 @@ def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
         raise BusError("lessons go through lesson_add(), which owns their gate")
     if not (fact or "").strip():
         raise BusError("fact is required")
+    # Backstop first, policy second: FACT_MAX holds even if a future tune
+    # raises a kind's cap past it -- the schema deliberately carries no bound.
+    if len(fact) > FACT_MAX:
+        raise BusError(f"fact is over {FACT_MAX} chars -- that is not a memory, "
+                       f"that is a payload; link a source message instead")
     limit = STATE_FACT_MAX if kind == "state" else MEMORY_FACT_MAX
     if len(fact) > limit:
         raise BusError(f"fact is over {limit} chars -- distill it or link a "
