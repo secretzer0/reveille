@@ -64,12 +64,35 @@ not exist yet. The registry is real new surface, both halves (devops 12657).
 directory is the one party that knows its own address.** Generalise the knock's
 machine string — `reveille init` reports `user@host:path` at bind (pad birth),
 `waked` reports it at attach (pad liveness, and where the live body is). One
-owner-scoped `pads` table: host, path, kind, agent, last_seen_ns, state.
+owner-scoped `pads` table: host, path, kind, agent, current credential hash,
+and **THREE SEPARATE TIMES, NOT ONE** (red-shirt 12663):
+
+| column | written by | means |
+|---|---|---|
+| `created_ns` | `init`'s report | the pad was PREPARED |
+| `last_attach_ns` | `waked`'s report | a RECEIVER was here |
+| `last_body_ns` | a `join()` that committed while the pad held that hash | a BODY actually RAN here |
+
+A single `last_seen_ns` would fold birth, attach and occupancy into one number
+and rebuild §6.1's pad-vs-receiver conflation one level down. **"Never ran a
+body" is `last_body_ns IS NULL`**, and it must live on the PAD row rather than
+the token row — credential rotation would otherwise erase pad history, which is
+not hypothetical: five mints rotated through one directory in one evening while
+that pad ran bodies throughout, so a fresh credential reads as never-ran on a
+pad that ran all night.
+
+The correlation seam: `join()` is hash-keyed and a session never self-reports
+its path, so the broker stamps `last_body_ns` by hash-to-pad lookup — which is
+free, because the pad row must carry the current credential hash anyway for
+§7's card. The adopt landing stamps correctly too: however a credential
+arrived, the landing still ends in a `join()`.
 
 **THE ADDRESS IS SELF-DECLARED BY THE MACHINE, SO IT IS A LABEL AND NEVER AN
-AUTHORIZATION INPUT.** Authorization stays hash-keyed (12485): the ticket keys
-on the hash that asked, never on a path anyone typed. The address exists for
-the owner's eyes and the owner's decision, display only. The 12445 boundary
+AUTHORIZATION INPUT** — and the same holds for the pad's HISTORY: `last_body_ns`
+and its siblings are owner-display only, never an input to a claim.
+Authorization stays hash-keyed (12485): the ticket keys on the hash that asked,
+never on a path anyone typed or a history anyone reported. The address exists
+for the owner's eyes and the owner's decision, display only. The 12445 boundary
 extends to it: pads are owner-visible, never shown to an unauthenticated
 caller.
 
@@ -163,8 +186,11 @@ A tab per identity, and what it shows follows the CURRENT BODY's kind.
 - **Native body** — a METADATA card: host, directory, user, credential state,
   daemon liveness, last act. **No terminal pretense.** We do not have a shell on
   someone's own machine and must not imply we do.
-- **No live body** — the pads this identity has, when each was last seen, and
-  any standing request.
+- **No live body** — the pads this identity has, each showing the three facts
+  §3.1 keeps apart (prepared when, receiver last seen when, body last ran
+  when), plus any standing request. Never one "last seen" number: a pad
+  prepared and never occupied and a pad that ran a body all night are
+  different things, and the owner is the one who needs to tell them apart.
 
 The asymmetry is honest and is the point: the verbs are the same, the view
 differs because the reality differs.
@@ -226,6 +252,9 @@ boot. This is a new shape over built machinery, not new machinery.
   and a human carries it across the gap. Reuse DES-022's device-flow code
   (`XXXX-XXXXX`, human-transcribable); do not invent a second code. Running it
   is what creates the pad — the code is the pad's birth certificate.
+  **Same discipline as every credential we ship** (devops 12661): one-time,
+  short TTL, STORED AS A HASH, and the answer keys on the hash in the row —
+  never on what the presenter typed beyond the exchange itself.
 - **KNOCK** — the asking machine ALREADY HOLDS a dead credential, and that
   credential is the proof. No code, no typed secret, authorization stays
   hash-keyed (12485).
@@ -244,3 +273,9 @@ the problem: the owner pays while running on hardware they do not control.
 
 Architect's prior: host pays, host decides, stated plainly at accept. NOT
 RULED — deliberately left for a waking operator.
+
+What IS ruled either way (devops 12661): **it is said in the host's language at
+the moment they run the command**, never buried in a mount list. Linking those
+credentials is the single biggest thing a host consents to, and the mount
+confinement — one directory in, limited remote access — is the right
+containment for exactly that reason.
