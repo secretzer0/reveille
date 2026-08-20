@@ -264,12 +264,18 @@ up:
 	@# and only the IDLE ones: no live attach grant, empty spool, nothing unread,
 	@# no bus send in REVEILLE_ROLL_IDLE_MIN (default 10) minutes -- each read,
 	@# never guessed. A busy agent is LISTED with why and retried on the next
-	@# deploy; nothing is ever killed mid-task, so this never fails the deploy.
+	@# deploy; nothing is ever killed mid-task. BUSY NEVER FAILS THE DEPLOY
+	@# -- roll_idle exits 0 listing the skips -- but a CRASHED roll step now
+	@# DOES (ruling 13245: two deploys in a row carried a locked-db traceback
+	@# inside a green trip, found only because a human read the log). A died
+	@# step inside a trip that exits 0 is the trip lying about itself; if a
+	@# step's exit status will control anything, nothing downstream may
+	@# swallow it.
 	@# THIS IS THE SCHEDULER for the roll: an image bump that reaches no running
 	@# container is the defect the lesson image-fix-never-reaches-a-running-
 	@# container is about, and a verb nobody invokes is how it happens again.
 	@REVEILLE_AGENT_IMAGE=$(AGENT_IMAGE) uv run --quiet python scripts/reveille_launch.py \
-		upgrade --all --idle --image $(AGENT_IMAGE) || true
+		upgrade --all --idle --image $(AGENT_IMAGE)
 	@echo "reveille up: proxy $(PROXY_SITE) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
 	@# WHERE THOSE TWO CAME FROM. A deploy that silently used a default for
 	@# PROXY_SITE would answer on :80 with no public origin and break the doors,
