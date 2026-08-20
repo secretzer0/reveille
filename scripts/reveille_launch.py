@@ -1719,7 +1719,13 @@ def leave_roll_record(user, agent, *, to_image, why):
         "and nothing else may wear that shape.",
     ]) + "\n"
     try:
-        path = os.path.join(data_root(user, agent), ".claude", "roll-record.md")
+        # "claude", NOT ".claude" (13343-era field check): docker_run_argv
+        # binds {root}/claude to /home/agent/.claude -- the DOT-less host dir
+        # is the mount. The first write targeted {root}/.claude, a sibling no
+        # container sees, so the pointer (#193) could never find the record
+        # and the gates hid it by faking data_root flat. The contract gate
+        # beside this reads the mount line from the argv builder itself.
+        path = os.path.join(data_root(user, agent), "claude", "roll-record.md")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write(text)
