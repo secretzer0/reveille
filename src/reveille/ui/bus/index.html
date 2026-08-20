@@ -5546,9 +5546,10 @@ function wireCredentials(){
 // The browser login (rulings 8644): the launcher runs `claude /login` in a
 // throwaway container and preselects the SUBSCRIPTION method itself -- the
 // picker never reaches a human, because its other branch is per-token
-// Console billing. This page only shows the URL (never follows it), relays
-// the ONE pasted code, and treats the credential FILE appearing as the only
-// proof of completion. Failure text names the launcher's answer (8633).
+// Console billing. This page only shows the URL (never follows it) and
+// relays the ONE pasted code; completion is the launcher's to judge (the
+// credential FINGERPRINT moving, 13353 -- never the file merely existing).
+// Failure text names the launcher's answer (8633).
 let loginPoll=null;
 // paint(): re-render ONLY when the rendered content actually changed. The
 // section polls while a login is pending, and a blind innerHTML= every tick
@@ -5582,51 +5583,58 @@ async function refreshLoginSection(){
   // intact, which is the point of hanging it on the container instead.
   const lgCancel=st.container
    ?' <button id="lgCancel">cancel the login container</button>':'';
-  if(L.present){
-   paint(el,'logged in ('+esc(new Date(L.logged_in_at_ns/1e6)
-    .toLocaleString())+'). <button id="lgStart">re-login (switch account)</button>'+
+  // THE SECTION RENDERS BY FLOW STATE FIRST, PRESENCE SECOND (ruling 13350;
+  // the third site of 13353's defect class). The flow UI used to live only
+  // in the no-login branch, so a RE-login could be STARTED here and never
+  // FINISHED here: the page repainted "logged in ..." over the very flow it
+  // had launched. Presence is a fact about the past; a pending flow is the
+  // thing the user is in the middle of, and the page draws the one they can
+  // act on -- with the past kept as context above it.
+  const seen=L.present
+   ?'logged in ('+esc(new Date(L.logged_in_at_ns/1e6).toLocaleString())+'). '
+   :'';
+  if(st.pending==='awaiting-code'&&st.url){
+   // SCHEME ALLOWLIST AT THE POINT OF INTERPOLATION. esc() makes a string
+   // safe to SIT in an attribute; it says nothing about what the browser
+   // will DO with it, and href acts on the scheme. This URL comes from the
+   // launcher relaying the login flow, so it is server-supplied today --
+   // which is a property of the current parse, not a guarantee, and the
+   // whole argument of this branch is that a constraint held elsewhere is
+   // not a check here. Anything that is not https renders as TEXT: the
+   // reader still sees the URL and can judge it, and nothing is one click
+   // from a javascript: or data: target (architect, msg 8813).
+   const https=/^https:\/\//i.test(st.url||'');
+   paint(el,seen+'<b>1.</b> '+(https
+    ? '<a href="'+esc(st.url)+'" target="_blank" '+
+      'rel="noopener noreferrer">Click here and sign in</a>'
+    : '<span class="pAsk err">the login service returned a link this page '+
+      'will not open: '+esc(st.url)+'</span>')+' with the account '+
+    'whose plan should pay. <b>2.</b> Paste the code it shows: '+
+    '<input id="lgCode" size="24" autocomplete="off"> '+
+    '<button id="lgSend"'+(st.relayed?' disabled':'')+'>submit</button>'+
+    lgCancel+
+    (st.relayed?'<div class="pDim">code sent -- waiting for the login to '+
+     'land; if nothing happens, cancel and start again</div>':''));
+   loginPoll=setTimeout(refreshLoginSection,3000);
+  }else if(st.pending){
+   paint(el,seen+(st.pending==='failed'
+    ?'the login flow looks stuck or expired -- '
+    :'starting the login flow... ')+lgCancel);
+   loginPoll=setTimeout(refreshLoginSection,2000);
+  }else if(L.present){
+   paint(el,seen+'<button id="lgStart">re-login (switch account)</button>'+
     lgCancel+
     '<span class="pDim"> then restart your agents; or in a terminal: '+cmd+'</span>');
   }else{
-   if(st.pending==='awaiting-code'&&st.url){
-    // SCHEME ALLOWLIST AT THE POINT OF INTERPOLATION. esc() makes a string
-    // safe to SIT in an attribute; it says nothing about what the browser
-    // will DO with it, and href acts on the scheme. This URL comes from the
-    // launcher relaying the login flow, so it is server-supplied today --
-    // which is a property of the current parse, not a guarantee, and the
-    // whole argument of this branch is that a constraint held elsewhere is
-    // not a check here. Anything that is not https renders as TEXT: the
-    // reader still sees the URL and can judge it, and nothing is one click
-    // from a javascript: or data: target (architect, msg 8813).
-    const https=/^https:\/\//i.test(st.url||'');
-    paint(el,'<b>1.</b> '+(https
-     ? '<a href="'+esc(st.url)+'" target="_blank" '+
-       'rel="noopener noreferrer">Click here and sign in</a>'
-     : '<span class="pAsk err">the login service returned a link this page '+
-       'will not open: '+esc(st.url)+'</span>')+' with the account '+
-     'whose plan should pay. <b>2.</b> Paste the code it shows: '+
-     '<input id="lgCode" size="24" autocomplete="off"> '+
-     '<button id="lgSend"'+(st.relayed?' disabled':'')+'>submit</button>'+
-     lgCancel+
-     (st.relayed?'<div class="pDim">code sent -- waiting for the login to '+
-      'land; if nothing happens, cancel and start again</div>':''));
-    loginPoll=setTimeout(refreshLoginSection,3000);
-   }else if(st.pending){
-    paint(el,(st.pending==='failed'
-     ?'the login flow looks stuck or expired -- '
-     :'starting the login flow... ')+lgCancel);
-    loginPoll=setTimeout(refreshLoginSection,2000);
-   }else{
-    paint(el,((L.needed_by||[]).length
-     ?'<b>No login on file.</b> Your agents '+esc(L.needed_by.join(', '))+
-      ' cannot work until you log in. '
-     :L.needed
-     ?'<b>No login on file.</b> Your credential mode is home-login: you will '+
-      'need this before you can create an agent. '
-     :'No login on file (needed only by home-login agents). ')+
-     '<button id="lgStart">log in via browser</button>'+lgCancel+
-     '<span class="pDim"> or in a terminal: '+cmd+'</span>');
-   }
+   paint(el,((L.needed_by||[]).length
+    ?'<b>No login on file.</b> Your agents '+esc(L.needed_by.join(', '))+
+     ' cannot work until you log in. '
+    :L.needed
+    ?'<b>No login on file.</b> Your credential mode is home-login: you will '+
+     'need this before you can create an agent. '
+    :'No login on file (needed only by home-login agents). ')+
+    '<button id="lgStart">log in via browser</button>'+lgCancel+
+    '<span class="pDim"> or in a terminal: '+cmd+'</span>');
   }
   if($('lgStart'))$('lgStart').onclick=async()=>{
    try{await lapi('/login/start',{method:'POST',body:'{}'});
