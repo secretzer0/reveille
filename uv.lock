@@ -490,7 +490,7 @@ wheels = [
 
 [[package]]
 name = "reveille"
-version = "0.2.211"
+version = "0.2.212"
 source = { editable = "." }
 dependencies = [
     { name = "authlib" },
