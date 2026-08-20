@@ -36,16 +36,30 @@ def fixture(n=40):
 
 
 def test_the_default_payload_fits_the_turn():
-    """A corpus far over the budget still serializes near it: the whole result,
-    rows and wrapper together, stays inside budget plus the slug tail. This is
-    the assertion that was red on the unfixed head (64,560 chars serialized)."""
+    """The budget bounds the SERIALIZED RESULT the caller receives -- rows,
+    envelope and note together, no tail riding outside the number (12957).
+    This is the assertion that was red on the unfixed head (64,560 chars
+    serialized against the 24000 budget)."""
     c, admin, room = fixture()
     got = store.lessons(c, [room["id"]])
     size = len(json.dumps(got))
-    tail_allowance = 40 * 40   # ~40 chars per slug-only row, 40 rows
-    assert size <= DEFAULT_BUDGET + tail_allowance, (
+    assert size <= DEFAULT_BUDGET, (
         f"lessons() serialized to {size} chars -- over the {DEFAULT_BUDGET} "
         f"budget it exists to honor")
+
+
+def test_chars_names_what_the_caller_received():
+    """`chars` equals the serialized length of the very payload carrying it --
+    the field a body uses to decide whether the call fits must measure the
+    payload, not a part of it (12957). Checked on the elided, the untouched
+    and the slug path alike."""
+    c, admin, room = fixture()
+    for got in (store.lessons(c, [room["id"]]),
+                store.lessons(c, [room["id"]], budget=0),
+                store.lessons(c, [room["id"]], slug="rule-001")):
+        assert got["chars"] == len(json.dumps(got)), (
+            f"chars={got['chars']} but the caller received "
+            f"{len(json.dumps(got))}")
 
 
 def test_no_lesson_becomes_invisible():
