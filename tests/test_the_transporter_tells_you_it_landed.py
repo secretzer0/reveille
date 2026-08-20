@@ -160,7 +160,7 @@ def test_a_pending_refusal_is_not_a_clean_session():
 
 
 async def _fake_claim(url, secret):
-    return "fresh-secret"
+    return "fresh-secret", "200"
 
 
 def test_a_claimed_return_ticket_rings_before_it_celebrates(tmp_path, monkeypatch):
@@ -261,7 +261,7 @@ def test_the_unparked_wait_is_bounded_so_the_lock_frees(monkeypatch):
     assert waked.ORPHAN_POLL_S >= 3 * 5 * 60
 
     async def never(url, secret):
-        return ""
+        return "", "204"
 
     monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
     monkeypatch.setattr(waked, "_claim", never)
@@ -278,7 +278,8 @@ def test_a_body_that_was_parked_waits_as_long_as_it_takes(monkeypatch):
 
     async def twice(url, secret):
         tries.append(secret)
-        return "fresh-secret" if len(tries) > 3 else ""
+        return (("fresh-secret", "200") if len(tries) > 3
+                else ("", "204"))
 
     monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
     monkeypatch.setattr(waked, "_claim", twice)
@@ -315,7 +316,7 @@ def test_a_parked_daemon_adopts_a_credential_that_arrived_another_way(tmp_path,
     monkeypatch.setattr(waked, "RECALL_POLL_S", 0)
 
     async def never(url, secret):
-        return ""
+        return "", "204"
 
     monkeypatch.setattr(waked, "_claim", never)
     got = asyncio.run(waked._park("http://b.example", "nr1", "spent-secret",
@@ -331,7 +332,8 @@ def test_it_does_not_adopt_its_own_secret_or_an_empty_file(monkeypatch):
 
     async def claim_third(url, secret):
         tries.append(secret)
-        return "ticket-secret" if len(tries) >= 3 else ""
+        return (("ticket-secret", "200") if len(tries) >= 3
+                else ("", "204"))
 
     monkeypatch.setattr(waked, "_claim", claim_third)
     got = asyncio.run(waked._park("http://b.example", "nr1", "spent", lambda s: True,
@@ -393,7 +395,8 @@ def test_it_does_not_re_adopt_a_credential_it_already_watched_die(monkeypatch):
 
     async def claim_third(url, secret):
         tries.append(secret)
-        return "second-ticket" if len(tries) >= 3 else ""
+        return (("second-ticket", "200") if len(tries) >= 3
+                else ("", "204"))
 
     monkeypatch.setattr(waked, "_claim", claim_third)
     got = asyncio.run(waked._park("http://b.example", "nr1", "spent",
@@ -433,7 +436,8 @@ def test_a_claimed_credential_that_died_does_not_eat_the_next_ticket(tmp_path,
 
     async def claim(url, secret):
         claims.append(secret)
-        return next(tickets, "")
+        got = next(tickets, "")
+        return got, ("200" if got else "204")
 
     def write_env(secret):
         disk["secret"] = secret         # claiming writes the new one to disk
@@ -490,7 +494,7 @@ def test_a_restarted_body_still_claims_on_the_secret_it_parked_on(tmp_path,
 
     async def claim(url, secret):
         claims.append(secret)
-        return "ticket-2"
+        return "ticket-2", "200"
 
     monkeypatch.setattr(waked, "_session", session)
     monkeypatch.setattr(waked, "_claim", claim)
@@ -540,7 +544,7 @@ def test_a_parked_secret_nobody_writes_a_ticket_for_still_gives_up(tmp_path,
 
     async def never(url, secret):
         tries.append(secret)
-        return ""
+        return "", "204"
 
     monkeypatch.setattr(waked, "_session", session)
     monkeypatch.setattr(waked, "_claim", never)

@@ -1131,13 +1131,21 @@ def cmd_init(a):
         ok, said = verify(url, name, token)
         checked = (token, ok, said)          # asked ONCE; the gate below reuses it
         if ok is False:
+            # STDERR, WITH ITS SIBLINGS (ruling 12944 R-B b1). A diagnostic,
+            # and every REFUSING sentence around it already goes to stderr; on
+            # stdout it was block-buffered under the entrypoint's 2>&1 capture
+            # and flushed LAST, so the true verdict trailed "no sign-in
+            # stored" and a first-line quote handed the reader the wrong
+            # remedy. Fixed at the source -- no env var to remember at the
+            # next call site.
             print(f"reveille: this directory's credential no longer works "
                   f"({said})."
                   + (" --force: kept anyway, unverified -- a body that was moved "
                      "off parks on exactly this secret and trades it for a live "
                      "one at the return ticket."
                      if a.force else
-                     " It will not be reinstalled -- mint a new one."))
+                     " It will not be reinstalled -- mint a new one."),
+                  file=sys.stderr)
     usable = bool(token) and not (checked and checked[1] is False)
     # A REFUSED CREDENTIAL IS A FACT TO RECORD, NOT A REASON TO REPLACE
     # (architect R2, ruling 12851). init replaces a credential only when it has

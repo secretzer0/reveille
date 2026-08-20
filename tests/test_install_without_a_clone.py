@@ -205,7 +205,9 @@ def test_a_dead_credential_in_the_directory_is_not_reinstalled(tmp_path, broker,
     assert not (work / ".claude" / "settings.local.json").exists(), \
         "it reinstalled a credential the broker had just refused"
     out = capsys.readouterr()
-    assert "no longer works" in out.out, "and it says so, in the words of the refusal"
+    # stderr since 12944 R-B b1: the verdict is a diagnostic and sits with
+    # its REFUSING siblings, un-reorderable by stdout buffering
+    assert "no longer works" in out.err, "and it says so, in the words of the refusal"
 
 
 def test_force_installs_a_refused_credential_so_the_body_can_park(tmp_path, broker,

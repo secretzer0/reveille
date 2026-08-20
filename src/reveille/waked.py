@@ -28,6 +28,7 @@ on the daemon's wall clock even while the broker is unreachable.
 import argparse
 import asyncio
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -231,8 +232,11 @@ def arrival_frame(why):
 
 
 async def _claim(url, secret):
-    """One claim attempt. Returns the new secret, or "" -- 204 is the ordinary
-    answer and must not read as a fault."""
+    """One claim attempt. Returns (new_secret_or_empty, status) -- 204 is the
+    ordinary empty answer and must not read as a fault. `status` is what the
+    wire actually said (an HTTP code as text, or the exception class), so the
+    caller's log can name which branch ran (ruling 13016: a poll that finds
+    nothing and a poll that never happened must not look identical)."""
     import urllib.error
     import urllib.request
     base = url.replace("wss://", "https://").replace("ws://", "http://")
@@ -243,10 +247,13 @@ async def _claim(url, secret):
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             if r.status == 204:
-                return ""
-            return (json.loads(r.read().decode()) or {}).get("secret", "")
-    except Exception:
-        return ""
+                return "", "204"
+            return ((json.loads(r.read().decode()) or {}).get("secret", ""),
+                    str(r.status))
+    except urllib.error.HTTPError as e:
+        return "", str(e.code)
+    except Exception as e:
+        return "", type(e).__name__
 
 
 def read_env(agent):
@@ -374,7 +381,19 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
     itself used and watched die is not that, and adopting it again is a loop
     that never reaches the claim (measured below).
     """
+    hp = hashlib.sha256(secret.encode()).hexdigest()[:12]
+    # THE CLAIM PATH SAYS WHICH BRANCH IT TOOK (ruling 13016): a poll that
+    # finds nothing and a poll that never happened used to look identical,
+    # which left the 2026-08-20 missed-ticket question unanswerable. One line
+    # on entry; the loop logs the first attempt, any change in the wire's
+    # answer, and a once-a-minute heartbeat -- never a line per poll.
+    print(f"reveille-waked: claim poll enters for {hp} -- every "
+          f"{RECALL_POLL_S}s"
+          + (f", deadline {deadline}s" if deadline is not None
+             else ", no deadline"),
+          file=sys.stderr)
     waited = 0
+    attempts, last_status, last_beat = 0, "", 0.0
     while True:
         await asyncio.sleep(RECALL_POLL_S)
         waited += RECALL_POLL_S
@@ -416,7 +435,14 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
                       f"{agent} was parked -- adopting it and reconnecting.",
                       file=sys.stderr)
                 return fresh
-        got = await _claim(url, secret)
+        got, status = await _claim(url, secret)
+        attempts += 1
+        beat = time.monotonic()
+        if attempts == 1 or status != last_status or beat - last_beat >= 60:
+            print(f"reveille-waked: claim poll {hp}: attempt {attempts}, "
+                  f"last answer {status}", file=sys.stderr)
+            last_beat = beat
+        last_status = status
         if not got:
             if deadline is not None and waited >= deadline:
                 return ""
@@ -823,7 +849,42 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
         nudger.cancel()
 
 
+class _Stamped:
+    """UTC ISO timestamp on every LINE this stream emits (ruling 13016).
+
+    waked.log lines carried no time, so three identical spawns and an exit
+    line were indistinguishable from one long poll -- the 2026-08-20
+    claim-poll question was unresolvable from the only log the body keeps,
+    and the body under test had already been cleaned up. Wrapping the STREAM
+    rather than the call sites stamps every print, current and future, and
+    no site can forget it. Partial writes buffer their mid-line state so a
+    line assembled across writes gets exactly one stamp."""
+
+    def __init__(self, stream):
+        self._s = stream
+        self._mid = False
+
+    def write(self, text):
+        out = []
+        for piece in text.splitlines(keepends=True):
+            if not self._mid:
+                out.append(time.strftime("%Y-%m-%dT%H:%M:%SZ ", time.gmtime()))
+            out.append(piece)
+            self._mid = not piece.endswith("\n")
+        self._s.write("".join(out))
+
+    def flush(self):
+        self._s.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
 def main():
+    # Installed FIRST, before any line prints: the stamp is only trustworthy
+    # if no line can precede it.
+    sys.stdout = _Stamped(sys.stdout)
+    sys.stderr = _Stamped(sys.stderr)
     ap = argparse.ArgumentParser(prog="reveille-waked")
     ap.add_argument("--url", required=True, help="ws://host:port/wake")
     ap.add_argument("--name", required=True, help="agent identity (spool + X-Agent)")
