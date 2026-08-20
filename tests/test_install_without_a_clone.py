@@ -1318,3 +1318,41 @@ def test_the_entrypoints_own_capture_sees_the_degraded_sentence(tmp_path):
                env={"PATH": f"{bindir}:/usr/bin:/bin"})
     assert r.stdout.strip().endswith("WIRED") and "NOT-WIRED" not in r.stdout, (
         r.stdout, r.stderr)
+
+
+def test_a_kept_refused_credential_retires_no_daemon(tmp_path, broker, monkeypatch,
+                                                     capsys):
+    """The 13094 invariant at the site the field found it: the keep-refused
+    --force path installs no NEW credential -- the daemon on the flock holds
+    the very secret init just decided to keep, so a SIGTERM here is not a
+    re-key, it is a murder. Measured 2026-08-20 on the 0.2.25 container: the
+    hoisted boot daemon (12882) died to this line seconds after spawning and
+    a parked body was deaf forever. Red on the pre-fix head: killed ==
+    ["dev-agent"]."""
+    Broker.code = 401
+    killed = []
+    monkeypatch.setattr(cli, "retire_waked", lambda name: killed.append(name) or "")
+    claude, _ = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude, force=True)
+    monkeypatch.setenv("REVEILLE_TOKEN", "the-superseded-one")
+    assert cli.main(argv + ["--no-prompt"]) == 0, capsys.readouterr().err
+    assert killed == [], (
+        "init installed no new credential and still retired the daemon")
+    assert "left the running daemon alone" in capsys.readouterr().out
+
+
+def test_a_healthy_kept_credential_retires_no_daemon(tmp_path, broker, monkeypatch,
+                                                     capsys):
+    """The same invariant on the ordinary boot: verify OK, credential kept,
+    nothing re-keyed, daemon untouched. Every healthy 0.2.24/0.2.25 container
+    boot took this path and killed its own daemon, then self-healed at the
+    first turn boundary -- a deaf window nothing reported."""
+    Broker.code = 200
+    killed = []
+    monkeypatch.setattr(cli, "retire_waked", lambda name: killed.append(name) or "")
+    claude, _ = fake_claude(tmp_path)
+    argv, home, work = run(tmp_path, broker, claude)
+    monkeypatch.setenv("REVEILLE_TOKEN", "a-perfectly-good-one")
+    assert cli.main(argv + ["--no-prompt"]) == 0, capsys.readouterr().err
+    assert killed == [], (
+        "a healthy kept credential is not a re-key either")

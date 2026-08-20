@@ -351,6 +351,23 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.220 INIT THAT INSTALLS NO NEW CREDENTIAL RETIRES NO DAEMON (ruling
+13094; agent image 0.2.26). The 0.2.24 hoist put the wake daemon at the top of
+the container entrypoint, where it takes the spool lock seconds before
+`reveille init` runs -- and init retired the lock holder on every path except
+a pending mint, so a boot that KEPT its credential killed the daemon it had
+just started. The supervisor that should have respawned it inherited the
+entrypoint's set -e and died with it: one Terminated in the log and no second
+spawn, ever. A healthy body self-healed at its next turn boundary and was
+merely deaf for a window it never reported; a PARKED body was deaf forever,
+which is the population the daemon exists for. Both halves are fixed by
+saying what was always meant: the daemon goes only when the secret it read at
+spawn is now dead, so one predicate replaces the enumeration of callers, and
+the supervisor survives any child exit. Found by the field check on the real
+image rather than by a unit -- every unit in this repo passed while every
+container boot did it -- so the gate that came out of it boots the pinned
+image, lets init finish, and asserts the daemon is still standing.
+
 0.2.219 THE BOOT REPORT QUOTES THE VERDICT, AND THE DAEMON GOES FIRST
 (ruling 12944 R-B, 12882, 13016; agent image 0.2.24). The field run of the
 12851 R1 gate came back red on its report: a container holding a refused

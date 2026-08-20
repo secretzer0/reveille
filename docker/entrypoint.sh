@@ -30,9 +30,14 @@ set -euo pipefail
 # below does not exist yet at this point, and that is fine.
 ws_url="${REVEILLE_URL/http/ws}/wake"
 mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
+# `|| true`: A SUPERVISOR THAT DIES WITH ITS CHILD IS NOT A SUPERVISOR
+# (ruling 13094). The subshell inherits this file's `set -euo pipefail`, so a
+# waked that exits non-zero -- a crash, a SIGTERM's 143 -- used to take the
+# whole loop with it: one "Terminated" in docker logs and no respawn, ever.
+# The loop's entire purpose is to outlive the thing it starts.
 ( while :; do
     reveille-waked --url "$ws_url" --name "$REVEILLE_AGENT_ROLE" \
-      >>"$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log" 2>&1
+      >>"$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log" 2>&1 || true
     sleep 2
   done ) &
 

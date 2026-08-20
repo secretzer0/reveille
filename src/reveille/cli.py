@@ -1207,6 +1207,7 @@ def cmd_init(a):
     # runs -- `will_mint` is the only thing that decides it does.
     will_mint, user, keep, cookie = False, None, False, cookie
     minted_pending = False
+    installed_new_credential = False
     if a.login or (not usable and not keep_refused):
         # MINT FIRST, then fall into exactly the same path as a pasted token.
         # One installer, not two: everything after this point cannot tell where
@@ -1450,6 +1451,11 @@ def cmd_init(a):
                      f"rooms: {', '.join(attached)}{note}"
                      + (" -- PENDING: the body holding this identity keeps it "
                         "until a turn here calls join()" if minted_pending else ""))
+        # A non-pending mint superseded the name's previous tokens IN THIS
+        # CALL -- whatever secret a running daemon read at spawn is dead now.
+        # A pending mint took nothing yet (12320 R5): the swap commits at
+        # join(), so nothing is dead until then.
+        installed_new_credential = not minted_pending
 
     try:
         path = write_credential(url, name, token, workdir)
@@ -1469,22 +1475,26 @@ def cmd_init(a):
     if lifted:
         steps.append(f"migrated: lifted the doctrine block out of {lifted} "
                      f"(it belongs in CLAUDE.local.md, which is not tracked)")
-    # THE DAEMON HOLDING THE OLD CREDENTIAL HAS TO GO (ruling 12008). It read
-    # its token once, at spawn, and no file written here can reach it.
-    # BUT A PENDING MINT TAKES NOTHING, SO IT RETIRES NOTHING (ruling 12320 R5,
-    # measured 2026-08-19). retire_waked is keyed on the agent NAME and the
-    # spool lock is per identity per machine, so an init in a second directory
-    # killed the daemon of the body that was still live and still holding a
-    # perfectly good credential -- deaf until its next turn boundary, for a
-    # credential that had not arrived and might never. 12008 was written before
-    # the swap was two-phase: it assumed the mint had already superseded what
-    # that daemon holds. When it has, this still fires.
-    retired = "" if minted_pending else retire_waked(name)
+    # THE DAEMON GOES ONLY WHEN THE SECRET IT READ AT SPAWN IS NOW DEAD --
+    # that is what 12008 meant, and the predicate says it directly (ruling
+    # 13094). An init that installed no NEW credential retires no daemon:
+    # nothing it wrote made the running daemon's secret stale, so a SIGTERM
+    # here is not a re-key, it is a murder. Measured 2026-08-20 on the 0.2.25
+    # container shape: the hoisted boot daemon (12882) took the flock seconds
+    # before init's keep-refused --force path reached this line, retire_waked
+    # killed it, the set-e supervisor died with it, and the body was deaf --
+    # forever, for the parked population the daemon exists to serve. The
+    # pending-mint case (12320 R5) and every kept-credential case fall out of
+    # the one predicate; do not re-split them.
+    retired = retire_waked(name) if installed_new_credential else ""
     if retired:
         steps.append(f"wake: {retired}")
     elif minted_pending:
         steps.append("wake: left the running daemon alone -- it holds the live "
                      "credential until this one arrives")
+    else:
+        steps.append("wake: left the running daemon alone -- nothing was "
+                     "re-keyed here")
     # ALWAYS, wizard or not (operator 11879 + red-shirt, 2026-08-18): the paste
     # path skips every prompt, and an agent with no CLAUDE.md has no boot ritual
     # -- it comes up connected and doctrine-less, which is what red-shirt did.

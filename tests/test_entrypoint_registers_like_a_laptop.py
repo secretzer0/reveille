@@ -271,3 +271,29 @@ def test_a_clean_init_reports_a_fact_not_silence(tmp_path):
     path states what was observed -- init's exit code and when."""
     _r, _order, report = _run_boot_block(tmp_path, init_rc=0)
     assert "init exit 0 at " in report, report
+
+
+def test_the_supervisor_outlives_its_child(tmp_path):
+    """A supervisor that dies with its child is not a supervisor (13094). The
+    subshell inherits this file's set -euo pipefail, so a waked exiting
+    non-zero -- the field case was a SIGTERM's 143 -- used to take the whole
+    loop: one Terminated, no respawn, ever since the loop was written. Red on
+    the pre-fix head: exactly one spawn recorded."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    count = tmp_path / "spawns"
+    (bindir / "reveille-waked").write_text(
+        f"#!/bin/sh\necho x >> {count}\nexit 7\n")
+    (bindir / "reveille-waked").chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    script = ("set -euo pipefail\n" + _waked_block() + "\nsleep 5\nkill 0\n")
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", HOME=str(home),
+               REVEILLE_URL="http://b:8765", REVEILLE_AGENT_ROLE="dev-agent",
+               REVEILLE_TOKEN="x")
+    subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                   env=env, timeout=30, start_new_session=True)
+    spawns = len(count.read_text().splitlines())
+    assert spawns >= 2, (
+        f"waked exited non-zero once and was never respawned "
+        f"({spawns} spawn recorded)")
