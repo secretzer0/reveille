@@ -2423,6 +2423,8 @@ let agTabOn=null;     // gid of the visible tab
 // CURRENT state allows, so the strip redraws from this -- never from whatever
 // was true at the moment the tab was opened.
 let agRows={};
+// Standing knocks (DES-012 s18): agent name -> the knock a stale machine left.
+let agKnocks={};
 let agAll=[];         // that answer in order, for the roster to redraw locally
 // agent -> [room id]. See tokenRooms().
 let agTokRooms=null;
@@ -2821,8 +2823,8 @@ function drawRoster(){
  // ACTIONABLE FLOATS: what wants a decision sorts to the top of its group,
  // recovery cases sink. Alphabetical inside each band, so the order is still
  // predictable enough to build muscle memory on.
- const band=a=>a.status==='absent'?0:differs(a)?1:a.status==='running'?2:
-   gone(a)?4:3;
+ const band=a=>a.status==='absent'?0:agKnocks[a.agent]?1:differs(a)?1:
+   a.status==='running'?2:gone(a)?4:3;
  const q=rostQ.trim().toLowerCase();
  const hit=a=>!q||a.agent.toLowerCase().indexOf(q)>=0;
  // EXCEPTIONS CARRY TEXT, NORMAL STATES CARRY A DOT. "running" and "stopped"
@@ -2834,7 +2836,10 @@ function drawRoster(){
  // is fill AND ring.
  const row=a=>{
   const s=stateOf(a);
-  const word=a.status==='absent'?'broken':gone(a)?s:differs(a)?'differs':'';
+  // KNOCKING is a decision waiting on the human (DES-012 s18), so it
+  // outranks the quiet states and carries its word.
+  const word=a.status==='absent'?'broken':agKnocks[a.agent]?'knocking'
+    :gone(a)?s:differs(a)?'differs':'';
   // A DIFFERENCE IS ONLY ACTIONABLE ONCE YOU CAN SEE FROM WHAT. One word on a
   // twenty-character rail cannot carry two image tags, so they ride the
   // tooltip and the accessible name -- the same two channels the state dot
@@ -3206,8 +3211,20 @@ async function openSendBack(name){
  me=await api('/me');
  const mine=(me.owned||[]).concat(me.member||[]).concat(me.public||[]);
  const axes=await agentRoomAxes(name, mine);
+ // A STANDING KNOCK CHANGES WHOSE IDEA THIS WAS (DES-012 s18): a machine is
+ // asking, and the answer is keyed to the hash that asked -- so the ticket
+ // can only land on the machine that knocked. The reason is the human's
+ // decision input, so it is said in the human's words, not the schema's.
+ const k=agKnocks[name];
+ const kWord=k?(k.reason==='superseded'
+   ?"that machine was this identity's body"
+   :'the move minted for that machine never arrived'):'';
+ const kAgo=k?Math.max(1,Math.round((Date.now()-k.last_ns/1e6)/60000)):0;
  openAgDlg(
   '<div class="pRow"><b id="agDlgTitle">Send '+esc(name)+' back</b></div>'+
+  (k?'<div class="pAsk"><b>A machine is knocking:</b> '+kWord+', and it asked '+
+   'to come back ~'+kAgo+' min ago. Answering opens the window for THE '+
+   'MACHINE THAT ASKED.</div>':'')+
   '<div class="pAsk">This opens a five-minute window in which the machine '+esc(name)+
   ' was moved OFF can take the identity back. That machine claims it with the '+
   'credential it is still holding -- nothing is pasted, and no live secret '+
@@ -3227,8 +3244,8 @@ async function openSendBack(name){
    .map(c=>c.dataset.sbroom);
   if(!picked.length){toast('tick at least one room -- a body with none reaches nothing');return;}
   try{
-   const r=await api('/recalls',{method:'POST',body:JSON.stringify({
-    agent:name,rooms:picked})});
+   const r=await api('/recalls',{method:'POST',body:JSON.stringify(
+    k?{agent:name,rooms:picked,knock:k.id}:{agent:name,rooms:picked})});
    closeAgDlg();
    toast(name+' may come back for the next 5 minutes -- it lands when that '+
     'machine takes a turn and joins',true);
@@ -3588,6 +3605,11 @@ async function refreshAgents(){
  agRows={};
  for(const a of d.agents)agRows[a.agent]=a;
  if(!agTokRooms)agTokRooms=await railRooms();
+ // Standing knocks ride the same poll: a machine asking to come back is
+ // exactly the kind of decision this rail exists to surface. Soft-fail --
+ // the rail is launcher-fed and must not die on a broker hiccup.
+ try{const rc=await api('/recalls');agKnocks={};
+  for(const k of (rc.knocks||[]))agKnocks[k.agent]=k;}catch(e){}
  drawRoster();
  // A tab whose agent no longer exists (erased in another browser) must not
  // keep a frame open over nothing.
