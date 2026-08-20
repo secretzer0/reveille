@@ -1,0 +1,11 @@
+# The CONTAINER is the sandbox (DES-024 virtual pad): codex's inner jail
+# (bubblewrap) is disabled because the outer walls -- the mounts, the
+# network policy, the non-root user -- are the confinement. Zero inner
+# restrictions, by the operator's ruling (2026-08-20).
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+
+notify = ["/home/node/.codex/notify.sh"]
+
+[projects."/home/node/work"]
+trust_level = "trusted"
