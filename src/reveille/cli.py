@@ -25,6 +25,7 @@ root-equivalent credential into .bash_history on every machine that runs it.
 import argparse
 import contextlib
 import getpass
+import socket
 import hashlib
 import re
 import json
@@ -1486,12 +1487,16 @@ def directory_env(workdir):
     return out
 
 
-def post_knock(url, token, timeout=10):
+def post_knock(url, token, machine=None, timeout=10):
     """POST /recalls/request with the dead credential as the bearer. The
     broker's refusal is the only diagnostic, so an HTTP error surfaces the
-    broker's own sentence, never a guess about it."""
+    broker's own sentence, never a guess about it. `machine` is this run's
+    own user@host:path (12626) -- the CLI is the one party standing in the
+    directory, so it is the one that can say WHERE the knock is from; the
+    owner's dialog shows it so they know which machine they are answering."""
+    body = json.dumps({"machine": machine} if machine else {}).encode()
     req = urllib.request.Request(url.rstrip("/") + "/recalls/request",
-                                 data=b"{}", method="POST",
+                                 data=body, method="POST",
                                  headers={"Authorization": f"Bearer {token}",
                                           "Content-Type": "application/json"})
     try:
@@ -1512,15 +1517,19 @@ def cmd_knock(a):
     refused -- and asks the owner to send the identity here. Records one row
     on the owner's rail and nothing else; their answer lands here on its own,
     through the same return ticket a parked daemon already claims."""
-    env = directory_env(a.dir or os.getcwd())
+    where = os.path.abspath(a.dir or os.getcwd())
+    env = directory_env(where)
     url, token = env["REVEILLE_URL"], env["REVEILLE_TOKEN"]
     if not url or not token:
         print("reveille knock: this directory holds no credential to present "
               "-- nothing to knock with. Run it in the agent's directory.",
               file=sys.stderr)
         return 1
+    # user@host:path -- so the owner's dialog can name WHICH machine is asking
+    # (12626; two directories on one laptop cost the operator that decision).
+    machine = f"{getpass.getuser()}@{socket.gethostname()}:{where}"
     try:
-        out = post_knock(url, token)
+        out = post_knock(url, token, machine=machine)
     except RuntimeError as e:
         said = str(e)
         # THE DISAMBIGUATION (#158 review), specific fact BEFORE the shared

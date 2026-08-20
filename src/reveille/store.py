@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -545,6 +545,10 @@ CREATE TABLE IF NOT EXISTS knocks (
     reason      TEXT NOT NULL,         -- the tombstone's: how this credential died
     first_ns    INTEGER NOT NULL,
     last_ns     INTEGER NOT NULL,
+    path        TEXT,                  -- user@host:path of the ASKING directory (12626);
+                                       -- shown ONLY to the owner. The REFUSAL side still
+                                       -- names no host and no path (12445) -- it answers
+                                       -- unauthenticated callers.
     UNIQUE (agent_id, secret_hash)
 );
 """
@@ -1965,6 +1969,19 @@ def _upgrade_v38(conn, db_path):
         conn.execute("PRAGMA user_version=39")
 
 
+def _upgrade_v39(conn, db_path):
+    """v39 -> v40 (ruling 12626): knocks.path -- user@host:path of the ASKING
+    directory, so the owner can tell WHICH machine they are answering (two
+    directories on one laptop cost the operator that decision tonight).
+    Additive-nullable, the wake_k shape; NULL is correct for every existing
+    row and for any client that sends no machine string."""
+    with tx(conn):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(knocks)")}
+        if "path" not in have:
+            conn.execute("ALTER TABLE knocks ADD COLUMN path TEXT")
+        conn.execute("PRAGMA user_version=40")
+
+
 def _upgrade_v37(conn, db_path):
     """v37 -> v38 (ruling 12532): tokens.last_inbox_ns -- when this credential
     last READ its mail. Additive; NULL is correct for every existing row (no
@@ -2203,7 +2220,7 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38)}
+              37, 38, 39)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -3641,7 +3658,7 @@ BAD_TOKEN = (
 KNOCK_TTL_NS = 24 * 3600 * 1_000_000_000
 
 
-def knock(conn, secret, now=None):
+def knock(conn, secret, now=None, path=None):
     """A dead credential asks the owner to send the identity here (DES-012
     s18, rulings 12445/12485). Records the ask and NOTHING else: no presence,
     no message, no join -- THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER
@@ -3670,18 +3687,28 @@ def knock(conn, secret, now=None):
     if not owner:
         raise AuthError(BAD_TOKEN)
     h = _sha(secret)
+    # `path` is user@host:path of the ASKING directory (12626) -- the whole
+    # content of the owner's decision when two directories on one machine can
+    # both be this agent's past. Shown ONLY to the owner (knocks_for is
+    # owner-scoped); the REFUSAL to a stale body still names no host and no
+    # path (12445) -- that side answers unauthenticated callers. A re-knock
+    # refreshes it (COALESCE keeps a recorded path over a client that stopped
+    # sending one).
     with tx(conn):
         conn.execute(
             "INSERT INTO knocks(id, agent_id, owner_id, secret_hash, reason, "
-            "first_ns, last_ns) VALUES(?,?,?,?,?,?,?) "
+            "first_ns, last_ns, path) VALUES(?,?,?,?,?,?,?,?) "
             "ON CONFLICT(agent_id, secret_hash) "
-            "DO UPDATE SET last_ns=excluded.last_ns",
+            "DO UPDATE SET last_ns=excluded.last_ns, "
+            "path=COALESCE(excluded.path, path)",
             (uuid.uuid4().hex, ts["agent_id"], owner["owner_id"], h,
-             ts["reason"], now, now))
+             ts["reason"], now, now, path))
     r = conn.execute("SELECT id, first_ns FROM knocks WHERE agent_id=? AND "
                      "secret_hash=?", (ts["agent_id"], h)).fetchone()
+    # owner_id is for the ROUTE (it pushes the owner's pages) and is popped
+    # before the response: the knocker learns nothing about who owns it.
     return {"id": r["id"], "agent": ts["agent_name"], "reason": ts["reason"],
-            "since_ns": r["first_ns"]}
+            "since_ns": r["first_ns"], "owner_id": owner["owner_id"]}
 
 
 def knocks_for(conn, owner_id, now=None):
@@ -3696,8 +3723,18 @@ def knocks_for(conn, owner_id, now=None):
             "WHERE k.owner_id=? AND k.last_ns >= ? ORDER BY k.last_ns DESC",
             (owner_id, now - KNOCK_TTL_NS)):
         out.append({"id": r["id"], "agent": r["agent"], "reason": r["reason"],
-                    "first_ns": r["first_ns"], "last_ns": r["last_ns"]})
+                    "first_ns": r["first_ns"], "last_ns": r["last_ns"],
+                    "path": r["path"]})
     return out
+
+
+def owners_with_knocks(conn, now=None):
+    """The distinct owners with a standing (unexpired) knock -- the nag
+    ticker's worklist, nothing else's."""
+    now = now or time.time_ns()
+    return [r["owner_id"] for r in conn.execute(
+        "SELECT DISTINCT owner_id FROM knocks WHERE last_ns >= ?",
+        (now - KNOCK_TTL_NS,))]
 
 
 def knock_take(conn, owner_id, knock_id, now=None):
