@@ -83,39 +83,70 @@ def test_the_direct_upgrade_path_asks_the_gate(monkeypatch):
     assert len(upgraded) == 1, "a consented force must proceed"
 
 
-def test_the_record_carries_observed_numbers(monkeypatch, tmp_path, capsys):
+def test_the_record_carries_observed_numbers(monkeypatch, tmp_path):
+    """13335: the tree is read FROM THE HOST side of the bind mount, with
+    plain git -- it works when the body is stopped, wedged, credential-dead
+    or gone, which is exactly when a roll is most likely. Proven against a
+    REAL repo: one dirty file, one unpushed commit, a stopped body."""
+    import subprocess as sp
+    monkeypatch.setattr(rl, "_inspect_container",
+                        lambda name: {**_running(image="img:1"),
+                                      "running": False})
+    root = tmp_path
+    work = root / "repos" / "work"
+    upstream = root / "upstream.git"
+    sp.run(["git", "init", "--bare", "-q", str(upstream)], check=True)
+    sp.run(["git", "clone", "-q", str(upstream), str(work)], check=True)
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    (work / "a.txt").write_text("committed")
+    sp.run(["git", "-C", str(work), "add", "a.txt"], check=True)
+    sp.run(["git", "-C", str(work), "commit", "-q", "-m", "x"], check=True,
+           env={**os.environ, **env})
+    sp.run(["git", "-C", str(work), "push", "-q", "-u", "origin", "HEAD"],
+           check=True)
+    sp.run(["git", "-C", str(work), "commit", "-q", "--allow-empty", "-m",
+            "unpushed"], check=True, env={**os.environ, **env})
+    (work / "dirty.txt").write_text("uncommitted")
+    monkeypatch.setattr(rl, "data_root", lambda u, a, base=None: str(root))
+    rl.leave_roll_record("u", "a", to_image="img:2", why="upgrade (image roll)")
+    text = (root / ".claude" / "roll-record.md").read_text()
+    assert "written by the LAUNCHER" in text
+    assert "img:1 -> img:2" in text
+    assert "dirty files in /home/agent/repos/work: 1" in text
+    assert "unpushed commits: 1" in text
+
+
+def test_an_ownership_refusal_is_named_not_misread(monkeypatch, tmp_path):
+    """13335's trap, gated: the host user reading the agent uid's tree gets
+    git's dubious-ownership refusal -- which must land in the record BY NAME,
+    because an unreadable that reads as zero dirty files is worse than a
+    blank."""
+    import types as _t
     monkeypatch.setattr(rl, "_inspect_container",
                         lambda name: _running(image="img:1"))
-    outs = {"status": "3\n", "rev-list": "2\n"}
-
-    def fake_docker(*argv, check=True, capture=False):
-        text = " ".join(argv)
-        out = outs["status"] if "status" in text else outs["rev-list"]
-        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
-    monkeypatch.setattr(rl, "_docker", fake_docker)
+    (tmp_path / "repos" / "work").mkdir(parents=True)
+    monkeypatch.setattr(
+        rl.subprocess, "run",
+        lambda *a, **k: _t.SimpleNamespace(
+            returncode=128, stdout="",
+            stderr="fatal: detected dubious ownership in repository"))
     monkeypatch.setattr(rl, "data_root", lambda u, a, base=None: str(tmp_path))
     rl.leave_roll_record("u", "a", to_image="img:2", why="upgrade (image roll)")
     text = (tmp_path / ".claude" / "roll-record.md").read_text()
-    assert "written by the LAUNCHER" in text
-    assert "img:1 -> img:2" in text
-    assert "dirty files in /home/agent/repos/work: 3" in text
-    assert "unpushed commits: 2" in text
-    assert "never" not in text.split("\n")[0]
+    assert "unreadable: ownership refused" in text
+    assert ": 0" not in text, "a refusal must never read as a clean tree"
 
 
 def test_an_unreadable_tree_is_recorded_not_skipped(monkeypatch, tmp_path):
-    """The refused-credential case is the whole point: the record still lands
-    and says what could not be seen."""
+    """No work tree at all (the refused-credential body that never cloned):
+    the record still lands and says what could not be seen."""
     monkeypatch.setattr(rl, "_inspect_container",
                         lambda name: _running(image="img:1"))
-    monkeypatch.setattr(
-        rl, "_docker",
-        lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="",
-                                              stderr="boom"))
     monkeypatch.setattr(rl, "data_root", lambda u, a, base=None: str(tmp_path))
     rl.leave_roll_record("u", "a", to_image="img:2", why="re-provision (--replace)")
     text = (tmp_path / ".claude" / "roll-record.md").read_text()
-    assert text.count("unreadable") == 2
+    assert text.count("unreadable (no repo") == 2
 
 
 def test_no_body_no_record(monkeypatch, tmp_path):
