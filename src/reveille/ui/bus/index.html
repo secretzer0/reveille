@@ -2662,6 +2662,26 @@ function stateSentence(name){
    ? 'Erased -- no container and no files. The hive still holds its messages, memories and lessons.'
   :a.status==='absent'
    ? 'Broken -- there is a launcher record for this agent but no container. Destroy clears the stale record.'
+  // THE ROW MUST NOT LIE ABOUT WHERE THE BODY IS (ruling 12851 R5, from the
+  // operator's 12839: "there is no beam back button like there was for you").
+  // A stopped container HERE and a live body THERE are both true at once, and
+  // the launcher decides `stopped` from docker alone -- so this row said the
+  // one fact the reader was not asking about. `elsewhere` is unreachable for
+  // it by construction (that row is only built for names with no container
+  // record on this host), and BEAM DOWN stays withheld for the same reason:
+  // one identity, one container record per host. Nothing is missing from the
+  // strip -- sendback is already on it -- so what was owed is the two-step
+  // said out loud, in the well where the terminal would be.
+  :st==='stopped'&&a.hive&&a.hive.present
+   ? 'Stopped HERE, and alive on another machine -- both are true. This host has '+
+     'a container for it that is not running; the identity is working somewhere '+
+     'else, and nothing is wrong with it. To bring it back to THIS host it is two '+
+     'steps, in this order: start the container, then send it back '+
+     'within five minutes. The started container claims the return ticket '+
+     'with the credential '+
+     'it still holds -- nothing is pasted -- and the swap commits when a turn in '+
+     'the container calls join(). Its current body keeps working until then, and '+
+     'if nobody claims, the window closes and nothing changed.'
    : 'Stopped -- there is no session to attach to. Start it from the tab above and this becomes its terminal.';
  return '<b>'+esc(name)+'</b> <span class="pDim">'+esc(st)+'</span>'+
   '<div class="pAsk">'+say+'</div>';

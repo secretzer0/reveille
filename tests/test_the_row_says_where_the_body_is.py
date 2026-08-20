@@ -101,6 +101,34 @@ def test_the_launcher_gives_each_its_own_row_state():
                       "flight is not the same fact as a body working somewhere else"
 
 
+def test_a_stopped_container_does_not_hide_a_body_alive_elsewhere():
+    """Ruling 12851 R5, from the operator's 12839 ("there is no beam back button
+    like there was for you").
+
+    A stopped container HERE and a live body THERE are both true at once, and
+    the launcher decides `stopped` from docker alone -- lifecycle_state returns
+    it for any docker_status != "absent" and never consults the hive -- so
+    `elsewhere` is unreachable for such a row by construction. The row then said
+    the one fact the reader was not asking about, and the two-step that DOES
+    work (start, then send back) appeared nowhere. No new state and no new verb:
+    sendback is already on the strip, the row already carries `hive`, and what
+    was owed is the sentence."""
+    s = PAGE[PAGE.index("function stateSentence"):PAGE.index("function drawTabs")]
+    assert "st==='stopped'&&a.hive&&a.hive.present" in s, (
+        "a stopped row whose identity the hive sees alive elsewhere must say so")
+    branch = s[s.index("st==='stopped'&&a.hive&&a.hive.present"):]
+    branch = branch[:branch.index("Stopped -- there is no session")]
+    assert "alive on another machine" in branch, "it must name where the body IS"
+    assert "start the container" in branch and "send it back" in branch, (
+        "and name the two steps, in order -- the verbs are on the strip already, "
+        "what was missing is which two and in which order")
+    assert "five minutes" in branch, "the return ticket window is what makes it two STEPS"
+    row = PAGE[PAGE.index("const b=(k,icon,label,cls)"):PAGE.index("function stateSentence")]
+    assert "if(st==='elsewhere')out+=b('materialize'" in row, (
+        "beam down stays withheld on a row that has a container record here -- "
+        "one identity, one container record per host")
+
+
 def test_the_pane_says_what_each_state_means_and_offers_nothing_rash():
     s = PAGE[PAGE.index("function stateSentence"):PAGE.index("function drawTabs")]
     assert "KEEPS WORKING until then" in s, "moving must not read as loss"
