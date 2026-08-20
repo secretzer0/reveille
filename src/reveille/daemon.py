@@ -5461,11 +5461,12 @@ def _agent_principal(request):
                              handover=True)
         ts = store.tombstone_for(_conn, secret)
         if ts:
-            # ONE TEXT, BOTH DEAD REASONS, LIVENESS FILLED IN (ruling 12445):
-            # identity name, alive-elsewhere-and-how-recently OR not alive at
-            # all, why THIS credential is dead and when, and the choices named
-            # as choices. NEVER a credential, NEVER the live body's host or
-            # path -- in the visit case that is another human's machine.
+            # ONE TEXT PER DEAD REASON, LIVENESS FILLED IN (ruling 12445;
+            # 'revoked' added by 12944 R-A): identity name,
+            # alive-elsewhere-and-how-recently OR not alive at all, why THIS
+            # credential is dead and when, and the choices named as choices.
+            # NEVER a credential, NEVER the live body's host or path -- in
+            # the visit case that is another human's machine.
             live = store.identity_liveness(_conn, ts["agent_id"])
             if live["alive"]:
                 seen = (" -- a live credential for it was last used " +
@@ -5489,6 +5490,16 @@ def _agent_principal(request):
                     f"send the identity to this machine -- their answer lands "
                     f"here on its own, nothing is pasted. {idle}")
             when = time.strftime("%Y-%m-%d", time.gmtime(ts["died_ns"] / 1e9))
+            if ts["reason"] == "revoked":
+                # The word matters (12944 R-A): "replaced" sends a revoked
+                # body knocking at a door that will not open -- knock refuses
+                # this reason by name, so the refusal must not recommend it.
+                raise store.AuthError(
+                    f"revoked: this credential for {ts['agent_name']!r} was "
+                    f"revoked by its owner on {when}. {alive} A knock will "
+                    f"not bring it back -- ask the owner to mint a fresh "
+                    f"credential (`reveille init` here once they have). "
+                    f"{idle}")
             raise store.AuthError(
                 f"superseded: this credential for {ts['agent_name']!r} was "
                 f"replaced on {when}. {alive} Your choices: run `reveille "

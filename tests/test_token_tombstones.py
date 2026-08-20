@@ -86,14 +86,6 @@ def test_a_never_valid_secret_gets_no_signpost():
     assert store.tombstone_for(c, "garbage-never-minted") is None
 
 
-def test_plain_revoke_leaves_no_tombstone():
-    c = db()
-    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
-    tok = store.create_token(c, admin["id"], "solo", agent_name="loner", create=True)
-    store.revoke_token(c, tok["id"], admin["id"])
-    assert c.execute("SELECT count(*) FROM token_tombstones").fetchone()[0] == 0
-
-
 def test_past_the_fixed_age_the_refusal_goes_generic():
     c = db()
     _, old, _ = minted_twice(c)
