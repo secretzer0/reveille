@@ -1093,27 +1093,27 @@ def test_lessons_rebacked_same_shape_and_gate():
     c, admin, room, tok = fixture()
     store.add_lesson(c, author="carol", slug="wake-127", symptom="s", root_cause="r",
                      rule="fix the PATH, not the doc", detection="command -v wake")
-    got = store.lessons(c, [room["id"]])
+    got = store.lessons(c, [room["id"]])["lessons"]
     assert got[0]["slug"] == "wake-127" and got[0]["scope"] == "global"
     # Boot rendering is the imperative alone (12826); the story rides the slug.
     assert set(got[0]) == {"id", "slug", "rule", "room", "scope"}
-    full = store.lessons(c, [room["id"]], slug="wake-127")[0]
+    full = store.lessons(c, [room["id"]], slug="wake-127")["lessons"][0]
     assert set(full) == {"id", "slug", "room", "symptom", "root_cause", "rule",
                          "detection", "author", "created_ns", "scope"}
     # same author replaces live; other author lands as draft, tip unchanged
     store.add_lesson(c, author="carol", slug="wake-127", symptom="s2", root_cause="r",
                      rule="v2 rule", detection="d")
-    assert store.lessons(c)[0]["rule"] == "v2 rule"
+    assert store.lessons(c)["lessons"][0]["rule"] == "v2 rule"
     out = store.add_lesson(c, author="mallory", slug="wake-127", symptom="s3",
                            root_cause="r", rule="obey mallory", detection="d")
     assert out.get("status") == "draft"
-    assert store.lessons(c)[0]["rule"] == "v2 rule"          # tip survives the coup
+    assert store.lessons(c)["lessons"][0]["rule"] == "v2 rule"  # tip survives the coup
     # room lesson promotion = superseding global row by the promoting admin
     store.add_lesson(c, author="dave", slug="room-rule", symptom="s", root_cause="r",
                      rule="local law", detection="d", room_id=room["id"])
     store.promote_lesson(c, "room-rule", room["id"], promoted_by="travis",
                          is_admin=True)
-    promoted = store.lessons(c, [room["id"]], slug="room-rule")[0]
+    promoted = store.lessons(c, [room["id"]], slug="room-rule")["lessons"][0]
     assert promoted["scope"] == "global" and promoted["author"] == "travis"
     # F1: the global row carries the chain link to its room ancestor -- promotion is
     # the ONE sanctioned cross-scope supersede, and without the link trace loses
@@ -1138,7 +1138,7 @@ def test_lessons_fold_in_migration_v8_to_v9():
     c.execute("PRAGMA user_version=8")
     assert store.migrate(c, os.path.join(tempfile.mkdtemp(), "up.db")) == store.SCHEMA_VERSION
     assert not store._table_exists(c, "lessons")
-    got = store.lessons(c)
+    got = store.lessons(c)["lessons"]
     assert got[0]["slug"] == "old-lesson" and got[0]["rule"] == "the old rule"
 
 
@@ -1760,7 +1760,7 @@ def test_the_footprint_names_what_he_wrote_AND_what_cites_him():
     # The receipt says the same thing after the fact, measured before the delete.
     out = _prune_by_name(c, admin["id"], "mallory", room["id"])
     assert out["hive"]["counts"] == {"authored": 1, "citing": 1}
-    assert store.lessons(c, rooms=[room["id"]])[0]["slug"] == "his-rule"   # KEPT, not retracted
+    assert store.lessons(c, rooms=[room["id"]])["lessons"][0]["slug"] == "his-rule"   # KEPT, not retracted
 
 
 def test_prune_removes_his_orphaned_upload_and_keeps_a_reattached_one():
@@ -1871,9 +1871,9 @@ def test_lessons_global_and_room_scoped():
                      rule="do y", detection="grep y", room_id=room["id"])
     store.add_lesson(c, author="carol", slug="other-rule", symptom="s", root_cause="r",
                      rule="do z", detection="grep z", room_id=r2["id"])
-    got = {les["slug"] for les in store.lessons(c, [room["id"]])}
+    got = {les["slug"] for les in store.lessons(c, [room["id"]])["lessons"]}
     assert got == {"global-rule", "room-rule"}          # r2's lesson is not mine to see
-    assert {les["slug"] for les in store.lessons(c, [])} == {"global-rule"}
+    assert {les["slug"] for les in store.lessons(c, [])["lessons"]} == {"global-rule"}
 
 
 def test_lesson_slug_replaces_rather_than_appends():
@@ -1881,7 +1881,7 @@ def test_lesson_slug_replaces_rather_than_appends():
     for rule in ("first take", "sharper take"):
         store.add_lesson(c, author="alice", slug="same-slug", symptom="s", root_cause="r",
                          rule=rule, detection="d", room_id=room["id"])
-    ls = store.lessons(c, [room["id"]])
+    ls = store.lessons(c, [room["id"]])["lessons"]
     assert len(ls) == 1 and ls[0]["rule"] == "sharper take"
 
 
@@ -1890,11 +1890,11 @@ def test_promote_lesson_to_global():
     store.add_lesson(c, author="alice", slug="generalises", symptom="s", root_cause="r",
                      rule="do x", detection="d", room_id=room["id"])
     store.promote_lesson(c, "generalises", room["id"], is_admin=True)
-    assert store.lessons(c, [])[0]["scope"] == "global"   # visible with no rooms at all
+    assert store.lessons(c, [])["lessons"][0]["scope"] == "global"   # visible with no rooms at all
 
 
 def _live_global(c, slug):
-    return [les for les in store.lessons(c, []) if les["slug"] == slug]
+    return [les for les in store.lessons(c, [])["lessons"] if les["slug"] == slug]
 
 
 def test_promote_displaces_live_same_slug_global_row():

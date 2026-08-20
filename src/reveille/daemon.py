@@ -351,6 +351,21 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.217 A BOOT READ MUST ARRIVE IN THE TURN THAT ASKED (ruling 12944 R-C).
+lessons() served the whole corpus and the harness refused it -- 86,534 chars
+on 2026-08-20, measured by two independent caps, so bodies read the fleet's
+rules off a spill file instead of from the tool, or paid a summarizer to read
+them badly. lessons() now takes a budget in chars, default 24000, and the
+budget bounds THE SERIALIZED RESULT the caller receives -- envelope and note
+included, never an internal counter, because a field named for the payload
+while measuring a part of it is a wrong-diagnosis generator. A budget may
+elide rule text; it may never make a lesson invisible: full rows upgrade from
+an all-slugs floor newest-first while the total fits, every remaining lesson
+keeps its slug, and the note names the elision count and the way back through
+lessons(slug=...). Order is unchanged, newest first -- brief() is the ranked
+and budgeted reader, lessons() is the exhaustive one, and a second ranker is
+a second thing to be wrong. chars equals what arrived.
+
 0.2.216 THE ROW MUST NOT LIE ABOUT WHERE THE BODY IS (ruling 12851 R5, from
 the operator's "there is no beam back button like there was for you"). A
 stopped container HERE and a live body THERE are both true at once, and the
@@ -5760,18 +5775,22 @@ async def rooms(ctx: Context = None) -> dict:
 
 
 @mcp.tool()
-async def lessons(slug: str = "", ctx: Context = None) -> dict:
+async def lessons(slug: str = "", budget: int = 24000, ctx: Context = None) -> dict:
     """Distilled defect post-mortems: every GLOBAL lesson plus any scoped to your rooms,
     newest first. Read these at boot -- they are rules the fleet already paid for.
 
-    Default rendering is id + slug + RULE -- the imperative that changes behaviour.
-    lessons(slug=<slug>) fetches that one lesson's full record (symptom, root_cause,
+    Budget is CHARS (~4/token, approximate: the broker has no tokenizer), default
+    24000 so the payload arrives INLINE in the turn that asked. Rows carry id +
+    slug + RULE -- the imperative that changes behaviour -- until the budget is
+    spent; every lesson past it stays in the list as its slug alone, and `note`
+    says how many. A budget elides rule text, never a lesson's existence.
+    lessons(slug=<slug>) fetches any lesson's full record (symptom, root_cause,
     detection) when you are diagnosing rather than booting.
 
     This replaces the per-repo LESSONS.md, which only ever worked because every agent
     shared one filesystem. Yours may not."""
     p = _me(ctx.request_context.request)
-    return {"lessons": store.lessons(_conn, p.rooms, slug=slug or None)}
+    return store.lessons(_conn, p.rooms, slug=slug or None, budget=budget)
 
 
 @mcp.tool()

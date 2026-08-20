@@ -6835,23 +6835,70 @@ def _lesson_slim(r):
             "scope": "global" if room is None else "room"}
 
 
-def lessons(conn, rooms=(), slug=None):
+def lessons(conn, rooms=(), slug=None, budget=24000):
     """Every global lesson plus the caller's rooms' lessons -- chain TIPS only
-    (status='live'), newest first. Default rendering is id + slug + rule;
+    (status='live'), newest first, as {"lessons", "total", "with_rule",
+    "chars", "note"}.
+
+    Budget is CHARS of the SERIALIZED RESULT the caller receives -- envelope
+    and note included, never an internal counter (12957: a field named for the
+    payload while measuring a part of it is a wrong-diagnosis generator).
+    Honored AS GIVEN, no floor. Full slim rows (id + slug + rule + routing)
+    upgrade from the all-slugs floor newest-first while the serialized total
+    stays within budget; EVERY remaining lesson stays in the list as its slug
+    alone (ruling 12944 R-C: a budget may elide rule text, never a lesson's
+    existence -- the all-slugs floor exists whatever the budget). Every
+    elision is marked in `note`; `chars` equals len(json.dumps(result));
     slug=<slug> serves that lesson's full record (symptom, root_cause,
     detection) inside the same room wall."""
     rooms = list(rooms or [])
     scopes = ["global"] + rooms
+
+    def sealed(payload):
+        """`chars` set to the serialized length of the result CARRYING that
+        very number -- fixed point over its own digit count, so the field
+        equals what the caller receives, exactly."""
+        base = len(json.dumps({**payload, "chars": 0})) - 1
+        for digits in range(1, 11):
+            if len(str(base + digits)) == digits:
+                return {**payload, "chars": base + digits}
+        raise BusError("chars fixed point did not converge")   # unreachable
+
     if slug is not None:
         rows = conn.execute(
             f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
             f"slug=? AND scope IN ({_ph(scopes)}) ORDER BY created_ns DESC",
             [slug] + scopes)
-        return [_lesson(r) for r in rows]
+        recs = [_lesson(r) for r in rows]
+        return sealed({"lessons": recs, "total": len(recs),
+                       "with_rule": len(recs), "note": ""})
     rows = conn.execute(
         f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
         f"scope IN ({_ph(scopes)}) ORDER BY created_ns DESC", scopes)
-    return [_lesson_slim(r) for r in rows]
+    slim = [_lesson_slim(r) for r in rows]
+    budget = max(0, int(budget))
+    total = len(slim)
+
+    def candidate(with_rule):
+        out = slim[:with_rule] + [{"slug": r["slug"]} for r in slim[with_rule:]]
+        elided = total - with_rule
+        note = ("" if not elided else
+                f"{elided} of {total} lessons over the {budget}-char budget: "
+                f"rule text elided, slug kept -- lessons(slug=<slug>) fetches "
+                f"any full record")
+        return {"lessons": out, "total": total, "with_rule": with_rule,
+                "note": note}
+
+    # Monotone upgrade (12957): serialized size grows with each row upgraded,
+    # so the largest fitting prefix is found by walking forward. The size test
+    # carries an 8-digit chars placeholder -- conservative width, so the sealed
+    # result is never over the number the walk accepted.
+    with_rule = 0
+    for k in range(1, total + 1):
+        if len(json.dumps({**candidate(k), "chars": 99999999})) > budget:
+            break
+        with_rule = k
+    return sealed(candidate(with_rule))
 
 
 def _displace_lesson_tips(conn, scope, slug, keep_id):
