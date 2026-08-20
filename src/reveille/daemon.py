@@ -351,6 +351,21 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.217 A BOOT READ MUST ARRIVE IN THE TURN THAT ASKED (ruling 12944 R-C).
+lessons() served the whole corpus and the harness refused it -- 86,534 chars
+on 2026-08-20, measured by two independent caps, so bodies read the fleet's
+rules off a spill file instead of from the tool, or paid a summarizer to read
+them badly. lessons() now takes a budget in chars, default 24000, and the
+budget bounds THE SERIALIZED RESULT the caller receives -- envelope and note
+included, never an internal counter, because a field named for the payload
+while measuring a part of it is a wrong-diagnosis generator. A budget may
+elide rule text; it may never make a lesson invisible: full rows upgrade from
+an all-slugs floor newest-first while the total fits, every remaining lesson
+keeps its slug, and the note names the elision count and the way back through
+lessons(slug=...). Order is unchanged, newest first -- brief() is the ranked
+and budgeted reader, lessons() is the exhaustive one, and a second ranker is
+a second thing to be wrong. chars equals what arrived.
+
 0.2.216 THE ROW MUST NOT LIE ABOUT WHERE THE BODY IS (ruling 12851 R5, from
 the operator's "there is no beam back button like there was for you"). A
 stopped container HERE and a live body THERE are both true at once, and the
