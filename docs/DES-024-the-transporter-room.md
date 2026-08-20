@@ -305,7 +305,22 @@ DIRECT is the whole host as that user; VIRTUAL is one directory.
 
 ## 12. The beam, and what a host may choose (operator 12672)
 
-### 12.1 The metaphor names three acts, not two
+### 12.1 RULED: the beam is the vocabulary (operator 12673)
+
+**BEAM DOWN and BEAM UP are the words**, in the UI, in this document, and in
+every future surface. "Push" and "knock" were engineering names for the
+directions and they stop being the words humans see.
+
+Two notes on carrying it out, so the rename does not become churn:
+
+- `reveille knock`, `POST /recalls/request` and the `knocks` table are SHIPPED
+  (0.2.201-0.2.208). Identifiers may keep their names; a released CLI verb
+  gets an alias and a deprecation, not a silent rename. That is a deliberate
+  act to schedule, not a side effect of this ruling.
+- The REQUEST is not a third word. A machine ASKS TO BE BEAMED DOWN. Whatever
+  the button says, it says that.
+
+### 12.2 The metaphor names three acts, not two
 
 The ship is the fleet; a machine is a planet.
 
@@ -321,7 +336,7 @@ the MECHANISM differs by direction: every beam down is a mint and a claim,
 every beam up is a supersede and a tombstone, and who had to agree depends on
 which of the two humans asked.
 
-### 12.2 RULED: the beam box carries the RUNTIME too, on container pads
+### 12.3 RULED: the beam box carries the RUNTIME too, on container pads
 
 The host's accept checkbox (§11.1.1) picks the pad KIND. On a CONTAINER pad it
 also picks the AGENT RUNTIME — Claude, or another when another exists.
@@ -335,7 +350,7 @@ machine has installed, and we do not get to put a binary on someone's host.
 That asymmetry is a REASON TO CHOOSE THE CONTAINER, not an apology for it: the
 smaller grant (§11.3) is also the more capable pad.
 
-### 12.3 The list must be earned, not promised
+### 12.4 The list must be earned, not promised
 
 The runtime selector's options are **the runtimes that have a working body
 profile** — never a static list of vendors. A runtime is a body only if it can
