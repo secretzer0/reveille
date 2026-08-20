@@ -37,7 +37,7 @@ def test_default_rendering_is_the_rule_alone():
     """Every lesson's RULE, no lesson's narrative: the default list carries
     exactly id + slug + rule + routing, for the whole corpus."""
     c, admin, room = fixture()
-    got = store.lessons(c, [room["id"]])
+    got = store.lessons(c, [room["id"]])["lessons"]
     assert {les["slug"] for les in got} == {"global-rule", "room-rule"}
     for les in got:
         assert set(les) == SLIM, f"{les['slug']} leaked {set(les) - SLIM}"
@@ -52,7 +52,7 @@ def test_slug_fetch_returns_the_story():
     """lessons(slug=...) serves the full record -- narrative included -- and an
     unknown slug serves nothing rather than something else."""
     c, admin, room = fixture()
-    got = store.lessons(c, [room["id"]], slug="room-rule")
+    got = store.lessons(c, [room["id"]], slug="room-rule")["lessons"]
     assert len(got) == 1
     full = got[0]
     assert NARRATIVE < set(full)
@@ -60,9 +60,10 @@ def test_slug_fetch_returns_the_story():
     assert full["root_cause"] == "local cause"
     assert full["detection"] == "grep for z"
     assert full["rule"] == "DO Z HERE"
-    slim = {les["slug"]: les for les in store.lessons(c, [room["id"]])}
+    slim = {les["slug"]: les
+            for les in store.lessons(c, [room["id"]])["lessons"]}
     assert full["id"] == slim["room-rule"]["id"]      # one id names one lesson
-    assert store.lessons(c, [room["id"]], slug="no-such-slug") == []
+    assert store.lessons(c, [room["id"]], slug="no-such-slug")["lessons"] == []
 
 
 def test_slug_fetch_stays_inside_my_rooms():
@@ -72,7 +73,7 @@ def test_slug_fetch_stays_inside_my_rooms():
     r2 = store.create_room(c, admin["id"], "Second")
     store.add_lesson(c, author="carol", slug="theirs", symptom="s", root_cause="r",
                      rule="not yours", detection="d", room_id=r2["id"])
-    assert store.lessons(c, [room["id"]], slug="theirs") == []
+    assert store.lessons(c, [room["id"]], slug="theirs")["lessons"] == []
 
 
 if __name__ == "__main__":

@@ -5760,18 +5760,22 @@ async def rooms(ctx: Context = None) -> dict:
 
 
 @mcp.tool()
-async def lessons(slug: str = "", ctx: Context = None) -> dict:
+async def lessons(slug: str = "", budget: int = 24000, ctx: Context = None) -> dict:
     """Distilled defect post-mortems: every GLOBAL lesson plus any scoped to your rooms,
     newest first. Read these at boot -- they are rules the fleet already paid for.
 
-    Default rendering is id + slug + RULE -- the imperative that changes behaviour.
-    lessons(slug=<slug>) fetches that one lesson's full record (symptom, root_cause,
+    Budget is CHARS (~4/token, approximate: the broker has no tokenizer), default
+    24000 so the payload arrives INLINE in the turn that asked. Rows carry id +
+    slug + RULE -- the imperative that changes behaviour -- until the budget is
+    spent; every lesson past it stays in the list as its slug alone, and `note`
+    says how many. A budget elides rule text, never a lesson's existence.
+    lessons(slug=<slug>) fetches any lesson's full record (symptom, root_cause,
     detection) when you are diagnosing rather than booting.
 
     This replaces the per-repo LESSONS.md, which only ever worked because every agent
     shared one filesystem. Yours may not."""
     p = _me(ctx.request_context.request)
-    return {"lessons": store.lessons(_conn, p.rooms, slug=slug or None)}
+    return store.lessons(_conn, p.rooms, slug=slug or None, budget=budget)
 
 
 @mcp.tool()

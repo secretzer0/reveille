@@ -6835,10 +6835,19 @@ def _lesson_slim(r):
             "scope": "global" if room is None else "room"}
 
 
-def lessons(conn, rooms=(), slug=None):
+def lessons(conn, rooms=(), slug=None, budget=24000):
     """Every global lesson plus the caller's rooms' lessons -- chain TIPS only
-    (status='live'), newest first. Default rendering is id + slug + rule;
-    slug=<slug> serves that lesson's full record (symptom, root_cause,
+    (status='live'), newest first, as {"lessons", "total", "with_rule",
+    "chars", "note"}.
+
+    Budget is CHARS of the serialized rows (~4/token, the same accounting
+    brief() uses -- the broker has no tokenizer), honored AS GIVEN, no floor.
+    Full slim rows (id + slug + rule + routing) render newest-first until the
+    budget is spent; EVERY remaining lesson stays in the list as its slug
+    alone (ruling 12944 R-C: a budget may elide rule text, never a lesson's
+    existence). The slug tail rides outside the budget -- the corpus stays
+    fully addressable at boot for ~40 chars a row. Every elision is marked in
+    `note`; slug=<slug> serves that lesson's full record (symptom, root_cause,
     detection) inside the same room wall."""
     rooms = list(rooms or [])
     scopes = ["global"] + rooms
@@ -6847,11 +6856,30 @@ def lessons(conn, rooms=(), slug=None):
             f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
             f"slug=? AND scope IN ({_ph(scopes)}) ORDER BY created_ns DESC",
             [slug] + scopes)
-        return [_lesson(r) for r in rows]
+        recs = [_lesson(r) for r in rows]
+        return {"lessons": recs, "total": len(recs), "with_rule": len(recs),
+                "chars": len(json.dumps(recs)), "note": ""}
     rows = conn.execute(
         f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
         f"scope IN ({_ph(scopes)}) ORDER BY created_ns DESC", scopes)
-    return [_lesson_slim(r) for r in rows]
+    slim = [_lesson_slim(r) for r in rows]
+    budget = max(0, int(budget))
+    out, spent, with_rule = [], 0, 0
+    for r in slim:
+        cost = len(json.dumps(r)) + 2
+        if spent + cost > budget:
+            break
+        out.append(r)
+        spent += cost
+        with_rule += 1
+    out.extend({"slug": r["slug"]} for r in slim[with_rule:])
+    elided = len(slim) - with_rule
+    note = ("" if not elided else
+            f"{elided} of {len(slim)} lessons over the {budget}-char budget: "
+            f"rule text elided, slug kept -- lessons(slug=<slug>) fetches any "
+            f"full record")
+    return {"lessons": out, "total": len(slim), "with_rule": with_rule,
+            "chars": spent, "note": note}
 
 
 def _displace_lesson_tips(conn, scope, slug, keep_id):
