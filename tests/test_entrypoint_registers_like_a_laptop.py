@@ -14,6 +14,7 @@ where the literal --header block still stands: test_no_literal_header_
 registration fires on the `--header "Authorization: ...` lines, and
 test_the_installer_is_the_registrar finds no `reveille init` call.
 """
+import os
 import pathlib
 import re
 import subprocess
@@ -91,3 +92,114 @@ def test_an_unanswering_broker_is_reported_as_unanswering():
 
 def test_the_two_worlds_render_differently():
     assert _render(REFUSED) != _render(UNREACHABLE)
+
+
+# ---- R1+R3+R4 (architect ruling 12851): the daemon starts first -------------
+# Measured 2026-08-20 on rev-tmelhiser-red-shirt-01: a container holding a
+# SUPERSEDED credential took init's mint path (a human sign-in no container
+# has), `set -e` turned the refusal into exit 1, and reveille-waked -- the one
+# process that could trade that spent secret for a live one at the return
+# ticket (DES-012 s14) -- never ran. The defect's whole signature is the
+# ABSENCE of a body to report it, so these run the block the image ships, with
+# `reveille` stubbed to refuse exactly as it did in the field.
+
+
+def _boot_block():
+    start = ENTRYPOINT.index("# ---- R1: NOTHING BEFORE waked MAY EXIT")
+    end = ENTRYPOINT.index("# Provision step 3.2.4")
+    return ENTRYPOINT[start:end]
+
+
+def _run_boot_block(tmp_path, init_rc=1, force_rc=1):
+    """Run the shipped block under the entrypoint's own `set -euo pipefail`.
+
+    `kill 0` at the end reaps the waked supervisor: the block backgrounds a
+    `while :` loop on purpose, and a test that leaves one of those behind per
+    run is a test that fills the box."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    order = tmp_path / "order.log"
+    (bindir / "reveille").write_text(
+        "#!/bin/sh\n"
+        f"echo init >> {order}\n"
+        "echo 'reveille init: REFUSING -- no sign-in stored for http://b:8765' >&2\n"
+        "echo 'Nothing was installed.' >&2\n"
+        "echo \"reveille: this directory's credential no longer works (HTTP 401 -- \"\n"
+        "echo 'the broker answered and refused this token).'\n"
+        f'case "$*" in *--force*) exit {force_rc};; *) exit {init_rc};; esac\n')
+    (bindir / "reveille-waked").write_text(
+        f"#!/bin/sh\necho waked >> {order}\nsleep 30\n")
+    for f in ("reveille", "reveille-waked"):
+        (bindir / f).chmod(0o755)
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    report = home / ".claude" / "boot-report.md"
+    report.write_text("")
+    script = (
+        "set -euo pipefail\n"
+        f'BOOT_REPORT="{report}"\n'
+        'say() { printf "%s\\n" "$*" >> "$BOOT_REPORT"; }\n'
+        'note() { printf "%s\\n" "$*" >> "$BOOT_REPORT"; printf "%s\\n" "$*" >&2; }\n'
+        'mcp_force_note() { note "- mcp: registered via reveille init --force"; }\n'
+        + _boot_block()
+        + '\nprintf "REACHED_END degraded=%s\\n" "$BOOT_DEGRADED"\nkill 0\n')
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", HOME=str(home),
+               REVEILLE_URL="http://b:8765", REVEILLE_AGENT_ROLE="dev-agent",
+               REVEILLE_TOKEN="spent")
+    # OWN SESSION, because the script ends in `kill 0`: without this the signal
+    # goes to pytest's process group and takes the test runner down with the
+    # supervisor it meant to reap.
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       env=env, timeout=60, start_new_session=True)
+    return r, order.read_text().split(), report.read_text()
+
+
+def test_waked_starts_before_anything_that_can_refuse():
+    """THE INVARIANT; the three below are its consequences. Order IS the fix --
+    the daemon used to start ~300 lines further down, AFTER the step that
+    refused, so recovery depended on the very thing that failed.
+
+    Asserted on the shipped file, not on a run: the supervisor is backgrounded
+    (`( while :; ... ) &`), so which one LOGS first is the scheduler's business
+    and a runtime assertion on that ordering flakes. What the rule is about is
+    which one is REACHED first, and that is a property of the text."""
+    spawn = ENTRYPOINT.index('reveille-waked --url "$ws_url"')
+    init = ENTRYPOINT.index("reveille init --no-prompt --dir /home/agent/repos")
+    assert spawn < init, (
+        "reveille-waked must be spawned before `reveille init` can refuse -- it is "
+        "the process that parks on a spent credential and claims the return ticket, "
+        "so nothing that can fail may stand in front of it")
+    assert ENTRYPOINT.count("reveille-waked --url") == 1, \
+        "one supervisor, one place -- a second spawn is two daemons racing one flock"
+
+
+def test_a_credential_the_broker_refuses_does_not_end_the_boot(tmp_path):
+    r, _order, _report = _run_boot_block(tmp_path)
+    assert "REACHED_END" in r.stdout, (
+        f"the entrypoint exited on a refused init -- rc={r.returncode}, err={r.stderr}")
+
+
+def test_the_report_carries_what_verify_said_not_only_the_second_sentence(tmp_path):
+    """R3. The cause is a print() -- stdout -- and both invocations discarded
+    it, leaving the reader "no sign-in stored" (go and log in) for a credential
+    that had been superseded (beam it back, or re-provision)."""
+    _r, _order, report = _run_boot_block(tmp_path)
+    assert "no longer works" in report and "HTTP 401" in report, report
+
+
+def test_a_refused_credential_marks_the_row_degraded_naming_the_credential(tmp_path):
+    """R4. Existing BOOT_DEGRADED -> .reveille-repo-status path, no new state;
+    the reason names the CREDENTIAL, not the repo that field usually carries."""
+    r, _order, _report = _run_boot_block(tmp_path)
+    line = [ln for ln in r.stdout.splitlines() if ln.startswith("REACHED_END")][0]
+    assert "REFUSED this container's credential" in line, line
+
+
+def test_an_init_that_succeeds_leaves_the_row_undegraded(tmp_path):
+    """The green half. A gate that can only go red one way measures nothing
+    about the other."""
+    r, order, _report = _run_boot_block(tmp_path, init_rc=0)
+    assert "waked" in order and order.count("init") == 1, \
+        f"one init call, and the daemon still spawned; ran {order}"
+    line = [ln for ln in r.stdout.splitlines() if ln.startswith("REACHED_END")][0]
+    assert line.strip() == "REACHED_END degraded=", line

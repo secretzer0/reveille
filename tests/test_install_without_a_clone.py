@@ -1258,10 +1258,16 @@ def test_the_entrypoints_own_capture_sees_the_degraded_sentence(tmp_path):
     import subprocess as sp
     entry = (pathlib.Path(cli.__file__).parents[2] / "docker" /
              "entrypoint.sh").read_text()
-    m = re.search(r'^if (init_said=\$\(reveille init[^)]*\)); then$', entry,
-                  re.M)
+    # SHAPE CHANGED IN R1 (ruling 12851): the capture is no longer the `if`
+    # condition. It cannot be -- an `if` whose command fails is fine under
+    # `set -e`, but the entrypoint now has to keep the RETURN CODE and carry on
+    # either way, so it reads `init_said="$(...)" || init_rc=$?`. The capture is
+    # also `2>&1` now, both streams, because the sentence naming a refused
+    # credential is a print() and the old idiom sent it to /dev/null (R3). The
+    # stream-specific guard lives in the test above, which asserts on out.err.
+    m = re.search(r'^(init_said="\$\(reveille init[^)]*\)")', entry, re.M)
     assert m, "the entrypoint no longer captures init the way this test drives"
-    capture = m.group(1)
+    capture = "init_rc=0\n" + m.group(1) + " || init_rc=$?"
     assert re.search(r'grep -q "DEGRADED"', entry), \
         "the entrypoint no longer greps for the DEGRADED sentence"
     # a stub `reveille` that speaks the fixed contract: DEGRADED on stderr

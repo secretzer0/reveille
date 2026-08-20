@@ -155,8 +155,45 @@ mcp_force_note() {
   say "  init said: ${1%%$'\n'*}"
   say "  waked will keep retrying the bus"
 }
+# ---- R1: NOTHING BEFORE waked MAY EXIT THE ENTRYPOINT (architect 12851) -----
+# The wake socket holder (DES-003 2.1): one daemon, one attachment, rings become
+# spool files. In a container the entrypoint is the supervisor -- it dies and
+# restarts with the container; the flock makes a double-start a no-op. Token
+# rides this shell's env, never argv.
+#
+# IT STARTS FIRST, AND THAT IS THE FIX. It used to start ~300 lines below, after
+# `reveille init` -- so a boot that init refused never reached it. Measured
+# 2026-08-20 on rev-tmelhiser-red-shirt-01: a container whose credential had been
+# SUPERSEDED by a move to another machine came up holding a secret the broker
+# answers 401 to, init took the mint path (which needs a human sign-in no
+# container has), `set -e` turned that into exit 1, and the daemon never ran.
+# waked is the one process that can undo that state -- it parks on the spent
+# secret and trades it for a live one at the return ticket (DES-012 s14) -- so
+# putting it behind anything that can refuse makes recovery depend on the very
+# thing that failed. It needs only the launcher's env ($REVEILLE_URL,
+# $REVEILLE_TOKEN, $REVEILLE_AGENT_ROLE), never init's artifacts.
+#
+# GENERALISED (ruling 12851 R1, extending 12401): every step in front of the
+# daemon may mark DEGRADED, and none of them may exit.
+ws_url="${REVEILLE_URL/http/ws}/wake"
+mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
+( while :; do
+    reveille-waked --url "$ws_url" --name "$REVEILLE_AGENT_ROLE" \
+      >>"$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log" 2>&1
+    sleep 2
+  done ) &
+
 BOOT_DEGRADED=""
-if init_said=$(reveille init --no-prompt --dir /home/agent/repos 2>&1 >/dev/null); then
+# R3: STDOUT IS CAPTURED TOO. This read `2>&1 >/dev/null`, which keeps stderr and
+# throws stdout away -- and the sentence naming the actual cause,
+# "this directory's credential no longer works (HTTP 401 ...)", is a print(), so
+# it went to /dev/null on both invocations. docker logs and this report were left
+# holding the refusal's SECOND sentence ("no sign-in stored"), which sends the
+# reader to `reveille login` for a credential problem. The comment above already
+# promised the report says what verify said; now it does.
+init_rc=0
+init_said="$(reveille init --no-prompt --dir /home/agent/repos 2>&1)" || init_rc=$?
+if [ "$init_rc" -eq 0 ]; then
   if printf '%s' "$init_said" | grep -q "DEGRADED"; then
     # Ruling 12401: a configured directory with the claude binary transiently
     # absent BOOTS, degraded and saying so -- a crash-looping entrypoint was
@@ -169,8 +206,31 @@ if init_said=$(reveille init --no-prompt --dir /home/agent/repos 2>&1 >/dev/null
     say "- mcp: registered via reveille init (project scope, headersHelper) in ~/repos"
   fi
 else
-  reveille init --no-prompt --force --dir /home/agent/repos >/dev/null
-  mcp_force_note "$init_said"
+  force_rc=0
+  force_said="$(reveille init --no-prompt --force --dir /home/agent/repos 2>&1)" || force_rc=$?
+  if [ "$force_rc" -eq 0 ]; then
+    mcp_force_note "$init_said"
+  else
+    # R1 AGAIN, AT ITS SHARPEST: init has now failed twice and the boot CARRIES
+    # ON. waked is already up; the agent may be unregistered and still be
+    # reachable, recallable and able to say what is wrong with it. An exit here
+    # would take all three away.
+    note "- mcp: **FAILED** -- reveille init refused twice; this agent is not"
+    say "  registered with the bus in ~/repos. waked is running regardless, so"
+    say "  the return ticket and every ring still reach this container."
+    say "  init said (first run):"
+    printf '%s\n' "$init_said" | sed 's/^/      /' >> "$BOOT_REPORT"
+    say "  init said (--force):"
+    printf '%s\n' "$force_said" | sed 's/^/      /' >> "$BOOT_REPORT"
+    # R4: the row says DEGRADED, and the reason names the CREDENTIAL -- not the
+    # repo, which is what that field usually carries. Same file, same state, no
+    # new machinery; a repo failure still outranks it below.
+    if printf '%s' "$init_said$force_said" | grep -q "no longer works"; then
+      BOOT_DEGRADED="failed: the broker REFUSED this container's credential -- it is superseded or revoked. The body is reachable and unregistered; beam it back (the return ticket) or re-provision"
+    else
+      BOOT_DEGRADED="failed: reveille init refused twice -- see boot-report.md; the body is reachable and unregistered"
+    fi
+  fi
 fi
 
 # Provision step 3.2.4: clone the repo the launcher named, into ~/repos -- the
@@ -445,17 +505,9 @@ umask 077
 printf '%s' "$REVEILLE_GATE_SECRET" > /home/agent/.gate-secret
 umask 022
 
-# The wake socket holder (DES-003 2.1): one daemon, one attachment, rings
-# become spool files. In a container the entrypoint is the supervisor -- it
-# dies and restarts with the container; the flock makes a double-start a
-# no-op. Token rides this shell's env, never argv.
-ws_url="${REVEILLE_URL/http/ws}/wake"
-mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
-( while :; do
-    reveille-waked --url "$ws_url" --name "$REVEILLE_AGENT_ROLE" \
-      >>"$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log" 2>&1
-    sleep 2
-  done ) &
+# The wake socket holder is started ABOVE, before `reveille init` -- see the R1
+# block there for why the ORDER is the fix. Nothing wake-related belongs here
+# any more.
 
 # Browser plane: ttyd execs `attach-gate attach` with the ?arg= token appended.
 # The literal "attach" is the security boundary: -a gives the CLIENT argv, and
