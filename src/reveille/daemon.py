@@ -2982,20 +2982,56 @@ def _usage_text(since="", budget=24000):
     would not fit -- a clipped LABEL is not a hidden entry, each stays
     addressable by usage(since=<version>)).
 
-    since=<version>: the entries newer than that version, in full, INCLUSIVE
-    of every entry AT that version (13063: a boundary that straddles two
-    entries must not silently drop one; re-reading one you have costs
-    nothing, an entry nobody knows is missing costs the entry)."""
-    if since:
-        cut = _ver_key(since)
-        picked = [t for v, t in CHANGES_ENTRIES if _ver_key(v) >= cut]
-        return (f"CHANGES since {since} (inclusive of that version; "
-                f"{len(picked)} of {len(CHANGES_ENTRIES)} entries):\n\n"
-                + "\n".join(picked))
+    since=<version>: the entries newer than that version, INCLUSIVE of every
+    entry AT that version (13063: a boundary that straddles two entries must
+    not silently drop one; re-reading one you have costs nothing, an entry
+    nobody knows is missing costs the entry) -- INSIDE THE SAME BUDGET AND
+    THE SAME ELISION (13245: the doctrine sends the LONGEST-ABSENT body to
+    this call, and since="0.1.4" measured 243,395 wire chars -- the default
+    was fixed while the prescribed verb could still refuse the exact body
+    that most needs its read). Full entries newest-first while the wire
+    fits, every remaining picked entry as a titled line, the note naming
+    the count and how to narrow. The whole log, unbudgeted, is GET /usage
+    -- the human surface, by design."""
     budget = max(0, int(budget))
 
     def wire(text):
         return len(json.dumps(text))
+
+    if since:
+        cut = _ver_key(since)
+        picked = [(v, t) for v, t in CHANGES_ENTRIES if _ver_key(v) >= cut]
+
+        def compose_since(shown, clip):
+            head = (f"CHANGES since {since} (inclusive of that version; "
+                    f"{len(picked)} of {len(CHANGES_ENTRIES)} entries"
+                    + (f"; {len(picked) - shown} over the {budget}-char "
+                       f"budget as titles -- narrow with a newer since=, "
+                       f"or GET /usage for the whole log"
+                       if shown < len(picked) else "")
+                    + "):\n\n")
+            body = "\n".join(t for _, t in picked[:shown])
+            tail = ""
+            if shown < len(picked):
+                def label(t):
+                    title = t.splitlines()[0]
+                    if not clip or len(title) <= clip:
+                        return title
+                    return title[:clip].rstrip() + "..."
+                tail = (("\n\n" if body else "")
+                        + "\n".join(label(t) for _, t in picked[shown:]))
+            return head + body + tail
+
+        best = None
+        for clip in (0, 40):
+            shown = 0
+            while shown <= len(picked) \
+                    and wire(compose_since(shown, clip)) <= budget:
+                best = compose_since(shown, clip)
+                shown += 1
+            if best is not None:
+                return best
+        return compose_since(0, 40)   # marked, never silent; the cap decides
 
     def compose(shown, clip):
         rest = CHANGES_ENTRIES[shown:]
