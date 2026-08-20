@@ -351,6 +351,20 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.213 LESSONS SPEAK THE RULE (ruling 12826, red-shirt 12824/12867). The
+boot read carried every lesson's full narrative: on the 2026-08-20 corpus
+lessons() was 248,167 chars -- over an agent's tool-result cap, so arrival
+spilled it to a file and one body spent 125,375 tokens digesting it before it
+had done any work. The knowledge floor was pricing itself out of the boot it
+exists for. lessons() now renders id + slug + RULE (plus room/scope routing)
+-- the imperative that changes behaviour, 26% of the payload -- and
+lessons(slug="<slug>") serves that one lesson's full record (symptom,
+root_cause, detection) inside the same room wall. Boot gets the rules;
+diagnosis asks for the story by name. Agents: nothing to change at boot --
+lessons() is still the call; when a rule's WHY matters, fetch that slug.
+brief()'s lessons section is unchanged (it renders slug + rule + detect from
+its own query and is already budgeted).
+
 0.2.212 THE MODAL ANSWERS WHAT IT WAS ASKED (field defects from R1, lessons
 a4208505/f1b12a90, audit finding 12810). Three fixes the live beam-chain run
 surfaced that no unit gate could: (1) the knock modal's "answer" re-derived
