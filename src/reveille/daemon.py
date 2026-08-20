@@ -351,6 +351,28 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.210 THE STATE NOTE GETS ROOM, AND THE SCHEMA STOPS CARRYING POLICY
+(operator 12743/12746/12754/12758, architect 12747/12750/12757/12759). The
+memories table's `fact` column had `CHECK (length(fact) <= 1000)` with no
+comment and no rationale anywhere in a heavily-commented schema -- a DESIGN
+choice to force distillation, wearing a schema constraint's clothes. SQLite
+gives nothing for it: TEXT is variable-length and the declared bound changes
+no storage, no index, no page layout. It is now BARE TEXT, with a comment in
+that spot explaining the absence, and every number lives in code as a named
+constant: FACT_MAX 128_000 as the disaster backstop enforced in memory_add,
+STATE_FACT_MAX 8192 with a 4096 soft line and a 2048 target, 1000 for every
+other kind. So a state note -- five fields, a branch and a sha, written by an
+agent for its own successor inside a swap window seconds wide -- has room,
+and EVERY FUTURE TUNE IS A CONSTANT CHANGE RATHER THAN A TABLE REBUILD.
+Over the soft line the WRITE SUCCEEDS and the result carries a nudge naming
+the size, the target, what is not compressible, the supersedes offer, and
+permission to ignore it mid-handover: STORE FIRST, THEN NUDGE, because a cap
+that refuses at the worst moment is a data-loss mechanism wearing a
+quality-control costume. The nudge is a length comparison and a constant
+string -- MODELS ON THE READ PATH, NEVER ON THE WRITE PATH (doctrine, 12750).
+Schema v41 is the rebuild that removes the constraint; the gate proves a
+pre-existing row survives byte-identical and that FTS still finds it after.
+
 0.2.209 THE VERSION CARRIES THE VERB (bump only; the code is #167's).
 `reveille claim` (ruling 12644, PR #167) merged WITHOUT a version bump --
 and DES-020 convergence fires only when a toolchain is BEHIND the broker.
