@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -281,19 +281,23 @@ CREATE TABLE IF NOT EXISTS tokens (
     created_ns   INTEGER NOT NULL,
     last_used_ns INTEGER
 );
--- S2 (ruling 10876): a SUPERSEDED credential leaves a tombstone so its refusal
--- can be a signpost -- the dormant body's one honest channel. EXACTLY these
--- four fields, nothing else: the holder of a superseded token is either the
--- former body or whoever stole a dead credential, and only one of those
--- deserves an inventory. last_refusal_ns doubles as S3's liveness reading
--- ("a human used that machine at T"). No FK: same discipline as token_audit,
--- the record outlives both the token and, if pruned, the agent it names.
--- Plain revoke does NOT tombstone -- revocation is deliberate and gets the
--- generic refusal; only supersession (the body moved) earns a signpost.
+-- THE BROKER NEVER DELETES A CREDENTIAL INTO SILENCE (ruling 12445; S2,
+-- ruling 10876 before it): every credential the broker kills leaves a
+-- tombstone naming what killed it, when, and what the holder may do next.
+-- reason='superseded' is the body-moved signpost; reason='expired-unclaimed'
+-- is a pending mint whose arrival window closed -- a credential that never
+-- carried the identity, which is why the two must stay distinguishable: the
+-- handover grace and the return ticket belong to 'superseded' alone.
+-- last_refusal_ns doubles as S3's liveness reading ("a human used that
+-- machine at T"). No FK: same discipline as token_audit, the record outlives
+-- both the token and, if pruned, the agent it names. Plain revoke does NOT
+-- tombstone -- revocation is deliberate and gets the generic refusal.
 CREATE TABLE IF NOT EXISTS token_tombstones (
     secret_hash     TEXT PRIMARY KEY,
     agent_id        TEXT NOT NULL,
-    superseded_ns   INTEGER NOT NULL,
+    reason          TEXT NOT NULL DEFAULT 'superseded'
+                    CHECK (reason IN ('superseded','expired-unclaimed')),
+    died_ns         INTEGER NOT NULL,
     last_refusal_ns INTEGER
 );
 -- The token->rooms mapping lives here, NOT in the token. Read on every request so
@@ -1906,6 +1910,23 @@ CREATE INDEX IF NOT EXISTS recalls_claim ON recalls(claim_hash);
 """
 
 
+def _upgrade_v35(conn, db_path):
+    """v35 -> v36 (ruling 12445): the tombstone stops being supersession-only.
+    superseded_ns becomes died_ns -- the column is now the instant ANY death
+    happened -- and reason arrives. Every existing row is correctly
+    'superseded': expiry never wrote one before this."""
+    with tx(conn):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(token_tombstones)")}
+        if "died_ns" not in have:
+            conn.execute("ALTER TABLE token_tombstones "
+                         "RENAME COLUMN superseded_ns TO died_ns")
+        if "reason" not in have:
+            conn.execute("ALTER TABLE token_tombstones ADD COLUMN reason TEXT "
+                         "NOT NULL DEFAULT 'superseded' "
+                         "CHECK (reason IN ('superseded','expired-unclaimed'))")
+        conn.execute("PRAGMA user_version=36")
+
+
 def _upgrade_v34(conn, db_path):
     """v34 -> v35 (DES-012 s14): recalls. Additive, one empty table; no broker
     has ever held a recall offer, so there is nothing to backfill."""
@@ -2107,7 +2128,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -3144,9 +3165,13 @@ def recalls_for(conn, owner_id, now=None):
 def superseded_hash_for(conn, agent_id):
     """The hash of the credential most recently displaced for this identity --
     the one a parked body is still holding. None when nothing was displaced."""
+    # reason='superseded' ONLY (ruling 12445): an expired-unclaimed tombstone
+    # for the same identity, stamped newer, must not shadow the hash the
+    # parked machine actually holds -- its hash matches no disk anywhere.
     r = conn.execute(
         "SELECT secret_hash FROM token_tombstones WHERE agent_id=? "
-        "ORDER BY superseded_ns DESC LIMIT 1", (agent_id,)).fetchone()
+        "AND reason='superseded' ORDER BY died_ns DESC LIMIT 1",
+        (agent_id,)).fetchone()
     return r["secret_hash"] if r else None
 
 
@@ -3169,25 +3194,36 @@ def live_token_ids(conn, owner_id, agent_id, except_id=None):
 
 
 def expire_pending(conn, now=None):
-    """Delete pending credentials nobody arrived on. Returns the ids deleted.
+    """Retire pending credentials nobody arrived on. Returns the ids retired.
 
     The old body is untouched by construction -- a pending mint never took
     anything from it -- so this is the whole of the NAK path: the credential
-    that was going to replace it simply stops existing, and the machine that
-    was working keeps working. That is the invariant the two-phase swap exists
+    that was going to replace it stops existing, and the machine that was
+    working keeps working. That is the invariant the two-phase swap exists
     for, and it is why this sweep can be blunt.
+
+    NEVER INTO SILENCE (ruling 12445): the delete leaves a tombstone, reason
+    'expired-unclaimed', dated to the instant the window CLOSED. Its hash is
+    the PENDING secret's, which no supersede tombstone ever carries and no
+    return ticket ever keys on -- the stale body that eventually presents it
+    gets the story instead of an amnesiac "bad token", and gets nothing else.
     """
     now = now or time.time_ns()
     rows = conn.execute(
-        "SELECT id FROM tokens WHERE pending_ns IS NOT NULL AND pending_ns < ?",
+        "SELECT id, secret_hash, agent_id, pending_ns FROM tokens "
+        "WHERE pending_ns IS NOT NULL AND pending_ns < ?",
         (now - PENDING_TTL_NS,)).fetchall()
     if not rows:
         return []
     with tx(conn):
         for r in rows:
-            # A plain delete, NOT supersede: nothing was superseded to begin
-            # with, so a tombstone here would sign-post a body that never
-            # existed toward a successor that never arrived.
+            if r["agent_id"]:
+                conn.execute(
+                    "INSERT OR REPLACE INTO token_tombstones"
+                    "(secret_hash, agent_id, reason, died_ns) "
+                    "VALUES(?,?,'expired-unclaimed',?)",
+                    (r["secret_hash"], r["agent_id"],
+                     r["pending_ns"] + PENDING_TTL_NS))
             conn.execute("DELETE FROM tokens WHERE id=?", (r["id"],))
     return [r["id"] for r in rows]
 
@@ -3350,7 +3386,7 @@ def supersede_bound_tokens(conn, owner_id, agent_id, except_id=None):
         # supersession tombstones -- plain revoke_token stays a bare delete.
         conn.execute(
             "INSERT OR REPLACE INTO token_tombstones"
-            "(secret_hash, agent_id, superseded_ns) VALUES(?,?,?)",
+            "(secret_hash, agent_id, reason, died_ns) VALUES(?,?,'superseded',?)",
             (r["secret_hash"], agent_id, now))
         revoke_token(conn, r["id"], owner_id)
     return [r["id"] for r in rows]
@@ -3398,19 +3434,22 @@ def handover_grace(conn, secret, now=None):
     if not secret:
         return None
     now = now or time.time_ns()
+    # reason='superseded' ONLY (ruling 12445): the grace is a licence earned
+    # by having HELD the identity. An expired-unclaimed credential never held
+    # it, so a fresh died_ns on its tombstone buys it nothing here.
     r = conn.execute(
-        "SELECT t.agent_id, t.superseded_ns, a.owner_id, a.name "
+        "SELECT t.agent_id, t.died_ns, a.owner_id, a.name "
         "FROM token_tombstones t JOIN agents a ON a.id = t.agent_id "
-        "WHERE t.secret_hash=?",
+        "WHERE t.secret_hash=? AND t.reason='superseded'",
         (_sha(secret),)).fetchone()
-    if not r or r["superseded_ns"] < now - HANDOVER_GRACE_NS:
+    if not r or r["died_ns"] < now - HANDOVER_GRACE_NS:
         return None
     return {"agent_id": r["agent_id"], "owner_id": r["owner_id"],
-            "agent_name": r["name"], "superseded_ns": r["superseded_ns"]}
+            "agent_name": r["name"], "superseded_ns": r["died_ns"]}
 
 
 def tombstone_for(conn, secret):
-    """The signpost payload for a superseded credential, or None.
+    """The story of a dead credential, or None -- ONE place assembles it.
 
     Reading refreshes last_refusal_ns: a refused call carrying this hash is
     evidence that something RAN on the dormant body -- S3's honest liveness
@@ -3418,23 +3457,68 @@ def tombstone_for(conn, secret):
     TOMBSTONE_TTL_NS the row is deleted on sight and the caller falls back to
     the generic refusal. Returns agent name via the agents row; an agent that
     was pruned since leaves the join empty, which is the generic refusal too.
+
+    READ-REPAIR (ruling 12445, by 12320 B's principle): an expired pending the
+    sweep has not reached yet answers the same way it will answer a minute
+    later. The knock itself moves the row to where the story lives -- delete
+    and tombstone in one transaction -- so the refusal is never "bad token"
+    for the one caller the tombstone exists to inform. The sweep still owns
+    the unattended table; this owns the answer at the act.
     """
     if not secret:
         return None
     h = _sha(secret)
+    now = time.time_ns()
     r = conn.execute(
-        "SELECT t.agent_id, t.superseded_ns, a.name FROM token_tombstones t "
+        "SELECT t.agent_id, t.reason, t.died_ns, a.name FROM token_tombstones t "
         "JOIN agents a ON a.id = t.agent_id WHERE t.secret_hash=?", (h,)).fetchone()
     if not r:
-        return None
-    now = time.time_ns()
-    if now - r["superseded_ns"] > TOMBSTONE_TTL_NS:
+        pending = conn.execute(
+            "SELECT t.id, t.agent_id, t.pending_ns, a.name FROM tokens t "
+            "JOIN agents a ON a.id = t.agent_id WHERE t.secret_hash=? "
+            "AND t.pending_ns IS NOT NULL AND t.pending_ns < ?",
+            (h, now - PENDING_TTL_NS)).fetchone()
+        if not pending:
+            return None
+        died = pending["pending_ns"] + PENDING_TTL_NS
+        with tx(conn):
+            conn.execute("DELETE FROM tokens WHERE id=?", (pending["id"],))
+            conn.execute(
+                "INSERT OR REPLACE INTO token_tombstones"
+                "(secret_hash, agent_id, reason, died_ns, last_refusal_ns) "
+                "VALUES(?,?,'expired-unclaimed',?,?)",
+                (h, pending["agent_id"], died, now))
+        return {"agent_id": pending["agent_id"], "agent_name": pending["name"],
+                "reason": "expired-unclaimed", "died_ns": died}
+    if now - r["died_ns"] > TOMBSTONE_TTL_NS:
         conn.execute("DELETE FROM token_tombstones WHERE secret_hash=?", (h,))
         return None
     conn.execute("UPDATE token_tombstones SET last_refusal_ns=? WHERE secret_hash=?",
                  (now, h))
     return {"agent_id": r["agent_id"], "agent_name": r["name"],
-            "superseded_ns": r["superseded_ns"]}
+            "reason": r["reason"], "died_ns": r["died_ns"]}
+
+
+def identity_liveness(conn, agent_id):
+    """Is any live body holding this identity, and when was it last seen using
+    the bus. Read by the dead-credential refusal (ruling 12445): the one thing
+    a stale body needs to know before choosing between asking and idling. A
+    pending, unarrived successor is NOT alive -- it has proven nothing yet."""
+    r = conn.execute(
+        "SELECT count(*) AS n, max(last_used_ns) AS seen FROM tokens "
+        "WHERE agent_id=? AND pending_ns IS NULL", (agent_id,)).fetchone()
+    return {"alive": r["n"] > 0, "last_seen_ns": r["seen"]}
+
+
+def sweep_tombstones(conn, now=None):
+    """Delete tombstones past TOMBSTONE_TTL_NS; returns how many. Rides the
+    broker's existing sweep (ruling 12445) -- prune-on-read only shrinks the
+    table when the right hash happens to knock, which for a tombstone nobody
+    ever presents is never (the recalls mistake, 12396)."""
+    now = now or time.time_ns()
+    with tx(conn):
+        return conn.execute("DELETE FROM token_tombstones WHERE died_ns < ?",
+                            (now - TOMBSTONE_TTL_NS,)).rowcount
 
 
 def assign_room(conn, token_id, room_id, actor_id):
