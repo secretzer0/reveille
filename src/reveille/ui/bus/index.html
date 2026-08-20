@@ -3692,6 +3692,16 @@ async function openRooms(){
     '<input id="cfIn" value="'+esc(r.name)+'" autocomplete="off">'+
     '<button id="cfGo">rename</button><button id="cfNo">cancel</button></div>');
    continue;}
+  // The storm-gate knob (rulings 12550/12555): gate 2's threshold for THIS
+  // room. Empty = the measured default; 0 = thread-wake off here. Same
+  // inline-edit shape as rename -- a plain setting, nothing to warn about.
+  if(confirming&&confirming.kind==='wakek'&&confirming.id===r.id){
+   mine.push('<div class="pRow sel"><span class="rDot"></span>'+
+    '<span class="pDim">wake gate K (agent messages since a human; empty = default, 0 = off):</span>'+
+    '<input id="cfIn" value="'+(r.wake_k==null?'':r.wake_k)+'" autocomplete="off" '+
+    'inputmode="numeric" style="width:6ch">'+
+    '<button id="cfGo">set</button><button id="cfNo">cancel</button></div>');
+   continue;}
   const sel=r.id===room;
   // Sharing state is DERIVED (DES-004 section 3): public wins, else members
   // make it shared, else private.
@@ -3706,6 +3716,9 @@ async function openRooms(){
    '<span class="pDim">'+state+'</span>'+
    '<button data-mem="'+r.id+'">'+(roomOpen===r.id?'hide members':'members')+'</button>'+
    '<button data-ren="'+r.id+'">rename</button>'+
+   '<button data-wakek="'+r.id+'" title="gate 2 threshold for this room -- '+
+    'agent messages since a human last spoke before broadcast rings stop">'+
+    'wake K: '+(r.wake_k==null?'default':esc(String(r.wake_k)))+'</button>'+
    '<button data-pub="'+r.id+'" data-to="'+(r.public?0:1)+'">'+(r.public?'make private':'make public')+'</button>'+
    '<button class="danger" data-purge="'+r.id+'" data-name="'+esc(r.name)+'">purge</button></div>');
   if(roomOpen===r.id){
@@ -3808,6 +3821,18 @@ async function openRooms(){
   openRooms();};
  for(const b of document.querySelectorAll('[data-ren]'))b.onclick=()=>{
   confirming={kind:'rename',id:b.dataset.ren};openRooms();};
+ for(const b of document.querySelectorAll('[data-wakek]'))b.onclick=()=>{
+  confirming={kind:'wakek',id:b.dataset.wakek};openRooms();};
+ if(confirming&&confirming.kind==='wakek')wireAsk(async()=>{
+  const id=confirming.id,raw=$('cfIn').value.trim();confirming=null;
+  const val=raw===''?null:parseInt(raw,10);
+  if(raw!==''&&(!Number.isInteger(val)||val<0)){toast('a whole number of agent messages, 0 for off, or empty for the default');return;}
+  try{await api('/rooms/'+id,{method:'PATCH',body:JSON.stringify({wake_k:val})});
+   toast(val==null?'wake gate back to the measured default'
+     :val===0?'thread-wake is OFF in this room -- unicast still rings'
+     :'wake gate set: '+val+' agent messages',true);}
+  catch(e){toast(e.message);}
+  openRooms();});
  if(confirming&&confirming.kind==='rename')wireAsk(async()=>{
   const id=confirming.id,name=$('cfIn').value.trim();confirming=null;
   try{await api('/rooms/'+id,{method:'PATCH',body:JSON.stringify({name})});}

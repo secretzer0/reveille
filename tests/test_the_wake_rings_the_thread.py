@@ -351,3 +351,92 @@ def test_the_ws_frame_and_the_floor_speak_the_feature():
     flat = " ".join(daemon.USAGE.split())
     assert "900 s" in flat and "floor" in flat.lower(), (
         "the idle nudge is the documented floor under the deferred half (12494)")
+
+# ---- the per-room knob (operator 12550, rulings 12553/12554/12555) ----------
+# rooms.wake_k on the retention_ns shape: nullable, NULL = the measured
+# default, owner-editable from the room panel. Precedence explicit > default
+# (the installer's rule, the timings profile's rule). Every gate-2 decision
+# names the EFFECTIVE K and ITS SOURCE -- a number with no provenance is how
+# two defects hid on 2026-08-19. The scaling formula deliberately does NOT
+# exist yet: one room's history cannot fit it, and normalised per-agent the
+# two eras may not even separate (12554) -- measurement first.
+
+def test_a_room_override_beats_the_default(caplog):
+    c, u, room, toks = world()
+    qs = hooked(c, toks, ("bravo", "charlie"))
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        store.set_wake_k(c, room["id"], u["id"], 2)
+        root = _run_room_hot(c, u, room, toks, 3)   # 4 agent msgs incl. root
+        res = store.send(c, ap(toks["alfa"]), "*", "over the knob",
+                         reply_to=root["id"], room=room["id"])
+        with caplog.at_level("INFO"):
+            out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
+                                      "over the knob")
+        assert out["rung"] == [] and all(q.empty() for q in qs.values()), (
+            "the owner's 2 beats the default 40")
+        assert any("K=2 (override)" in r.message for r in caplog.records), (
+            "the effective K carries its provenance")
+    finally:
+        daemon._conn = prev
+
+
+def test_zero_is_the_off_switch_and_default_says_so_too(caplog):
+    c, u, room, toks = world()
+    hooked(c, toks, ("bravo",))
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        store.set_wake_k(c, room["id"], u["id"], 0)
+        root = thread_with_sibling(c, u, room, toks)
+        res = store.send(c, ap(toks["alfa"]), "*", "into a muted room",
+                         reply_to=root["id"], room=room["id"])
+        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
+                                  "into a muted room")
+        assert out["rung"] == [], "wake_k=0 turns thread-wake off for the room"
+        # and clearing the override restores the measured default, with its
+        # source named on the next decision
+        store.set_wake_k(c, room["id"], u["id"], None)
+        res2 = store.send(c, ap(toks["alfa"]), "*", "unmuted",
+                          reply_to=root["id"], room=room["id"])
+        with caplog.at_level("INFO"):
+            out2 = daemon._thread_wake(room["id"], res2, ap(toks["alfa"]), "unmuted")
+        assert out2["rung"], "NULL means the default again"
+        assert any("(default)" in r.message for r in caplog.records)
+    finally:
+        daemon._conn = prev
+
+
+def test_only_the_owner_sets_the_knob():
+    c, u, room, toks = world()
+    try:
+        store.set_wake_k(c, room["id"], "not-the-owner", 5)
+        raise AssertionError("a non-owner set the room's wake gate")
+    except store.AccessError:
+        pass
+    r = c.execute("SELECT wake_k FROM rooms WHERE id=?", (room["id"],)).fetchone()
+    assert r["wake_k"] is None
+
+
+def test_the_knob_reaches_the_room_row_and_the_panel():
+    c, u, room, toks = world()
+    store.set_wake_k(c, room["id"], u["id"], 7)
+    assert store.get_room(c, room["id"])["wake_k"] == 7
+    src = inspect.getsource(daemon)
+    patch = src[src.index("async def room_http"):src.index("async def rooms_ownerless_http")]
+    assert "wake_k" in patch, "the owner sets it through the same PATCH as retention"
+    page = daemon._ui_read("index.html")
+    assert "data-wakek" in page, "and the room panel offers the control"
+
+
+def test_the_migration_carries_the_knob():
+    path = os.path.join(tempfile.mkdtemp(), "old.db")
+    c = sqlite3.connect(path)
+    c.row_factory = sqlite3.Row
+    c.execute("CREATE TABLE rooms (id TEXT PRIMARY KEY)")
+    c.execute("PRAGMA user_version=38")
+    store._upgrade_v38(c, path)
+    cols = {r["name"] for r in c.execute("PRAGMA table_info(rooms)")}
+    assert "wake_k" in cols
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 39

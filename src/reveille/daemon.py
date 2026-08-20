@@ -219,7 +219,9 @@ USE:
    on their next turn, the 900 s idle nudge is the FLOOR under the deferred
    half, and UNICAST IS UNGATED, which is the path for anything actually
    owed. A PARENTLESS agent broadcast still rings nobody. Every gate
-   decision is logged with the counter.
+   decision is logged with the counter and the effective K with its source
+   (override|default) -- the room's OWNER may tune K per room from the web
+   room panel (0 = thread-wake off there; empty = the measured default).
    IDLE NUDGE (W3): after 15 min without any ring (tunable --idle-nudge on
    waked; 0 disables) the daemon writes one synthetic ring with
    reason=idle-nudge. On a nudge: inbox() first; resume any owed work (an
@@ -340,6 +342,21 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.205 THE OWNER TUNES THE STORM GATE (operator 12550, rulings 12553/12555).
+rooms.wake_k, on retention_ns's exact shape: nullable, NULL = the measured
+default (40), 0 = thread-wake off for that room, owner-set through the same
+PATCH as retention and a control in the web room panel beside rename.
+Precedence explicit > default -- the installer's rule, the timings profile's
+rule, now the gate's. Every gate decision line (rung, deferred, suppressed,
+deferred-suppressed) names the EFFECTIVE K and ITS SOURCE (override|default):
+a number with no provenance is how two defects hid on 2026-08-19. The
+auto-scaling formula the operator asked for is DELIBERATELY ABSENT: one
+room's history cannot fit it, and normalised per active agent the storm era
+(~6-8 msgs/agent, 9 agents) may sit BELOW tonight's normal (~10, 3 agents) --
+so the formula waits for the normalised measurement and ships only if normal
+and storm still separate (12554; operator agreed 12557 -- measure, do not
+guess).
 
 0.2.204 STEERING IS A PROPERTY OF THE ROOM (ruling 12546/12548, falsified
 and re-ruled by 0.2.203's own logging within minutes of its deploy -- which
@@ -3484,6 +3501,14 @@ _thread_pending: dict[str, dict] = {}
 THREAD_WAKE_K = 40
 
 
+def _room_wake_k(room_id):
+    """The effective gate-2 threshold and WHERE IT CAME FROM. Precedence:
+    the owner's explicit rooms.wake_k, else the measured default (12555 --
+    the installer's explicit-beats-env rule, again)."""
+    o = store.wake_k_override(_conn, room_id)
+    return (o, "override") if o is not None else (THREAD_WAKE_K, "default")
+
+
 def _thread_wake(room_id, res, sender_principal, subject=""):
     """Decide and deliver the rings for one agent REPLY-broadcast.
 
@@ -3505,10 +3530,11 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
         return out
     counter = store.agent_messages_since_human(_conn, room_id)
     out["counter"] = counter
-    if counter >= THREAD_WAKE_K:
+    k, k_src = _room_wake_k(room_id)
+    if counter >= k:
         log.info("thread-wake SUPPRESSED (gate 2: %s agent messages since a "
-                 "human last spoke in the room, K=%s) -- %s not rung",
-                 counter, THREAD_WAKE_K, [n for n, _p in targets])
+                 "human last spoke in the room, K=%s (%s)) -- %s not rung",
+                 counter, k, k_src, [n for n, _p in targets])
         return out
     fact = {"id": res["id"], "from": res["sender"], "owner": res["owner"],
             "subject": subject, "room": room_id,
@@ -3522,14 +3548,14 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
                                         "room": room_id, "name": name}
                 out["pended"].append(name)
                 log.info("thread-wake DEFERRED for %s (gate 1: poke "
-                         "outstanding, counter=%s) -- fires when its turn ends",
-                         name, counter)
+                         "outstanding, counter=%s, K=%s (%s)) -- fires when "
+                         "its turn ends", name, counter, k, k_src)
                 continue
             for q in list(_waiters.get(tid, ())):
                 q.put_nowait(fact)
             out["rung"].append(name)
-            log.info("thread-wake RUNG %s (gate 1: idle+unread, counter=%s)",
-                     name, counter)
+            log.info("thread-wake RUNG %s (gate 1: idle+unread, counter=%s, "
+                     "K=%s (%s))", name, counter, k, k_src)
     return out
 
 
@@ -3542,11 +3568,12 @@ def _fire_deferred():
     900 s idle nudge -- the documented floor."""
     for tid, entry in list(_thread_pending.items()):
         counter = store.agent_messages_since_human(_conn, entry["room"])
-        if counter >= THREAD_WAKE_K:
+        k, k_src = _room_wake_k(entry["room"])
+        if counter >= k:
             _thread_pending.pop(tid, None)
             log.info("thread-wake deferred ring SUPPRESSED for %s (gate 2: "
-                     "counter=%s reached K=%s while pending)",
-                     entry.get("name"), counter, THREAD_WAKE_K)
+                     "counter=%s reached K=%s (%s) while pending)",
+                     entry.get("name"), counter, k, k_src)
             continue
         if store.read_since(_conn, tid, entry["ts_ns"]):
             _thread_pending.pop(tid, None)
@@ -8082,8 +8109,10 @@ async def rooms_http(request):
 
 @_guard
 async def room_http(request):
-    """PATCH /rooms/<rid> {name?, public?, retention_ns?} -- owner only. Flipping public
-    to false also revokes the room from every other user's tokens, instantly."""
+    """PATCH /rooms/<rid> {name?, public?, retention_ns?, wake_k?} -- owner only.
+    Flipping public to false also revokes the room from every other user's
+    tokens, instantly. wake_k: gate 2's threshold for this room (null =
+    measured default, 0 = thread-wake off here)."""
     p = _user_principal(request)
     rid = request.path_params["rid"]
     d = await request.json()
@@ -8094,6 +8123,9 @@ async def room_http(request):
         log.info("%s set room %s public=%s", p.name, rid, bool(d["public"]))
     if "retention_ns" in d:
         store.set_retention(_conn, rid, p.user_id, d["retention_ns"])
+    if "wake_k" in d:
+        store.set_wake_k(_conn, rid, p.user_id, d["wake_k"])
+        log.info("%s set room %s wake_k=%s", p.name, rid, d["wake_k"])
     return JSONResponse(store.get_room(_conn, rid))
 
 
