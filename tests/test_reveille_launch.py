@@ -1752,7 +1752,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.24", (
+    assert tag == "reveille-agent:0.2.25", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.23 CARRIES THE R1 ENTRYPOINT (ruling 12851): reveille-waked is spawned
     # BEFORE `reveille init`, and no step in front of it may exit. 0.2.22 and

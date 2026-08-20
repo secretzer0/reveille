@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.24")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.25")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two

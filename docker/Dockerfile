@@ -26,9 +26,14 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # build-essential/pkg-config/cmake: standard C/C++ work is part of what an agent
 # gets asked to do; a dev image without a C toolchain fails at the first
 # node-gyp or pip sdist anyway.
+# ffmpeg (GO 12872): the voice-pipeline tests (test_script_writer, test_clips,
+# test_voice_worker) shell out to it, so no container body could run
+# `pytest tests/ -q` locally -- 20 failures on every 0.2.22/0.2.23 body,
+# measured in three of them. CI carries its own pinned static ffmpeg and stays
+# the authoritative gate; this restores the local run.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates cmake curl git gnupg jq less openssl \
-      pkg-config ripgrep sudo tmux unzip xvfb \
+      build-essential ca-certificates cmake curl ffmpeg git gnupg jq less \
+      openssl pkg-config ripgrep sudo tmux unzip xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # node (claude code ships via npm), go, uv (owns python). Versions are pinned: the tag is
