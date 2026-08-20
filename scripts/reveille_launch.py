@@ -941,9 +941,20 @@ while tmux has-session -t login 2>/dev/null; do
 done
 """
 
-# From the REAL pane, captured in-container 2026-07-30 (msg 8643): the flow
-# prints the authorize URL and then waits at "Paste code here if prompted".
-_LOGIN_URL_RE = re.compile(r"https://[^\s]*claude\.com/[^\s]+")
+# The sign-in line AS THE PANE SHOWS IT (captured in-container 2026-07-30,
+# msg 8643; re-captured 2026-08-20 after the operator's field report 13384):
+# host claude.com BARE, anchored right after the scheme so the claude 2.1.237
+# startup banner's "Learn more: https://support.claude.com/..." line can
+# never win the match, path oauth/authorize required, then the query --
+# HARD-WRAPPED by tmux across rows. The newline join in parse_login_pane
+# reassembles the wrap; the URL CHARSET is what stops the join from swallowing
+# pane decoration (the banner's U+2594 underline row rode a [^\s]+ match
+# straight into the operator's browser). A pane whose path moves fails
+# CLOSED -- no url -- and parse_login_pane names that state out loud (13390:
+# fail-closed must not be fail-silent).
+_LOGIN_URL_RE = re.compile(
+    r"https://claude\.com/[A-Za-z0-9/._-]*oauth/authorize\?"
+    r"[A-Za-z0-9%&=+._~-]+")
 # The code is OPAQUE: never parsed beyond "printable, sane length, no control
 # characters" -- enough to refuse key sequences, never enough to learn it.
 _LOGIN_CODE_RE = re.compile(r"^[A-Za-z0-9_\-#%.~]{4,256}$")
@@ -977,13 +988,18 @@ def login_bg_argv(user, image, network, fp0, data_base=None):
 def parse_login_pane(text):
     """The pending login's stage, READ from its pane. Pure. The pane is the
     truth (ruling 8644): expiry and failure surface here, not from exit codes.
-    -> {stage: starting|picker|awaiting-code|failed, url: str|None}"""
+    -> {stage: starting|picker|awaiting-code|url-missing|failed, url: str|None}"""
     url = None
     m = _LOGIN_URL_RE.search(text.replace("\n", ""))   # tmux wraps the long URL
     if m:
         url = m.group(0)
-    if "Paste code here" in text or url:
+    if url:
         return {"stage": "awaiting-code", "url": url}
+    if "Paste code here" in text:
+        # FAIL-CLOSED, NEVER FAIL-SILENT (13390): the prompt is up but no URL
+        # matched -- a vendor path move lands HERE as a state the page can say
+        # out loud, not as an eternal "starting...".
+        return {"stage": "url-missing", "url": None}
     if "Select login method" in text:
         return {"stage": "picker", "url": None}
     if "Login" in text or "Welcome" in text or not text.strip():

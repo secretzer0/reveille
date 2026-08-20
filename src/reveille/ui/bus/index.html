@@ -5617,8 +5617,16 @@ async function refreshLoginSection(){
      'land; if nothing happens, cancel and start again</div>':''));
    loginPoll=setTimeout(refreshLoginSection,3000);
   }else if(st.pending){
+   // url-missing is its own sentence (13390: fail-closed must not be
+   // fail-silent) -- the prompt is up but the launcher could not read its
+   // URL from the pane, which is what a vendor URL change looks like. An
+   // eternal "starting..." here already cost one night.
    paint(el,seen+(st.pending==='failed'
     ?'the login flow looks stuck or expired -- '
+    :st.pending==='url-missing'
+    ?'the login prompt is up but its sign-in URL could not be read from '+
+     'the pane -- likely a claude UI change; report this, and use the '+
+     'terminal path meanwhile. '
     :'starting the login flow... ')+lgCancel);
    loginPoll=setTimeout(refreshLoginSection,2000);
   }else if(L.present){

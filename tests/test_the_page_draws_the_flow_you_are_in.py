@@ -59,6 +59,14 @@ def test_the_first_login_branch_is_unchanged():
     assert "reveille-launch login" in BODY
 
 
+def test_url_missing_is_a_sentence_not_a_spinner():
+    """13390: the launcher's fail-closed parse (prompt up, no readable URL)
+    must surface as its own words plus cancel -- never impersonate
+    'starting the login flow...'."""
+    assert "st.pending==='url-missing'" in BODY
+    assert "could not be read" in BODY
+
+
 def test_cancel_stays_hung_on_the_container():
     """8867 intact: the escape hatch renders on st.container, independent of
     every belief about pending or presence."""
