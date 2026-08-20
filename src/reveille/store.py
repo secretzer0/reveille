@@ -3563,6 +3563,44 @@ def sweep_tombstones(conn, now=None):
                             (now - TOMBSTONE_TTL_NS,)).rowcount
 
 
+# THE REFUSAL IS THE ONLY SANCTIONED SOURCE OF A BODY'S OWN STATE (rulings
+# 12506, 12522, final wording 12526; operator 12518). A body that cannot be
+# identified must still be told what to DO -- and told not to investigate.
+# The materialize body reconstructed its state from git history and got it
+# right, but only by hometown advantage: OUR repo, ITS OWN wip branches, a
+# shell, permission to run git. A generic agent has none of that, so the
+# instruction rides the refusal itself, broker-side, reaching every existing
+# directory with no re-init and no converge tick.
+#
+# THE DISTINCTION IS PROVENANCE, NOT LOCATION (12525/12526 -- do not
+# "simplify" this later): a BROKER-PRODUCED ring in the body's own spool
+# (reason=message, swap-pending, recalled, credential-superseded) is the
+# system speaking, and reading it is sanctioned -- that is mail, not
+# inference. A LOCALLY-PRODUCED artifact (reason=idle-nudge, logs, git
+# history, credential files, the environment) is the body's own scratch and
+# is NOT an input to "who am I and what happened to me". The sanctioned set
+# is exactly two: this refusal, and broker-produced rings already in the
+# spool.
+REFUSAL_DOCTRINE = (
+    "join() refused and no ring explains it -> read your own spool first "
+    "(~/.reveille/spool; a ring's `reason` is the system speaking, but "
+    "reason=idle-nudge says nothing), then act on the refusal: `reveille "
+    "knock`, `reveille init`, or stay idle. Do NOT reconstruct your state "
+    "from anything else -- not files, not logs, not git history. Idle is "
+    "a valid life.")
+
+# ONE sentence, ONE constant, every site that cannot identify a credential
+# (12520): the daemon's principal path and knock's two refusals. Deliberately
+# UNSPECIFIC -- identical for a swept pending, a typo, a stolen secret, a
+# stranger. It is reachable by anyone presenting any garbage secret, so it
+# must never name an identity or its liveness (12523): its value is the
+# instruction, not the information.
+BAD_TOKEN = (
+    "bad token: the broker does not know this credential. If this directory "
+    "once held an identity, run `reveille init` here to mint a fresh one, or "
+    "ask the owner to send the identity back. " + REFUSAL_DOCTRINE)
+
+
 # THE KNOCK'S STANDING (DES-012 s18). A day: long enough that an owner away
 # overnight still finds it on the rail, short enough that a machine nobody
 # has thought about in a week is not a standing invitation. Re-knocking
@@ -3593,11 +3631,11 @@ def knock(conn, secret, now=None):
                        "already holds the identity")
     ts = tombstone_for(conn, secret)
     if not ts:
-        raise AuthError("bad token")
+        raise AuthError(BAD_TOKEN)
     owner = conn.execute("SELECT owner_id FROM agents WHERE id=?",
                          (ts["agent_id"],)).fetchone()
     if not owner:
-        raise AuthError("bad token")
+        raise AuthError(BAD_TOKEN)
     h = _sha(secret)
     with tx(conn):
         conn.execute(

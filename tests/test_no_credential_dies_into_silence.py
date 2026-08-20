@@ -30,6 +30,7 @@ store._upgrade_v35 do not exist, and the doctrine line is nowhere.
 import hashlib
 import inspect
 import os
+import pathlib
 import sqlite3
 import sys
 import tempfile
@@ -120,7 +121,7 @@ def test_the_refusal_names_the_expiry_and_the_liveness_when_alive():
         assert "never carried the identity" in said
         assert "alive" in said and "last used" in said, (
             "the identity has a live body and the refusal says so, with recency")
-        assert "idle is a valid life" in said, "the choices are named as choices"
+        assert "Idle is a valid life" in said, "the choices are named as choices"
         assert new["secret"] not in said and old["secret"] not in said, (
             "a signpost never carries a credential")
     finally:
@@ -235,8 +236,11 @@ def test_the_doctrine_line_reaches_the_boot_and_the_reference():
     for text in (cli.doctrine_body("x", ""), daemon.USAGE):
         flat = " ".join(text.split())    # the line wrap is not the doctrine
         assert "Idle is a valid life" in flat
-        assert "the broker's refusal is the only diagnostic" in flat
-        assert "NEVER read, print, compare or copy credential files" in flat
+        assert "not files, not logs, not git history" in flat, (
+            "12522 widened the rule: no diagnosis by inference, anywhere")
+        assert "read your own spool first" in flat, (
+            "12526: the spool's broker-produced rings are the one sanctioned "
+            "local source -- provenance, not location")
 
 
 def test_the_migration_carries_old_rows_forward():
@@ -259,3 +263,78 @@ def test_the_migration_carries_old_rows_forward():
     r = c.execute("SELECT * FROM token_tombstones").fetchone()
     assert r["reason"] == "superseded" and r["died_ns"] == 12345
     assert c.execute("PRAGMA user_version").fetchone()[0] == 36
+
+
+def test_the_generic_refusal_carries_the_doctrine_and_names_nobody():
+    """RULINGS 12506/12522, the invariant's true form: 0.2.200 gave the story
+    to every credential the broker kills FROM NOW ON -- but a credential swept
+    before the tombstone code existed is story-less forever, and the directory
+    the ruling was born from is in that cohort (measured: its hash matches no
+    tombstone, no token, no knock). The generic refusal is the only text that
+    reaches that cohort, and it is broker-side, so it reaches every existing
+    directory instantly -- no re-init, no converge tick, no managed-block
+    rewrite. So it carries the doctrine: init, ask the owner, and NO DIAGNOSIS
+    BY INFERENCE (12522, from operator 12518: a generic agent has no git
+    history to reconstruct from -- the materialize body's self-diagnosis was a
+    hometown advantage, not a property of the system).
+
+    And it names NOBODY. Identical text for a swept pending, a typo, a stolen
+    secret, a stranger -- no identity, no liveness, no existence claim. It is
+    safe precisely because it says nothing specific (12523: value is the
+    INSTRUCTION, not the information).
+    """
+    c = db()
+    world(c)   # an identity exists, so a leak would have a name to leak
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        texts = []
+        for secret in ("never-minted-garbage", "a-different-stranger"):
+            with pytest.raises(store.AuthError) as e:
+                daemon._agent_principal(_request(secret))
+            texts.append(str(e.value))
+        said = texts[0]
+        assert said.startswith("bad token"), "the two words stay, as the key"
+        assert "reveille init" in said
+        assert "ask the owner" in said
+        assert "read your own spool first" in said, (
+            "12525/12526: broker-produced rings are mail, not inference")
+        assert "not files, not logs, not git history" in said
+        assert "Idle is a valid life" in said
+        assert "wanderer" not in said, "no identity -- it must not confirm one exists"
+        assert texts[0] == texts[1], (
+            "unspecific means IDENTICAL: a typo and a stranger read the same")
+    finally:
+        daemon._conn = prev
+
+
+def test_one_sentence_three_sites_and_no_two_word_refusal_survives():
+    """12520's build detail, gated structurally: ONE constant at all three
+    call sites (the daemon principal path and knock's two), because the field
+    run proved the second one matters -- `reveille knock` in materialize
+    answered the bare two words, which reads as "the remedy is broken". The
+    enumeration gate is the allowlist shape: a fourth site added later cannot
+    quietly reintroduce the two-word version.
+
+    The sentence names `reveille knock` even though a story-less holder's
+    knock answers this same text again -- ruled in 12526: the sentence is ONE,
+    everywhere, and a body that follows it terminates at "stay idle" rather
+    than at two different rules that disagree.
+    """
+    import re as _re
+    src_dir = pathlib.Path(os.path.dirname(__file__)) / ".." / "src"
+    for f in sorted(src_dir.rglob("*.py")):
+        assert not _re.search(r'AuthError\(\s*"bad token"\s*\)', f.read_text()), (
+            f"{f.name} still raises the two-word refusal")
+    # the knock path speaks the same sentence as the principal path
+    c = db()
+    with pytest.raises(store.AuthError) as e:
+        store.knock(c, "never-minted-garbage")
+    assert str(e.value) == store.BAD_TOKEN
+    # and the doctrine sentence is ONE sentence, word for word, everywhere a
+    # body learns from: the constant, usage(), and the managed block (12523)
+    def flat(t):
+        return " ".join(t.split())          # line wrap is not the doctrine
+    assert flat(store.REFUSAL_DOCTRINE) in flat(store.BAD_TOKEN)
+    assert flat(store.REFUSAL_DOCTRINE) in flat(daemon.USAGE)
+    assert flat(store.REFUSAL_DOCTRINE) in flat(cli.doctrine_body("x", ""))

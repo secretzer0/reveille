@@ -965,10 +965,12 @@ def doctrine_body(name, agent_type):
         f"in THIS directory is a successor that has not landed. `join()` -- that call\n"
         f"IS the arrival, it commits the swap, and until it happens the identity is\n"
         f"still the other body and nothing else here will work.\n\n"
-        f"THE BODY IN WAITING (ruling 12445): join() refused and no ring explains\n"
-        f"it -> print the refusal, take the choice it offers (knock, or idle), do\n"
-        f"NOTHING else. NEVER read, print, compare or copy credential files -- the\n"
-        f"broker's refusal is the only diagnostic. Idle is a valid life.\n\n"
+        f"THE BODY IN WAITING (rulings 12445/12526): join() refused and no ring\n"
+        f"explains it -> read your own spool first (~/.reveille/spool; a ring's\n"
+        f"`reason` is the system speaking, but reason=idle-nudge says nothing),\n"
+        f"then act on the refusal: `reveille knock`, `reveille init`, or stay\n"
+        f"idle. Do NOT reconstruct your state from anything else -- not files,\n"
+        f"not logs, not git history. Idle is a valid life.\n\n"
         f"WHO HEARS WHAT: a unicast (`to=\"<name>\"`) WAKES that agent. YOUR\n"
         f"broadcast (`to=\"*\"`) does not wake anyone -- it is read on each\n"
         f"recipient's next turn; a HUMAN's broadcast does ring the room. So: needed\n"
@@ -1517,7 +1519,18 @@ def cmd_knock(a):
     try:
         out = post_knock(url, token)
     except RuntimeError as e:
-        print(f"reveille knock: the broker refused it -- {e}", file=sys.stderr)
+        said = str(e)
+        # THE DISAMBIGUATION (#158 review), specific fact BEFORE the shared
+        # doctrine: the generic refusal tells every story-less body to
+        # knock-init-or-idle, and this IS the knock -- without this line the
+        # tool answers an instruction to run itself. Not redundant with the
+        # broker text: the broker's sentence is correct and the CONTEXT is
+        # what makes it a loop. Only the story-less case; a credential the
+        # broker recognises gets its own sentence undecorated.
+        if said.startswith("bad token"):
+            print("reveille knock: knocking cannot help here -- this "
+                  "credential has no story with the broker.", file=sys.stderr)
+        print(f"reveille knock: the broker refused it -- {said}", file=sys.stderr)
         return 1
     reason = {"superseded": "this machine was the identity's body",
               "expired-unclaimed": "the move minted for this machine never "
