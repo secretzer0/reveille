@@ -1670,19 +1670,38 @@ def leave_roll_record(user, agent, *, to_image, why):
     if c is None:
         return                     # no body existed; there was no roll to record
 
-    def observed(cmd):
+    # READ THE TREE FROM THE HOST (13335): docker_run_argv binds
+    # {root}/repos:/home/agent/repos, so the container's work tree IS
+    # data_root(user, agent)/repos/work on this host. Plain git here works
+    # when the body is stopped, wedged, credential-dead or already gone --
+    # the exact states a roll is most likely in, and the states where the
+    # exec-through-the-body read came back blank on the first fleet roll.
+    # safe.directory is passed deliberately: the tree is owned by the image's
+    # agent uid and this process is the host user, and git's ownership
+    # refusal must be RECORDED as unreadable, never misread as a clean tree.
+    work = os.path.join(data_root(user, agent), "repos", "work")
+
+    def observed(args):
+        if not os.path.isdir(work):
+            return None
         try:
-            r = _docker("exec", name, "sh", "-c", cmd, check=False, capture=True)
+            r = subprocess.run(
+                ["git", "-c", f"safe.directory={work}", "-C", work] + args,
+                capture_output=True, text=True, timeout=20)
         except (OSError, subprocess.SubprocessError):
             return None
-        out = (r.stdout or "").strip()
-        return out if r.returncode == 0 and out else None
+        if r.returncode != 0:
+            if "dubious ownership" in (r.stderr or ""):
+                return "unreadable: ownership refused"
+            return None
+        return (r.stdout or "").strip()
 
-    dirty = observed("git -C /home/agent/repos/work status --porcelain "
-                     "2>/dev/null | wc -l")
-    unpushed = observed("git -C /home/agent/repos/work rev-list --count "
-                        "@{u}..HEAD 2>/dev/null")
-    unreadable = "unreadable (container not answering, no repo, or no upstream)"
+    st = observed(["status", "--porcelain"])
+    dirty = (st if st == "unreadable: ownership refused"
+             else None if st is None
+             else str(len([ln for ln in st.splitlines() if ln.strip()])))
+    unpushed = observed(["rev-list", "--count", "@{u}..HEAD"])
+    unreadable = "unreadable (no repo, no upstream, or an unreadable tree)"
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     text = "\n".join([
         "# roll record -- written by the LAUNCHER, not by the body",
