@@ -3262,7 +3262,19 @@ async function openSendBack(name){
    'to come back ~'+kAgo+' min ago. Answering opens the window for THE '+
    'MACHINE THAT ASKED'+(k.path?' -- '+esc(k.path):'')+', and nowhere else. '+
    'The knocking machine may be one you do not recognise; the path above is '+
-   'the whole content of this decision.</div>':'')+
+   'the whole content of this decision.</div>'+
+   // THE ANSWER MUST NOT DIE SILENTLY (ruled 12644 (a), from 12642: one waked
+   // per agent per host). When the asking directory shares a host with the
+   // live body, no daemon there can take the window -- the answer is still
+   // legitimate, it just needs a hand, so the dialog says which one. The
+   // button is never disabled. Same-host DETECTION waits on the pads table
+   // (DES-024 s3.1); until then this honesty is said whenever a knock stands.
+   '<div class="pAsk pDim">If '+esc(name)+' is currently LIVE in another '+
+   'directory on that same machine, the asking directory cannot claim this '+
+   'window by itself (one daemon per agent per host, and it is busy being '+
+   'the live body). Answer anyway, then run <code>reveille claim</code> in '+
+   'the asking directory within the five minutes -- it takes the ticket by '+
+   'hand and says what to do next.</div>':'')+
   '<div class="pAsk">This opens a five-minute window in which the machine '+esc(name)+
   ' was moved OFF can take the identity back. That machine claims it with the '+
   'credential it is still holding -- nothing is pasted, and no live secret '+
