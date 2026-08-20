@@ -6730,11 +6730,52 @@ def sweep_expired_state(conn):
     return len(rows)
 
 
+def rendered(payload):
+    """The exact text the tool layer emits for a budgeted payload -- rendered
+    HERE, once, so the seam the budget defends is ours and never a transport's
+    private convention (rulings 13014/13059: the transport's indent-2 was
+    charging per line while the accounting counted compact, and the drift GREW
+    with elision). Compact default separators; consumers json.loads it exactly
+    as they did the dict. The daemon returns this string verbatim."""
+    return json.dumps(payload)
+
+
+def wire_chars(payload):
+    """THE BYTES THAT LEAVE (rulings 13014/13059): the harness's inline cap
+    reads the JSON-ESCAPED tool result -- measured to the character on two
+    independent bodies: len(json.dumps(<the exact text the tool layer
+    emits>)). Never the store's own re-serialization (the first budget
+    defect), never the unescaped text (the second). Every budgeted reader
+    counts THIS number and reports it as `chars`."""
+    return len(json.dumps(rendered(payload)))
+
+
+def _wire_line_cost(line):
+    """One emitted text line's cost at the wire: both escape layers (the
+    payload's own dumps, then the tool-result escaping) minus the six quote
+    chars the nested dumps of an empty string costs, plus the newline that
+    joins it -- \\n rendered then escaped is four characters."""
+    return len(json.dumps(json.dumps(line))) - 6 + 4
+
+
+def _sealed(payload):
+    """`chars` set to the WIRE cost (wire_chars) of the result carrying that
+    very number -- fixed point over its own digit count, so the field equals
+    the bytes the caller's harness will actually meter, exactly."""
+    base = wire_chars({**payload, "chars": 0}) - 1
+    for digits in range(1, 11):
+        if len(str(base + digits)) == digits:
+            return {**payload, "chars": base + digits}
+    raise BusError("chars fixed point did not converge")   # unreachable
+
+
 def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
     """The onboarding pack (DES-001 section 7): lessons, then doctrine ranked by
     entity overlap with the caller's role, then live contracts, then decisions
-    (recent weighted up), then own state, then a presence digest. Budget is CHARS
-    (~4/token, approximate by construction: the broker has no tokenizer, G4).
+    (recent weighted up), then own state, then a presence digest. Budget is the
+    BYTES THAT LEAVE (wire_chars: the JSON-escaped tool result, ~4/token,
+    approximate by construction: the broker has no tokenizer, G4), so the
+    number a caller picks against its harness cap is the number it receives.
     Every truncation is MARKED -- a silent cap reads as "covered everything".
 
     Budget accounting (s7 under-fill fix): the caller's budget is honored AS
@@ -6750,11 +6791,22 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
                   extract_entities(role or ""))}
     parts, spent = [], 0
     truncated = []
+    # THE ENVELOPE IS PRECHARGED, conservatively: the wire cost of the result
+    # with no text and every count/marker at its widest, so line accounting
+    # below spends only what is actually left for lines. Overshoot here costs
+    # a line of slack; undershoot would cost the budget's whole promise.
+    line_budget = max(0, budget - wire_chars(
+        {"text": "", "chars": 99999999,
+         "sections": {k: 99999 for k in
+                      ("lessons", "doctrine", "contracts", "decisions",
+                       "state")},
+         "truncated": ["lessons", "doctrine", "contracts", "decisions",
+                       "state"]}))
 
     def emit(line):
         nonlocal spent
         parts.append(line)
-        spent += len(line) + 1
+        spent += _wire_line_cost(line)
 
     def room_scopes():
         return ["global"] + list(rooms)
@@ -6784,17 +6836,18 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
     def section(title, rows, render, cap_share):
         nonlocal carry
         room_for = dict(rooms)
-        cap = int(budget * cap_share) + carry
+        cap = int(line_budget * cap_share) + carry
         used, shown = 0, 0
         emit(f"== {title} ({len(rows)}) ==")
         for r in rows:
             line = render(r, room_for)
-            if spent + len(line) > budget:
+            cost = _wire_line_cost(line)
+            if spent + cost > line_budget:
                 break  # the global budget is the one hard promise
-            if shown > 0 and used + len(line) > cap:
+            if shown > 0 and used + cost > cap:
                 break  # the share cap bounds row two onward only
             emit(line)
-            used += len(line) + 1
+            used += cost
             shown += 1
         carry = max(0, cap - used)
         if shown < len(rows):
@@ -6843,11 +6896,19 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
             (rid,)) if _is_live(r["seen_ns"], time.time_ns())]
         emit(f"- {rname}: {', '.join(live) if live else '(nobody live)'}")
 
-    return {"text": "\n".join(parts)[:budget], "chars": min(spent, budget),
-            "sections": {"lessons": len(lrows), "doctrine": len(drows),
-                         "contracts": len(mem_rows('contract')),
-                         "decisions": len(dec), "state": len(srows)},
-            "truncated": truncated}
+    # No [:budget] slice: that was a RAW-text cut against a wire-counted
+    # number, and the accounting above owns the bound now. The trim loop is
+    # the backstop for the precharge's approximations; it fires rarely and
+    # never silently -- a dropped line is a truncation like any other.
+    def payload():
+        return {"text": "\n".join(parts),
+                "sections": {"lessons": len(lrows), "doctrine": len(drows),
+                             "contracts": len(mem_rows('contract')),
+                             "decisions": len(dec), "state": len(srows)},
+                "truncated": truncated}
+    while parts and wire_chars({**payload(), "chars": 99999999}) > budget:
+        parts.pop()
+    return _sealed(payload())
 
 
 # ---- lessons: same API, rebacked onto memories (DES-001 B1) ----------------------
@@ -6911,21 +6972,12 @@ def lessons(conn, rooms=(), slug=None, budget=24000):
     stays within budget; EVERY remaining lesson stays in the list as its slug
     alone (ruling 12944 R-C: a budget may elide rule text, never a lesson's
     existence -- the all-slugs floor exists whatever the budget). Every
-    elision is marked in `note`; `chars` equals len(json.dumps(result));
+    elision is marked in `note`; `chars` equals wire_chars(result) -- the
+    JSON-escaped tool result, the bytes that LEAVE (13014/13059);
     slug=<slug> serves that lesson's full record (symptom, root_cause,
     detection) inside the same room wall."""
     rooms = list(rooms or [])
     scopes = ["global"] + rooms
-
-    def sealed(payload):
-        """`chars` set to the serialized length of the result CARRYING that
-        very number -- fixed point over its own digit count, so the field
-        equals what the caller receives, exactly."""
-        base = len(json.dumps({**payload, "chars": 0})) - 1
-        for digits in range(1, 11):
-            if len(str(base + digits)) == digits:
-                return {**payload, "chars": base + digits}
-        raise BusError("chars fixed point did not converge")   # unreachable
 
     if slug is not None:
         rows = conn.execute(
@@ -6933,8 +6985,8 @@ def lessons(conn, rooms=(), slug=None, budget=24000):
             f"slug=? AND scope IN ({_ph(scopes)}) ORDER BY created_ns DESC",
             [slug] + scopes)
         recs = [_lesson(r) for r in rows]
-        return sealed({"lessons": recs, "total": len(recs),
-                       "with_rule": len(recs), "note": ""})
+        return _sealed({"lessons": recs, "total": len(recs),
+                        "with_rule": len(recs), "note": ""})
     rows = conn.execute(
         f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
         f"scope IN ({_ph(scopes)}) ORDER BY created_ns DESC", scopes)
@@ -6952,16 +7004,17 @@ def lessons(conn, rooms=(), slug=None, budget=24000):
         return {"lessons": out, "total": total, "with_rule": with_rule,
                 "note": note}
 
-    # Monotone upgrade (12957): serialized size grows with each row upgraded,
-    # so the largest fitting prefix is found by walking forward. The size test
-    # carries an 8-digit chars placeholder -- conservative width, so the sealed
-    # result is never over the number the walk accepted.
+    # Monotone upgrade (12957): wire size grows with each row upgraded, so the
+    # largest fitting prefix is found by walking forward. The size test counts
+    # wire_chars -- the bytes that LEAVE (13014) -- with an 8-digit chars
+    # placeholder, conservative width, so the sealed result is never over the
+    # number the walk accepted.
     with_rule = 0
     for k in range(1, total + 1):
-        if len(json.dumps({**candidate(k), "chars": 99999999})) > budget:
+        if wire_chars({**candidate(k), "chars": 99999999}) > budget:
             break
         with_rule = k
-    return sealed(candidate(with_rule))
+    return _sealed(candidate(with_rule))
 
 
 def _displace_lesson_tips(conn, scope, slug, keep_id):

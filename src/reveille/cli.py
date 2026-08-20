@@ -1485,7 +1485,13 @@ def cmd_init(a):
     # killed it, the set-e supervisor died with it, and the body was deaf --
     # forever, for the parked population the daemon exists to serve. The
     # pending-mint case (12320 R5) and every kept-credential case fall out of
-    # the one predicate; do not re-split them.
+    # the one predicate; do not re-split them. The NON-MINT re-key (a token
+    # pasted into a live directory, 12008's original case) is covered by
+    # park-and-adopt, not by this kill: waked re-reads the directory's
+    # credential each poll and adopts a new-to-it secret within RECALL_POLL_S
+    # -- proven in the field 2026-08-20, six seconds from write to "adopting
+    # it and reconnecting" (13144). Do not re-widen this predicate to serve
+    # that case; it is already served.
     retired = retire_waked(name) if installed_new_credential else ""
     if retired:
         steps.append(f"wake: {retired}")
