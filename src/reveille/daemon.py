@@ -351,6 +351,33 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.214 NOTHING BEFORE waked MAY EXIT THE ENTRYPOINT (ruling 12851 R1/R3/R4,
+field defect on rev-tmelhiser-red-shirt-01; agent image 0.2.23). A container
+whose credential had been SUPERSEDED by a move to another machine could not
+boot at all, and that took the way back with it: init verified the spent
+secret, the broker answered 401, init diverted to the mint path -- which
+needs a human sign-in no container has -- and `set -e` turned the refusal
+into exit 1. reveille-waked never spawned, so the one process that parks on a
+spent credential and trades it for a live one at the DES-012 s14 return
+ticket was never running, and the ticket could never be claimed. The
+recovery mechanism sat behind the step whose failure it exists to recover
+from. Now the waked supervisor starts FIRST, before anything that can refuse
+-- it needs only REVEILLE_URL, REVEILLE_TOKEN and REVEILLE_AGENT_ROLE from
+the provision env, never init's artifacts -- and a boot that init refuses
+twice CARRIES ON: the body comes up unregistered, reachable, recallable, and
+says so. Generalises 12401 into a rule: every step in front of the daemon may
+mark DEGRADED and none of them may exit. ALSO (R3): both init invocations
+captured stdout into /dev/null, and the sentence naming the real cause --
+"this directory's credential no longer works (HTTP 401 ...)" -- is a print(),
+so docker logs and boot-report.md were left holding "no sign-in stored",
+which sends a reader to `reveille login` for a credential that was
+superseded. Both streams are captured now. AND (R4): a refused-credential
+boot marks the row DEGRADED through the existing BOOT_DEGRADED path, with a
+reason that names the CREDENTIAL rather than the repo that field usually
+carries. UNPROVEN IN THE CONTAINER SHAPE at this version: the field gate --
+boot a container on a 401 credential, watch waked run, claim a ticket --
+needs host docker and had no runner.
+
 0.2.213 LESSONS SPEAK THE RULE (ruling 12826, red-shirt 12824/12867). The
 boot read carried every lesson's full narrative: on the 2026-08-20 corpus
 lessons() was 248,167 chars -- over an agent's tool-result cap, so arrival
