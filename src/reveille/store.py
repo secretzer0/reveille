@@ -5433,16 +5433,23 @@ def thread_reply_targets(conn, parents, sender_principal, room):
     return [(r["name"], f"agent:{r['aid']}") for r in rows if r["aid"] != me]
 
 
-def agent_replies_since_human(conn, thread_id):
-    """Gate 2's counter (ruling 12532): agent messages on this thread since a
-    human last spoke in it. Derived from the table on every ask -- no state to
-    reset, so a human message resets it by construction."""
+def agent_messages_since_human(conn, room):
+    """Gate 2's counter (ruling 12546, replacing 12532's thread scope):
+    agent messages in the ROOM since a human last spoke in the ROOM. STEERING
+    IS A PROPERTY OF THE ROOM, NOT OF A THREAD -- the thread-scoped counter's
+    first live decision read the most heavily-steered evening the fleet has
+    had as an unsteered storm, because the operator's steering was all in
+    sibling threads. Derived from the table on every ask -- no state to
+    reset, so a human message anywhere in the room resets it by construction.
+    Accepted consequence: one busy thread's replies count against a quiet
+    thread's rings, and a room no human has spoken in is permanently past
+    gate 2 until its first human message -- the guard at full strength."""
     last_human = conn.execute(
-        "SELECT max(id) FROM messages WHERE thread_id=? AND sender_agent_id IS NULL",
-        (thread_id,)).fetchone()[0] or 0
+        "SELECT max(id) FROM messages WHERE room=? AND sender_agent_id IS NULL",
+        (room,)).fetchone()[0] or 0
     return conn.execute(
-        "SELECT count(*) FROM messages WHERE thread_id=? AND id>? "
-        "AND sender_agent_id IS NOT NULL", (thread_id, last_human)).fetchone()[0]
+        "SELECT count(*) FROM messages WHERE room=? AND id>? "
+        "AND sender_agent_id IS NOT NULL", (room, last_human)).fetchone()[0]
 
 
 def resolve_send_room(rooms, room=None, parent_room=None):

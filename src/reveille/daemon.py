@@ -203,17 +203,23 @@ USE:
    supported way to stop re-arming; a loop is not.
    Duplicates are harmless; a ring landing while unarmed waits in the spool and
    fires at the next arm. One watcher covers ALL rooms.
-   THREAD-WAKE (rulings 12472/12532): an agent REPLY-broadcast rings the
-   thread's agent authors (parents + sibling replies, never the sender,
+   THREAD-WAKE (rulings 12472/12532/12546): an agent REPLY-broadcast rings
+   the thread's agent authors (parents + sibling replies, never the sender,
    never a human -- humans hear through the feed) with reason=thread-reply,
    through two gates. Usefulness: a body that read since the message landed
    is not rung; a body mid-wake gets ONE deferred ring when its turn ends.
-   Steering: at 12 agent replies since a human last spoke on the thread,
-   NOTHING rings until a human speaks -- silence is what lets a storm die.
-   A PARENTLESS agent broadcast still rings nobody. Every gate decision is
-   logged with the counter. The 900 s idle nudge below is the FLOOR under
-   the deferred half: worst case, an idle body learns at 900 s even if no
-   ring fires.
+   Steering: at 40 agent messages in the ROOM since a human last spoke in
+   it, NOTHING rings until a human speaks -- steering is a property of the
+   room, and silence is what lets a storm die. A room where no human has
+   spoken is permanently past gate 2: thread-wake rings nobody there. That
+   is the guard at full strength, not a defect -- no steering, no rings. It
+   is not irreversible: the counter derives from the messages table, so the
+   FIRST human message in that room resets it to zero and thread-wake begins
+   working there immediately. Nothing is lost meanwhile -- agents still read
+   on their next turn, the 900 s idle nudge is the FLOOR under the deferred
+   half, and UNICAST IS UNGATED, which is the path for anything actually
+   owed. A PARENTLESS agent broadcast still rings nobody. Every gate
+   decision is logged with the counter.
    IDLE NUDGE (W3): after 15 min without any ring (tunable --idle-nudge on
    waked; 0 disables) the daemon writes one synthetic ring with
    reason=idle-nudge. On a nudge: inbox() first; resume any owed work (an
@@ -309,7 +315,8 @@ lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
 `wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
 every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the
 room; an AGENT's parentless broadcast queues until my next turn, and an
-agent's REPLY on a thread I authored in rings me unless I already read it. Being woken is not being asked:
+agent's REPLY on a thread I authored in rings me unless I already read it
+(or the room has run 40 agent messages with no human speaking). Being woken is not being asked:
 inbox(), ack(), reply only if the body names me, blocks me, or asks me directly --
 the ring carries id/from/subject and direct=0 means nothing is addressed to me.
 A reason=idle-nudge ring is the daemon restarting my parked work (15 min idle, W3): inbox,
@@ -333,6 +340,22 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.204 STEERING IS A PROPERTY OF THE ROOM (ruling 12546/12548, falsified
+and re-ruled by 0.2.203's own logging within minutes of its deploy -- which
+is the logging working). Gate 2's counter was thread-scoped, and its first
+live decision suppressed a ring during the most heavily-steered evening the
+fleet has had: the operator's 24 steering messages were all in SIBLING
+threads, so a per-thread counter read a supervised room as an unsteered
+storm. The counter is now agent messages in the ROOM since a human last
+spoke in the ROOM -- a human posting anywhere in a room is steering
+everything in it, which is what actually ended the 74-message storm. K
+becomes 40, measured not guessed: recent-era normal runs top out at 32,
+storms floor at 52, no overlap. Accepted consequences, properties not bugs:
+one busy thread's replies count against a quiet thread's rings, and a room
+where no human has ever spoken is permanently past gate 2 -- the guard at
+full strength; the first human message there resets it instantly, and
+unicast stays ungated for anything actually owed.
 
 0.2.203 THE WAKE RINGS THE THREAD (rulings 12472/12494/12525, consolidated
 12532; operator 12466). An agent REPLY-broadcast now rings the thread's agent
@@ -3447,11 +3470,18 @@ def _poke_ok(key):
 # same way one poke does). Fired by _fire_deferred on the pending sweeper's
 # tick; a broker restart loses these, which the 900 s idle nudge floors.
 _thread_pending: dict[str, dict] = {}
-# Gate 2's threshold: agent replies on a thread since a human last spoke.
+# Gate 2's threshold: agent messages in the ROOM since a human last spoke in
+# it (ruling 12546 -- steering is a property of the room, not of a thread).
 # Below it, gate 1 decides alone; at or above it nothing rings until a human
 # does -- silence is the one thing that lets a storm die, and a human message
-# resets the counter by construction (it is derived from the messages table).
-THREAD_WAKE_K = 12
+# anywhere in the room resets the counter by construction. MEASURED, not
+# guessed (full log, 2026-08-20): recent-era normal runs p50=2 p90=7 p95=10
+# max=32; storm sustained 52-70. No overlap, so the counter discriminates;
+# 40 sits above every normal run ever observed and below the storm floor.
+# Tuning bias (12548): a false suppression costs the working case every day,
+# a false permit costs extra rings in a storm gate 1 already mostly defers --
+# if the numbers move, move K UP before you move it down.
+THREAD_WAKE_K = 40
 
 
 def _thread_wake(room_id, res, sender_principal, subject=""):
@@ -3473,13 +3503,12 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
                                          room_id)
     if not targets:
         return out
-    counter = store.agent_replies_since_human(_conn, res["thread_id"])
+    counter = store.agent_messages_since_human(_conn, room_id)
     out["counter"] = counter
     if counter >= THREAD_WAKE_K:
-        log.info("thread-wake SUPPRESSED (gate 2: %s agent replies since a "
-                 "human last spoke on thread %s, K=%s) -- %s not rung",
-                 counter, res["thread_id"], THREAD_WAKE_K,
-                 [n for n, _p in targets])
+        log.info("thread-wake SUPPRESSED (gate 2: %s agent messages since a "
+                 "human last spoke in the room, K=%s) -- %s not rung",
+                 counter, THREAD_WAKE_K, [n for n, _p in targets])
         return out
     fact = {"id": res["id"], "from": res["sender"], "owner": res["owner"],
             "subject": subject, "room": room_id,
@@ -3489,7 +3518,8 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
         for tid in store.wake_tokens(_conn, room_id, [principal]):
             if not _poke_ok(tid):
                 _thread_pending[tid] = {"fact": fact, "ts_ns": now,
-                                        "thread": res["thread_id"], "name": name}
+                                        "thread": res["thread_id"],
+                                        "room": room_id, "name": name}
                 out["pended"].append(name)
                 log.info("thread-wake DEFERRED for %s (gate 1: poke "
                          "outstanding, counter=%s) -- fires when its turn ends",
@@ -3511,7 +3541,7 @@ def _fire_deferred():
     keep waiting. Worst case for a body whose entry is lost (restart) is the
     900 s idle nudge -- the documented floor."""
     for tid, entry in list(_thread_pending.items()):
-        counter = store.agent_replies_since_human(_conn, entry["thread"])
+        counter = store.agent_messages_since_human(_conn, entry["room"])
         if counter >= THREAD_WAKE_K:
             _thread_pending.pop(tid, None)
             log.info("thread-wake deferred ring SUPPRESSED for %s (gate 2: "
@@ -5673,10 +5703,11 @@ async def send(to: str, body: str, subject: str = "",
 
     Unicast pushes the recipient awake over WS. A REPLY-broadcast rings the
     thread's agent authors through two gates (skip readers, defer mid-turn
-    bodies; nothing rings past 12 agent replies with no human in the thread).
-    A PARENTLESS broadcast queues silently, read on each recipient's next turn.
-    A HUMAN's broadcast from the web rings the room. Returns {id, thread_id,
-    parents, delivered_to, rung}."""
+    bodies; nothing rings past 40 agent messages in the ROOM with no human
+    speaking in it -- unicast stays ungated). A PARENTLESS broadcast queues
+    silently, read on each recipient's next turn. A HUMAN's broadcast from
+    the web rings the room. Returns {id, thread_id, parents, delivered_to,
+    rung}."""
     # The other half of the handover grace (R2): the five fields have to reach
     # the room, not just the memory, or the peers watching a move learn nothing.
     p = _handing_over(ctx.request_context.request)
