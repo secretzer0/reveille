@@ -217,10 +217,29 @@ commits the arrival. Thread-wake's two gates decide, and log, who rings.
 These need nobody to remember anything, which is the whole test.
 
 **PROVIDED** -- not the body's job at all. `reveille init` writes the doctrine
-block; the Stop hook or the container entrypoint spawns and supervises waked,
-and the flock makes a double-start a no-op; the daemon, not the body, produces
-the idle nudge. The failure mode here is not disobedience but ABSENCE: a body
-whose harness lacks the provider gets no refusal, only silence.
+block; the Stop hook or the container entrypoint SPAWNS waked, and the flock
+makes a double-start a no-op; the daemon, not the body, produces the idle
+nudge. The failure mode here is not disobedience but ABSENCE: a body whose
+harness lacks the provider gets no refusal, only silence.
+
+**A PROVIDER CAN DIE AND SAY NOTHING**, which this document first filed as
+part of PROVIDED and red-shirt corrected (msg 13331). The doctrine says the
+entrypoint "spawns and supervises" the wake daemon. THE SPAWN IS PROVIDED;
+THE SUPERVISION IS PROVIDED ONLY WHILE ITS PROVIDER IS ALIVE, AND NOTHING
+REPORTS WHEN IT IS NOT. Measured on two live bodies the night this was
+written: the supervising subshell was no longer the daemon's parent -- `ps
+-o pid,ppid -C reveille-waked` answered PPID 1 -- so the loop the doctrine
+calls supervision was gone and the daemon was merely a process that had not
+exited yet. On agent images 0.2.24 and 0.2.25 the same half was
+DETERMINISTIC: the subshell inherited the entrypoint's `set -euo pipefail`,
+so the daemon's SIGTERM exit took the loop with it, one Terminated line and
+no second spawn ever (ruling 13094, lesson
+`hoisting-a-step-changes-what-every-step-below-can-do-to-it`). Fixed in
+0.2.26. The reason it belongs here rather than in a bug queue is the CLASS:
+PROVIDED means a body may stop thinking about it, and a provider whose
+continued existence is unobservable from inside the body gives exactly the
+false comfort of item 11's green lights -- socket established, presence
+connected, flock held, and nobody home.
 
 **RULE** -- nothing refuses, and the doctrine is correct only if the reader is.
 This is the audit's payload, and it is longer than it looks:
@@ -275,11 +294,20 @@ is half a finding:
   (12532) records when a credential last read its mail. Surfacing it in
   presence turns "this body does not ack" from an invisible habit into a fact
   a peer can see. A detector, not a refusal, and honest about which it is.
-- Item 11 wants the same treatment from the other side: the broker knows
-  whether a waiter is registered and whether rings are being consumed, so a
-  body holding a socket that has consumed nothing over a window is
-  describable -- `an-established-socket-is-not-a-registered-waiter` is the
-  lesson that says why the socket alone must never be read as reachability.
+- Item 11 wants the same treatment from the other side, but the broker sees
+  LESS than this document first claimed (red-shirt, msg 13331): it knows
+  whether a waiter is REGISTERED, and it knows when a credential last READ
+  its mail -- and that second thing is `tokens.last_inbox_ns` again, so the
+  two proposals above collapse into ONE observable rather than two. WHAT THE
+  BROKER CANNOT SEE IS RING CONSUMPTION: draining the spool is a body
+  deleting files under its own `~/.reveille/spool/<name>/new/`, a local act
+  with no broker-side artifact, and the heartbeat proves the socket rather
+  than the drain. So item 2 has NO detector available by surfacing; giving
+  it one means waked reporting its own spool depth, which is a BUILD and not
+  a free read. Saying so matters: "the broker already knows" is the kind of
+  sentence that makes a slice look free.
+  `an-established-socket-is-not-a-registered-waiter` remains the lesson for
+  why the socket alone must never be read as reachability.
 - Neither is a control by this document's test, and neither should be
   described as one. The rule class above cannot be emptied; it can only be
   made observable, and the honest goal is that every RULE either becomes a
