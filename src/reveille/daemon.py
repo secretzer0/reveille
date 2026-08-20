@@ -351,6 +351,23 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.218 EVERY TOKEN DEATH WRITES A TOMBSTONE NAMING ITS REASON (ruling
+12944 R-A, from red-shirt's finding on the night the architect went dark).
+token_tombstones was the supersede register: a revoke DELETED the row and
+left nothing, so "revoked" and "never existed" were byte-identical
+afterwards, and diagnosing a dead identity from the database took four
+queries instead of one. It is now the DEATH register -- revoke_token records
+reason=revoked in the same transaction as the delete, so revocation stays
+instant and stops being unaccountable. Privilege does not follow the record:
+knock refuses a revoked hash BY NAME and says a knock will not bring it back,
+while the handover grace and the return ticket still belong to superseded
+alone -- dead-ness is the address, privilege is separate. An unbound token
+has no identity to explain and its delete stays bare. The reason CHECK widens
+by table rebuild, and that rebuild copies BY NAME: on any database older than
+v36 the physical column order is historical, the production one included, and
+a positional copy would have landed died_ns in reason and taken the broker
+down at the next boot.
+
 0.2.217 A BOOT READ MUST ARRIVE IN THE TURN THAT ASKED (ruling 12944 R-C).
 lessons() served the whole corpus and the harness refused it -- 86,534 chars
 on 2026-08-20, measured by two independent caps, so bodies read the fleet's
