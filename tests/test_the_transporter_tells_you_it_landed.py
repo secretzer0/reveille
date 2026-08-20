@@ -569,3 +569,24 @@ def test_the_parked_secret_is_ignored_before_it_exists(tmp_path, monkeypatch):
     assert ".reveille-parked" in gi.split(), gi
     assert "settings.local.json" in gi.split()   # appended, never replaced
     assert (d / ".reveille-parked").read_text() == "spent"
+
+
+def test_the_adopt_says_the_directory_scoped_reason_only():
+    """Ruled (architect 12628): adopting a credential that changed in place is
+    RIGHT because it changed IN THIS DIRECTORY -- a directory-scoped fact.
+    "The identity never left this machine" is HOST-scoped reasoning, true that
+    night only by coincidence, and a correct action with a wrong stated reason
+    is a future misdiagnosis: DES-012 scopes identity to the DIRECTORY, and
+    two directories on one host can both claim this sentence."""
+    import inspect as _inspect
+    src = _inspect.getsource(waked)
+    i = src.index("credential changed while")
+    window = src[i:i + 400]
+    assert "never left this" not in window, (
+        "the host-scoped justification was ruled deleted (12628)")
+    assert "adopting it and reconnecting" in window
+    # The same frame one layer in: _park's comment narrated the measured
+    # incident as "the identity never left the machine". Same decision, same
+    # wrong scope -- no host-scoped justification anywhere in the adopt path.
+    park = _inspect.getsource(waked._park)
+    assert "never left the machine" not in park and "never left this" not in park
