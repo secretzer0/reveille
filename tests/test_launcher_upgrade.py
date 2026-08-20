@@ -89,6 +89,10 @@ class _Docker:
             return ok
         if verb == "cp":
             return ok
+        if verb == "exec":
+            # leave_roll_record's observation (12959 half 2): answer as a body
+            # with a clean, pushed tree -- the record rides every roll now
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="0\n")
         raise AssertionError(f"unexpected docker call {args!r}")
 
     def run(self, argv, env=None, check=True, stdout=None):

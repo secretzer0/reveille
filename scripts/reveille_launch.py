@@ -1250,6 +1250,8 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
 
     _ensure_network(network, broker)
     if replace:
+        leave_roll_record(user, agent, to_image=image,
+                          why="re-provision (--replace)")
         _docker("rm", "-f", name, check=False, capture=True)
     argv = docker_run_argv(user, agent, image, network, quotas,
                            boot_cmd=boot_cmd, extra_env=extra_env,
@@ -1453,6 +1455,7 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
                            boot_cmd=boot_cmd, extra_env=extra_env, auth_mount=auth_mount)
     prev = f"{name}.prev"
     _docker("rm", "-f", prev, check=False, capture=True)      # a leftover from a crashed upgrade
+    leave_roll_record(user, agent, to_image=image, why="upgrade (image roll)")
     if old["running"]:
         _docker("stop", name, check=False, capture=True)         # never two containers with driver state
     _docker("rename", name, prev, check=True, capture=True)
@@ -1609,6 +1612,87 @@ def roll_reason(conn, user, agent, *, health_url=DEFAULT_HEALTH, now_ns=None,
                       now_ns=now_ns, window_ns=window_ns)
 
 
+def refuse_unless_forced(conn, user, agent, force, *, doing):
+    """12959 HALF 1: the DIRECT paths ask the same pure gate the automated
+    roll has had since it was written (roll_reason), and refuse BY NAME. The
+    asymmetry this closes: the sweep was careful and the human path was
+    blunt, which is the wrong way round -- a human is the one who can be
+    interrupted mid-sentence. The gate protects LIVE bodies only: a stopped
+    or absent container has nobody at its keyboard, and refusing its
+    replacement would block the heal path (the 2026-08-20 architect revival
+    came through exactly that door). --force is the deliberate override; a
+    consented force is not the gate overridden."""
+    c = _inspect_container(container_name(user, agent))
+    if c is None or not c["running"]:
+        return
+    r = roll_reason(conn, user, agent)
+    if r and not force:
+        raise LaunchError(
+            f"not {doing} {user}/{agent}: busy -- {r}. A roll of a live body "
+            f"is a body swap (12959); pass --force to do it anyway.")
+
+
+def leave_roll_record(user, agent, *, to_image, why):
+    """12959 HALF 2 (as amended at 12954/12956): THE ROLL LEAVES ITS OWN
+    RECORD IN THE DATA ROOT, WRITTEN BEFORE THE STOP, by the LAUNCHER while
+    the old container still stands. It lands beside the boot report -- the
+    surface the next body already reads about its own boots -- and covers
+    precisely what the bus-activity gate cannot see: local work with no bus
+    traffic. It still works when the credential is dead or the body is
+    wedged, because the writer is the launcher, not the body. OBSERVED
+    state, numbers not adjectives; a tree that cannot be read is RECORDED as
+    unreadable, never skipped -- the refused-credential case is the whole
+    point. PROVENANCE: the record says the launcher wrote it. It is an
+    observation about a body, never a note in the body's voice; a five-field
+    handover note means a live body looked at its own work, and nothing else
+    may wear that shape."""
+    name = container_name(user, agent)
+    c = _inspect_container(name)
+    if c is None:
+        return                     # no body existed; there was no roll to record
+
+    def observed(cmd):
+        try:
+            r = _docker("exec", name, "sh", "-c", cmd, check=False, capture=True)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        out = (r.stdout or "").strip()
+        return out if r.returncode == 0 and out else None
+
+    dirty = observed("git -C /home/agent/repos/work status --porcelain "
+                     "2>/dev/null | wc -l")
+    unpushed = observed("git -C /home/agent/repos/work rev-list --count "
+                        "@{u}..HEAD 2>/dev/null")
+    unreadable = "unreadable (container not answering, no repo, or no upstream)"
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    text = "\n".join([
+        "# roll record -- written by the LAUNCHER, not by the body",
+        "",
+        f"- when: {ts}",
+        f"- what: {why}",
+        f"- image: {c['image'] or 'unknown'} -> {to_image}",
+        "- dirty files in /home/agent/repos/work: "
+        + (dirty if dirty is not None else unreadable),
+        "- unpushed commits: "
+        + (unpushed if unpushed is not None else unreadable),
+        "",
+        "This is an observation about the body, not the body's own note: a",
+        "five-field handover note means a live body looked at its own work,",
+        "and nothing else may wear that shape.",
+    ]) + "\n"
+    try:
+        path = os.path.join(data_root(user, agent), ".claude", "roll-record.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    except OSError as e:
+        # a record that cannot be written must not stop the roll -- but it
+        # is SAID, never swallowed
+        print(f"roll record could not be written for {user}/{agent}: {e}",
+              file=sys.stderr)
+
+
+
 def roll_idle(conn, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH, timeout=120,
               window_ns=None, out=print):
     """Roll every BEHIND container that is idle; skip the rest and LIST them.
@@ -1729,6 +1813,10 @@ def cmd_new(a):
         conn.close()
         die(f"unknown role {a.role!r} -- one of {', '.join(sorted(ROLE_PROMPTS))}")
     try:
+        if a.replace:
+            refuse_unless_forced(conn, a.user, a.agent,
+                                 getattr(a, "force", False),
+                                 doing="re-provisioning")
         token = read_secret(f"bound broker token for {a.agent}")
         name, kind = provision_agent(conn, a.user, a.agent, a.repo_url, token,
                                      image=a.image, network=a.network,
@@ -1774,6 +1862,8 @@ def cmd_upgrade(a):
                 print(f"nothing behind {a.image}")
                 return
         elif a.user and a.agent:
+            refuse_unless_forced(conn, a.user, a.agent,
+                                 getattr(a, "force", False), doing="upgrading")
             todo = [(a.user, a.agent)]
         else:
             die("usage: reveille-launch upgrade USER AGENT [--image X] | upgrade --all [--image X]")
@@ -3007,6 +3097,11 @@ def build_api(auth_url):
                 (d.get("agent") or "").strip(), list(d["rooms"]),
                 create=bool(d.get("create")))
         try:
+            if d.get("replace"):
+                refuse_unless_forced(conn, p["user"],
+                                     (d.get("agent") or "").strip(),
+                                     bool(d.get("force")),
+                                     doing="re-provisioning")
             name, kind = provision_agent(
                 conn, p["user"], (d.get("agent") or "").strip(),
                 (d.get("repo_url") or "").strip(), token,
@@ -3110,9 +3205,13 @@ def build_api(auth_url):
             # two minutes, and provision deliberately never blocks the loop that
             # serves every user's /agents poll -- so this runs in a thread with
             # its OWN connection (sqlite is per-thread); the answer still waits.
+            force = request.query_params.get("force") in ("1", "true")
+
             def _upgrade_owned(user, agent):
                 c = _db()
                 try:
+                    refuse_unless_forced(c, user, agent, force,
+                                         doing="upgrading")
                     return upgrade_agent(c, user, agent, DEFAULT_IMAGE)
                 finally:
                     c.close()
@@ -3797,6 +3896,9 @@ def build_parser():
     n.add_argument("--replace", action="store_true",
                    help="re-provision an existing agent (destroys its container; "
                         "the data root is kept)")
+    n.add_argument("--force", action="store_true",
+                   help="replace even a BUSY live body (12959: the direct path "
+                        "asks roll_reason and refuses by name without this)")
     n.add_argument("--image", default=DEFAULT_IMAGE)
     n.add_argument("--timeout", type=int, default=90)
     n.add_argument("--no-wait", action="store_true",
@@ -3826,6 +3928,9 @@ def build_parser():
                          "REVEILLE_ROLL_IDLE_MIN minutes); the busy ones are LISTED and "
                          "retried on the next deploy, never killed mid-task")
     up.add_argument("--image", default=DEFAULT_IMAGE)
+    up.add_argument("--force", action="store_true",
+                   help="roll even a BUSY live body (12959: the direct path "
+                        "asks roll_reason and refuses by name without this)")
     up.add_argument("--health-url", default=DEFAULT_HEALTH)
     up.add_argument("--timeout", type=int, default=120)
     up.set_defaults(fn=cmd_upgrade)
