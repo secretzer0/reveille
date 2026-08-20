@@ -290,6 +290,40 @@ def test_the_knock_cli_reads_the_directory_it_stands_in(tmp_path, monkeypatch):
     assert seen["url"] == "http://stub" and seen["token"] == "dead-secret"
 
 
+def test_the_knock_cli_disambiguates_the_story_less_case(tmp_path, monkeypatch, capsys):
+    """#158 review: the generic refusal tells every story-less body to
+    knock-init-or-idle, and the knock CLI is where that advice lands -- so
+    without this line the tool answers an instruction to run itself. Specific
+    fact BEFORE the shared doctrine: "knocking cannot help here". It is not
+    redundant with the broker text; it is the disambiguation, and this gate is
+    what stops someone deleting it as redundant. Only the bad-token case gets
+    it -- a live credential HAS a story, and its refusal already says the
+    right thing."""
+    d = tmp_path / ".claude"
+    d.mkdir()
+    (d / "settings.local.json").write_text(
+        '{"env": {"REVEILLE_URL": "http://stub", '
+        '"REVEILLE_AGENT_ROLE": "wanderer", "REVEILLE_TOKEN": "dead-secret"}}')
+    monkeypatch.chdir(tmp_path)
+
+    def storyless(url, token):
+        raise RuntimeError(store.BAD_TOKEN)
+    monkeypatch.setattr(cli, "post_knock", storyless)
+    assert cli.main(["knock"]) == 1
+    said = capsys.readouterr().err
+    assert "knocking cannot help here" in said
+    assert "no story with the broker" in said
+
+    def alive(url, token):
+        raise RuntimeError("a live credential needs no knock -- this machine "
+                           "already holds the identity")
+    monkeypatch.setattr(cli, "post_knock", alive)
+    assert cli.main(["knock"]) == 1
+    said = capsys.readouterr().err
+    assert "knocking cannot help here" not in said, (
+        "a credential WITH a story gets the broker's own sentence, undecorated")
+
+
 def test_des_012_s18_carries_the_operators_words():
     doc = pathlib.Path(os.path.join(os.path.dirname(__file__), "..", "docs",
                                     "DES-012-a-visit-is-a-body-swap.md")).read_text()

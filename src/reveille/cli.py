@@ -1519,7 +1519,18 @@ def cmd_knock(a):
     try:
         out = post_knock(url, token)
     except RuntimeError as e:
-        print(f"reveille knock: the broker refused it -- {e}", file=sys.stderr)
+        said = str(e)
+        # THE DISAMBIGUATION (#158 review), specific fact BEFORE the shared
+        # doctrine: the generic refusal tells every story-less body to
+        # knock-init-or-idle, and this IS the knock -- without this line the
+        # tool answers an instruction to run itself. Not redundant with the
+        # broker text: the broker's sentence is correct and the CONTEXT is
+        # what makes it a loop. Only the story-less case; a credential the
+        # broker recognises gets its own sentence undecorated.
+        if said.startswith("bad token"):
+            print("reveille knock: knocking cannot help here -- this "
+                  "credential has no story with the broker.", file=sys.stderr)
+        print(f"reveille knock: the broker refused it -- {said}", file=sys.stderr)
         return 1
     reason = {"superseded": "this machine was the identity's body",
               "expired-unclaimed": "the move minted for this machine never "
