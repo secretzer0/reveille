@@ -46,7 +46,7 @@ def _seed(tmp_path, bodies=3):
 
 def _quiet(monkeypatch):
     monkeypatch.setattr(rl, "_harvest_gate_audit", lambda u, a, g: None)
-    monkeypatch.setattr(rl, "sweep_actions", lambda g, l, s, n: ([], []))
+    monkeypatch.setattr(rl, "sweep_actions", lambda g, live, s, n: ([], []))
     monkeypatch.setattr(rl, "_stop_superseded", lambda conn: [])
 
 
