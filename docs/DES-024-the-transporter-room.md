@@ -49,6 +49,30 @@ The launcher does not disappear: it remains the thing that PROVISIONS AND
 OPERATES container bodies, and its endpoints stay exactly what they are. It
 stops being consulted for the question "what agents are there".
 
+## 3.1 RULED: the broker cannot answer this today, and the seam that fixes it
+
+The broker holds no address for anything. `tokens` carry no host or path;
+`token_tombstones` prove a pad once existed but not where, and are swept at 30
+days; `recalls`, presence and the wake attach are hash-keyed and address-free.
+`knocks` is the ONLY table with an address (v40, 0.2.208) — and only while a
+pad is orphaned AND asking. **The broker also does not know where the LIVE body
+is**: tonight native bodies were located by file mtimes and shell history.
+So §7's metadata card and §6.2's receiver display both rest on data that does
+not exist yet. The registry is real new surface, both halves (devops 12657).
+
+**THE SEAM ALREADY EXISTS AND v40 TAUGHT IT: the process standing in the
+directory is the one party that knows its own address.** Generalise the knock's
+machine string — `reveille init` reports `user@host:path` at bind (pad birth),
+`waked` reports it at attach (pad liveness, and where the live body is). One
+owner-scoped `pads` table: host, path, kind, agent, last_seen_ns, state.
+
+**THE ADDRESS IS SELF-DECLARED BY THE MACHINE, SO IT IS A LABEL AND NEVER AN
+AUTHORIZATION INPUT.** Authorization stays hash-keyed (12485): the ticket keys
+on the hash that asked, never on a path anyone typed. The address exists for
+the owner's eyes and the owner's decision, display only. The 12445 boundary
+extends to it: pads are owner-visible, never shown to an unauthenticated
+caller.
+
 ## 4. RULED: the vocabulary
 
 - **IDENTITY** — the durable thing. `red-shirt-01`. Has an id, an owner, rooms,
@@ -79,19 +103,34 @@ them one identity-level home and one consistent name.
 
 ## 6. RULED: the constraints that shape it
 
-### 6.1 The transporter can only beam to a pad that exists
+### 6.1 A pad is not a receiver
 
 Credentials are PULLED, never pushed: a destination claims with something it
-already holds. So a pad must have a RECEIVER before anything can land.
+already holds. Two distinct things must be true before anything can land, and
+CONFLATING THEM WAS THE FIRST DRAFT'S ERROR (caught by devops, 12657):
 
-- **Container pad**: free. The launcher creates pad and body together.
-- **Native pad**: there is no receiver until `reveille init` has run there at
-  least once.
+- **A PAD is a prepared place**: an address and a credential file. `reveille
+  init` creates one on a native host; the launcher creates one when it makes a
+  container.
+- **A RECEIVER is something that can claim right now**: a running `waked`
+  parked on that pad's credential, or a human hand running `reveille claim`
+  there.
+
+**Init creates the pad. It does not create the receiver.** Measured
+2026-08-20: `~/red-shirt-01-knock` had run init, held a credential, and could
+not receive — twice — because no daemon was parked on it. A pad with a dead
+credential and no daemon needs the hand REGARDLESS of where the live body is;
+§6.2 is one reason a receiver can be absent, not the only one.
+
+**The room shows both states, separately.** "Prepared" and "can receive right
+now" are different columns, and only the second decides whether a beam can
+land.
 
 Therefore "push the agent to Bob's project" cannot mean "conjure a body on
-Bob's laptop". It means either the pad is already prepared and listed, or what
-crosses is an **INVITATION**, and Bob running it is what creates the pad.
-**Preparing a pad is a first-class act** and the room must show it as one.
+Bob's laptop". It means either the pad is already prepared AND has a receiver,
+or what crosses is an **INVITATION**, and Bob running it is what creates the
+pad — and starting a session there is what creates the receiver. **Preparing a
+pad is a first-class act** and the room must show it as one.
 
 ### 6.2 One receiver per identity per host
 
@@ -143,15 +182,16 @@ differs because the reality differs.
 1. The rail fed by the broker rather than the launcher.
 2. Body-kind-dependent content well.
 3. The general PUSH verb with (user, project) addressing.
-4. A pad registry — what places exist, which can receive right now, and how a
-   new one is prepared (the invitation).
+4. A pad registry (§3.1) — self-declared addresses at init and at attach; what
+   places exist, which can RECEIVE right now, and how a new one is prepared.
 5. Receiver-state display: a pad that cannot claim says so before it is offered.
 
 ## 10. Open, not ruled here
 
-- What exactly registers a pad, and whether a pad outlives the body that made
-  it. A directory that has run `init` once is a candidate; whether it should
-  be listed forever is a retention question, not a transport one.
+- Whether a pad outlives the body that made it. With §3.1's table this stops
+  being a design question and becomes a RETENTION COLUMN — a knob, not a
+  transport rule. What value, and whether an unreachable pad ages out or is
+  kept as history, is unruled.
 - Whether an invitation to another human is a new object or a reuse of the
   DES-012 §11 visit request. My prior is reuse.
 - The Windows body (DES-021) is a pad kind with its own receiver questions and
