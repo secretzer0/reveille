@@ -301,3 +301,49 @@ machine, on my account". It should be stated plainly there, in the host's
 language, because it is a real transfer of value. What the pad kind decides is
 not whether that consent happened but how much of the machine it reaches:
 DIRECT is the whole host as that user; VIRTUAL is one directory.
+
+
+## 12. The beam, and what a host may choose (operator 12672)
+
+### 12.1 The metaphor names three acts, not two
+
+The ship is the fleet; a machine is a planet.
+
+- **BEAM DOWN** — the identity goes from the fleet to a machine. This is PUSH.
+- **BEAM UP** — the identity comes off a machine. This is RECALL and EVICT,
+  already ruled as the two ends in DES-012 §11.
+- **A KNOCK IS NOT A THIRD DIRECTION.** It is a machine REQUESTING A BEAM
+  DOWN. Push and knock differ in who initiates, not in which way the identity
+  travels — both end with a body on that machine.
+
+Keeping that straight matters because the CONSENT differs by initiator while
+the MECHANISM differs by direction: every beam down is a mint and a claim,
+every beam up is a supersede and a tombstone, and who had to agree depends on
+which of the two humans asked.
+
+### 12.2 RULED: the beam box carries the RUNTIME too, on container pads
+
+The host's accept checkbox (§11.1.1) picks the pad KIND. On a CONTAINER pad it
+also picks the AGENT RUNTIME — Claude, or another when another exists.
+
+**This falls out of a ruling already made** (architect 12451): one image per
+runtime on a shared base, because THE IMAGE PIN IS THE RUNTIME PIN. A container
+pad can therefore offer a runtime choice by construction — choosing the image
+IS choosing the runtime. A NATIVE pad cannot, initially: it runs whatever that
+machine has installed, and we do not get to put a binary on someone's host.
+
+That asymmetry is a REASON TO CHOOSE THE CONTAINER, not an apology for it: the
+smaller grant (§11.3) is also the more capable pad.
+
+### 12.3 The list must be earned, not promised
+
+The runtime selector's options are **the runtimes that have a working body
+profile** — never a static list of vendors. A runtime is a body only if it can
+answer the six questions of 12450, and question 4 is the gate: **how does the
+harness tell us a turn ended, so we can wake it.** A runtime that cannot be
+woken can only be polled, which is a different product.
+
+So: no option appears in that box until a body of that kind has been woken by
+a ring. Offering a runtime we cannot wake would be the dropdown equivalent of
+a button that opens a window into nothing — the defect this document already
+exists to remove (§6.2).
