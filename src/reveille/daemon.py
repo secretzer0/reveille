@@ -351,6 +351,24 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.221 THE BUDGET COUNTS THE BYTES THAT LEAVE (rulings 13014/13059, found
+by red-shirt measuring what it received instead of what the code claimed).
+BREAKING, deliberately and with no compatibility shim: lessons() and brief()
+now return ONE COMPACT JSON STRING -- json.loads it -- and brief's `chars` is
+the WIRE number, the JSON-escaped length of exactly that string, not the
+length of the text. A reader comparing the new chars to len(text) will find
+them different; that is the fix, not a defect. The budget used to be enforced
+on a string nobody received: the store counted compact separators while the
+transport delivered indent-2, so a 24000-char budget shipped 26,538 and
+reported 23,873 -- and because indentation is charged per LINE while elision
+keeps a line per row, the gap GREW with the corpus while the number stayed
+pinned under budget. The transport's rendering turned out to be a private
+convention nobody could pin, so the tool layer now emits its own string and
+the seam the budget defends is ours. One helper serves both readers, because
+a budget that means one thing in lessons() and another in brief() is worse
+than the defect it replaces. brief's raw character slice is gone with it -- a
+raw cut against a wire number was the same mistake in a fourth spelling.
+
 0.2.220 INIT THAT INSTALLS NO NEW CREDENTIAL RETIRES NO DAEMON (ruling
 13094; agent image 0.2.26). The 0.2.24 hoist put the wake daemon at the top of
 the container entrypoint, where it takes the spool lock seconds before
@@ -5840,12 +5858,13 @@ async def rooms(ctx: Context = None) -> dict:
 
 
 @mcp.tool()
-async def lessons(slug: str = "", budget: int = 24000, ctx: Context = None) -> dict:
+async def lessons(slug: str = "", budget: int = 24000, ctx: Context = None) -> str:
     """Distilled defect post-mortems: every GLOBAL lesson plus any scoped to your rooms,
     newest first. Read these at boot -- they are rules the fleet already paid for.
 
-    Budget is CHARS (~4/token, approximate: the broker has no tokenizer), default
-    24000 so the payload arrives INLINE in the turn that asked. Rows carry id +
+    Budget is the BYTES THAT LEAVE -- the JSON-escaped tool result (~4/token,
+    approximate: the broker has no tokenizer) -- default 24000 so the payload
+    arrives INLINE in the turn that asked. Rows carry id +
     slug + RULE -- the imperative that changes behaviour -- until the budget is
     spent; every lesson past it stays in the list as its slug alone, and `note`
     says how many. A budget elides rule text, never a lesson's existence.
@@ -5853,9 +5872,15 @@ async def lessons(slug: str = "", budget: int = 24000, ctx: Context = None) -> d
     detection) when you are diagnosing rather than booting.
 
     This replaces the per-repo LESSONS.md, which only ever worked because every agent
-    shared one filesystem. Yours may not."""
+    shared one filesystem. Yours may not.
+
+    The result arrives as ONE compact JSON string -- json.loads it. Rendering
+    here, not in the transport, is what lets the budget count the bytes that
+    actually leave (rulings 13014/13059): the escaped wire form of exactly
+    this string is what `chars` reports and what the budget bounds."""
     p = _me(ctx.request_context.request)
-    return store.lessons(_conn, p.rooms, slug=slug or None, budget=budget)
+    return store.rendered(
+        store.lessons(_conn, p.rooms, slug=slug or None, budget=budget))
 
 
 @mcp.tool()
@@ -5960,20 +5985,26 @@ async def recall(query: str = "", kind: str = "", scope: str = "", entity: str =
 
 
 @mcp.tool()
-async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> dict:
+async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> str:
     """The onboarding pack (DES-001): lessons, doctrine (ranked by entity overlap
     with your role string), live contracts, decisions, your own saved state, and a
-    presence digest -- composed, ranked, and budgeted in CHARS (~4/token,
-    approximate: the broker has no tokenizer). Every truncation is marked in the
-    text; nothing is silently capped. Call it at boot after join() and lessons();
-    call it again anytime -- it always reflects the live tips."""
+    presence digest -- composed, ranked, and budgeted in the BYTES THAT LEAVE
+    (the JSON-escaped tool result, ~4/token, approximate: the broker has no
+    tokenizer), so the number you pick against your harness cap is the number
+    you receive. Every truncation is marked in the text; nothing is silently
+    capped. Call it at boot after join() and lessons(); call it again anytime --
+    it always reflects the live tips.
+
+    The result arrives as ONE compact JSON string -- json.loads it. Rendering
+    here, not in the transport, is what lets the budget count the bytes that
+    actually leave (rulings 13014/13059)."""
     p = _me(ctx.request_context.request)
     out = store.brief(_conn, rooms=p.rooms, token_id=p.token_id,
                       agent_id=p.agent_id, role=role,
                       budget=budget)
-    log.info("%s brief role=%r -> %s chars, sections=%s", p.name, role,
+    log.info("%s brief role=%r -> %s wire chars, sections=%s", p.name, role,
              out["chars"], out["sections"])
-    return out
+    return store.rendered(out)
 
 
 @mcp.tool()

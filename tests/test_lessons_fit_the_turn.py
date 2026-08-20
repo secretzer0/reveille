@@ -73,17 +73,19 @@ def test_the_tail_cannot_ride_outside_the_budget():
 
 
 def test_chars_names_what_the_caller_received():
-    """`chars` equals the serialized length of the very payload carrying it --
-    the field a body uses to decide whether the call fits must measure the
-    payload, not a part of it (12957). Checked on the elided, the untouched
-    and the slug path alike."""
+    """`chars` equals the WIRE cost of the very payload carrying it -- the
+    JSON-escaped tool result, the bytes that leave (13014/13059), never the
+    store's own re-serialization: that number agreed with itself while the
+    transport delivered 11% more, and the drift grew with elision. Checked on
+    the elided, the untouched and the slug path alike; the seam itself is
+    pinned in test_the_budget_counts_the_bytes_that_leave."""
     c, admin, room = fixture()
     for got in (store.lessons(c, [room["id"]]),
                 store.lessons(c, [room["id"]], budget=0),
                 store.lessons(c, [room["id"]], slug="rule-001")):
-        assert got["chars"] == len(json.dumps(got)), (
-            f"chars={got['chars']} but the caller received "
-            f"{len(json.dumps(got))}")
+        assert got["chars"] == store.wire_chars(got), (
+            f"chars={got['chars']} but the bytes that leave are "
+            f"{store.wire_chars(got)}")
 
 
 def test_no_lesson_becomes_invisible():
