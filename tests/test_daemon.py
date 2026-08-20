@@ -70,10 +70,11 @@ def test_changes_newest_entry_is_this_version():
 
     Kept honest deliberately: an overclaiming gate is worse than a missing one,
     because the next person reads the claim and stops looking."""
-    newest = next(ln for ln in daemon.CHANGES.splitlines()
-                  if ln[:1].isdigit())
-    assert newest.split()[0] == __version__, (
-        f"CHANGES newest entry is {newest.split()[0]!r} but the package is "
+    # Read from the WRITER'S RECORD (13063): the newest entry is the first
+    # record, not the first digit-leading line of a rendering.
+    newest = daemon.CHANGES_ENTRIES[0][0]
+    assert newest == __version__, (
+        f"CHANGES newest entry is {newest!r} but the package is "
         f"{__version__!r} -- bump both or neither")
 
 

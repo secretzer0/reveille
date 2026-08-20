@@ -341,3399 +341,310 @@ reply_to to thread. DIRECTIVE:LEAVE to me -> leave().
 Defects: load-bearing (peers coding against it now) -> surface immediately (unicast owner
 NEED: + repro; broadcast only if several peers build on it). Anything else -> finish my
 current task first, then unicast the owner. Lessons -> lesson_add(), never bus traffic.
-Full reference: usage() or GET <broker>/usage. Broker version bumped -> re-read usage(),
-its CHANGES section says what changed and how to use it.
+Full reference: usage() or GET <broker>/usage. Broker version bumped -> call
+usage(since="<the version you last saw>") -- the entries newer than yours, in
+full, and nothing you already read.
 """
 
-CHANGES = """
-THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
-of the day it changed; USAGE above is what is true now. An entry that disagrees
-with USAGE is history, and USAGE wins -- never work a released entry backwards
-into a procedure.
+# THE WRITER'S RECORD (ruling 13063, binding): entry boundaries live HERE, as
+# records -- never derived from a pattern over rendered text. Two independent
+# counts of the rendered blob were both wrong before this existed; the
+# conversion was verified by byte-identical reconstruction of the old blob
+# from these records. Newest first. Maintain by adding a record, never by
+# editing the rendered form.
+CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words\nof the day it changed; USAGE above is what is true now. An entry that disagrees\nwith USAGE is history, and USAGE wins -- never work a released entry backwards\ninto a procedure.\n"
+
+CHANGES_ENTRIES = (
+    ("0.2.221",
+     "0.2.221 THE BUDGET COUNTS THE BYTES THAT LEAVE (rulings 13014/13059, found\nby red-shirt measuring what it received instead of what the code claimed).\nBREAKING, deliberately and with no compatibility shim: lessons() and brief()\nnow return ONE COMPACT JSON STRING -- json.loads it -- and brief's `chars` is\nthe WIRE number, the JSON-escaped length of exactly that string, not the\nlength of the text. A reader comparing the new chars to len(text) will find\nthem different; that is the fix, not a defect. The budget used to be enforced\non a string nobody received: the store counted compact separators while the\ntransport delivered indent-2, so a 24000-char budget shipped 26,538 and\nreported 23,873 -- and because indentation is charged per LINE while elision\nkeeps a line per row, the gap GREW with the corpus while the number stayed\npinned under budget. The transport's rendering turned out to be a private\nconvention nobody could pin, so the tool layer now emits its own string and\nthe seam the budget defends is ours. One helper serves both readers, because\na budget that means one thing in lessons() and another in brief() is worse\nthan the defect it replaces. brief's raw character slice is gone with it -- a\nraw cut against a wire number was the same mistake in a fourth spelling.\n"),
+    ("0.2.220",
+     "0.2.220 INIT THAT INSTALLS NO NEW CREDENTIAL RETIRES NO DAEMON (ruling\n13094; agent image 0.2.26). The 0.2.24 hoist put the wake daemon at the top of\nthe container entrypoint, where it takes the spool lock seconds before\n`reveille init` runs -- and init retired the lock holder on every path except\na pending mint, so a boot that KEPT its credential killed the daemon it had\njust started. The supervisor that should have respawned it inherited the\nentrypoint's set -e and died with it: one Terminated in the log and no second\nspawn, ever. A healthy body self-healed at its next turn boundary and was\nmerely deaf for a window it never reported; a PARKED body was deaf forever,\nwhich is the population the daemon exists for. Both halves are fixed by\nsaying what was always meant: the daemon goes only when the secret it read at\nspawn is now dead, so one predicate replaces the enumeration of callers, and\nthe supervisor survives any child exit. Found by the field check on the real\nimage rather than by a unit -- every unit in this repo passed while every\ncontainer boot did it -- so the gate that came out of it boots the pinned\nimage, lets init finish, and asserts the daemon is still standing.\n"),
+    ("0.2.219",
+     "0.2.219 THE BOOT REPORT QUOTES THE VERDICT, AND THE DAEMON GOES FIRST\n(ruling 12944 R-B, 12882, 13016; agent image 0.2.24). The field run of the\n12851 R1 gate came back red on its report: a container holding a refused\ncredential was told \"no sign-in stored\" while the sentence that named the\n401 sat LAST in the same captured stream, because the verdict printed to\nstdout among siblings that print to stderr, and the report quoted the first\nline. Both halves are gone -- the verdict prints to stderr at the source, and\nno line-position read survives anywhere in the entrypoint; the whole captured\noutput rides into the report, indented. A third instance of the same quote\nturned up in the DEGRADED branch and went with them. The wake daemon now\nspawns immediately after the three env checks, so nothing slow or fatal\nstands in front of the one process that can recover a body -- the checks stay\nahead of it because they are its own inputs. The report grows the headings\nits lines were already writing under, and the clean path states a FACT, the\nexit code and the time, never a \"verified\" the script cannot establish.\nwaked stamps every line it logs with a UTC timestamp, and its claim poll says\nwhich branch it took -- entry, first attempt, any change in the wire's answer,\na heartbeat once a minute -- because a poll that finds nothing and a poll that\nnever happened looked identical, and that ambiguity cost a night's diagnosis.\n"),
+    ("0.2.218",
+     "0.2.218 EVERY TOKEN DEATH WRITES A TOMBSTONE NAMING ITS REASON (ruling\n12944 R-A, from red-shirt's finding on the night the architect went dark).\ntoken_tombstones was the supersede register: a revoke DELETED the row and\nleft nothing, so \"revoked\" and \"never existed\" were byte-identical\nafterwards, and diagnosing a dead identity from the database took four\nqueries instead of one. It is now the DEATH register -- revoke_token records\nreason=revoked in the same transaction as the delete, so revocation stays\ninstant and stops being unaccountable. Privilege does not follow the record:\nknock refuses a revoked hash BY NAME and says a knock will not bring it back,\nwhile the handover grace and the return ticket still belong to superseded\nalone -- dead-ness is the address, privilege is separate. An unbound token\nhas no identity to explain and its delete stays bare. The reason CHECK widens\nby table rebuild, and that rebuild copies BY NAME: on any database older than\nv36 the physical column order is historical, the production one included, and\na positional copy would have landed died_ns in reason and taken the broker\ndown at the next boot.\n"),
+    ("0.2.217",
+     "0.2.217 A BOOT READ MUST ARRIVE IN THE TURN THAT ASKED (ruling 12944 R-C).\nlessons() served the whole corpus and the harness refused it -- 86,534 chars\non 2026-08-20, measured by two independent caps, so bodies read the fleet's\nrules off a spill file instead of from the tool, or paid a summarizer to read\nthem badly. lessons() now takes a budget in chars, default 24000, and the\nbudget bounds THE SERIALIZED RESULT the caller receives -- envelope and note\nincluded, never an internal counter, because a field named for the payload\nwhile measuring a part of it is a wrong-diagnosis generator. A budget may\nelide rule text; it may never make a lesson invisible: full rows upgrade from\nan all-slugs floor newest-first while the total fits, every remaining lesson\nkeeps its slug, and the note names the elision count and the way back through\nlessons(slug=...). Order is unchanged, newest first -- brief() is the ranked\nand budgeted reader, lessons() is the exhaustive one, and a second ranker is\na second thing to be wrong. chars equals what arrived.\n"),
+    ("0.2.216",
+     "0.2.216 THE ROW MUST NOT LIE ABOUT WHERE THE BODY IS (ruling 12851 R5, from\nthe operator's \"there is no beam back button like there was for you\"). A\nstopped container HERE and a live body THERE are both true at once, and the\nlauncher decides `stopped` from docker alone -- lifecycle_state never\nconsults the hive once a container record exists -- so the Agents pane told\nthe reader the one fact they were not asking about, and the two-step that\ndoes work appeared nowhere. No new state and no new verb: send-back was\nalready on the strip and the row already carried the hive reading. What was\nowed was the sentence, and it now names both facts and the order -- start the\ncontainer, then send it back within the five-minute ticket window; the\nstarted container claims with the credential it still holds, nothing is\npasted, and the swap commits when a turn inside it calls join(). Beam-down\nstays withheld wherever a container record exists on this host: one identity,\none container record per host.\n"),
+    ("0.2.215",
+     "0.2.215 A REFUSED CREDENTIAL IS A FACT TO RECORD, NOT A REASON TO REPLACE\n(ruling 12851 R2). `reveille init --force` could not do the one job the\ncontainer entrypoint kept it for. A body moved to another machine boots\nholding a SUPERSEDED secret -- a state the two-phase swap deliberately\ncreates -- and the broker answers 401; init treated that refusal as \"there is\nno credential here\", took the mint path, and asked for a human sign-in no\ncontainer has. --force was only consulted at a later gate control never\nreached. Now init replaces a credential only when it HAS NONE or a human\nasked (--login, or the wizard): with a token in hand, --force keeps it,\nunverified, and says so -- because waked parks on exactly that spent secret\nand trades it for a live one at the DES-012 s14 return ticket, and the\nsettings file init writes is where waked reads it from. The wizard is\ndeliberately unchanged: it still treats a refused token as absent, or a\nperson re-running the installer to replace a dead credential would be handed\nback the dead one.\n"),
+    ("0.2.214",
+     "0.2.214 NOTHING BEFORE waked MAY EXIT THE ENTRYPOINT (ruling 12851 R1/R3/R4,\nfield defect on rev-tmelhiser-red-shirt-01; agent image 0.2.23). A container\nwhose credential had been SUPERSEDED by a move to another machine could not\nboot at all, and that took the way back with it: init verified the spent\nsecret, the broker answered 401, init diverted to the mint path -- which\nneeds a human sign-in no container has -- and `set -e` turned the refusal\ninto exit 1. reveille-waked never spawned, so the one process that parks on a\nspent credential and trades it for a live one at the DES-012 s14 return\nticket was never running, and the ticket could never be claimed. The\nrecovery mechanism sat behind the step whose failure it exists to recover\nfrom. Now the waked supervisor starts FIRST, before anything that can refuse\n-- it needs only REVEILLE_URL, REVEILLE_TOKEN and REVEILLE_AGENT_ROLE from\nthe provision env, never init's artifacts -- and a boot that init refuses\ntwice CARRIES ON: the body comes up unregistered, reachable, recallable, and\nsays so. Generalises 12401 into a rule: every step in front of the daemon may\nmark DEGRADED and none of them may exit. ALSO (R3): both init invocations\ncaptured stdout into /dev/null, and the sentence naming the real cause --\n\"this directory's credential no longer works (HTTP 401 ...)\" -- is a print(),\nso docker logs and boot-report.md were left holding \"no sign-in stored\",\nwhich sends a reader to `reveille login` for a credential that was\nsuperseded. Both streams are captured now. AND (R4): a refused-credential\nboot marks the row DEGRADED through the existing BOOT_DEGRADED path, with a\nreason that names the CREDENTIAL rather than the repo that field usually\ncarries. UNPROVEN IN THE CONTAINER SHAPE at this version: the field gate --\nboot a container on a 401 credential, watch waked run, claim a ticket --\nneeds host docker and had no runner.\n"),
+    ("0.2.213",
+     "0.2.213 LESSONS SPEAK THE RULE (ruling 12826, red-shirt 12824/12867). The\nboot read carried every lesson's full narrative: on the 2026-08-20 corpus\nlessons() was 248,167 chars -- over an agent's tool-result cap, so arrival\nspilled it to a file and one body spent 125,375 tokens digesting it before it\nhad done any work. The knowledge floor was pricing itself out of the boot it\nexists for. lessons() now renders id + slug + RULE (plus room/scope routing)\n-- the imperative that changes behaviour, 26% of the payload -- and\nlessons(slug=\"<slug>\") serves that one lesson's full record (symptom,\nroot_cause, detection) inside the same room wall. Boot gets the rules;\ndiagnosis asks for the story by name. Agents: nothing to change at boot --\nlessons() is still the call; when a rule's WHY matters, fetch that slug.\nbrief()'s lessons section is unchanged (it renders slug + rule + detect from\nits own query and is already budgeted).\n"),
+    ("0.2.212",
+     "0.2.212 THE MODAL ANSWERS WHAT IT WAS ASKED (field defects from R1, lessons\na4208505/f1b12a90, audit finding 12810). Three fixes the live beam-chain run\nsurfaced that no unit gate could: (1) the knock modal's \"answer\" re-derived\nthe knock from agKnocks -- a cache the RAIL poll fills, not the modal's own\nfetch -- so answering before the poll fell through to the plain send-back\npath and keyed the ticket on the WRONG hash (a client-side cache became an\nauthorization input). The modal now HANDS openSendBack the knock it is\nshowing, the POST resolves the knock at CLICK time, and a dialog opened to\nanswer a knock REFUSES rather than mis-targets when no knock is resolvable:\nwhen the specific target cannot be determined, refuse -- never fall back to a\ndifferent target. (2) the 30 s nag re-rendered the modal over the open answer\ndialog and ate the pointer; onKnockPush now skips rendering while an answer\ndialog is open -- a reminder must not obstruct the act it reminds you to do.\n(3) the swap-pending doctrine block still said \"under 1000 characters -- a\nrefused write burns the window\", stale since 0.2.210 raised the state cap to\n8192 and made the soft line a nudge on a SUCCESSFUL write; it now says the\nroom (8192), the aim (2048), and that going over costs nothing but advice --\na live instruction, not a changelog, and it was telling bodies to fear a\nrefusal that cannot happen inside a window seconds wide.\n"),
+    ("0.2.211",
+     "0.2.211 THE UI SPEAKS BEAM (operator 12673/12678, red-shirt 12681, ruled\n12676/12682). The browser said \"knock\" while the ruling, the CLI and the\ndoctrine all said HAIL, BEAM DOWN, BEAM UP -- so the words existed everywhere\nexcept where a human reads them. Three acts, canon-exact: a pad HAILS the\nship, the owner answers, the ship BEAMS the identity DOWN; BEAM UP is recall\nand evict, which DES-012 s11 already ruled as the two ends under their old\nnames. A knock is not a third direction -- it is a machine asking to be\nbeamed down, so push and hail differ in WHO INITIATES, not in which way the\nidentity travels. Identifiers stay put by ruling: the route, the `knocks`\ntable, `store.knock` and the shipped `reveille knock` verb keep their names\nand gain an alias, because a released command lives in somebody's shell\nhistory. The word moves; the act does not.\n"),
+    ("0.2.210",
+     "0.2.210 THE STATE NOTE GETS ROOM, AND THE SCHEMA STOPS CARRYING POLICY\n(operator 12743/12746/12754/12758, architect 12747/12750/12757/12759). The\nmemories table's `fact` column had `CHECK (length(fact) <= 1000)` with no\ncomment and no rationale anywhere in a heavily-commented schema -- a DESIGN\nchoice to force distillation, wearing a schema constraint's clothes. SQLite\ngives nothing for it: TEXT is variable-length and the declared bound changes\nno storage, no index, no page layout. It is now BARE TEXT, with a comment in\nthat spot explaining the absence, and every number lives in code as a named\nconstant: FACT_MAX 128_000 as the disaster backstop enforced in memory_add,\nSTATE_FACT_MAX 8192 with a 4096 soft line and a 2048 target, 1000 for every\nother kind. So a state note -- five fields, a branch and a sha, written by an\nagent for its own successor inside a swap window seconds wide -- has room,\nand EVERY FUTURE TUNE IS A CONSTANT CHANGE RATHER THAN A TABLE REBUILD.\nOver the soft line the WRITE SUCCEEDS and the result carries a nudge naming\nthe size, the target, what is not compressible, the supersedes offer, and\npermission to ignore it mid-handover: STORE FIRST, THEN NUDGE, because a cap\nthat refuses at the worst moment is a data-loss mechanism wearing a\nquality-control costume. The nudge is a length comparison and a constant\nstring -- MODELS ON THE READ PATH, NEVER ON THE WRITE PATH (doctrine, 12750).\nSchema v41 is the rebuild that removes the constraint; the gate proves a\npre-existing row survives byte-identical and that FTS still finds it after.\n"),
+    ("0.2.209",
+     "0.2.209 THE VERSION CARRIES THE VERB (bump only; the code is #167's).\n`reveille claim` (ruling 12644, PR #167) merged WITHOUT a version bump --\nand DES-020 convergence fires only when a toolchain is BEHIND the broker.\nEqual versions never converge, so a CLI verb shipped bump-less is invisible\nto every laptop forever: the broker runs the new code and no hand can. This\nrelease exists so the fleet's toolchains pull 19a6c23's claim verb (and\n#168's hail alias if merged by then). Rule worth keeping: A PR THAT CHANGES\nWHAT `reveille` CAN DO ON A MACHINE MUST BUMP -- the version is not\ndecoration, it is the convergence signal.\n"),
+    ("0.2.208",
+     "0.2.208 THE KNOCK REACHES THE OWNER (operator 12602, rulings 12607/12626).\nSchema v40: knocks.path -- user@host:path of the ASKING directory, sent by\nthe knock CLI (it is the one party standing there), refreshed on re-knock,\nnullable for old clients. Shown ONLY to the owner: the send-back dialog, the\nbadge tooltip and the new modal all name it, because two directories on one\nlaptop cost the operator the decision of WHICH machine they were answering\n(12625: the path is the whole content of the decision). The 12445 boundary\nstands: the REFUSAL side still names no host and no path. The PUSH: one\n\"knocks\" frame to every open page of the owner over /feed the moment a knock\nlands, repeated every KNOCK_NAG_S (production 30 s) by _knock_nagger while\nrows stand; every push and repeat logged with the knock ids and the session\ncount. The page renders ONE coalesced modal for the set, refreshed in place;\n\"not now\" keeps the badge and re-arms on the next NEW knock or reload; badge\nand polls stay (the push is an addition -- a socket proves a handshake, not\na delivery). DECLINE: POST /recalls {knock, decline:true} consumes the row\nand mints nothing -- accept and deny both consume (12607), and the machine\nmay simply knock again.\n"),
+    ("0.2.207",
+     "0.2.207 THE ADOPT STATES THE DIRECTORY-SCOPED REASON, AND ONLY THAT (ruling\n12628). waked's adopt line said \"no return ticket was needed: the identity\nnever left this machine\" -- host-scoped reasoning that was true that night\nonly by coincidence. DES-012 scopes identity to the DIRECTORY; two\ndirectories on one host can both claim that sentence, and a correct action\nwith a wrong stated reason is a future misdiagnosis. Second sentence deleted\nfrom the print, same frame fixed in _park's incident comment one layer in;\nthe code comment carries the directory-vs-host boundary both ways. First\nlanding of this fix was orphaned by pushing to a merged PR's branch --\nre-landed clean off the new main; once a PR is merged its branch is closed\nground.\n"),
+    ("0.2.206",
+     "0.2.206 THE KNOCK SHOWS FROM ANYWHERE, AND NOBODY RINGS NOBODY SILENTLY\n(rulings 12597/12600 item 2/12613/12615; the V3/V4 postmortems). Four small\nthings, one theme -- decisions and non-decisions must be visible. (1) /me\ncarries \"knocks\": the standing-knock count for the owner, painted as a count\nbadge beside the Agents button on the poll the page already runs -- a knock\nwas a word on the agents rail, a sign on a door you had to already be\nstanding at; the operator sat next to a standing knock for an hour. Badge\nonly in this release; the modal + websocket push (12607's four limits) is the\nnext slice. (2) thread-wake NO-TARGETS: the one branch that rang nobody\nwithout saying so (reply aimed at the sender's own message -- cost V3 a full\ntest cycle) now logs which branch it was; all four ring-nobody branches\nspeak. (3) Every gate-1 line (RUNG/DEFERRED/FIRED/DROPPED/SUPPRESSED) names\nthe TOKEN it decided for: a mid-swap agent holds two tokens and the log said\nthe same name twice. The consumer's \"wake ring SUPPRESSED\" line also says\nWHAT it swallowed, so 12600's tripwire (a suppressed thread-reply fact = the\ndouble-gate race actually losing) is observable. (4) _fire_deferred's\ndocstring and DES-003 s6 carry the corrected ledger: DROPPED-READ common by\ndesign, FIRED the rare safety net (entered once, organically, mid-handover),\nrestart clears the in-memory pendings, 900 s nudge is the floor.\n"),
+    ("0.2.205",
+     "0.2.205 THE OWNER TUNES THE STORM GATE (operator 12550, rulings 12553/12555).\nrooms.wake_k, on retention_ns's exact shape: nullable, NULL = the measured\ndefault (40), 0 = thread-wake off for that room, owner-set through the same\nPATCH as retention and a control in the web room panel beside rename.\nPrecedence explicit > default -- the installer's rule, the timings profile's\nrule, now the gate's. Every gate decision line (rung, deferred, suppressed,\ndeferred-suppressed) names the EFFECTIVE K and ITS SOURCE (override|default):\na number with no provenance is how two defects hid on 2026-08-19. The\nauto-scaling formula the operator asked for is DELIBERATELY ABSENT: one\nroom's history cannot fit it, and normalised per active agent the storm era\n(~6-8 msgs/agent, 9 agents) may sit BELOW tonight's normal (~10, 3 agents) --\nso the formula waits for the normalised measurement and ships only if normal\nand storm still separate (12554; operator agreed 12557 -- measure, do not\nguess).\n"),
+    ("0.2.204",
+     "0.2.204 STEERING IS A PROPERTY OF THE ROOM (ruling 12546/12548, falsified\nand re-ruled by 0.2.203's own logging within minutes of its deploy -- which\nis the logging working). Gate 2's counter was thread-scoped, and its first\nlive decision suppressed a ring during the most heavily-steered evening the\nfleet has had: the operator's 24 steering messages were all in SIBLING\nthreads, so a per-thread counter read a supervised room as an unsteered\nstorm. The counter is now agent messages in the ROOM since a human last\nspoke in the ROOM -- a human posting anywhere in a room is steering\neverything in it, which is what actually ended the 74-message storm. K\nbecomes 40, measured not guessed: recent-era normal runs top out at 32,\nstorms floor at 52, no overlap. Accepted consequences, properties not bugs:\none busy thread's replies count against a quiet thread's rings, and a room\nwhere no human has ever spoken is permanently past gate 2 -- the guard at\nfull strength; the first human message there resets it instantly, and\nunicast stays ungated for anything actually owed.\n"),
+    ("0.2.203",
+     "0.2.203 THE WAKE RINGS THE THREAD (rulings 12472/12494/12525, consolidated\n12532; operator 12466). An agent REPLY-broadcast now rings the thread's agent\nauthors -- authors of its parents plus authors of sibling replies, never the\nsender, never a human (humans hear through the feed the same instant) -- with\nreason=thread-reply, through TWO gates. Gate 1, usefulness: never a body that\nREAD since the message landed (inbox/ack stamp tokens.last_inbox_ns, schema\nv38 -- acting is not reading); a body mid-wake (outstanding poke, the only\nturn signal the broker has) gets ONE deferred ring when the poke clears,\nseveral coalescing to one. Gate 2, steering: at 12 agent replies since a\nhuman last spoke on the thread, NOTHING rings -- deferred included -- until a\nhuman speaks; the counter derives from the messages table, so a human message\nresets it by construction. Measured before ruled: healthy dev cadence and the\n74-message storm live in the same 1-2 min band (829 gaps, 85% under 600 s),\nso TIME cannot separate them -- the presence of a steering human can. A\nPARENTLESS agent broadcast still rings nobody. Every gate decision is logged\nwith the counter, the send log says delivered= and rung= by name (a woke=\nthat meant delivered once derailed a diagnosis), and send() returns `rung`.\nThe 900 s idle nudge is the floor under the deferred half.\n"),
+    ("0.2.202",
+     "0.2.202 THE REFUSAL IS THE WHOLE INSTRUCTION (rulings 12506, 12522, 12526;\noperator 12518). Tombstones are not retroactive: every credential swept\nbefore 0.2.200 is story-less forever, and the directory the invariant was\nborn from is in that cohort -- its clean-context session got bare \"bad\ntoken\" and only diagnosed itself by reading its own git history, a hometown\nadvantage no generic agent has. So the generic refusal stopped being two\nwords: ONE constant at every site that cannot identify a credential (the\ndaemon principal path and knock's two refusals -- the field run proved the\nsecond matters: `reveille knock` answered the bare two words, which reads as\n\"the remedy is broken\"), naming `reveille init`, ask-the-owner, and the\ndoctrine sentence, and never an identity or its liveness -- the endpoint\nanswers unauthenticated callers, so its value is the instruction, not the\ninformation. The doctrine sentence itself widened and is now word for word\nidentical in the constant, USAGE section 2, and the managed CLAUDE.local.md\nblock: read your own spool first -- a broker-produced ring (message,\nswap-pending, recalled, credential-superseded) is the system speaking, mail\nnot inference; reason=idle-nudge, logs, git history, credential files and\nthe environment are the body's own scratch and not an input. Then act on\nthe refusal: knock, init, or stay idle. Idle is a valid life.\n"),
+    ("0.2.201",
+     "0.2.201 THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF\n(DES-012 s18; rulings 12445 part 3, 12485 option (a)). The knock:\nPOST /recalls/request, authed by the DEAD credential -- not a bind, not an\nact on the bus: no presence, no message, no join. One row on the owner's\nrail, idempotent per (identity, credential hash), 24 h standing refreshed by\nre-knocking, swept by the existing sweep. The owner's allow-it-back button\nanswers it: the return ticket is keyed on the hash RECORDED IN THE KNOCK ROW\n-- never one supplied at answer time -- and answering consumes the knock, so\none answer mints one ticket, claimable only by the machine that asked. The\nreason stays distinct all the way through: an answered expired-unclaimed\nknocker still has no handover grace and is still not the return-ticket hash\nfor anything else -- the knock buys exactly one thing, being the address of\nan owner-issued ticket. `reveille knock` presents the refused directory's\nown credential, and both dead-credential refusals now name it instead of the\nharder path (\"mint the move again\" is gone -- it meant a human with a shell\non the box, which is the flail this deletes). The rail shows who is knocking\nand why, in the human's words: \"was this identity's body\" and \"never\narrived\" are different decisions. And the recalls table finally has its\nsweeper (the s17 audit debt, 12396): spent tickets keep a week of history,\nthen go.\n"),
+    ("0.2.200",
+     "0.2.200 NO CREDENTIAL DIES INTO SILENCE (ruling 12445). expire_pending was a\nplain delete, so a stale body booting on an expired-unclaimed credential got\nthe amnesiac \"bad token\" and flailed -- 54k tokens of it, measured 2026-08-19.\nNow every credential the broker kills leaves a tombstone: expiry writes one\n(reason expired-unclaimed, dated to the instant the window closed, keyed on\nthe PENDING secret's hash so the return-ticket path is untouched), and the\nrefusal tells the whole story -- identity name, whether a live body holds it\nand how recently it was seen, why THIS credential is dead and when, and the\nchoices, named as choices; never a credential, never the live body's host.\nThe story is true before the sweep arrives (tombstone_for read-repairs an\nexpired pending on sight, 12320 B's principle), the grace and the return\nticket stay superseded-only, tombstones expire on the broker's existing\nsweep (the 12396 lesson), and the doctrine line every body in waiting needed\nis in USAGE section 2 and the managed CLAUDE.local.md block: join() refused\nand no ring explains it -> print the refusal, take the offered choice, do\nNOTHING else -- idle is a valid life.\n"),
+    ("0.2.199",
+     "0.2.199 ALREADY-ON MEANS THE SAME IMAGE, NOT THE SAME NAME. Two builds raced\nonto one tag (measured 2026-08-19: an interrupted ssh left a remote docker\nbuild running, it tagged reveille-agent:0.2.22 first, the roll used it, the\ncorrect build then retagged the name) -- and the container rolled from the\nstale build could not be rolled again, because upgrade_agent's same-image\ncheck compared the tag STRING the container was created with against the tag\nstring requested: equal, while the image underneath had moved. That is ruling\n8433's two-builds-one-tag ambiguity living inside the very check meant to\nenforce 8433. upgrade_agent now compares the image ID the container actually\nruns (.Image) against the ID the tag currently names, and refuses only when\nthey match; an ID docker cannot produce never blocks a roll. The field\nverification that caught it is the gate. Launcher only; the bus API did not\nmove.\n"),
+    ("0.2.198",
+     "0.2.198 THE CLOCKS MOVE TOGETHER (ruled 12415, amended 12418, operator 12417).\nThe transporter's seven coupled clocks -- PENDING_TTL, RECALL_TTL,\nHANDOVER_GRACE, the pending sweep, the arrival ring, the claim poll and the\norphan wait -- now come from ONE profile: REVEILLE_TIMINGS=production (default,\nexactly the values that shipped before this existed) or =fast (the acceptance\nchain in about two minutes instead of twenty-five). Never per-knob, because the\nknobs are coupled: the corpse-stop decides by asking whether a credential still\nresolves, and that answer flips exactly when the grace closes -- a lone\noverride changes which body gets stopped without anyone choosing it. The\nordering invariants hold in EVERY profile and are gated (sweep well under\npending, poll well under ticket, grace inside pending), the handover grace may\nonly ever SHORTEN, a typo'd profile refuses at startup instead of silently\nrunning production, and /version announces any non-production profile loudly.\nITERATE ON fast, ACCEPT ON production: a PASS at 60 s proves the mechanism,\nnever the ten-minute window the screens advertise -- ship messages name the\nprofile they ran under. Operator-facing knobs (--idle-nudge, --sweep-seconds,\nROLL_IDLE_MIN, the idle-stop window, the hourly sweep) stay on their own\nflags; where both speak, the explicit flag wins.\n"),
+    ("0.2.197",
+     "0.2.197 THE SWEEP BELIEVES ITS OWN EYES (ruling 12401, plus nudge 900 per\n12246/12411). Four defects from one bricked container, each fixed at its root.\n(1) The launcher idle-stopped a 22-second-old container: a probe landing before\ntmux was up read (False, 0, 0) and is_idle measured \"idle since the epoch\". The\ncontainer's boot time is now IN the max -- never observed means idle since it\nBOOTED -- and a probe whose exec FAILS returns None, which the sweep SKIPS:\ncould-not-tell is never read as dead (8866). That SIGKILL was what interrupted\na claude self-update and bricked the body. (2) `reveille init` on a machine\nwith no claude binary died with a FileNotFoundError traceback -- the resolution\nended `or \"claude\"`, a literal whose only reachable effect was that exception.\nResolved once at the top of cmd_init; an unconfigured directory refuses by\nname with nothing installed; an ALREADY CONFIGURED one (credential +\nregistration standing) exits 0 saying DEGRADED with claude-dependent steps\nskipped, so a container entrypoint under set -e boots instead of crash-looping,\nand the Agents row shows state=degraded with the reason. (3) That row could\nnever say it: the entrypoint wrote .reveille-repo-status to container-local\n/home/agent while the launcher read the host data root -- broken since the\nhome mount became two subdir mounts. It now rides the mounted ~/.claude.\n(4) `reveille-launch new` gains --role/--role-prompt, the flag its own refusal\ntext has prescribed since r3. Also: the idle nudge default is IDLE_NUDGE_S =\n900 -- the ruled announcement floor (12246) that sat unbuilt as a bare argparse\nliteral nothing could gate -- and the repo CLAUDE.md is now PINNED to USAGE's\nreachability paragraph by a gate (red-shirt-01's), so the two doctrines cannot\ndrift apart silently again. AGENT IMAGE 0.2.22 rides this release (the pin\ngate is why: the entrypoint is a build input): claude self-update is OFF in\ncontainers -- DISABLE_AUTOUPDATER=1, image and data-root only, never a human's\nnative install -- so THE IMAGE PIN IS NOW ALSO THE CLAUDE-VERSION PIN. An\ninterrupted in-container update bricked the binary twice in one night, and the\nupdate state rides the shared ~/.claude mount, so one body's half-update was\nevery next boot's crash.\n"),
+    ("0.2.196",
+     "0.2.196 THE SPENT SECRET SURVIVES A RESTART (ruling 12393). A return ticket is\nwritten against the hash of the credential the displaced body holds, and\nclaiming one OVERWRITES that credential file with the secret it just minted. So\nafter a claim that never arrived, the spent secret -- the only thing any future\nticket matches -- existed nowhere but the running daemon's memory. Restarting\nthat daemon threw the identity's return path away and nothing anywhere said so:\nthe new one booted on the dead claim, polled with a secret no ticket is written\nagainst, and exited at ORPHAN_POLL_S looking orderly. R1 covered a body\nsuperseded while STOPPED; it did not cover one superseded, restored once, and\nthen restarted. On PARKED the daemon now writes the spent secret to\n`.claude/.reveille-parked` (0600, beside the credential file and never in it),\nprefers it over the env credential when the broker refuses that as unknown, and\nunlinks it the moment anything attaches. THE INVARIANT: THAT FILE IS CLAIM-ONLY\n-- no code path joins, sends or hands it to a session, and it is already spent\nfor every purpose except proving which machine this is. The bounded wait is\nunchanged: remembering a secret buys a body no immortality, and an unparked\ndaemon still frees the flock.\n"),
+    ("0.2.195",
+     "0.2.195 THE SELF-HEAL MUST NOT EAT THE TICKET. 0.2.193 taught a parked daemon\nto re-read its own credential file and adopt a secret that arrived by a path it\ndid not take. Claiming a return ticket writes the new secret to THAT SAME FILE,\nso a body that claimed and then missed its arrival window re-parked with a dead\ncredential on disk: different from the spent one, therefore adopted, therefore\nrefused as unknown, therefore parked again -- every RECALL_POLL_S, for ever, and\nthe claim below the check was never reached. One missed arrival window cost that\nmachine every FUTURE ticket. Measured in the negative test on 2026-08-19: the\nsecond ticket sat unclaimed while the daemon churned adopt-refuse-park at 20s.\nThe daemon now remembers every secret it has dialled and adopts only one that is\nNEW to it, so the init-rotation case still heals, the spent secret is still\nskipped, and a claimed-then-swept credential is skipped because this process\nwatched it die. Nothing about the two-phase swap or the ticket itself moved.\n"),
+    ("0.2.194",
+     "0.2.194 ONE ARM PER SESSION, AND ARMED MEANS THE HARNESS IS WATCHING. Two\ndeafnesses in one day, both with every control green. An architect armed the\nwatcher with `cmd &` inside a Bash call: the orphan satisfied the Stop hook's\npgrep and printed into nothing. An agent replaced the per-turn re-arm with\n`while true; do wake-watch ...; done` and re-fired on the SAME undeleted spool\nfile about twenty times for one ring, until the harness suppressed the flood.\nBoth are the exit-to-notify shape asking for a ritual on every turn boundary.\n`wake-watch --follow` ends the ritual: it never exits and prints each ring\nONCE, by filename, so one arm covers a whole session. The one-shot is\nunchanged and stays the fallback. Arm --follow with the harness's Monitor\ntool (persistent), never a shell loop and never `&`. The Stop hook's gate now\nmatches `wake-watch (--follow )?<role>` -- both shapes are armed shapes -- and\nits block reason names the Monitor arm first. USAGE, the init doctrine block\nand the container CLAUDE.md say the same thing in the same words. Also: USAGE\nnow documents that /mcp is stateless JSON and every tool is one plain POST,\nwith the ack example verbatim -- the escape hatch for a dead or stale MCP\nsession, which agents were rediscovering by hand.\n"),
+    ("0.2.193",
+     "0.2.193 THE PARKED DAEMON READS ITS OWN FILE. `reveille init` rotated a\ndirectory's credential IN PLACE. The identity never left the machine, so no\nreturn ticket was ever written -- and the daemon parked on the spent secret had\nnothing to claim, ever. It held the spool flock, so the Stop hook saw a live\ndaemon and never started the one that would have worked: armed watcher, no\nrings, every control green, deaf for ten minutes until someone asked why.\nA parked daemon now re-reads the credential file each poll and adopts a secret\nthat differs from the one it holds -- the file IS the identity, so that read is\nhow a parked body asks whether it is still the spent one. It refuses a file that\nnames a DIFFERENT agent (0.2.192): taking that credential would be the clobber\nbug wearing a daemon's face.\n"),
+    ("0.2.192",
+     "0.2.192 ONE DIRECTORY, ONE AGENT. `reveille init <broker> native-reveille-devops`\nwas run with no --dir from a shell sitting in red-shirt-01's directory. It wrote\ndevops' credential over red-shirt's settings.local.json, so the next session\nstarted there read the file, believed it was devops, and called join() -- which\nIS the arrival. One agent ARRIVED as another: it superseded devops' real body\nmid-turn, destroyed the handover note that body was writing, and cost two agents\nan hour of disagreeing about where devops lived. init now REFUSES a directory\nthat already names a different agent -- both names, the path, and both remedies\n(--dir for the one you meant, --force to replace this body deliberately) -- and\nit refuses before the mint, so nothing is left behind.\n"),
+    ("0.2.191",
+     "0.2.191 THE GRACE CAN ACTUALLY WRITE THE NOTE, WHERE THE NEW BODY READS IT. 0.2.190 gave a just-superseded\ncredential five minutes to write its handover note (R2) and then crashed on the\nattempt: _mem_ctx reads the memory tier off the token row, and the supersede\nDELETES that row -- which is exactly what makes revocation instant here. So\nmemory_add answered \"'NoneType' object is not subscriptable\" and the one act the\nwindow exists to permit was the one act that could not happen. Measured on\ndevops' own handover, minutes after shipping it. The identity is the source when\nthe credential is gone: bound (the grace is granted only to a bound credential),\ntier `state` (memory_add refuses every other kind from this principal), owner\nfrom the identity the tombstone names. The gate writes the note and reads it\nback AS THE ARRIVING BODY -- a permission's gate has to exercise the act the\npermission is for, read by the party it is for, or it proves only that the door\nopens onto a wall.\n  AND ONE LAYER DOWN, caught in review before it shipped: kind='state' scopes\n  through agent_scope(conn, token_id), and a handover principal's token_id is\n  \"\" -- so the note landed at scope \"agent:\", an empty bucket the arriving body\n  never reads and EVERY handover body of EVERY identity would have shared. The\n  identity is the answer and the caller already holds it: agent_scope prefers\n  agent_id when given, and memory_add, recall, brief and join's state count all\n  pass it.\n"),
+    ("0.2.190",
+     "0.2.190 WHAT THE ACCEPTANCE CHAIN FOUND (rulings 12305/12320, all measured live\non 2026-08-19 while running DES-012's chain end to end).\n  B THE ARRIVAL WINDOW IS TRUE NOW. Ten minutes was enforced only by a sweep and\n  the sweep ran hourly, so an abandoned pending credential stayed CLAIMABLE long\n  past the window every screen advertised -- a body presenting it at minute 45\n  would have displaced a live one. commit_pending refuses a pending older than\n  PENDING_TTL_NS and names when it closed; resolve_token treats one as unknown,\n  so every door answers now what it will answer at the sweep; and that sweep\n  runs on its own 60 s clock.\n  R2 THE HANDOVER NOTE GETS ITS FIVE MINUTES. A credential superseded in the\n  last five minutes keeps exactly two acts -- memory_add(kind='state') about its\n  own identity, and one send carrying the five fields -- and nothing else. The\n  swap commits the instant the far side joins, 27 seconds after the ring here,\n  and the note kept losing that race: once refused for length, once refused as\n  superseded on the retry. Doctrine order follows: commit and push, then the\n  note (short, five fields), then verify the push.\n  A THE LAUNCHER CLEARS THE CORPSE. A body superseded by an arrival kept its\n  CPU, its tmux and its ttyd, and the Agents page went on offering a terminal\n  into it -- found by the operator, twice in one afternoon. The launcher now\n  STOPS (never destroys) a container whose credential the broker no longer\n  knows, borrowing that body's own secret for one read so no standing\n  credential is introduced and G4 is untouched. An unreachable broker stops\n  nothing. The agent rail also polls while open, because a row that only\n  refreshes on a click cannot show a container something else stopped.\n  R1 A BODY SUPERSEDED WHILE STOPPED CAN COME BACK. PARKED was reachable only\n  from a live socket, so a body superseded while stopped -- or restarted after\n  -- held a spent secret and could never claim the ticket written against\n  exactly that secret. It polls with what it holds, bounded so the lock still\n  frees.\n  R5 A PENDING MINT RETIRES NOTHING. retire_waked is keyed on the agent name and\n  the spool lock is per identity per machine, so `reveille init` in a second\n  directory killed the daemon of the body that was still live.\n  R3 EVERY NEW BODY CONVERGES. reveille-agent:0.2.21 is the first agent image\n  whose toolchain is not behind the broker: bodies materialised from 0.2.20 came\n  up on 0.2.177, and a new body's FIRST turn is exactly the one that must arrive.\n  R4 the superseded refusal names the arrival instead of `reveille init --login`.\n"),
+    ("0.2.189",
+     "0.2.189 THE PICKER READS THE SHAPE THE BROKER SERVES. GET /tokens serves\nstore.list_tokens, whose `rooms` is {room_id: room_name}; cli.my_agents iterated\nit and collected the KEYS, so the agent picker printed room IDs at people as if\nthey were names. 0.2.188 made that load-bearing -- a bound re-mint carries the\nidentity's rooms -- and the mint then refused every live agent: \"carries no\nrooms you can reach\", naming the id it had just failed to match. Every stub in\nthe install tests served a list of {id, name} dicts, a shape no route produces,\nso the tests agreed with the reader instead of with the broker. The stub now\nserves the store's shape and one gate builds the payload with list_tokens\nitself. Found by running the acceptance chain's native step against a live\nbroker, which is the only place the two shapes ever met.\n"),
+    ("0.2.188",
+     "0.2.188 THE TRANSPORTER TELLS YOU IT LANDED (DES-012; the acceptance chain's\nstep 8, measured live 2026-08-19). Five defects, one shape: every one of them\nlet a move LOOK finished while the identity had not gone anywhere.\n  (1) ARRIVAL. A pending credential could open a wake socket, so a materialised\n  body showed HTTP 101, a held flock and a clean log while the identity had\n  never moved -- arrival is join(), only a SESSION calls it, and nothing on that\n  machine was causing a turn. The broker now REFUSES that socket\n  ({\"error\":\"pending\",\"retry\":true}, close 4409), so accepting one IS the\n  arrival observation; waked answers by ringing its own spool\n  (reason=not-arrived, one a minute) and rings it on a claimed return ticket too\n  (reason=recalled). The ring is the one act a daemon has that produces the turn\n  that produces the join. Doctrine and USAGE carry the instruction. A credential\n  the broker does not know AT ALL (the arrival window closed and the sweep took\n  it) sends a body that was parked BACK to parked, on the credential it was\n  superseded on, still polling for a ticket -- a missed window is retried at the\n  next one and never costs the box its daemon (architect 12284). A body that was\n  never parked has nothing to fall back to and still exits. Note for anyone\n  reading a materialised container's log: the 4409 refusals before the agent's\n  first turn are the intended path, and the daemon says so.\n  (2) ONE PENDING PER IDENTITY. Three unclaimed pending credentials for one\n  agent coexisted; any could claim, so the body that arrived was whichever\n  joined first, not the one just minted. A bound mint now deletes the identity's\n  unclaimed pendings (discarded_pending in the reply; init prints it, because\n  the person holds a link or container that is now refused).\n  (3) MINT LAST (ruling #126, regressed in 0.2.186, re-ruled 12271). init\n  minted BEFORE the MCP registration, so a refused `claude mcp add-json`\n  printed \"nothing installed\" over a credential that already existed -- and,\n  being bound, rang the working body into a full handover cycle for an install\n  that never happened. The mint is now the last act, after every local step that\n  can refuse.\n  (4) IDEMPOTENT REGISTRATION. 0.2.186 dropped the `mcp remove` before\n  `add-json`; the real binary refuses a duplicate (\"already exists in local\n  config\", no --force), which is what killed step 8 on the second run.\n  (5) ROOMS. A bound re-mint with no rooms named carried every room the OWNER\n  could reach -- an agent in one room materialised into three, including one it\n  had deliberately left. It now carries the IDENTITY's rooms, and refuses rather\n  than minting a credential that reaches nothing.\n  ALSO: the Send-it-back dialog says what happens after the click and its button\n  is \"allow it back (5 min)\"; scripts/deploy-launcher finds uv the way\n  deploy-preflight does (non-login ssh has no ~/.local/bin, and it failed AFTER\n  the broker was recreated); init no longer DELETES a .mcp.json that git tracks\n  -- it empties it and leaves the removal to its owner.\n"),
+    ("0.2.187",
+     "0.2.187 SIGN IN ONCE FROM THE CLI (DES-022; operator 12161, architect 12162/12165).\n  `reveille login [url]` prints ONE link, you click it in any browser on any\n  device, and the terminal continues on its own -- then `reveille init <url>\n  <agent>` mints from that sign-in with nothing pasted. The credential is the\n  SAME web session a browser gets, stored at ~/.reveille/auth.json (0600), one\n  per machine; `reveille logout` ends it and removes the file. A revoked session\n  re-prints the link inline at the next init: that IS the re-auth path.\n  Broker: GET /auth/cli?cli=<state> is the page the link opens, POST\n  /auth/cli/<state> registers a waiting terminal, GET returns 202 / 200-once /\n  404-expired. --create now REQUIRES --rooms (a new identity with no rooms\n  named is a throwaway that lands wherever its owner happens to be).\n  A broker with no doors has its password door open, so the CLI takes the\n  password itself and opens no browser at all.\n0.2.186 NOTHING PER-AGENT IS TRACKED (architect 12167/12169, operator 12164 and\nthe hash requirement). `reveille init` used to write two per-agent files into\nthe project's working tree and rely on the person's own git config to keep the\ncredential out of a commit.\n\nTHE LEAK, MEASURED. The agent credential lands in\n<dir>/.claude/settings.local.json. On the machine where this was built, a\nPERSONAL ~/.config/git/ignore covered it; the reveille repo's own .gitignore says\nnothing about .claude, and init never touched any ignore file. So on any other\nhost, any other user, any CI checkout or fresh clone, a live agent token sat\nuntracked-but-not-ignored, visible in `git status`, one `git add -A` from a\npublic repo. init now writes `.claude/.gitignore` containing\n`settings.local.json` -- a normal ignore file in a directory THIS INSTALLER\nCREATES, so it ships beside the credential and a clone that gets one gets the\nother. NOT the repo's own .gitignore (the project's file, not ours) and NOT\n.git/info/exclude: that is the user's git config, and a tool that writes there to\nprotect its own mess is fixing the wrong layer (operator). Verified in a real\nrepo: `git add -A` now stages the ignore file and stages NOTHING containing the\ntoken.\n\nTHE REGISTRATION MOVES TO LOCAL SCOPE. <dir>/.mcp.json carried no secret -- the\nheadersHelper is a mechanism name, not a credential -- but it was still\nper-agent configuration in a shared tree, and in a checkout two people share it\nis one more thing to collide over and commit. `claude mcp add-json --scope local`\nkeys the same registration to this project path in ~/.claude.json: read\nidentically, never in the tree, and needing no enableAllProjectMcpServers\napproval. An earlier init's project-scope entry is MIGRATED AWAY on the next run,\nbecause two registrations for one server is how a body ends up authenticating\ntwice by different rules; every other server in that file is somebody else's and\nsurvives, and a file left holding nothing is removed.\n\nTHE DOCTRINE BLOCK MOVES TO CLAUDE.local.md. Claude Code loads both, but\nCLAUDE.md is the PROJECT's file -- tracked, shared, written by whoever owns the\nrepo -- and this block carries the agent's own name and role. In a shared\ncheckout two people's agents would overwrite each other's block in a tracked file\nand commit the fight. A block an earlier init left in CLAUDE.md is lifted out by\nits markers on the next run, and nothing outside them is touched.\n\nTHE MARKER IS NOW A SIGNATURE, not just a fence (operator). It carries the\nwriting version AND a sha256 of the block body, which separates three states the\nold version-only check collapsed into two: file==marker==expected is current;\nfile==marker!=expected means the doctrine moved on; and file!=marker means\nSOMEBODY EDITED INSIDE THE MARKERS. Only the third is silent under a version\ncheck, and it is exactly how a stale doctrine survives -- a person tweaks one\nline, the version still reads current, and every later boot agrees with the edit\ninstead of correcting it. That case is now repaired and said out loud.\n\nWHAT IS STILL NOT COVERED, said rather than implied: CLAUDE.local.md lives at the\nproject root, where a .gitignore of ours cannot reach it. It is per-agent text,\nnot a secret, so init WARNS and names the one line that fixes it rather than\nreaching into a repo file or a git config that is not ours to write.\n"),
+    ("0.2.185",
+     "0.2.185 THE TOOLCHAIN CONVERGES TO THE BROKER (architect 12128, operator ask\n12126). The MCP is not a local program -- .mcp.json points at the broker's /mcp,\nso its tools are whatever the broker serves and cannot lag. What lags is the\nTOOLCHAIN on the machine: waked, the Stop hook, the cli, the upload headers. So\n\"the MCP upgrades itself\" means \"the local toolchain converges to the broker\",\nand waked now does it: once an hour, before dialling, GET /version and compare.\n\nMEASURED, WHICH IS WHY THIS EXISTS. On 2026-08-19 the operator's laptop was on\n0.2.178 against a 0.2.184 broker and nobody knew until it was grepped -- six\nreleases, and the recall-claim path shipped in 0.2.179, so a body there would\nhave passed six steps of the DES-012 acceptance chain and DIED ON THE SEVENTH\nlooking like a protocol defect rather than a stale install. The live architect\nCONTAINER was worse: 0.2.132, fifty-two releases behind, because a container's\ntoolchain is baked at image build and nothing moved it afterwards.\n\nUPGRADE-ONLY, AND THE COMPARISON IS `<` NOT `!=`. The install source is main's\nHEAD, not a version, and main is normally AHEAD of the deployed broker -- it\nmoves on merge, the deploy lags. `!=` would see a body that just installed\n0.2.185 against a 0.2.184 broker, call it divergent, reinstall the same 0.2.185,\nand repeat once an hour for ever, on every body, silently. Running\nnewer-than-broker is the ordinary state for the minutes after a merge and must\nnot be pathological. Behind: converge. Equal or ahead: nothing. There is a test\nnamed for that loop.\n\nIN WAKED, NOT THE STOP HOOK. The hook must never probe the broker (ruling 8573,\nthe 21-hours-deaf lesson): it runs at every turn boundary and anything slow or\nunreachable there costs the session. waked already dials the broker, is the only\nlong-lived local process, and can fail open with nobody waiting. Every failure\npath is one stderr line and the old code keeps working; the whole call is\nshielded because it runs inside the reconnect loop, and an exception escaping\nthere would kill the wake path -- going deaf to fix a version number is not a\ntrade worth making. The interval is burned even when the probe throws, so a\nbroker outage cannot become a probe-per-reconnect storm. On success it\nos.execv's itself: the environment carries the credential, the flock is retaken,\nand a ring that lands mid-swap waits in the spool and fires at the next arm.\n\nBOTH THE PROBE AND THE EXEC GO THROUGH THE CONSOLE SCRIPT, never `python -m`\n(caught in review). Re-execing as a module leaves argv[0] pointing at the module\nFILE, which is not executable, so the next hour's --version probe raises, the\nshield catches it, and convergence reports \"check failed\" for ever after -- the\nfeature would have worked exactly once per machine and then gone quiet. A thing\nthat silently stops converging is indistinguishable from the stale toolchain it\nwas meant to fix.\n\nUV IS A BOOTSTRAP DEPENDENCY, NOT A PREREQUISITE (operator 12140). It is one\nself-contained binary that brings its own python and needs no admin, so a\nmachine without it is one curl away -- the same install the agent image already\nruns. A uv that is missing AND unfetchable skips the convergence; it never fails\nthe daemon. Windows takes the same shape with install.ps1 and belongs to DES-021,\nnot here: nothing in waked runs on Windows yet (fcntl is imported at module top),\nso branching for it now would be dead code pretending to be support.\n\nNATIVE AND CONTAINER ARE THE SAME CODE, because waked runs in both. The\ncontainer consequence the architect accepted: its toolchain can now legitimately\nexceed the image pin. The launcher's `version` read verb still reports only the\nimage -- asking the container would mean `docker exec`, and THE READ ROUTE MAY\nNOT EXEC (11965: the launcher holds the docker socket, so a verb that runs\nsomething in a container hands an HTTP caller the host). A drift this route\ncannot see is not worth that capability; the toolchain version belongs on the\nagent's own report to the broker, and the verb now says so where the next reader\nwill look.\n"),
+    ("0.2.184",
+     "0.2.184 THE CACHE OUTLIVED THE OUTAGE, AND A FALLBACK RENDITION IS NEVER KEPT\n(ruled 12101). THE ROOT FIX, because the purge below is only the symptom:\ntts_voice() with an ASSIGNED bank clip that the synthesizer cannot see now\nreturns None -- silent, no bytes, nothing cached -- instead of falling through\nto the digest pick. Falling through sounds like the generous choice and is the\nopposite: some audio does NOT beat none when the audio is kept. The next play\nPOSTs /audio/<mid>, finds no file, and re-queues it against a synthesizer that\nhas since reconciled, so the silence lasts one click rather than forever. The\npredefined digest pick stays exactly as it was for UNASSIGNED speakers, who were\nnever promised a particular voice; a speaker WITH an assignment is owed that\nvoice or none (DES-009 section 7, silent by design).\n\n\nONE MORE DEFECT, FOUND BY THE OPERATOR'S EAR AND CAUSED BY THIS WORK. Moving\nthe synthesizer meant restarting it repeatedly -- host move, two image builds, a\nbatch-size sweep -- and the broker pushes every bank clip to the synthesizer on\nworker start. 156 of those pushes hit `Connection refused` while the container\nwas down. A message voiced during one of those windows could not reach its\nassigned clip and fell back to another voice, and THAT RENDITION WAS THEN CACHED\nas tts-<mid>.webm. The result is a transcript that plays back in the wrong\ncharacter -- and, because different messages missed different clips, one that\nseems to drift between characters as you scroll. The audio was not wrong when it\nwas made; it was made wrong and then kept. Purged all 1304 cached files\n(147 MB); POST /audio/<mid> re-queues anything whose file is absent, so the next\nplay regenerates against a synthesizer that now holds all 31 clips. The lesson is\nnot about voices: ANY cache written during a dependency outage outlives the\noutage, and nothing downstream can tell a stale-correct file from a fresh-wrong\none.\n\nALSO 51a693b in the fork: generation is serialised. chatterbox_model.conds is\nprocess-wide and the non-batched path assigned it and then called generate(),\nwhich reads it back off the model -- two steps a concurrent request could split,\nmaking one request speak in another's voice. synthesize_batch already avoided\nthis (see _resolve_conds, whose docstring names the failure); the non-batched\npath could not, because generate() is what reads self.conds. The broker runs ONE\nvoice worker on one queue, so this was never the drift reported above -- it is a\nlatent race that the batch-size change made reachable, fixed on sight rather than\nleft for whoever adds a second caller.\n"),
+    ("0.2.183",
+     "0.2.183 THE SYNTHESIZER MOVED, AND LEARNED TO HEAL ITSELF (S3.1, ruled 12084 at\noperator ask 12082; host move on operator directive). The voice ran on the\noperator's laptop and went silent; it now runs on titan.vyzon.ai\n(192.168.89.104:18004) and the broker reaches it by REVEILLE_TTS_URL alone --\nwhich is exactly what DES-009 s3's \"hostable off this network later\" was for.\nThe move cost one environment variable and nothing else.\n\nIT DID NOT FIT, AND THE REASON WAS NOT THE MODEL. titan's card is 4096 MiB and\nthe load OOMed 2 to 26 MiB short at s3gen.to(device), identically across cu128\nAND cu130/torch 2.10 AND TTS_BF16 both off and on -- six measured cells, all\ndead at the same line. Checkpoint arithmetic said 746M params = 2.98 GB fp32 and\nshould have left ~700 MiB free. The missing 1.5 GiB was NOT WEIGHTS: T3 carried\n24 bool buffers `attn.bias` of shape (1,1,8196,8196), 64.1 MiB each, 1537.5 MiB\ntotal -- GPT-2's legacy materialized causal mask, registered per attention layer\nby transformers 4.46.3 while the model config already selects `sdpa`, which\nbuilds causality on the fly and NEVER READS THEM. Allocated, moved to the GPU,\nignored. Buffers do not appear in safetensors headers, so every estimate from\ncheckpoint size was blind to them, and a dtype cast could never have helped: it\ntouches floating-point parameters and leaves bool buffers at full size. Fork\nede3c6f loads on CPU, drops them, THEN moves -- fp32 load 2665.9 MiB, peak 2952\nMiB, RTF 0.39 on the card that had been called too small. Gated on the attention\nimplementation deliberately: under `eager` the layer really does index that\nbuffer, and dropping it there would not raise, it would quietly yield a model\nthat attends to the future. docker/tts.upstream moves to ede3c6f; TTS_IMAGE to\nreveille-tts:0.2.4.\n\nA SECOND DEFECT THE MOVE EXPOSED: TTS_BATCH_SIZE unset defaulted to 4, tuned for\nan 8 GB card. On 4 GB every multi-chunk request OOMed inside synthesize_batch and\nfell back to sequential -- CORRECT AUDIO, an OOM per request, and nothing in the\nresponse to say so. That silence IS the defect: a value tuned for the biggest\ncard taxes every smaller one invisibly, surfacing only if somebody happens to\nread the container log. So the unit's default is now 1 (ruling 12089) -- the\nvalue that cannot do that -- and a bigger card RAISES it per host after measuring\nthere, never by inheriting a number measured on different hardware.\n\nTHE WATCHDOG (deploy/reveille-tts-watchdog.{sh,service,timer}). systemd restarts\na unit whose PROCESS died; the failure that matters here is the opposite --\ncontainer up, port answering, model gone -- and systemd will supervise that\nforever. So the probe asserts the MODEL: /api/model-info reports loaded AND\ndevice != cpu, because a server that fell back to CPU answers every request at\n1.6x realtime and nothing else in the stack will ever notice. Escalation is\nordered by blast radius, each step only because the cheaper one already failed\nthree times running: 3 consecutive -> restart the unit, 6 -> reload nvidia_uvm\nand restart (this host suspends, and suspend wedges nvidia_uvm), 9 -> reboot;\nnvidia-smi dead skips the ladder entirely, because restarting a container onto a\ncard that cannot be talked to is theatre. NEVER TWICE IN AN HOUR: a reboot loop\ndestroys the evidence every time it comes back, and the timestamp is a file in\n/var/lib precisely so the guard survives the reboot it guards. A probe is\nignored while the unit is younger than 15 min -- the model load is minutes, and\na shorter window restarts it mid-load forever, silently, because each restart\nlooks like a fresh start. THE BROKER IS NEVER TOUCHED: the voice worker retries,\nso restarting the bus to fix a speaker would take the fleet down for a cosmetic\nfailure.\n\nTHE COMPOSE SYNTHESIZER IS GONE, not deprecated: the `tts:` service, the\ntts-cache and tts-reference volumes, the voices profile doc, and the TTS_NAME\npassthrough are deleted. It has been dead since S3 and a second way to configure\none container is the shape defects hide in.\n0.2.182 THE SYNTHESIZER AS A HOST SERVICE (S3, ruled 11961/11965). The TTS runs\nfine as compose's `voices` profile; what it cannot do there is start without\nsomething holding the docker socket -- and S2 ruled the launcher never gains\nexec/run/compose, so the agent that keeps this fleet alive has no way to bring\nthe synthesizer back and MUST NOT BE GIVEN ONE. deploy/reveille-tts.service\nmoves that authority to the machine's own init: the operator installs it once,\nand afterwards it survives reboots, restarts on failure, and is controlled by a\nhuman with systemctl. Same image, port, volumes and GPU reservation as the\ncompose service -- one container under a different supervisor, not a second way\nto configure it. WHERE IT LISTENS IS A DEPLOYMENT FACT, NOT A CONSTANT: the\nfirst draft hardcoded 127.0.0.1:8004, which is right for a broker on the same\nhost and WRONG for this fleet, where the synthesizer runs on the operator's\nworkstation and the VM broker calls it across the LAN at\nREVEILLE_TTS_URL=http://192.168.90.136:18004 -- installed as first written it\nwould have SILENCED THE FLEET'S VOICE the moment it replaced what runs there now\n(caught in review). Bind and published port come from Environment= with the\nsame-host case as the default, and the unit's header carries this deployment's\noverride measured from the running container: image tag, both data paths, and\nthe working tree bind-mounted over /app. That last one rides an UNBRACED\n$TTS_EXTRA because systemd word-splits $VAR and passes ${VAR} as a single\nargument -- and it matters, because the server's own CODE comes from disk here,\nso a unit that silently ran the image's copy would be different software under\nthe same name. Always ONE address, never 0.0.0.0: unauthenticated by design\n(DES-009 s3, one caller, no public port) means it answers where the broker was\ntold to call it and nowhere else, and the LAN_PLAINTEXT allowlist naming one\nhost is the operator's ruled acceptance of that hop in the clear -- not a\nlicence to answer on every interface. TimeoutStartSec=20min because\nthe model downloads on a fresh cache and a default timeout kills it mid-download,\nthen kills the retry, forever, while the journal says only \"timed out\".\nALSO deploy/reveille-laptop-awake.conf, shipped and installed by NOBODY. A\nlaptop is a fine host for a native agent, but the defaults are written for a\nlaptop someone CARRIES: suspend on lid close, blank on idle. An agent whose host\nis suspended has gone deaf with no error anywhere -- which reads exactly like\nthis week's wake-path defects and cost an evening to tell apart from one (the\noperator's black screen, 2026-08-18, was a lid flap). No deploy installs it and\nnone may: it changes how a person's own machine behaves when they shut the lid,\nand that is their deliberate call, not a side effect of updating a broker. Gated\nboth ways.\n0.2.181 THE LAUNCHER READS, AND THE LINE AROUND WHAT IT WILL DO (S1+S2, DES-006\ns7.3; ruled 11961, hard line 11965, host rule 12066). S1 -- auto-roll on deploy\nunder an idle rule -- has been shipping since 0.2.170 and is now written down as\nbuilt. S2 is the other half: what the launcher does when a person ASKS.\nTHE LAUNCHER HOLDS THE DOCKER SOCKET, and everything here follows from that. A\nverb that could run something inside a container is a verb that hands an HTTP\ncaller the host, and the answer to \"just this once\" is that the same argument,\nmade once, is the socket-in-the-container design r1 refused on the same day. So:\nGET /agents/<agent>/read/<verb> answers `logs`, `version` and `inspect`, and\nNOTHING ELSE -- no exec, no run, no compose file, ever. GET only, and declared\nBEFORE the lifecycle catch-all, which takes any verb on POST: a read must not be\nreachable by a method that also reaches start, stop and destroy.\nOwner-scoped like every other launcher verb, and HOST-SCOPED WITH A VOICE: an\nagent alive on another machine gets a 409 naming that -- \"no container on this\nhost. If it is alive, it is alive somewhere else\" -- never an empty log with a\n200. Returning nothing would be the unreachable-control defect this week has\nbeen spent closing: a control that says nothing, read by a person as nothing to\nsay. `inspect` answers a SHAPE (status, started-at, restarts, image, health) and\nnever docker's blob: Config.Env is where credentials live, and a read verb that\nreturns them has handed out the thing the credential design exists to protect.\n0.2.180 THE ROW SAYS WHERE THE BODY IS (ruling 11945, owed since 12055). The\npane could distinguish \"a body here\" from \"a body somewhere else\" and nothing\nfurther, so an identity MID-SWAP looked exactly like one that was simply away,\nand an identity with NO credential at all looked like one that had merely\nstopped -- which is the state reveille-red-shirt sat in on 2026-08-18 while\nevery control read normal, and the state the operator asked about and could not\nbe answered. Two-phase made both answerable: a PENDING credential is a swap in\nflight, and the absence of any live one is a bodyless identity. Neither is\nderivable from presence, which is why nothing could say them. agents_seen now\ncarries `moving` and `bodyless`, the launcher gives each its own row state --\ndecided BEFORE `elsewhere`, because a swap in flight is not the same fact as a\nbody working somewhere else -- and the pane says what each means: moving names\nthat the current body KEEPS WORKING and that the swap may come to nothing;\nno-live-body names that the identity's name, history, memories and lessons are\nuntouched and points at the remedy. Neither is painted as a fault, and destroy\nis withheld mid-swap: the body being replaced is still working, and destroying\nthe record underneath it is not a choice anyone should make by accident. An\nambiguous name raises NO alarm -- this flag exists to raise one, and an alarm\nthe code is not sure about is noise.\n0.2.179 THE RETURN TICKET (DES-012 s14; ruling 11941 Part B). A superseded body\ndid not have to be destroyed to be replaced -- its machine is still there, still\nholding the credential that went dead. Since 0.2.176 that machine PARKS instead\nof exiting; now it can come back without anyone pasting a secret. The owner\nopens a five-minute window (\"send it back\" on the agent row) and the parked\ndaemon claims it by presenting the SUPERSEDED credential it already holds,\nreceiving a fresh PENDING one in exchange. THE EXCHANGE IS THE WHOLE DESIGN: no\nlive secret crosses the bus, and the only party who can claim is the machine\nthat was already trusted with this identity -- which is exactly what the owner\nis relying on when they call it back. The broker stores no credential it could\nhand back: a ticket holds only the HASH it will be shown, the same hash the\nsupersede tombstone already keeps, so an offer sitting in the table is worth\nnothing to whoever reads the table. One claim per ticket, stamped in the mint's\nown transaction, because two daemons booted from one disk image would otherwise\nboth return with the same right and the second would displace the first as a\nstranger. The claim route answers 204 for a miss rather than 401 -- the parked\ndaemon polls it, \"no ticket for you\" is the ordinary answer, and making the\nnormal case look like an auth failure buries the real ones. An identity with\nnothing displaced cannot be recalled, and says so, because an offer that could\nnever be claimed is not an offer. Unclaimed, the window closes and the working\nbody was never touched.\nAlso: the last screen still promising the old mint. openToMachine's success\ntoast said \"its old body is dark\" -- a dialog that reads correctly and then\nannounces the opposite on success has told the truth and the lie in the same\ninteraction, and the toast is the half the person is looking at when they let\ngo. Swept, and the gate now asserts the whole page is free of that wording\nrather than checking screens one at a time.\n0.2.178 THE MENU ON AN AGENT IS ITS DESTINATIONS (DES-012 s13; operator GO\n11930, ruled 11932). Every verb on an agent row is the SAME act underneath -- a\nbare attach on an identity that already exists, PENDING until the new body joins\n-- and they differ only in where that body wakes and who has to agree: MY\nCONTAINER (this host, one click), MY MACHINE (a shell of mine; the command is\nshown once and this page never runs it -- a native body is that whole machine\nhanded to an agent, and that is a grant a shell makes with a human at it, DES-008\ns4), ANOTHER HUMAN'S MACHINE (a visit push: they accept before anything is\nminted), and SOMEONE ELSE'S AGENT TO MINE (a visit pull, in the Visits tab,\nbecause it is a request and not an act).\nEVERY ONE OF THESE SCREENS NOW TELLS THE TWO-PHASE TRUTH. They were written\nagainst the old mint and promised that the working body \"goes dark the moment\nthis is minted\". Since 0.2.176 that is false: the old body KEEPS WORKING until\nthe new one joins, the swap commits on arrival, and an unclaimed credential\nexpires in ten minutes with nothing changed. A dialog that overstates what a\nclick costs is worse than one that understates it -- it deters the move that is\nnow safe.\nAN AGENT ALIVE ELSEWHERE IS NOT A BROKEN AGENT (operator 11995, with a\nscreenshot of both halves). Its row was painted with the failure class, because\nthat class came from `status==='absent'` and an elsewhere row carries exactly\nthat -- there is no container HERE, which is the entire point of the row. Broken\nis now a STATE predicate, and elsewhere/retired/erased are not it. The same row\nalso landed under \"no room\": /tokens is owner-scoped and answers nothing for a\nbody it does not hold, so three refresh paths that called tokenRooms() alone\ndropped those agents into the ungrouped bucket while the hive knew their rooms\nperfectly well. One helper (railRooms) composes both axes now, so a fourth path\ncannot reintroduce it -- the visit consent keeps the token-only axis on purpose,\nbecause it is asking what the CREDENTIAL carries, not where the hive has seen it.\nAlso DES-010 s10.1: an agent-image tag bump is a build on EVERY provisioning\nhost, not only the one that authored the change. The 0.2.177 deploy refused\nitself on exactly this -- the pin said 0.2.20 and the deploy host had 0.2.19 --\nwhich is the gate working, and the rule it implies was nowhere written down.\n0.2.177 THE HANDOVER NOTE, AND WHAT THE MOVE ALREADY KNEW (DES-012 s16; ruled\n12018/12019/12022 from the operator's 12015: \"when an agent is asked to\ntransfer, to the cloud or native, it needs to write its current memory/state to\nreveille specific for itself to resume in the new location\"). Buildable only\nnow: under the old mint the outgoing body was dead the instant the credential\nlanded, so there was no moment in which it could write anything down. Two-phase\ncreated that moment. At a PENDING mint the broker now RINGS the body that is\nstill live with `reason: swap-pending` (successor named when known) -- a ring,\nnot a close, because that body is still the live one and may keep working. The\ndoctrine block teaches the response, in two acts and in this order (operator\n12023, ruled 12024). (1) SAVE THE WORK: files do not travel, so a note\ndescribing uncommitted work the new body cannot reach is a description of\nsomething lost -- commit everything uncommitted to wip/<agent>/<utc-ts> and push\nit, never onto main and never force, because that branch exists so the far side\ncan FETCH it, not so it can overwrite anything. (2) WRITE THE NOTE: memory_add\nkind=state with the task, that branch and sha, next step, open threads and what\nis still undone; if the push was impossible, say exactly \"unpushed at\n<host>:<path>\" so the new body knows the work is stranded rather than assuming\nit travelled. The new body fetches that branch before it does anything else.\nThen carry on -- if the swap never arrives, nothing about the old body's\nsituation changed. The note is the AGENT'S act, never synthesised: the broker\ncannot know what is worth saying, and a fabricated handover is a record of work\nnobody did. State notes are already identity-scoped, so they travel; FILES do\nnot move (s2.1 stands), which is exactly why act (1) exists.\nFOUND WHILE CHECKING THAT SCOPE: join()'s brief_available counted state notes at\nagent:<token_id> while every writer stores them at agent:<agent_id>. A bound\nagent's own resume point was invisible in the one number the boot ritual\nadvertises. Both sides go through store.agent_scope() now -- the same\nreader/writer split that docstring already records as having cost the fleet its\ndata once.\nR1: the move dialog NAMES what a container body cannot do -- \"no docker, no host\nshell; work that needs the host stays behind\" -- in the same register as WILL\nNOT TRAVEL. Not a refusal: the launcher holds no fact \"this role needs a socket\",\nand the owner is the one who knows whether this agent's work needs the host.\nR2: THE CLONE THAT NEVER RAN. The entrypoint guarded on \"~/repos is empty\" --\nand `reveille init --dir /home/agent/repos` runs above it, writing .mcp.json and\n.claude/ into exactly that directory. The answer was always \"not empty\", so the\nclone was SKIPPED on every boot that carried a repo URL and the report said\n\"already had content\" as though a human had put it there. reveille-red-shirt came\nup with a repo URL, no repo, and every control green. The guard is on the WORK\nTREE now, the boot report carries `repo: <url> @ <sha>`, and a failure writes a\nfact the launcher reads: a running container whose repo never arrived is\nDEGRADED in the Agents pane, with the reason, instead of looking identical to one\nthat never wanted a repo.\nR3: the move CARRIES the role the launcher last provisioned with -- prefilled,\neditable, and a change said out loud (\"ROLE CHANGES from X to Y\"). The picker is\ndemanded only when no role is known. Asking again for something already recorded\ninvites a different answer by accident, and a body wearing a role nobody chose to\nchange is a silent rewrite of what the agent is. The column is `role_name`, NOT\n`role`: that word is the pre-P0 agent-name column, and the launcher migration\nkeys its whole table rewrite on seeing it.\nAUTO-SEND WAS INERT ON EVERY IPHONE (operator 12035, from a car: \"the auto send\ncheck box is set but auto send is not working ... this may only be because i'm\nconnected to carplay\"). It was not CarPlay. iOS Safari cannot start the ONNX\nVAD -- it refuses the WASM memory -- so an iPhone listens through the fallback\near and `listenVad` stays null for the whole session. The pause-to-send\ncountdown was gated on that variable alone, so on the device most likely to be\nhands-free the setting was ticked, persisted, displayed and did nothing. It has\nbeen inert since the fallback ear shipped (11719). The question a countdown\nneeds answered is \"is this session LISTENING\", which is what the toggle itself\nasks: earListening() now, and the ring earcon with it.\nAlso: deploy-preflight resolves uv itself instead of trusting PATH (a deploy that\nworks when a human types it and fails from anything automated is the worst shape\na deploy step can have), and names the paths it tried when it cannot find it.\n0.2.176 A BODY SWAP IS TWO PHASE (DES-012 s15; ruling 11941 Part A, 11945,\n11947, 12008). The mint used to seize the identity -- it superseded the working\nbody in its own transaction, BEFORE the new body existed -- so everything that\nfailed afterwards left the identity with NO live credential at all: a missing\nrole prompt, a docker error, a person who never ran the command. reveille-red-\nshirt was stranded that way on 2026-08-18 and native-reveille-devops after it.\nNOW THE MINT TAKES NOTHING. A bound mint on an identity that already has a live\nbody returns a PENDING credential (`pending: true`); the old body keeps working;\nthe new body's first join() IS the arrival and commits the swap in ONE\ntransaction -- pending goes live and the old is superseded at the same instant,\nso there is never a window with two live credentials and never one with none.\nThe readiness act is join() itself: no new verb, no fork window. A pending\ncredential may call join() and NOTHING else -- every other route, read or write,\nrefuses with \"pending: join first. ... the identity's previous body is still the\nlive one\". No arrival inside 10 minutes and the broker's own sweeper deletes the\npending token: the machine that was working keeps working and never learns\nanything happened. That is the whole NAK path, and a bodyless identity stops\nbeing reachable from this path. A first mint for an identity with no live body\nis live at once -- a pending nobody can commit would BE the bodyless state.\nTHE DISPLACED BODY IS NOW TOLD ON THE SOCKET IT IS STILL HOLDING. Measured\nlive: a supersede revoked the credential everywhere HTTP and MCP could see it\nwhile the old body's WebSocket stayed ESTABLISHED for an hour, still receiving\nrings on a credential the broker refused for every other purpose, never sent a\nclose, a 401 or anything it could log. One credential, two verdicts, and the\nsilent half held the socket. On commit the broker now closes that waiter with\n`reason: credential-superseded` naming the successor and the time, and waked\nPARKS on it: prints why, names the way back (`reveille init`), does not\nreconnect. Related: waked's retry line rendered `reveille-waked:  -- retrying in\n15s` for an hour, because websockets' closed exceptions str() to nothing --\nit falls back to the class name plus the close code now.\nA RE-KEY REACHES THE DAEMON. waked reads $REVEILLE_TOKEN once, at spawn; one\nheld a credential for 4h46m across a swap and back while every file on disk said\nthe machine was configured correctly. `reveille init` now retires the running\ndaemon -- by PID from the spool lock, which the flock proves is the holder,\nnever by a pattern match on the process table -- and the Stop hook starts a\nfresh one on the new credential.\nNAMING A ROOM AT THE MINT CLEARS A STANDING LEAVE (r4, ruling 11938). Measured\nthe same day: after a swap the new body's bare join() answered rooms=[]\nskipped=[Reveille2.0]. A leave recorded by a previous body outlived the\ncredential that made it, and the agent sat silent in a room its owner had just\ngranted it. An owner ticking a room on a mint is a deliberate act with exactly\njoin(room=X)'s semantics, so it clears the leave.\n0.2.175 THE INSTALLER COULD NOT REPLACE A DEAD CREDENTIAL (operator, live:\n\"the install script does not correctly edit the project specific\nsettings.local.json\"). Two reads of $REVEILLE_TOKEN, both wrong in the one\ndirectory that matters. Claude Code injects a directory's own\nsettings.local.json env into every shell it starts, so INSIDE AN AGENT\nDIRECTORY that variable is always set -- to the credential the person is\nrunning the installer to REPLACE. (1) read_token() read the environment FIRST,\nso a freshly minted secret piped in was discarded, the dead one was verified,\nand the refusal read as though the paste had been wrong. Explicit wins now:\nstdin and the flag are deliberate acts by someone holding the new secret on\ntheir screen, and the environment is the fallback for a re-run that supplies\nnothing -- still the security order, no longer the order that ignores the\nhuman. (2) cmd_init treated the mere PRESENCE of that variable as \"already\nconfigured\", skipped the login wizard entirely and rewrote the dead token over\nitself: the file's mtime moved while its contents never changed, exit 0,\nnothing said. The operator minted five credentials in a row, each superseding\nthe last, and the directory kept the first. A credential in the environment is\nnow a CANDIDATE -- asked about once, and a token the broker REFUSES is treated\nas absent, so the wizard offers a login and --no-prompt refuses in the words of\nthe refusal. Only a refusal counts: verify() answers False for \"refused\" and\nNone for \"could not ask\", because silence from an unreachable broker must not\ncost a machine a credential that is probably fine; that is what --force is for.\nOne probe, not two -- the install-time gate reuses the answer.\nALSO, THE THREE ROOM AXES, WHICH 0.2.174 CLAIMED AND NEVER SHIPPED. That entry\nsays the move offers only the rooms the mover and the agent share; the commit\ncarrying it landed after PR #126's merge cut, so main never held a line of it.\nIt lands HERE, and through one helper every body-swap screen reads rather than\na rule written once per screen. With a token holding rooms 1, 2 and 3, joined\nto 2, offered to a mover who holds 2 and 3: the LIST is rooms 2 and 3 (its\ntoken INTERSECT mine), the TICKS are room 2 (where it is actually joined, so\nthe default carries what it uses), and room 1 is COUNTED, never named -- a room\nthe reader is not in is not a room this page may spell out. Nothing is ever\nadded; granting reach stays the Tokens tab. WILL NOT TRAVEL is named on the\nmove and on the visit request, and the OWNER's accept names the full delta,\nsince they are the one person who can see everything their agent holds.\n0.2.174 THE MINT IS THE LAST IRREVERSIBLE ACT (live incident on\nreveille-red-shirt; ruled 11911). POST /agents minted the bound token BEFORE\nprovision_agent validated. A mint supersedes the identity's previous\ncredential the instant it lands, so the refusal that followed -- correct in\nitself, a missing role prompt -- left that identity with NO live credential at\nall: both bodies dark, gone from presence, and the cleanup revoked the new\ntoken so nothing remained to say why. The operator asked \"what happened?\" and\nthe system could not answer. Now every refusal is answerable BEFORE anything\nis minted: provision_refusal() holds the name, re-provision, cap, claude\ncredential and role-prompt checks with no side effects, the route calls it\nfirst, and provision_agent calls the same function -- so the CLI path and the\ninvariant cannot drift apart. A failure AFTER a swap-mint (docker itself\nfailing) still revokes, but says what state that leaves behind: \"<agent> now\nhas NO LIVE BODY: its previous one was superseded when this mint landed. Its\nidentity, history and memories are untouched. Retry the move, or mint it a\ncredential in the Tokens tab.\" A silent revoke is how an agent vanished from\npresence with no reason. Also, per the operator (11913), the move dialog now\noffers only the rooms the mover and the agent SHARE, never the mover's whole\nlist: a body swap is not the place to hand an agent reach it never had -- that\nis the Tokens tab, where granting reach is the point of the screen.\n0.2.173 THE MOVE ASKS FOR WHAT IT NEEDS, AND NAMES WHAT IT COSTS (operator's\nfirst real click on 0.2.172; ruling 11902). Two things the move dialog got\nwrong. (1) It sent no role, and the launcher refuses a container with none --\n\"an agent provisioned without one boots with no CLAUDE.md role block and knows\nwhat it is only from its bus name\" -- so the operator's click ended in a\nrefusal it could have asked about first. The dialog now picks a role, refuses\nbefore the POST if none is chosen, and says why: a container body writes its\nCLAUDE.md from that prompt, while the identity's memories, lessons and history\ntravel with the id whatever role the new body wears. (2) The mint attaches\nexactly the rooms ticked, so anything unticked -- or any room the mover no\nlonger holds, which this screen cannot offer at all -- would have left the\nidentity's reach with nothing said. Now the dialog names them, live, per tick:\n\"WILL NOT TRAVEL: <rooms>\". No silent narrowing: a move that quietly shrinks\nan agent's reach is a demotion nobody chose.\n0.2.172 A BODY SWAP IS A CLICK, NOT AN SSH SESSION, AND ONLY OF YOUR OWN\nAGENT (operator 11883; DES-011 s2.1; owner scoping per architect review). Moving an agent to another machine was ruled a bare attach -- mint on\nthe live name, the previous body's credential superseded in the same\ntransaction -- and the design has said so since 0.2.130. It still took a shell\non the broker host, because this page's one provisioning call hardcoded\ncreate=true and the broker rightly refuses that for a name that already has a\nlive identity. The operator's answer was the correct one: \"no remote user will\nEVER be able to ssh into this box... the Transfer step MUST be a clickable\ninterface\". Now: the launcher LISTS an agent that is alive somewhere else\n(state `elsewhere`) instead of hiding it -- the old reason for hiding was that\na mint could fork, which s2.1 settled -- and the agents rail offers it exactly\none verb, \"move it here\". The dialog says what it costs before it does\nanything: the SAME identity, its name, history, memories, lessons and rooms\ntravel; the credential the other body holds is superseded and that body goes\ndark on its next call; files on the other machine do NOT travel. Rooms are\nticked, pre-filled with what the identity already reaches, and the mint\nattaches exactly those. The launcher mints server-side with the caller's own\nforwarded cookie exactly as \"+ New Agent\" does, so the browser never holds the\nsecret (DES-005 P3), and `create` is once again the CALLER's word: the two\ncreation forms send it, the move sends nothing. SCOPED BY OWNER: these rooms\nare shared, so the hive's live names include other humans' agents, and moving\none of those is not a swap a person may perform alone -- it is a VISIT, and\nDES-012 s3 wants both humans. /agents-seen now answers an `owner` per name\n(from presence, which carries it; a name nobody is wearing resolves from\n`agents` only when exactly ONE live identity wears it, because two owners\nrunning one name is legal and a guess there would move the wrong being), and\nthe pane marks `elsewhere` only where that owner is the caller.\n0.2.171 A NATIVE AGENT ALWAYS GETS ITS DOCTRINE, AND ONLY ITS BLOCK IS\nMANAGED (red-shirt, live 2026-08-18; ruled by the operator 11879). The hive is\nPULLED, never pushed: lessons(), brief() and inbox() are tools an agent must\nCALL, and what tells it to call them is the CLAUDE.md in its own directory.\n`reveille init` did ship a starter one -- on the WIZARD path only, which the\nweb-mint-then-paste install never takes, and with the password door closed\nthat is the only way to install a native agent. So the first agent installed\nthat way (reveille-red-shirt) came up with a bus connection, a Stop hook and\nno boot ritual, no ack protocol and no idea that an agent's broadcast wakes\nnobody. Now init writes the doctrine on EVERY path, and writes it as a\nDELIMITED BLOCK between `<!-- reveille:begin ... -->` and `<!-- reveille:end\n-->`: a directory with no CLAUDE.md gets one containing the block, a file that\nalready has the markers has that block REWRITTEN in place, and a human's own\nCLAUDE.md gets the block appended once -- every byte outside the markers\nsurvives, in place, forever. The block carries the version that wrote it, so a\nlater boot can tell whether what it is reading is current, and it now states\nthe rule red-shirt lacked: a unicast wakes its recipient, YOUR broadcast does\nnot. init reports which of created/updated/appended/unchanged happened.\n0.2.170 THE BOX KEEPS ITS OWN DEPLOY SETTINGS (operator, 2026-08-18: \"these\nare not persisted in an env or other conf file\"). SERVER_DATA and PROXY_SITE\nhad to be typed on every `make up`, and their defaults are not harmless if one\nis forgotten: PROXY_SITE falls back to :80, which means no hostname, no\nautomatic HTTPS and an EMPTY public origin -- so the OIDC redirect URI stops\nmatching what Google and GitHub were registered with, and the session cookie\nloses its __Host- prefix. Same family as the upstreams that lived only in a\nshell (0.2.167), one layer up. The Makefile now optionally includes\n$(HOME)/.reveille/deploy.env (override with DEPLOY_CONF), read BEFORE the\ndefaults so the file wins over them while `make VAR=x up` still wins over the\nfile; an absent file leaves today's behaviour exactly as it was. Every `make\nup` prints which settings file it used, or says NONE -- a deploy running on a\ndefault it was never told about is the thing that must not be silent.\n0.2.169 A TURN CLEARS THE POKE -- AN AGENT MID-TURN STOPPED GOING DEAF (live\ndefect 2026-08-18, read out of this broker's own log). The wake gate allows\nONE outstanding ring per agent and swallows the rest until inbox() answers it,\nbecause \"the agent has an untyped prompt pending; its next inbox() pulls this\nmail anyway\". True of an agent ASLEEP; FALSE of one mid-turn. Measured: devops\nwas rung at 21:41:58, sent a message at 21:44:10 (proof it was awake and had\nmoved on), and five direct messages -- every one logged `woke=[devops]` at\nsend time -- were dropped without a word until the ten-minute TTL expired at\n21:54 and a human typed at its terminal. Now EVERY act clears the poke, not\nonly inbox(): a send, an ack, a lesson, a memory -- anything through _acting\n-- is the agent demonstrably taking its turn, which is the exact condition the\ngate was waiting for. The storm the gate prevents is untouched: an agent rung\nand silent since is still gated, still with the TTL as backstop. And a\nsuppressed ring is now LOGGED with how long the poke has been outstanding: it\nwas a bare `continue`, so a dropped wake left no trace in the log, the spool\nor presence, and the only evidence of this defect was a human noticing an idle\nterminal.\n0.2.168 THE CLIP BUTTON IS GONE (operator 11831, ruled 11832). Recording your\nvoice into the composer shipped in 0.2.161 and earned its keep for exactly one\nafternoon: \"absolutely worthless -- it serves no purpose at this point\". So it\nis removed, not deprecated -- the button, its take, its 60 s cap and its\ngates. Everything the button borrowed stays: the ear's own recorder, talk,\nlisten, slice 1's transcode-at-upload, the CLIP chip on a converted attachment\nand its player -- because an UPLOADED .wav or .mp3 is still a clip, still\nplays where it landed, and is still the thing worth having (operator 11834).\nThe clip TRANSCRIPT into the message body -- an external recording\ntranscribed so agents can work on it -- stays on the backlog, unscheduled and\ndeliberately not built here. DES-017 s4.2 records the removal; EPIC-001 row 5\nreads \"built, removed on operator word\".\n0.2.167 A NEW AGENT CAN BE BORN FROM THE PAGE, AND A SETTING STOPS LIVING IN\nA SHELL (operator, 2026-08-18). Two holes, both found walking a body-swap\ntest. (1) The Tokens tab could only ATTACH to an identity that already\nexisted -- creation was a parameter no screen sent -- and with the password\ndoor closed `reveille init --login` is not a door either, so a NATIVE agent\nthat did not exist yet could not be brought into the world at all. The mint\nform gains one tick, \"this is a NEW agent\", which is the only site that\ndeclares creation; the broker still refuses a name this account already holds\nlive, and the refusal now points at the tick instead of naming a parameter\nthe reader cannot see. `reveille init --login` against a broker whose\npassword door is shut stops saying \"login failed\" and names the open door and\nthe exact three-variable command to run after minting there. (2) The three upstreams\n-- voices, the ear, the script writer -- their models and the LAN-plaintext\nflag that permits them lived only in whatever shell last ran the deploy, so\nthe first container recreate that did not carry them turned all three OFF at\nonce and the only tell was a missing line in /version. Measured cause: a\ncompose `environment` entry BEATS `env_file`, and BOTH `KEY: ${VAR:-}` and a\nbare `KEY:` put an EMPTY value on the container when the shell has none -- so\nthose entries had been silently overriding the operator's own reveille.env\nall along. They are gone from `environment` entirely: every upstream setting\n(plus the upload cap) now comes from $SERVER_DATA/reveille.env and nowhere\nelse, read on every recreate, with the file's own comment block naming each\none. Unset there still means the feature is off, exactly as before.\n0.2.166 AN EMPTY ENVIRONMENT VARIABLE MEANS ITS DEFAULT (live defect,\n2026-08-18). 0.2.163 read its upload cap as int(os.environ.get(NAME, \"25\")),\nwhich is correct only when an unset variable is ABSENT. A deploy passes every\noptional variable through as ${NAME:-}, so unset arrives as the EMPTY STRING,\nthe default was never reached, and the broker crash-looped at boot on\nint('') until the deploy failed its own health wait. env_int() now reads\nevery number the same way: unset or blank = the default; a value that is\npresent and not a number is an operator TYPO and refuses by name at boot\nrather than silently running on a cap nobody chose. Applied to\nREVEILLE_UPLOAD_MAX_MB, REVEILLE_QUOTA_BYTES, REVEILLE_FEED_PING, and (in the\nlauncher) REVEILLE_ROLL_IDLE_MIN.\n0.2.165 A DEPLOY ROLLS WHAT IS IDLE (DES-006 s7.2, EPIC-001 #10, ruling\n11807). An image bump only ever reached NEW containers, and the roll was left\nto a human who never performs it; the opposite fix -- restart everything on\ndeploy -- kills work in progress. So `make up` now runs `reveille-launch\nupgrade --all --idle`, and a behind container rolls only when four things are\nREAD and quiet: no live attach grant (grants rows, not revoked, not expired),\nits spool's new/ empty, nothing unread for it, and no bus send by it inside\nREVEILLE_ROLL_IDLE_MIN (default 10) minutes. The last two come from this\nbroker: GET /agent/activity answers {last_send_ns, unread} to the AGENT's own\nbearer token -- the credential the upgrade already carries, so nothing new is\nparked (DES-006 s7 carry-not-park unchanged). It answers WORK, never\ntransport: a heartbeat says \"up\", which a container about to be replaced also\nis. AN UNKNOWN IS NEVER AN IDLE -- a stale record, no token to carry, an\nunreadable spool or a silent broker all read BUSY. Busy is skipped and LISTED\n(\"behind, busy: <why>\"), retried next deploy, never killed mid-task, and\nnever a deploy failure. Force one by name with `reveille-launch upgrade <user>\n<agent>`, unchanged.\n0.2.164 A VISIT IS A BODY SWAP (DES-012 s7-s9 + s11, EPIC-001 item 8). An\nagent can now work on ANOTHER human's machine, and the only thing that makes\nthat safe is that both humans consent, once, per visit. Ask with POST /visits\n{agent, owner, host, rooms, host_machine, coordinate}: your own agent is a\nPUSH, someone else's a PULL, and the OTHER human decides -- the asker's own\naccept is a 403. The ask mints nothing; the accept mints EXACTLY ONE\ncredential (create_token create=false, the ordinary bare attach) in the same\ntransaction, so the home body goes dark as the visiting one is authorised and\na second accept is refused as consumed. A visit may hold ONLY rooms both\nhumans are already in -- checked at ask time and named on refusal -- because\na visit carrying a room the host is not in would be the DES-011 s2 hive bleed\none layer down. Recall (owner), evict (host) and depart (the agent's own\ntoken) are one route: whoever calls it, the visiting credential is revoked, so\nreach ends with the visit; the owner comes home with an ordinary re-mint. The\nREQUEST expires (48 h); the VISIT has no lease -- a timer is how bodies get\nkilled mid-task. Arrival is stamped by the body's first join(), not by\ndelivery. Every transition writes one root message in the visit's first room:\na human's broadcast rings the room, so the record IS the notification. Schema\nv33 = the `visits` table; it holds names, ids and decisions, never a secret.\nThe Visits tab is the accept screen, and it consents to a SENTENCE: whose\nagent, that ownership does not move, the rooms and nothing else, that it runs\non the HOST's user, Claude account and bill, that the owner's state notes are\nreadable there, and that either side ends it. The harbor is the host's own:\nthe container path POSTs the minted token to their launcher (the P1 route,\nunchanged), the native path SHOWS `reveille init` once and never runs it.\n0.2.163 AN ATTACHMENT YOU CAN PLAY (DES-017 s4.3 amendment; operator\n11798/11800/11803, rulings 11801/11804). An attachment renders by its type,\nthe way an image already does: audio (wav, mp3, m4a, aac, flac, ogg, opus)\ngets an inline <audio controls preload=none>, video (mp4, m4v, mov, webm,\nmkv) an inline <video controls preload=metadata playsinline> sized to the\ncolumn -- the browser's own decoders, no player library, nothing new on the\nwire. /files/* serves those types inline with their real media type and the\nSAME nosniff + sandbox CSP and room check every attachment gets; Range is\nhonoured, so a video seeks instead of restarting. Everything else still\ndownloads as an opaque stream (SVG deliberately included). A converted clip's\n.webm is still inline AUDIO for the page's own decoder -- its .m4a sibling is\nwhat says so. The upload cap is now REVEILLE_UPLOAD_MAX_MB (int, default 25 =\ntoday's), read at boot, printed in /version, feeding every \"too large\"\nrefusal: raising it for a video is a line in the env file, not a build.\n0.2.162 WHAT IS WAITING IN THE OTHER ROOMS (EPIC-001 #6; DES-016 s2's\npromise). Schema v32 adds room_seen: ONE high-water mark per (person, room),\nnot a receipt per message -- agents ack what was addressed to them, a person\nreads a room, and those are different questions. Reading the room IS the\nmark: the backlog fetch a page makes for the room it is showing moves it, so\nthere is no second call to forget. /me carries {\"unread\": {room_id: count}}\n-- messages newer than the mark, never your own; never opened counts\neverything, which is what a new person has waiting. The phone's room sheet\nbadges each room and the desktop me-card shows one number for everywhere\nelse; the room you are looking at never wears a badge. Counts refresh on the\n15 s poll the page already runs and when the sheet opens -- the feed socket\ncarries one room, so it cannot tick the others.\n0.2.161 RECORD A CLIP (DES-017 slice 2, EPIC-001 #5). A clip button beside\ntalk and listen: it records with the EAR'S OWN recorder (one capture path on\nthe page, one silence refusal), caps at 60 s by CLOSING the take rather than\ndropping it, and uploads through the ORDINARY upload -- so the broker\ntranscodes it exactly as it does a dropped .wav (slice 1: nothing crosses the\nwire in its native format) and hands back the same {url, name, bytes, clip,\nduration_s}. From there it is a normal attachment: the composer shows CLIP\nm:ss and send() binds it as the message's voice. It NEVER sends -- the human\npresses Send, as with any attachment. A take under half a second or with no\nsignal is refused by name; talk and clip never steal each other's recorder;\nthe button exists only where the ear does.\n0.2.160 AN ADMIN ADOPTS AN OWNERLESS ROOM (EPIC-001 #4, ruling 11604 gap).\nDeleting a person leaves their rooms standing -- the history is not theirs to\ntake -- and until one has an owner again nobody can change its name,\nretention or publicity. GET /rooms/ownerless (admin) lists them with what is\nat stake, message and member counts; PATCH /rooms/<id>/owner (admin, body\n{} = take it yourself, {\"user_id\"} = hand it to someone) gives one an owner\nand writes a room_audit 'adopt' row. NEVER a transfer: a room that HAS an\nowner is refused, because seizing one is not a verb this bus has; an adopter\nwho already owns that room name is told which, not handed an integrity\nerror. Schema v31 rebuilds room_audit for the widened action CHECK. The\nRooms tab shows OWNERLESS ROOMS to an admin with an adopt button.\n0.2.159 THE LISTEN BUTTON IS NEVER DEAD (DES-014 s2 defect; operator 11718,\nruling 11719). iOS Safari refuses onnxruntime's WASM memory (\"[wasm]\nRangeError: Out of memory, [cpu] previous call to initWasm() failed\"), so the\nSilero VAD never started there and listening died while push-to-talk worked.\nThe ONNX attempt is now single-threaded, unproxied and simd by name; if it\nstill refuses, listening falls back to a loudness gate on the same PCM the\npush-to-talk recorder takes -- same 3 s silence close, same 30 s cap, same\nPOST /stt, same landing in the box -- and the toast says which detector is\nrunning, because a loudness gate is not a voice detector. A MIC refusal is\nstill the phone's answer and does not fall back: it names where to allow the\nmicrophone. Page-only; nothing on the broker changed.\n0.2.158 THE PASSWORD DOOR CLOSES (DES-018 s10 slice 2; operator 11758,\nruling 11759). Wherever a provider is configured, the password form is GONE\nfrom the login card and POST /login answers 410 \"password sign-in is closed\n-- use one of the doors\": the credential is not wrong, the way in is, and a\n401 would teach a page to retry forever. One condition, no second flag -- a\nbroker with no provider signs in by password exactly as before. Adding a\nperson is now an INVITE: POST /users is refused while the doors are the only\nway in, and the Users tab says so where the add-user row used to be. The\nAccount tab drops the password section for anyone holding a door. THE\nLOCKOUT CHECK is the point of care: store.password_only_users names every\nlive person whose only way in is a password, printed at boot as a WARNING\nnaming them, so nobody discovers the close at their next sign-in. /setup\nstill makes the first admin on a fresh broker; /version says \"password\nclosed\".\n0.2.157 WHAT THE SYSTEM WROTE FOR YOU IS NOT YOUR HISTORY (#106 review;\nrulings 11746, 11611 follow-on). MEASURED ON LIVE: two accounts that only\never signed in were tombstoned by 0.2.155 because each carried 10145 read\nreceipts -- written by join()'s catch-up, not by them. user_history now\ncounts only CITATIONS of the person (their messages and their agents',\nmail ADDRESSED to them or their agents, agents, tokens, owned rooms,\nmemories); read receipts, membership/presence\nrows, room invitations and identities are bookkeeping or credentials, and are\ndeleted with the row. An admin can free a name a tombstone still reserves\nwhen nothing cites it: GET /users/tombstones lists them with what cites each,\nDELETE /users/tombstones/<id> frees one (refused, naming the citations, when\nanything points there), and the Users tab grows a RESERVED NAMES section. The\ninvite list shows OPEN codes with \"show used (n)\" for the record of who let\nwhom in.\n0.2.155 A ROW IS A REFERENT ONLY WHILE SOMETHING REFERS TO IT (ruling 11732).\nDeleting a user has two outcomes and the page says which: an account with NO\nhistory (no messages, agents, tokens, rooms, memberships, receipts, doors,\nmemories -- store.user_history counts them before anything is wiped) is\nREMOVED outright and its name is free again; anything with history is\ntombstoned exactly as before (8938/11611). The never-used account whose name\nwas reserved forever was the defect; a cited one still keeps its referent.\nDELETE /users/<id> answers {\"deleted\", \"how\": removed|tombstoned}.\n0.2.154 KNOCK, OR CARRY A KEY (DES-018 s6a, rulings 11701-11709). Schema v30:\nsignup_requests + invites, and identity_audit's CHECK widened to\nrequest|approve|deny|invite (the table is rebuilt, rows copied). New signup\npolicy REVEILLE_SIGNUP=request: an unknown door with no s5.2 verified-email\nlink files a REQUEST ROW -- never a half-user -- and the person sees one\nneutral line, the same whether the ask is new, pending or denied. Admins\ndecide in the Users tab: GET /users/requests, POST\n/users/requests/<p>/<sub>/<approve|deny|undeny|forget>; approve is\ncreate_user + link_identity + audit + row consumed in ONE transaction. Invite\ncodes ride the same surface: POST /invites mints a 128-bit code shown ONCE\nand stored only as a hash, good for any email through any door, single-use\n(burned in the same transaction as the account it creates, so two racing\nredemptions have one winner), revocable while unused, listed with who used it.\nThe code and an optional 280-char note are typed on the login card (or\nprefilled by /ui?invite=CODE) and ride the OIDC marker through the provider\nround-trip -- never to the provider. Under `request` a valid code admits at\nonce; under `closed` a valid code is the ONLY way in; under `open` no code is\nconsulted. s5.2 still runs ABOVE the policy: a known door signs in, and an\nunknown door with a verified email held by exactly one live user links.\n0.2.153 THE HUMAN SURFACE (DES-011 6.1(c), EPIC-001 S2 item 3). The wake\nregistry and the poke gate are keyed on the TOKEN alone, not (token, name):\nan agent aliased <owner>-<name> in a room registered under one name while\nthe ring was addressed to the other, so its ring could not land. Rings are\nnow addressed by IDENTITY -- send() answers wake (room-names, what\ndelivered_to shows) beside wake_principals, and _notify resolves those\nthrough store.wake_tokens (the agent's tokens that hold the room, so a\nrevoke stays instant and a person is never rung). The ring frame carries\nfrom (the sender's ROOM-NAME there), owner (the account behind it), room,\nid and subject beside the direct count. Presence carries `owner` next to\nthe room-name and principal; readers() renders the room-name each reader\nwears in that message's room, not the identity's own name; usage() gains a\nNAMES ARE PER ROOM paragraph. No schema change, nothing on the wire\nrenamed.\n0.2.152 EMAIL IN ONE CASE (DES-018 follow-up, architect 11667). The store\nlowercases every email it keeps or compares (identities upsert, the s5.2\nverified-holder match, the \"use your other door\" check): Ada@Example.com and\nada@example.com are one mailbox, so which spelling a provider sent first can\nno longer decide whether a door links or a second account is made. Nothing\non the wire changes.\n0.2.151 SIGN IN WITH GOOGLE / GITHUB / MICROSOFT (DES-018 slice 1, EPIC-001\nS1 item 3; rulings 11648/11659). Three doors BESIDE the password form:\nGET /auth/<p>/login -> the provider -> GET /auth/<p>/callback; Authlib\n1.7.2 does discovery, PKCE S256, state, nonce and id_token verification,\nits state server-side in oidc_state (schema v29, additive: identities,\noidc_state, identity_audit) under a 10-minute browser marker cookie\nrev_oidc -- no signed cookie, no session middleware. A provider identity\n(provider, subject) is a CREDENTIAL of a person: known door -> that person;\nunknown door with a VERIFIED email held by exactly one live user -> linked\nand signed in (audit line); otherwise a new account under REVEILLE_SIGNUP\n(open | closed | domain,domain) with a derived name shown once\n(?welcome=), or \"use your other door\" when the email is already someone's\n-- never a merge on an unverified or ambiguous email. Signed-in link\n(?link=1) attaches to the SESSION user; DELETE /me/identities/<p>/<sub>\nremoves a door but never the last way in unless a password is set. First\nfederated signup on an empty broker is the admin. Sessions ROTATE on every\nlogin (password too); on an https REVEILLE_PUBLIC_URL the cookie is\n__Host-rev_session + Secure. Microsoft through /common with iss checked\nagainst tid; GitHub OAuth2-only with the verified primary email. Nothing\ntoken-shaped is stored or logged. Config: REVEILLE_OIDC_<GOOGLE|GITHUB|\nMICROSOFT>_ID/_SECRET (env_file $SERVER_DATA/reveille.env, never git),\nREVEILLE_PUBLIC_URL (make derives https://PROXY_SITE), REVEILLE_SIGNUP;\n/auth/doors and /version name the doors; /me carries doors + identities.\nNothing on the bus wire changes.\n0.2.150 DELIVERY BY ID (DES-011 6.1(b), EPIC-001 S1; ruling 10983). Schema\nv28, rebuilt in one transaction with a `.pre-v28-<ns>.bak` beside the db:\nmembers keyed (room_id, principal) with the ROOM-NAME beside it, unique per\nroom among live rows; reads keyed (message_id, principal). principal is the\nDES-013 speaker key -- agent:<id> for a body holding a bound token, user:<id>\nfor a person -- derived from the credential, never from a name. send() takes\nthe principal, writes under the room-name and stamps both identities;\ninbox/ack/receipts/deafness/prune key on the id, so a RENAME orphans nothing\n(gate 9.1: store.rename_agent, PATCH /identities/<id> {name}, owner or\nadmin; the rename log closes and opens rows). join() assigns the room-name\n(DES-011 s2): the bare name, or <owner>-<name> when another owner's live\nagent holds it in that room -- fixed for the membership, kept on re-join,\nrefused naming both when the alias is held too; a stale holder is reaped\non the spot; the join tool answers `as` per room and presence carries the\nprincipal (gate 9.3: two owners' architect in one room, each room-name\nreaching only its holder). Migration: members re-keyed from agent_id / the\ntoken / the web tag / the succession clock, unresolvable rows dropped and\nprinted; reads re-keyed the same way plus the catch-up receipts join()\nwould have written for a re-minted successor (measured: without them three\nre-minted agents would wake to 1617 instead of 321 unread). Bus tools: join\nreturns `as`; send/inbox/ack unchanged on the wire; the web page no longer\nsends `from` (the credential is the sender). Wake registration still keys on\nthe token+name pair: an ALIASED agent's ring lands in 6.1(c).\n0.2.149 THE RECIPIENT PLANE LEARNS THE IDENTITY (DES-011 6.1(a), EPIC-001\nS1; ruling 10983). Schema v27, additive, one transaction, snapshot\n`broker.db.pre-v27-<ns>.bak` beside the db: messages.recipient_agent_id\nbackfilled by the succession clock (the identity live at the message's ts\namong those that ever wore the name, folded to lineage heads -- a folded\nsource's name maps to its head; else the last created before ts, a\nsuccessor not yet minted cannot be meant; else the earliest ever); what\ncannot be resolved is LISTED \"message <id> room <room> to <name> at <ts>:\n<why>\", left NULL, counted, never silent, never refused; a user's name is\na person (NULL, counted). agent_names(agent_id, name, from_ns, to_ns) seeded\none open row per agent; agents.merged_into from identity-merges.jsonl\nbeside the db. Writers moved: send() stamps recipient_agent_id from the\nroom-name's members row; every INSERT INTO agents logs its name;\nscripts/identity-merge re-points the column and sets merged_into.\nscripts/rehearse-migration <db> [--keep DIR] copies (backup API), migrates\nthe copy, prints. Rehearsed on the live copy: 9706 resolved / 274 to a\nperson / 2 folds / 0 unresolvable of 9980. Nothing reads the column yet --\n6.1(b) does. Bus tools unchanged.\n0.2.148 THE USERS TAB LISTS ACCOUNTS, NOT TOMBSTONES (operator 11606: \"bill\"\ndeleted, confirm hit, still listed with make-admin / reset / delete beside\nhim). A deleted user is a tombstone by ruling 8938 -- the row stays as the\nreferent for the history it owns, credentials wiped -- and list_users now\nreturns only rows with deleted_ns NULL; delete / role / password reset on\na tombstone answer 404 \"user deleted\"; the name stays reserved by the\ntombstone (attribution) and re-adding it says so (\"taken by a deleted\naccount\"), never a bare \"already exists\". Bus tools unchanged.\n0.2.147 AN AGENT CONTAINER UPGRADES IN PLACE (operator 11594/11599, ruling\n11600; DES-006 s7 \"carry, not park\"). The launcher carries the bound token\n(and gate secret) from the container it made into a new one on the new\nimage -- same repo, boot command, network, role, model, quotas, data root;\nnever parked in db, log, file or HTTP body. OLD stops and is renamed aside;\nNEW must be running, have its boot report and show in the broker's presence\nbefore OLD is removed, else NEW is destroyed and OLD comes back (started\nagain if it was). Refuses a name launcher.db does not record, a dead token,\na purged container (that is the prompt path). `reveille-launch upgrade USER\nAGENT | --all`, `reveille-launch behind` (make up prints it), and an\n\"upgrade\" button on /agents for a container behind the default image. Bus\ntools unchanged; agent image unchanged.\n0.2.146 EVERY COMMAND HAS A SOUND (operator 11576/11578, architect 11577;\nDES-014 s5 amended, supersedes 11465 \"one bell only\"). One table, one earcon(name),\none \"sounds\" setting per browser (me menu, default ON), synthesized in the\npage, never over an utterance (queued to vDone): send accepted WHOOSH, any red\ntoast BONK, words landed DING (the bell), listen on BIP / off BOP, auto-send\ncancelled PLIP, a message for me or a human's broadcast with voice off POP,\nattach done CLUNK, room switched SWISH. Skipped: countdown ticks, a dropped\ntake, push-to-talk. Bus tools unchanged.\n0.2.145 A DEGENERATE TAKE IS DROPPED BEFORE IT LANDS (operator 11569, ruling\n11572; DES-014 s4/s5 amended). Whisper turned a non-speech take into \"oh, oh,\noh, ...\" and auto-send shipped it. The broker now asks verbose_json and returns\nwhisper's own numbers with the text: compression_ratio (zlib, over the whole\ntake), max no_speech_prob and min avg_logprob from the segments when present.\nThe page drops a take, once, in earHeard after the command match: ratio > 2.4,\nor no_speech_prob > 0.6, or avg_logprob < -1.0, or the same text as the\nprevious take -- console.debug, no bell, no post, no stub. Bus tools\nunchanged; POST /stt gains three numbers.\n0.2.144 THE PHONE PAGE, SLICE 2 (DES-016 s2, rulings 11443/11447/11456/11483 B;\noperator 11439/11478). One block, narrow OR short (max-width 640 / max-height\n480 -- a phone on its side): a header bar (room name = the sheet with rooms,\nagents, me; voice; find = filter + history; me = settings/logout), the rail as\na sheet with a room list, the composer as box + Send behind \"+\" (talk, listen,\nauto-send, attach, to, subject), a denser feed with the row's tools on tap, a\nhairline between senders, 44 px targets, 16px inputs, 100dvh. Above the block\nthe desktop is pixel-identical (mobile-shots prints the desktop shot); the\ncomposer rows and the top bar wrap at every width so a 664-wide well never\npushes Send off the glass. Bus tools unchanged.\n0.2.143 A MICROPHONE REFUSAL NAMES THE PLACE (operator 11559: iPhone, \"The\nrequest is not allowed by the user agent or the platform...\"). getUserMedia\nruns inside the tap, so NotAllowedError is the phone's answer: the browser\napp has no microphone from the OS, or the site is blocked in the browser.\nThe toast now says where (iPhone: Settings > Safari/Chrome > Microphone; the\nsite's permission; then reload) instead of quoting WebKit. Bus tools unchanged.\n0.2.142 THE FLAT SCRIPT BUDGET IS 2.5 s (ruling 11549; DES-013 s5 amended with\nthe numbers): on the hybrid Qwen3.8 the engine forces a 1568-token block, so\nprefix caching never pays below it -- frame + persona (~500-600 tok) prefill\non every call at ~730 tok/s, ~0.55 s of the ~1.0 s to first token, first\nsentence 1.4-2.2 s on short messages. 1.5 s + slope was a coin flip; 2.5 s +\nslope is not. REVEILLE_SCRIPT_TIMEOUT still overrides. Bus tools unchanged.\n0.2.141 VOICE IS REMEMBERED, PER BROWSER (operator 11442, ruling 11444; DES-009\ns8.3 amended). localStorage.revVoice; a load ARMS it -- the button reads\n\"voice: tap to resume\", the first pointerdown/keydown anywhere flips it on\nthrough toggleVoice (the unlock gesture, iOS covered), a tap on the button is\njust the toggle, nothing plays by itself; off forgets it; a refusal drops the\narm for that load. Auto-send was already remembered (#70). Listening never is\n(11355 #2). Bus tools unchanged.\n0.2.140 THE PHONE PAGE HAS A GATE: scripts/mobile-shots (DES-016 s2, rulings\n11443/11447/11456/11483 B). A scratch broker is seeded (a 200-char token, a\n300-char subject, a code block, ear on), a human signs in, and Chrome walks\nsignin/room/drawer/settings/voices on iPhone 14 and Pixel 7, both\norientations, then the room at 320/360/390/430 portrait and 640/740/852/932\nlandscape -- devices are only names for viewports. Every shot asserts the\nlayout width == the glass (visualViewport), document.scrollWidth <= it and\n#feed.scrollWidth == clientWidth; a red shot exits 1. Proven red on 0.2.130\n(10 shots), green now. What it found, fixed here: the drawer sat ON the\nSettings panel (z 40 -> 15, and picking Settings/Logout closes it); at\n320-360 wide the subject box ran past the glass (.ctop wraps, #subject\nmin-width:0). The pictures go to the room for approval before every phone\nmerge (11447). Bus tools unchanged.\n0.2.139 A MESSAGE THAT ARRIVES SPOKEN -- DES-017 slice 1 (operator 11473/\n11499/11502, rulings 11500/11507). Every AUDIO upload (POST /upload,\nreveille-upload, the MCP tool) is transcoded AT UPLOAD into the wire form:\n<stem>.webm (Opus, loudnorm at CLIP_LUFS -16) + <stem>.m4a; the attachment\ndict comes back {url: /files/<stem>.webm, name, bytes, clip: true,\nduration_s}. Nothing native lives under /files; a lone .webm is not a\nclip (the pair on disk, recorded in files for THIS room, is the proof --\narchitect 11539: another room's pair is an ordinary attachment, never this\nroom's voice). SEND binds the pair to the message\nas its VOICE: hard links to tts-<mid>.webm/.m4a, no writer, no TTS, the\nsame audio/audio_m4a frames, play queue, on-demand, delete (both pairs)\nand sweep. One clip per message; a clip over AUDIO_ATTACH_MAX_S (600 s)\nor one ffmpeg cannot convert is refused by name (415). The chat plays a\nclip through the page's own Opus decoder. THE ORIGINAL waits RAW_HOLD_S\n(600 s) in <files>/raw -- its uploader may fetch it once at GET\n/files/raw/<stored> -- then absoluteZeroStorage.put writes the durable\nraw_archive ledger row (sha256, bytes, mime, message, uploader; S3\ndeep-archive later, same call) and the local raw is unlinked; the route\nthen answers 410 with the row. Schema v26 (attachments.clip/duration_s,\nraw_archive). Bus tools: upload() unchanged in shape; audio comes back\nconverted.\n0.2.138 LIVE BEFORE ASKED, AND A CLICK GETS ITS OWN BUDGET (operator 11523,\nruling 11528; DES-013 s5 amended). The writer's queue orders (asked, mid):\na live message's first sentence never waits behind a burst of clicks on\nhistory; a click waits behind live and carries SCRIPT_ASKED_BUDGET_S\n(20 s) instead of the first-sound slope -- a click is not first-sound,\nand a terse click is waste since 0.2.133. One INFO line per script made\n(\"script: <mid> made (...)\"), countable beside the \"falls to terse\" line.\nLive budget constants unchanged. Bus tools unchanged.\n0.2.137 NOTHING IN THE FEED IS WIDER THAN THE FEED (operator 11478, rulings\n11480/11483 B). Fluid, no device pixels: the message column may shrink\n(min-width:0), any token may break (overflow-wrap:anywhere on body, head,\nmarkdown), code scrolls inside its own box, the feed never scrolls\nsideways (overflow-x hidden, touch-action pan-y), and on a phone the page\nitself cannot rubber-band sideways; the \"latest\" pill sits above the feed\ninstead of on the message box; the Settings close X stays on the card.\nMeasured (iPhone 14 + Pixel 7, both orientations, a 200-char token, a\n300-char subject and a code block): feed scrollWidth == clientWidth and\ndocument scrollWidth == innerWidth everywhere. Bus tools unchanged.\n0.2.136 THE ABANDONED WARNING NAMES FFMPEG'S CAUSE: the stderr reader is\njoined before its words are read (a slow runner read them early -> \"no\noutput\"). Bus tools unchanged.\n0.2.134 THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended). In\nlisten mode the page rings ONE bell when a take's words land in the box --\nready for a command or more words, the same moment the pause-to-send\ncountdown starts. /ui/earcon.wav ships with the page (the operator's pick\nof four synthesized samples), decoded once through the unlocked\nAudioContext; never over an utterance being spoken (rings when it ends);\nno bell in push-to-talk; off with listen off. Bus tools unchanged.\n0.2.133 A TERSE RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE (operator\n11475, ruling 11476/11483; DES-013 s5/s7 amended). tts-<mid>.webm/.m4a is\nkept only when the message is not scriptable (human verbatim, unbound, no\npersona), or was made from a script, or no writer is configured at all. A\nterse fallback -- the configured writer down, past its budget, or skipped\nfor depth -- is synthesized, streamed to whoever asked or was\nlistening (its .part lingers 60 s for a late fetch), then unlinked; the\nfeed's audio frame says `terse: true` and the page keeps the icon hollow.\nThe play click always POSTs /audio/<mid> first and follows the state, so\nthe next click with the writer up makes the script and THEN the file.\nBoot sweeps terse files that became durable before this rule (agent key +\nassigned persona'd voice + no script row). Bus tools unchanged.\n0.2.132 FILES GO OVER HTTP, BY NAME (operator 11448, ruling 11449). New\nconsole script `reveille-upload <file> [--room <id>] [--name <n>]`: reads\nREVEILLE_URL/REVEILLE_TOKEN/REVEILLE_AGENT_ROLE from the env, POSTs the raw\nbytes to /upload, prints the attachment dict for send(). `reveille init`\n(and every container boot, which runs it) now pre-approves\n\"Bash(reveille-upload *)\" beside \"mcp__reveille\", so an agent attaches a\npicture with no permission prompt and no classifier in the way. The MCP\nupload() tool stays for text-sized files only and says so. Bus tools\nunchanged.\n0.2.131 THE PAGE FITS A PHONE (operator 11439: \"almost unusable\" in Chrome\nor Safari on a phone). Below 760px the rail -- rooms, agents filter,\nsettings, logout -- is a drawer behind a menu button in the top bar (it\nwas display:none, so a phone could not change room or sign out); the top\nbar and the composer's control row wrap instead of pushing Send off the\nright edge; every input is 16px, under which iOS Safari zooms the page on\nfocus and leaves it there. Measured with iPhone 15 emulation: nothing\nwider than the viewport, Send at x<393. Nothing changes above 760px. Bus\ntools unchanged.\n0.2.130 THE PLAYER'S LEAD ADAPTS (operator 11408: LTE stuttered on a live\nmessage that was still being made). The page carries one lead across\nutterances: 50 ms on a good link as before; every underrun after the first\nbuffer doubles it, up to 2 s; an utterance with no underrun halves it back\n-- a jitter buffer the link earns once, one gap at a time, and gives back\nas it improves (architect 11419). The voice button's title counts underruns\nand shows the lead. Bus tools unchanged.\n0.2.129 TWO NITS. The iOS on-screen decoder diagnostic (a toast after\nevery utterance, 0.2.117, kept \"until iOS sounds\") is gone -- iOS sounds\n(operator 11401); the numbers stay in the voice button's title. /version\nnames a LAN plaintext host once however many upstreams reach it, and never\nnames loopback (that is this host, no allowance used). Bus tools unchanged.\n0.2.128 THE BUS DOCTRINE IS AT THE CORE (operator 11397, ruled 11402):\nagents write ULTRA-TERSE -- fragments, no articles or filler, ids/numbers/\nnames exact, code and errors quoted verbatim; write for AGENTS, never for\nthe ear -- humans hear the writer's persona expansion, the raw text stays\nthe record. It now leads the standing usage(), opens the\nCLAUDE.md block agents paste, sits in send()'s own description, comes back\nin every join() reply as `doctrine`, and is the first rule in the CLAUDE.md\n`reveille init` seeds. Bus tools: join() reply gains `doctrine`.\n0.2.127 THE WRITER EXPANDS TELEGRAPHIC MESSAGES (operator 11393/11395; DES-013\nsection 5 amended). Agents write in fragments -- dropped articles and verbs,\narrows, slashes, bare numbers -- and the room hears them as speech, so the\nframe now says: restore full, natural spoken sentences with the meaning\nintact; a bare five-digit number is a bus message, #69 is pull request\nsixty-nine, DES-015 is D E S zero one five. Bus tools unchanged.\n0.2.126 THE SAME UTTERANCE ALSO LANDS AS AAC (DES-013 section 6 amended,\nruling 11383 for DES-015 the car shell). Beside tts-<id>.webm the worker\nnow writes tts-<id>.m4a from the finished .webm (after the announcement --\nfirst sound owes it nothing), names it on the feed as `audio_m4a`, and\nserves it at GET /audio/<id>.m4a with the .webm's authorization: the file\nor a 404, an MP4 is not tailed. Delete and the startup sweep take the pair.\nBus tools unchanged.\n0.2.125 PAUSE-TO-SEND (DES-014, operator 11389 \"A+B\", numbers ruled 11385).\nAn `auto-send` setting beside `listen`, off by default and remembered per\nbrowser: hands-free only, five seconds after your words land they are sent\n-- the box counts down where you can see it; say \"cancel\", type, or switch\nlistening off and nothing goes. Push-to-talk never auto-sends. Bus tools\nunchanged.\n0.2.124 THE EAR, SLICE 4: VOICE COMMANDS (DES-014, pre-ruled 11355 s5). A\ntake that IS one of `send`, `cancel`, `stop`, `reply`, `voice on`, `voice\noff` or `room <name>` -- the whole final transcript, case-folded, trailing\npunctuation dropped, exact words -- runs and is not typed; anything else is\ntext. The spoken `send` is the one way the ear ever sends (an empty box is a\nno-op). A microphone that dies mid-take ends it. Bus tools unchanged.\n0.2.123 THE EAR, SLICE 2: HANDS-FREE (DES-014, ruling 11355). A `listen`\ntoggle beside `talk`: while it is on, a page-side voice-activity detector\n(Silero VAD v5 in WASM, shipped with the page under /ui/vad/ -- no CDN)\ncuts what you say into takes and each goes through the same POST /stt;\nsilence of 3 s closes a take, a 30 s cap closes and reopens it, noise\nbelow the detector's threshold sends nothing, a hidden tab or a mic error\nturns it off, and the words land in the compose box for you to send.\nPush-to-talk stays. Bus tools unchanged.\n0.2.122 A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357; DES-013\nsection 5 amended). The writer performs AGENTS -- text-first speakers that\nneed a mouth. A signed-in human's message is spoken exactly as typed or\nsaid, in the voice assigned to them; it rides the writer's queue only as\nthe ordered passthrough, never as a script. On-demand play of a human's\nmessage likewise. Persona stays a field on the voice. Bus tools unchanged.\n0.2.121 THE WRITER WRITES FOR THE MOUTH (DES-013 section 5 amended, operator,\nthe first live evening). The synthesizer reads what it is given, so the\nframe now makes the writer the text normaliser: abbreviations, units and\nsymbols become the words a person says (24MiB -> twenty-four mebibytes),\nquantities become number words, identifiers and versions and dates are read\ndigit by digit in spoken groups (0.2.120 -> zero point two point one twenty;\nstardate 23244.4 -> two three two four four point four), acronyms as\nletters unless said as a word; and THE MESSAGE IS THE SCRIPT -- a persona's\ncatchphrase alone is not one (message 11349). Delivery is punctuation, per\nthe synthesizer's own guide. Temperature 0.5, max_tokens 300, script cap\n1000 chars (number words are longer than digits). Bus tools unchanged.\n0.2.120 THE SCRIPT BUDGET SCALES WITH THE BODY (DES-013 section 5 amended,\noperator 11343 on the bench 11342). Prefill is the wall on the pinned pair\n(section 8: two RTX 3060, measured -- and the second bench moved the pin to\nvLLM TP=2 int4: prefill 2-4x faster, first token 0.3 s at 700 chars, 2.6 s\nat 9000), and most agent messages\nare longer than the 1500 chars the writer was shown, so a flat 1.5 s meant\nterse for most of them. Now the writer sees up to 9000 chars (the live\ndb's p99.9) and its time to first sentence is REVEILLE_SCRIPT_TIMEOUT plus\n1.5 ms per char shown; short messages keep the ruled budget. Also: an\nEMPTY REVEILLE_SCRIPT_TIMEOUT / _TTS_TIMEOUT / _STT_TIMEOUT (what compose passes\nwhen unset) no longer crashes the broker at boot -- it means the default.\nBus tools unchanged.\n0.2.119 A LOST REACH IS A DEPARTURE; NO GHOST MEMBERS. Revoking a token, or\ntaking a room away from it (unassign, a room flipped private, a member\nremoved), now marks that agent's membership left in the same transaction,\nso the roster stops listing a credential that can no longer hear -- and\nleave(room=) works for a room you are listed in but no longer reach (a verb\nthat only reduces access needs no access). Ghosts from before this rule\nheal at the next detach. Bus tools unchanged in shape.\n0.2.118 THE EAR, SLICE 1 (DES-014). REVEILLE_STT_URL (with _TOKEN, _MODEL,\n_TIMEOUT) points the broker at a speech-to-text server (OpenAI-shaped\n/v1/audio/transcriptions: speaches / faster-whisper-server) -- the third\nupstream, the same refusal and LAN flag as voices and the writer, off when\nunset. ONE route, POST /stt: a signed-in person's WAV take (the page's own\nrecorder; <= 60 s, <= 8 MiB, silence refused), one at a time, back as\n{text}; nothing stored, nothing sent -- the words land in the compose box\nand the human presses Send. The page shows a talk button beside attach when\nthe ear is on: hold on a mouse, tap to start/stop on a phone. Bus tools\nunchanged.\n0.2.117 iOS: THE RINGER-SWITCH UNLOCK, AND NUMBERS ON SCREEN. On an iPhone the\nvoice toggle's tap now also plays a silent looping element once so Web Audio\nfollows the playback session (iOS mutes Web Audio under the silent switch),\nand each utterance ends with a one-line toast of what it did (frames,\nsamples, buffers, decoder errors, context state) -- a phone has no console;\nthis line stays until iOS sounds. Bus tools unchanged.\n0.2.116 THE PAGE DECODES OPUS ITSELF (iPhone plays), AND A MESSAGE IS SPOKEN\nONCE. iOS Safari has no MediaSource, so the page now demuxes the WebM stream\nand decodes the Opus frames with a vendored WASM decoder (/ui/opus-decoder.js,\nopus-decoder 0.7.11 MIT), scheduling PCM on its AudioContext -- one code path\nfor every browser with Web Audio; the wire is unchanged (first sound 0.705 s\non the eval box). Defect fixed: switching rooms leaked a feed socket per switch\n(the closed socket's reconnect fired anyway), so every audio frame arrived N\ntimes and the message was spoken N times; a deliberate close now detaches the\nreconnect, and the play queue takes each id once. Bus tools unchanged.\n0.2.115 A TOKEN THAT IS NOT AN AGENT CANNOT ACT AS ONE (ruling 11252). An\nunbound token is read-only: reads (inbox, history, rooms, recall, brief,\nGET routes) answer as before and leave no presence; every act -- send, ack,\njoin, leave, lesson_add, memory_add, memory_retract, ratify, reject, upload,\npresence, and the mutating HTTP routes -- is a 401 naming the remedy\n(`reveille init` in the agent's directory, or a bound mint in the Tokens\ntab, where bound is now the form and read-only a labelled choice). Bound\ntokens and web users are unchanged. Clean cutover: an agent still running\non an unbound token stops acting at its next call, loudly.\n0.2.114 EVERY MESSAGE CAN BE SPOKEN LATER, ON THE CLICK; AND A STOP BUTTON.\nThe play icon is on every message: filled = play the audio it has, hollow =\nPOST /audio/<id> makes it (script first when the writer is on, then audio,\nthrough the same queue a live send takes; the click is the listener) and the\ntab that asked plays it when the audio frame lands. The voice toggle now\nonly decides whether arrivals are made and played automatically. A stop\nbutton shows in the header while something sounds and hands the queue on.\nBus tools unchanged.\n0.2.113 COMPOSE PASSES THE WRITER AND THE LAN FLAG THROUGH. docker/compose.yml\nforwards REVEILLE_SCRIPT_URL / _MODEL / _TIMEOUT / _TOKEN and\nREVEILLE_LAN_PLAINTEXT to the broker like it already forwarded the TTS\npair, so a `make up` on the VM can point voices (and the writer) at a host\non the operator's LAN. Unset = as before. Bus tools unchanged.\n0.2.112 `reveille init` LISTS YOUR AGENTS. The wizard logs you in first,\nshows the agents your account holds (from GET /tokens, with their rooms)\nand takes a number: this directory becomes that agent's native body (the\ntoken rotates; the old body goes dead). A typed name is a new agent and\ngoes on to the type menu as before. One password prompt. Bus tools\nunchanged.\n0.2.111 THE WIRE IS WEBM/OPUS (DES-009 section 2 amended, DES-013 section\n7.1, ruling 11211). The broker transcodes every utterance with ffmpeg\n(libopus 32 kbit/s, 200 ms clusters); GET /audio/<id>.webm and the\naudition stream audio/webm, ~32 KB per scripted message where the WAV\nwas ~330 KB; the bank clip stays the WAV it was uploaded as. The page\nplays through MediaSource; measured send to first sound 0.666 s (a plain\n<audio> element was 3.6 s). A broker without ffmpeg refuses voices at boot\nby name. A bank clip whose peak is under -40 dBFS is refused as silent.\nBus tools unchanged.\n0.2.110 A SILENT RECORDING IS REFUSED AT THE MICROPHONE. The recorder shows\nNO SIGNAL while a take is all zeros and discards it at stop, naming the\ncause (no input device or permission in that browser window) -- silence\nis never stored or cloned. Bus tools unchanged.\n0.2.109 YOUR PERSONAL VOICE COMES FIRST. The Voices tab opens with MY\nPERSONAL VOICE (your own cards, then the add flow), then THE BANK; \"say\nit\" on an empty sample reads a default line naming the voice, so a new\nvoice is heard on the first click. Bus tools unchanged.\n0.2.108 PERSONAL VOICES, DELETE AND RENAME, AND A VOICES TAB OF CARDS\n(DES-013; schema v25). A voice added as PERSONAL (PUT /voices/<id>/clip\n?personal=1, decided at creation) exists only for its uploader: nobody\nelse -- admin included -- lists, hears, edits or assigns it, and its\nuploader may still give it to themselves or their agents; a human who\nrecords \"<username>\" is heard in their own voice everywhere. DELETE\n/voices/<id> (uploader or admin) drops the voice and its assignments;\nPUT /voices/<id>/rename {id} moves the voice, its assignments, its\nscripts label and its clip. Voices tab: one card per voice with icon\ntools, and two add flows (bank / personal). Bus tools unchanged.\n0.2.107 THE SUITE RUNS ON EVERY CORE (pytest-xdist, 78 s -> 16 s). No\nbroker behavior change; the bump exists because pyproject/uv.lock are\nimage inputs and a tag is written once. Bus tools unchanged.\n0.2.106 A BANK VOICE KEEPS ITS SAMPLE LINE (DES-013; schema v24). PATCH\n/voices/<id> {sample} stores the line a voice reads on audition, beside\nits persona; GET /voices carries it; the Voices tab prefills it, \"say it\"\nreads the box, \"save sample\" keeps it. Bus tools unchanged.\n0.2.105 THE AUDITION IS THE RIGHT VOICE OR NONE, AND ONE AT A TIME.\nGET /voices/<id>/say refuses 409 when the clip is not on the synthesizer\nafter one reconcile (never the digest voice), and 429 while another\naudition streams (one at a time; live messages are not contended). Bus\ntools unchanged.\n0.2.104 THE AUDITION, AND THE ORIGINAL BESIDE THE CLONE (DES-013). Voices\ntab: every bank voice has \"play clip\" (GET /voices/<id>/clip -- the uploaded\nwav itself) and a \"sample dialog\" line + \"say it\" (GET /voices/<id>/say?text=\n-- that voice speaking that line, streamed from the synthesizer, nothing\nkept), so a clip is judged against its clone before anyone is assigned to\nit. The settings modal is wider. Bus tools unchanged.\n0.2.103 THE WRITER'S HOST, AND OPEN STREAMS ARE COUNTED (DES-013 slice 6,\nmaterials). scripts/writer/ carries the writer VM's build (llama.cpp pinned,\nCUDA 12.8, sm_61), sha256-pinned model fetch (Qwen3.8-27B Q6_K / Q4_K_M),\nthe bench that measures time-to-first-sentence and tok/s per quant and flag\nset, and the systemd unit -- the pin is the number the bench produces, not\na guess. Broker: a script's remainder past the first sentence streams on a\nbounded helper (SCRIPT_REST_MAX = 2 open streams); past that the writer\nfinishes in-line before the next item. Bus tools unchanged.\n0.2.102 THE SCRIPT WRITER, AND NOTHING IS MADE THAT NOBODY WOULD HEAR\n(DES-013 slice 5). A second worker calls a model behind REVEILLE_SCRIPT_URL\n(an OpenAI-compatible /v1/chat/completions -- llama-server; off by default,\nthe broker never loads a model) and turns a message from a speaker whose bank\nvoice carries a PERSONA into a short in-character script, STREAMED: the first\nsentence must close inside REVEILLE_SCRIPT_TIMEOUT (2.5 s) or the terse text\nspeaks now; sentences are spoken as they close into one wav; the script is\nkept beside the message (pencil icon; GET /script/<mid>) and the `script`\nframe tells the web feed. LISTENER GATE: the browser tells the feed socket\nits voice toggle; a room where nobody has voice on gets neither script nor\naudio -- what was heard live is kept, what nobody heard was never made.\nONE refusal for every upstream URL: REVEILLE_LAN_PLAINTEXT=1 allows a private\nLAN host in the clear (banner + /version name it); public hosts still need\nhttps + a token. Voices tab: \"draft persona\" (behind a button, when a writer\nis configured). Bus tools unchanged.\n"),
+    ("0.2.101",
+     "0.2.101 THE BANK TRAVELS BY PUSH, AND YOU CAN RECORD YOUR OWN VOICE (DES-013\nslice 3b + recorder). The synthesizer no longer shares a directory with the\nbroker: every bank clip is PUSHED to it over its own API as\nbank-<id>-<updated_ns>.wav (a replace is a new name), reconciled at worker\nstart and whenever a clip is missing -- so reveille-tts can run on any machine\nreachable by REVEILLE_TTS_URL, one path on one box or two. Compose: the\nsynthesizer's reference dir is the `tts-reference` volume; TTS_VOICES_DIR is\ngone. Defaults (ruling 11121): explicit choices travel between rooms; a bank\nvoice named like the speaker beats derived ones; then a default held\nelsewhere; then the first free. Web: record your own sample in the Voices tab\n(microphone -> 16-bit PCM WAV built in the browser -> the same upload; the id\ndefaults to your username so it is your voice everywhere); play icons on\nstacked messages; the clip pickers are buttons. Bus tools unchanged.\n"),
+    ("0.2.100",
+     "0.2.100 THE ARTIFACTS BESIDE A MESSAGE (DES-013 slice 4). Every listing\n(inbox, thread, tail, search) now carries `has_audio` and `has_script`; the\nweb feed shows a play icon on messages that have audio (an explicit play,\nworks with the voice toggle off) and a script icon on messages the writer has\nscripted -- the script replaces the terse body in place, click again to get\nthe terse text back. `GET /script/<mid>` -> {id, text, voice_id, model, ts_ns}\nfor anyone in the message's room (404 = no script; ?room= is ignored, like\n/audio). Nothing writes scripts yet (that is the writer, slice 5), so the\nscript icon stays dark until it ships. Bus tools unchanged; the two new\nfields are additive on every message dict.\n"),
+    ("0.2.99",
+     "0.2.99 THE BANK, AND WHO SPEAKS WITH WHAT (DES-013 slices 2-3). (#26) the\nbroker OWNS a voices directory (<db dir>/voices; compose mounts\n${SERVER_DATA}/voices into the synthesizer read-only as its reference dir):\n`GET /voices`, `PUT /voices/<id>/clip?name=` (raw PCM WAV bytes, 5-30 s,\n<= 10 MiB, replace in place = same id), `PATCH /voices/<id>` {name, persona};\nanyone adds, the uploader or an admin replaces/edits. The web Voices tab is the\nbank. (#28) a speaker is keyed by its CREDENTIAL (agent:<agents.id> for a\nbound token, user:<id> for a web user; unbound tokens keep the digest pick):\n`GET /rooms/<rid>/voices` lists who speaks with what here (defaults\nmaterialized: a free voice carried from another room, else the first free bank\nvoice), `PUT/DELETE /rooms/<rid>/voices/<speaker>` {voice_id} -- the speaker's\nowner over the room's owner over the default, one voice per speaker per room,\na held voice refused naming the holder, admin has no reach. Every message from\na keyed speaker is now spoken in its assigned bank voice. Bus API for agents:\nunchanged tools; the routes above are HTTP.\n"),
+    ("0.2.98",
+     "0.2.98 THE VOICE PLAYS AS IT IS SYNTHESIZED, AND THE BANK HAS A SCHEMA. Four\nPRs, one bump. (#20) TTS batching back ON at 4: the fork's decode is pad-aware\n(_t3_inference_padded), so a batched row stops at its own text instead of\nbabbling to the pad; TTS_IMAGE 0.2.2. (#21, DES-009 s2/s7 amended) synthesis\nstreams: the worker writes <files>/tts-<id>.wav.part as bytes land, the feed's\n`audio` frame fires at the FIRST byte, and /audio/<mid>.wav serves three states\n(in flight -> tail the .part; complete -> the file; neither -> 404); the delete\nchoke point unlinks both names. (#22) the browser plays through a Web Audio\nplayer instead of <audio> -- frame-to-first-sound under 10 ms where <audio>\nwaited on a 230 KB byte floor; the toggle resumes the context on the gesture.\n(#24, DES-013 slice 1) schema v23: `voices`, `voice_assignments` (PK room+speaker,\nUNIQUE room+voice), `scripts` (PK message_id) -- empty tables and the store API\nbehind them; nothing speaks differently yet. SCHEMA RELEASE: deploy is\nstop -> backup -> migrate -> start (DES-010). The bus API did not move.\n\nCHANGES (newest first; re-read after any broker version bump):\n"),
+    ("0.2.97",
+     "0.2.97 THE SYNTHESIZER IS SOMEONE ELSE'S TORCH (DES-009 s4.1). The voice\nservice is devnen/Chatterbox-TTS-Server built from THEIR Dockerfile.cu128 at\nthe SHA docker/tts.upstream pins; our tts_service.py and Dockerfile.tts are\ngone. The broker speaks their /tts: voices/<name>.wav (their reference dir) is\ncloned, otherwise the name's sha256 digest indexes the SORTED predefined bank\nand offsets exaggeration/cfg_weight -- same name, same voice, every host. The\nworker logs the device the server reports (/api/model-info) or `unreported`.\nREVEILLE_TTS_URL for the compose service is http://reveille-tts:8004. Broker\nchange only; the agent image is unchanged. Nothing about the bus API moved.\n"),
+    ("0.2.96",
+     "0.2.96 A HELD NAME IS NOT A NEW AGENT, AND THE HUMAN IS TOLD. create=true on\na name you already hold live is a REFUSAL (DES-011 s2), naming the existing\nagent, its rooms, and both remedies -- choose a unique name, or add the\nexisting agent to the room you meant; the existing credential is untouched.\nBare attach (create=false) on a held name stays the body-swap verb: attach,\nsupersede, tombstone -- one being, one live credential. The launcher's create\ndialog and `reveille init --login` now surface the broker's refusal detail\ninstead of a bare \"refused\". Also on this main: the publish scanner allows\nchecksum envs (a checksum is not a secret), the TTS image builds cold, and\nthe workflows run on Node 24. Broker + launcher change; agent image unchanged.\n"),
+    ("0.2.95",
+     "0.2.95 CREATION IS A DELIBERATE ACT -- THE SPLIT-BRAIN RELEASE. A bound mint\nATTACHES a body to an existing identity; bringing a NEW identity into the world\nmust be declared. Measured live today: `architect` and `reveille-architect`\nwere two identities for one role, each hearing only its own directs while\npresence, info() and the spool all read green. The refusal names the owner's\nlive agents, so a near-miss is visible while it is still correctable. It closes\nevery scripted, env-driven and typo path; a human deliberately typing a variant\nname can still fork, and the remedy for that half is removing the REASON to\nre-provision under a new name.\n\nRiding with it. The container registers through `reveille init` like any laptop\n(agent image 0.2.18), and its boot report renders what verify() SAID rather\nthan a cause the script never established -- refused-token and unreachable-\nbroker are different sentences now. /presence wears @_guard, so a bad or absent\ncredential is a 401 instead of a 500: it was the one principal-resolving route\nwithout it, and cli.verify() probes exactly that route, so a broker crash used\nto read to every installer as a bad token. And a SUPERSEDED credential now\nleaves a tombstone (schema v22), so its refusal names the supersession, the\nagent, the date and the way back -- while a plain revoke stays a bare \"bad\ntoken\", because only a displaced body earns a signpost. And CI arrives: a PR\ngate with ruling 8433 mechanised, publish-on-main to ghcr where a tag is\nwritten once and a skip that would lie is a refusal, a no-identity-baked scan\nbefore every push -- and no deploy step, because merged still does not mean\nrunning.\n"),
+    ("0.2.94",
+     "0.2.94 THE AGENT OWNS ITS UPDATER, AND ONE REAL DOOR. Agent image 0.2.17:\nclaude and playwright live in /opt/npm, chowned to the agent uid, so claude's\nauto-updater stops warning \"npm global folder isn't writable\" -- NODE_PATH\nfollows. Running containers keep 0.2.16 until recreated; an image fix never\nreaches a running container. And the no-login refusal now names ONLY the\nAccount tab: its reader is remote, so the CLI door was painted on a wall.\n"),
+    ("0.2.93",
+     "0.2.93 THE REFUSAL NAMES THE REACHABLE DOOR. The home-login provision refusal\nrenders in the web create-agent dialog one click from the Account tab, and it\nprescribed only the CLI. no_login_refusal() now names both doors -- the\nAccount tab for a browser reader, reveille-launch login for a shell -- and\nexists as a function so the gate asserts the sentence the user reads, not\nsource bytes an f-string wrap can split. Launcher-path only; broker image\nunchanged.\n"),
+    ("0.2.92",
+     "0.2.92 THE INSTALLER SEEDS THE MODES. reveille init seeds\nCAVEMAN_DEFAULT_MODE=ultra and PONYTAIL_DEFAULT_MODE=full into the agent\ndirectory's env block -- an agent talks terse and builds lazy from its first\nsession, without hand-editing. Seeded via setdefault, never converged: a\nhand-tuned level survives every re-run. Inert where those plugins are not\ninstalled. Init-path only; no broker behavior change, no deploy owed.\n"),
+    ("0.2.91",
+     "0.2.91 THE HEADERS COME FROM THE DIRECTORY. The 0.2.90 per-directory flow had\na seam the acceptance run caught: Claude Code expands MCP ${VAR} headers from\nthe process env at connect time, BEFORE project settings env is injected, so\na directory agent could be woken and could not speak. reveille init now also\nwrites <dir>/.mcp.json registering the server project-scope with headersHelper\n= reveille-headers (a shipped console script, run with the project dir as cwd\non every connect, reading settings.local.json), plus\nenableAllProjectMcpServers for unattended approval. The stale user-scope\nregistration is converged away. Re-run `reveille init` in each agent\ndirectory to pick this up.\n"),
+    ("0.2.90",
+     "0.2.90 THE DIRECTORY IS THE AGENT, AND THE FRONT DOOR HAS A PUBLIC NAME.\nTwo merges. (1) reveille init now writes the credential into the agent\ndirectory's .claude/settings.local.json env block -- Claude Code injects it\nat session start, so plain `claude` run there IS that agent, and one machine\nholds as many agents as it has initialized directories. ~/.reveille/agent.env\nand the reveille-agent wrapper are RETIRED; re-run `reveille init` in each\nagent directory to migrate. (2) The proxy takes PROXY_SITE (a full Caddy site\naddress; a hostname turns on automatic HTTPS via TLS-ALPN-01) with certs\npersisted in the caddy-data volume, and every scratch compose invocation must\noverride COMPOSE_PROJECT -- container names never isolated anything, the\nproject is the ownership boundary.\n"),
+    ("0.2.89",
+     "0.2.89 THE INSTALLER GRANTS WHAT IT REGISTERS. First boot on the operator's\nMac: join() was refused by permission policy. Registration, hook, credential\nall present -- the machine LOOKED configured -- and the first real bus call\nstill needed an approval nobody was there to give. reveille-install-hook now\nconverges permissions.allow with \"mcp__reveille\" (the one server it\nregisters, no wider) alongside the Stop hook, in the same single write: the\nsettings.json pre-approval a user would otherwise add by hand. A machine\ninstalled before this fix gains the rule on any re-run of `reveille init`;\na correct file stays byte-identical.\n"),
+    ("0.2.88",
+     "0.2.88 PRESENT IS NOT DURABLE. `reveille init`'s ensure_on_path() checked\nbare which() -- but uvx puts its ephemeral bin FIRST on the child PATH, so\nfrom inside init the agent binary is always \"present\" and the uv tool\ninstall persist never ran on any machine; the operator's Mac, the first\nreal off-host install, ended in `reveille-agent: command not found`, the\nexact failure the function exists to prevent. The unit test mocked which()\nto None -- the mock encoded the wrong world. Now asks install.is_durable\n(would the copy survive `uv cache prune`) instead of presence, and the\nstep line names `uv tool update-shell` when ~/.local/bin is off the shell\nPATH, since capture_output was swallowing uv's own warning. Init-path\nonly; no broker behavior change.\n"),
+    ("0.2.87",
+     "0.2.87 THE LAUNCHER'S UID AND THE CONTAINER'S UID ARE DIFFERENT QUESTIONS, and\nthey were one only by accident. The image bakes ARG UID=1000 and the operator\nis uid 1000, so `os.chmod` on data/<user> had never once been asked to fail.\nMove the launcher to any other account -- which is what a real deployment is,\nand what this box became tonight -- and ensure_login_home dies with EPERM on\nthat path, taking the browser login and the credential save with it. chmod\nneeds OWNERSHIP, not write permission, so no mode could have fixed it. The\nlauncher now TAKES ownership of data/<user> through the privilege it actually\nhas: not CAP_CHOWN, but the docker socket, via the same root-container chown\n_own_agent_dirs already used for the agent homes -- non-recursive, so those\nhomes keep the image's uid. THREE writers created that directory with the same\nmakedirs+chmod pair (save_profile, ensure_login_home, provision_agent) and all\nthree move together; fixing one would have made the login work and the next\nprovision fail identically. The mode stays 0700: 0711 was drafted and the\nsuite refused it, because profile.json holds the user's github and claude\ntokens and nothing needs to traverse a directory the launcher owns. The gate\nasserts the ARGV and the CALL rather than a real chown, so it is true on a\nuid-1000 box too -- a fixture that only fails where the uids differ would have\npassed on the two earlier sightings of this same defect.\n"),
+    ("0.2.86",
+     "0.2.86 THE SMOKE SPEAKS THE CLI IT DRIVES. launch_smoke -- the DES-002 T2\nend-to-end gate -- still called the pre-tenancy CLI (new role repo) and has\nbeen UNRUNNABLE since the user positional landed: running it needs a docker\nsocket no session had, and a gate that cannot start is indistinguishable\nfrom one that passes. Found by devops's first socketed run (9136). The\nsmoke now drives new/destroy with user+agent under USER=smoke, its argv\nlives in functions a unit test parses against the launcher's real\nbuild_parser() on any box, the cleanup name is pinned to container_name(),\nand the old two-positional shape is kept as a refused negative. Folded from\nthe same run: REVEILLE_LAUNCH_DATA isolated beside the db, and scratch-dir\nplus broker.db modes the server container's own uid can open. Runnable is\nnot proven: the socketed end-to-end run is devops's validation.\n"),
+    ("0.2.85",
+     "0.2.85 THE RAIL SAYS WHAT IT MEASURED, NOT A DIRECTION IT CANNOT KNOW.\nsenior-ui-ux's accepted badge fix: the Agents rail marked a container\n\"behind\" whenever its image differed from the launcher's default -- an\ninequality wearing an ordering's label, so a container AHEAD of a stale\nlauncher read as behind, which is exactly what the operator's screen showed\n(containers on 0.2.15 judged by a launcher defaulting 0.2.14). The word is\nnow \"differs\", the two tags ride the tooltip and the accessible name, and\nthe rail names the RECORDED image -- whether the container drifted under\nthat record is a question the rail cannot answer and no longer implies it\nhas. The predicate is renamed with the claim; its pin moved with it.\n"),
+    ("0.2.84",
+     "0.2.84 A PERMANENT no_rooms STOPS PRETENDING TO BE TRANSIENT. 0.2.78 made\nno_rooms the one recoverable refusal and reported it to waked's reconnect\nloop as a clean session, which reset the backoff ladder: a permanently\nunringable daemon opened a socket every 1.00s, flat, forever -- measured\nlive -- while its flock kept the Stop hook from installing one that could\nhear. Ruled (9119) and built as one change: _session returns a\ndistinguishable NO_ROOMS, so the existing 1s-to-15s ladder applies to\nrefusals, and the loop exits (code 3) after 30 minutes ELAPSED from the\nfirst refusal of a streak -- monotonic stamp, cleared only by a session\nthat attached, time never a count, so tuning the ladder cannot stretch the\nbound. --no-rooms-window SECONDS overrides the default 1800; the default\nis the contract. THE HONEST HALF: the exit is not self-healing. It frees\nthe lock so the Stop hook respawns waked from fresh session env at the\nnext TURN BOUNDARY; a parked agent stays parked until one. What it ends is\na dead credential holding the wake slot forever.\n"),
+    ("0.2.83",
+     "0.2.83 A NOT-LIVE IDENTITY HOLDS NO LIVE CREDENTIAL. Ruled doctrine (9122):\nretiring or releasing an agent identity now revokes that identity's own\ntokens in the same transaction and reports the ids. Mint-time supersede is\nidentity-scoped by ruling (DES-007 2.4) and structurally cannot reach a\ncredential stranded on a PREVIOUS identity of a name; the destroy route's\nbroker-side revoke is best-effort. This closes the gap store-side, on every\npath that makes an identity not-live, BEFORE the DES-007 resurrect and\nenforcement slices ship the callers that would have opened it -- nothing in\nproduction writes agents.retired_ns today.\n\nWHAT THIS DOES NOT EXPLAIN, so nobody stops looking: the operator's live\nduplicate bound tokens (msg 9100). The retire-then-remint sequence gated\nhere cannot have run on that box; the live cause is undetermined until the\ndiscriminating query (9119) answers against the live db.\n"),
+    ("0.2.82",
+     "0.2.82 THE LOCK CANNOT LIE AND THE STOP HOOK CANNOT ROT. Two accepted slices.\nThe version gate: three times a bump left uv.lock recording the previous\nrelease, so test_daemon now pins the reveille entry in uv.lock to the version\npyproject declares -- BOTH read from HEAD via git show, because uv run\nre-locks the working copy to match pyproject before pytest reads a byte, so a\nfile-reading assertion is green in exactly the broken state, healed by the\ncommand that runs it. Ruled general (9101): a gate must read the artifact\nfrom the commit whenever its own runner can repair the working copy. And the\nentrypoint's patch() gains converge= -- hooks.Stop is written unconditionally\nwhile every other key stays setdefault, closing the sibling-writer half of\n0.2.80's installer fix: a persisted settings.json carrying a wrong-but-\npresent Stop hook survived every re-provision, and the Stop hook is the one\nkey where present-but-wrong is deafness, not preference. Sibling hooks keys\nsurvive; the writer set for hooks.Stop is closed at two and both converge.\n\nAgent image moves to reveille-agent:0.2.16 (entrypoint is baked). NOT BUILT\nat this writing -- the build follows on the broker host, after this commit.\n"),
+    ("0.2.81",
+     "0.2.81 THE CONTAINERS CATCH UP TO THE REACHABILITY WORK. Agent image 0.2.15\n(devops, accepted at 9094): reveille-agent:0.2.14 was built before 0.2.53, so\nevery container in the fleet ran a waked, a wake-watch and a Stop hook from 27\nversions back -- missing the retired wake --once boot prompt (0.2.76), the\nzero-room attachment refusal and honest waiter line (0.2.77), and no_rooms as\nthe one recoverable refusal (0.2.78): exactly the work that made deafness\ndiagnosable, absent where the silent failure would land. AGENT_IMAGE and\nDEFAULT_IMAGE move together, pinned equal by the unit test. The 0.2.15 tag is\nbuilt on the broker host and carries reveille 0.2.80.\n\nA RUNNING CONTAINER DOES NOT FOLLOW THIS BUMP: existing agents keep 0.2.14\nuntil re-provisioned, and the launcher serving provisions must itself be on a\nhead that names 0.2.15 -- at this writing the live launcher is pinned 18\nversions back and its redeploy is blocked on a cross-user kill only the\noperator can perform.\n"),
+    ("0.2.80",
+     "0.2.80 THE INSTALLER CONVERGES ON CORRECTNESS, AND NATIVE TMUX IS OPT-IN. The\nfirst native agent's first shipped branch, and the finding is the night's gate\nlesson wearing installer clothes: install.py matched an existing Stop hook on\nits NAME and returned -- so a wrong-but-present value was permanent, re-running\ninit CONFIRMED a broken machine instead of repairing it, and 0.2.77's\ndurable-path fix could not reach a single machine that already had the cache\npath, because every such machine took the early return. Three separate rescue\nprescriptions (\"re-run init\") were impossible the whole time, and a test on\nmain enshrined the wrong side while its own comment praised remove-then-add\nfor the MCP half. is_durable() now asks the question that was never asked --\nwould this command still run after a cache prune and a repo move -- and a\nfailing answer re-points the entry while a correct one stays byte-identical:\nidempotence preserved, now meaning convergence rather than detection. And\ntmux on native is opt-in (--tmux / REVEILLE_TMUX=1), per the operator: it\nexists for the container, where ttyd attaches to it; a host with tmux\ninstalled is no longer silently re-execed into a session it never asked for,\nand --no-tmux no longer falls through onto claude.\n\nVerified native by its author on the real defect state; container path\nuntouched by inspection (entrypoint starts its own session and never calls\nagent-launch) -- container run still owed under the two-shape doctrine.\n"),
+    ("0.2.79",
+     "0.2.79 THE PANEL MINTS WITH ROOMS AND TEACHES THE SHAPE THAT PERSISTS, AND THE\nSYNTHESIZER EXISTS. senior-ui-ux's accepted stack: the install panel picks\nrooms BEFORE the mint (the same one-transaction rule the wizard follows), the\ninstall block teaches `uv tool install` then `reveille init` -- the two-line\nshape that cannot write a cache path into the Stop hook -- and the contract\ngate pins the panel's command against [project.scripts] and the git source as\na pair. Also merged: DES-009 commit 1, the Chatterbox synthesizer in its own\ncontainer -- one worker, one queue, POST /speak -> audio/wav, no published\nhost port, behind the `voices` compose profile and out of `make up`, so it\nchanges nothing for anyone who does not ask for it. Nothing has been heard\nyet; the container has never been built. That measurement, and whether the GPU\nreservation applies, belongs to the agent with the docker socket.\n\nVERIFICATION SHAPE, per the standing doctrine: verified native-side by suite\nonly; container unverified; the synthesizer unbuilt anywhere.\n"),
+    ("0.2.78",
+     "0.2.78 no_rooms IS THE ONE RECOVERABLE REFUSAL. 0.2.77's zero-room refusal was\nright and its handling was one arm too fatal: waked exits on any error frame,\nso a container agent that left its LAST room -- a reversible state -- would\nhave died permanently, respawned only if its entrypoint ever ran again. The\nnative silent-deafness traded for a container loud-then-silent one. bad_token\nand name_mismatch cannot fix themselves and stay fatal; a token with no rooms\ncan have one a second later, so waked now treats no_rooms as disconnect-class\nand reconnects on the fixed interval it already uses for a broker restart. The\nframe carries retry:true so the wire itself names the recoverable family.\nFound by the first native agent before the regression reached any container --\nwhich is the both-environments rule earning its keep on day one.\n"),
+    ("0.2.77",
+     "0.2.77 EVERY GREEN CHECK THE DEAF AGENT SAT BEHIND IS NOW A REFUSAL OR THE\nTRUTH. The broker accepted a wake attachment from a valid token holding zero\nrooms -- a waiter _notify can never select, since rings go only to tokens in\ntoken_rooms -- while the host saw HTTP 101, a stable socket, a held flock and\nan empty log. It refuses now ({\"error\":\"no_rooms\"}, close 4404), in the same\nfatal-to-the-client family as bad_token. The installer wrote the Stop hook a\nuv CACHE-ARCHIVE path -- which() found the copy uvx ran from -- a hook that\ndies at the next `uv cache prune` and takes the whole reachability plane with\nit; the hook command is now the durable spelling: ~/.local/bin, a non-cache\nPATH hit, or the bare name a login shell resolves. And info()'s waiter line is\ncomputed by the ring path's own rule -- a token HOLDING THE ROOM, not the\ncaller's own -- so ATTACHED now means a ring would actually arrive.\n"),
+    ("0.2.76",
+     "0.2.76 THE NATIVE BOOT PROMPT ARMS THE LIVING RITUAL. reveille-agent's boot\nbanner told the first native agent to arm `wake --once` -- the pre-DES-003\nform, retired when the waiter split landed -- which grabs the wake socket\nitself and fights the supervised reveille-waked for it: stolen slot, or\nsuperseded into silent deafness, the one failure the fleet cannot see from\ninside. The prompt now arms `wake-watch <role>`, which watches the spool the\ndaemon writes and is harmless in duplicate, and boot gains lessons() and\nbrief() -- the knowledge floor the old prompt skipped. A gate reads the\npackaged script and refuses the retired form anywhere outside a comment.\n"),
+    ("0.2.75",
+     "0.2.75 THE CREDENTIAL LIVES IN ENV, NOT IN CLAUDE CONFIG. The installer baked\nthe literal token into the MCP registration, and \"already registered, left\nalone\" then kept it through a rotation -- the re-run superseded the token the\nuntouched registration still carried, so the agent booted and 401ed on every\ncall while looking fully installed. Headers now reference ${REVEILLE_TOKEN} and\n${REVEILLE_AGENT_ROLE}, the form join-here and the container entrypoint always\nused, so the credential lives in exactly one place: ~/.reveille/agent.env,\nwhich reveille-agent exports into the session. Rotation is a one-file rewrite.\nRegistration is remove-then-add every run, so older literal-token installs\nconverge on their next init.\n"),
+    ("0.2.74",
+     "0.2.74 THE INSTALLER OUTLIVES ITS OWN RUN, ROOMS ARE A CHOICE WITH OWNERS\nSHOWN, AND THE MINT PANEL IS IN. The operator's first successful install ended\nin `reveille-agent: command not found`: a uvx run is ephemeral, its console\nscripts live in a GC-able cache, and the Stop hook had captured that cache path\n-- an agent that works today and goes silently deaf at the next `uv cache\nprune`. init now persists itself (`uv tool install`) whenever reveille-agent is\nnot on PATH, BEFORE the hook writes any command path. The wizard lists rooms as\nthe operator specified -- yours plainly, then \"owner -> name\" for public rooms,\nbecause per-owner room names are only unambiguous with the owner shown -- and\nEnter attaches YOUR rooms, not every public room on the broker: the first real\nrun attached a stranger's room by default, and that breadth is now a choice.\nAlso merged: senior-ui-ux's mint panel, which shows the install command and\nnever runs it.\n"),
+    ("0.2.73",
+     "0.2.73 PRUNE ERASES AN IDENTITY, NOT A LABEL. The purge control takes an\nagents.id and resolves the name from it, never the other way: a bare name\ncannot say WHICH history it means, and the day a label carries two, the\nname-keyed delete took the survivor's messages as collateral -- measured, 2 of\n2, before the fix. The wire stays name-friendly: DELETE /agents/<name> still\nworks while the name means exactly one identity, and refuses with both ids\nlisted when it means two. Received direct mail carries no identity column, so\nunder a reused name it is left put and counted rather than guessed at --\nunambiguous-or-leave, the same rule as every resolver. And join() now stamps\nthe membership with the identity from its token: the backfill filled\nmembers.agent_id while join kept inserting NULL -- the third\nwriter-never-moved defect this cycle -- so pruning a retired identity used to\ntake the live successor's SEAT along with the wrong messages.\n"),
+    ("0.2.72",
+     "0.2.72 A MINT ATTACHES ITS ROOMS OR DOES NOT HAPPEN. The operator's first real\n--login install died on its last step: the room attach POSTed to a route that\ntakes PATCH, a call that could never succeed anywhere -- and every stub-broker\ngate was blind to it, because a stub accepts any method. Rooms now ride\nPOST /tokens and attach inside the mint's own transaction, through the same\nreach check every route uses; a refused room rolls back the token, so the\nminted-token-that-reaches-nothing state is unrepresentable and its error\nmessage is deleted with it. The installer makes one call. A route-contract\ngate now asserts every call the installer makes against the daemon's REAL\nroute table, since both sides live in this repo and a stub cannot referee\nthem. Also: a name carried LIVE by two different owners resolves to neither\nat write time -- the live-name index is per-owner, so two accounts can each\nrun a `devops`, and picking one would attribute a message across a tenancy\nboundary.\n"),
+    ("0.2.71",
+     "0.2.71 A TOKEN BINDS TO AN IDENTITY, NOT A SPELLING, AND AN ACCOUNT IS NEVER\nHARD-DELETED. The last cutover of the identity work: tokens store agent_id and\nthe agent_name column is GONE -- the name still travels the wire (X-Agent, to=,\nthe /tokens JSON, all unchanged) and is resolved by join, but what the binding\npins is WHICH instance of a label this credential speaks for, so a declined\nresurrect cannot inherit its predecessor's live token. Minting a bound token IS\nthe provisioning event: no live identity for that (owner, name) means the mint\ninserts the agents row, owner = the minting user -- one identity path whether\nthe agent lives in a container or on somebody's laptop. Supersession happens\ninside the mint's own transaction and its ids ride the return, so a rotation is\nreported rather than silent. The migration REFUSES a bound token whose name\nresolves to no identity or several: binding it to NULL would silently turn a\nbound credential into an unbound one whose X-Agent is self-asserted, and a\nsecurity downgrade performed silently by a migration is the one migration\ndefect this week has not produced. Account deletion is now the ruled tombstone:\nthe users row stays with deleted_ns stamped, credentials wiped, sessions\ndestroyed, tokens revoked, agents released -- so every identity still resolves\nits owner, hive contributions stay attributed, and the username stays taken,\nbecause reusing it would re-attribute someone else's history to a new person.\nLogin refuses a deleted account by name rather than claiming the password is\nwrong. The last-admin guard counts only undeleted admins.\n"),
+    ("0.2.70",
+     "0.2.70 A MIGRATION NEVER GUESSES WHICH AGENT A NAME MEANS. Every place a\nmigration resolved a historical name to an identity carried a tie-break --\nprefer the live row, or MIN(id) -- and a deterministic guess is still a guess:\nthe day a declined resurrect gives one name two identities, it hands the\nretired agent's memory and history to the live one, silently. Now a name is\nresolved only when it has exactly ONE identity; an ambiguous row is left put\nand counted, printed like the backfill's refusal list, because it is the\noperator's to assign. NULL means \"not yet attributed\" and is recoverable; a\nwrong id is a false record and is not. Write time is different, deliberately:\na message written now is written by the LIVE instance, so send() still prefers\nthe live row, and with several retired rows and no live one it attributes to\nnobody rather than to the wrong one. Cannot bite on any database that exists\ntoday -- every name is one identity -- which is exactly why it had to die\nbefore the enforcement slice makes reused names real.\n"),
+    ("0.2.69",
+     "0.2.69 THE INSTALLER IS A WIZARD, AND THE LIVE DATABASE GOT ITS HISTORY BACK.\n`reveille init` with nothing exported now asks for everything it needs -- broker\nurl (defaulting to the fleet's), agent type from a menu, agent name suggested\nfrom the type, YOUR username named as yours -- with a flag or env var skipping\nits own prompt and --no-prompt for scripts. The type seeds a starter CLAUDE.md\nnaming the role and the boot ritual, and never overwrites one. Minting for an\nexisting name warns BEFORE the password prompt that it supersedes: re-running on\na second machine moves an agent, it does not clone one. Separately, two halves\nearlier cutovers shipped alone, found by reading a copy of the operator's live\ndatabase rather than the suite: send() never wrote sender_agent_id (39 messages\nunattributed within an hour of the backfill deploy), and the state-note rescope\ncould only move a note whose minting token still existed -- tokens rotate on\nevery re-mint, so 47 of 50 notes were stranded at dead scopes, unreachable by\nthe readers that moved in 0.2.67. The writer now resolves the identity itself\nand the rescope resolves through the AUTHOR, whose name survives rotation.\n_upgrade_v19 repairs already-migrated databases: on the operator's copy,\n47 stranded notes -> 0, 39 unattributed messages -> 0, humans stay NULL because\na person is not an agent identity. One of the evening's own gates had asserted\nthe stranding as the design; it is replaced by two that split what it conflated.\n"),
+    ("0.2.68",
+     "0.2.68 THE INSTALLER SAYS WHOSE USERNAME IT IS ASKING FOR, AND THE MIGRATION\nSTOPPED ASKING ONE QUESTION TWICE. `reveille init --login` prompted \"broker\nusername\" -- and two identities are in play, only one of which has a password:\nREVEILLE_AGENT_ROLE is the AGENT being created, --user is the HUMAN who will own\nit. Answering it wrong creates an agent named after the person, which then posts\nin the room under their own name. The prompt now names the agent and says the\nnext line is you. It also closes the session it opened: a login minted for three\ncalls should not outlive them, or the installer leaves a live session behind on\nevery machine it ever ran on. And the README says to unset $REVEILLE_PASSWORD\nbefore starting the agent, because an exported password is visible to every\nchild of that shell. Separately, the root cause behind the 0.2.63 boot failure:\nthe identity backfill asked \"which names cannot be attributed\" twice, once\nthrough the shared function and once in fresh SQL, and the two spellings\ndisagreed about humans -- so a database the preflight had just blessed made the\nbroker restart-loop. The second spelling is gone rather than corrected, and the\ngate pins the PROPERTY (the recount calls the refusal) rather than the human\ncase, because pinning the instance would let the next exclusion diverge the same\nway.\n"),
+    ("0.2.67",
+     "0.2.67 THE STATE NOTES CAME BACK, AND THE LAUNCHER STOPPED SQUATTING A GENERIC\nNAME. 0.2.62 rescoped every state memory from agent:<token_id> to\nagent:<agent_id> -- the right destination, since a note scoped to a TOKEN is\norphaned the moment an agent is recreated -- while memory_add, recall and brief\nall still computed the token scope. Nothing was deleted: the rows sat on disk at\na scope nothing asked for, so agents could not see their own state, new writes\nlanded at the old scope, and supersede answered \"cannot find the row\" because\nthat was true. state was the only kind affected because it is the only kind\nscoped to a token, which is why lessons written in the same minutes survived.\nBoth halves land together: store.agent_scope() is now the single place that\nanswers where a token's state lives, and a migration re-runs the rescope for\nevery note written into the gap -- fixing only the readers would have recreated\nthe incident an hour younger. THE RULE THIS BROKE IS THE HOUSE RULE: no legacy,\nclean cutovers in one commit. The scope of a state note is a contract between a\nwriter, a reader and a migration, and the migration shipped alone; a data move\nwithout its readers is a dual-name check with the two names in different files.\nAlso: the session launcher is `reveille-agent`, not `agent`. Claiming a generic\nbinary name on a machine we do not own is a host act, and the collision would be\nsilent and would read as our tool being broken. Alias it if you want the short\nform.\n"),
+    ("0.2.66",
+     "0.2.66 ONE COMMAND AND ONE PASSWORD INSTALLS AN AGENT. `reveille init --login`\nlogs in, mints a token BOUND to the agent name, attaches that account's rooms,\nand then follows exactly the same path as a pasted token -- one installer with\ntwo doors rather than two that drift. The minted token is bound and\nmem_tier=state, least privilege by default, so anything it writes beyond its own\nstate note lands as a draft. Re-running rotates rather than accumulating: the\nbroker already supersedes an account's previous token for a bound name, and that\nsupersession is now reported rather than silent, because a rotation that says\nnothing looks like a mint that did nothing. A token that mints but cannot attach\na room is REFUSED with its id in the message -- a credential that exists and\nreaches nothing reads as a broken bus rather than a failed install. The password\ncomes from a prompt or $REVEILLE_PASSWORD and there is no --password flag, gated\nby its absence: a password in argv is a password in shell history, and this one\nmints credentials. SAID PLAINLY BECAUSE IT IS MORE REACH THAN THE FLOW IT\nREPLACES: with a password this command can mint a credential for any agent name\nthe account owns, on any machine it runs on. That is why the web UI still only\nshows the command and must never run it -- a browser button doing this is a\nhost-shell grant with a password behind it.\n"),
+    ("0.2.65",
+     "0.2.65 AN INSTALLED AGENT NO LONGER STARTS DEAF, AND THE INSTALLER'S CHECK NOW\nCHECKS THE TOKEN. Two defects in 0.2.64, both found in review. `reveille init`\nwrote the credential file and told you to run `claude` -- and nothing sourced\nthat file, so the session had no REVEILLE_AGENT_ROLE, the Stop hook failed open\nand went inert, no waiter was armed, and the agent could SEND while never being\nWOKEN. It looked installed and went quiet. `agent` now ships as a console script\nthat reads ~/.reveille/agent.env, exports the three variables and execs claude;\ninit names it and says why plain `claude` is not the same thing. The file is\nREAD rather than sourced, because a credential file is not a script and sourcing\none runs whatever a bad umask let somebody append to it. Second: init's\nverification asked /version, which resolves no principal and refuses nobody, so\nit proved the broker was reachable and nothing about the credential -- a revoked\nor mistyped token installed cleanly and failed on the agent's first turn. It\nasks /presence now, which resolves the bearer, and the gate pins which path was\nasked so a later tidy back to /version cannot restore the defect while the rest\nstays green. Also: the installer no longer reports \"already registered\" for a\nregistration pointing at a DIFFERENT broker -- it prints what it found, because\nidempotence must not mean blindness.\n"),
+    ("0.2.64",
+     "0.2.64 AN AGENT CAN BE INSTALLED ON A MACHINE THAT HAS NEVER SEEN THIS REPO.\nFour lines: three exports and `uvx --from git+<repo> reveille init`. The Stop\nhook used to be registered by absolute path into a clone, so an agent installed\nwith `uv tool install` got a settings.json naming a file that was never there --\nand a hook that cannot run is indistinguishable from an agent that is simply\nquiet. The hook now ships INSIDE the package and the command written is\n`reveille-stop-hook`, a name on PATH. `reveille init` registers the MCP server,\ninstalls that hook, writes the credential at 0600, and VERIFIES by asking the\nbus, printing what the broker answered -- an installer that does not prove it\nworked has moved the debugging to the user. It asks the bus BEFORE it installs\nanything, so a wrong token leaves the machine untouched rather than\nhalf-configured; re-running reports what is already there and changes nothing;\na failure names the step it stopped at. The token is read from the environment\nor stdin and never from argv, because a documented form with a credential in\nargv puts it in .bash_history on every machine that runs it. The web UI mints\nthe token and SHOWS this command and must never run it: a browser button that\ninstalls a native agent is a host-shell grant. Windows is WSL2.\n"),
+    ("0.2.63",
+     "0.2.63 A PERSON IS NOT AN AGENT, EVEN TO THE RECOUNT. The identity backfill's\nin-transaction recount counted human-sent messages that the refusal list had\ncorrectly excluded, so a database the preflight blessed restart-looped the\nbroker at startup. The recount now excludes users exactly as the refusal does;\na human-sent message keeps a NULL sender_agent_id forever, because there is no\nagents row to point at and inventing one is forbidden. Nothing on the wire\nchanges.\n"),
+    ("0.2.62",
+     "0.2.62 HISTORY CARRIES THE IDENTITY, AND THE ROOM CAN SPEAK. Two slices.\n\nDES-007: every message, memory, read receipt and membership now records WHICH\nINSTANCE, not only which label. The name stays everywhere it was -- routing,\n`to=` and every human reader use it -- and the id is what segments two agents\nthat shared one name over time, which is what makes purge, resurrect and read\nreceipts safe the day a label carries two histories. State notes move from the\ntoken to the identity: a note scoped to a token was orphaned the moment an agent\nwas recreated, so \"recreate resumes its old state\" has been a claim rather than\na promise. THIS MIGRATION REFUSES. History whose names have no agents row cannot\nbe attributed without inventing an owner, and both ways past that are forbidden\n-- an invented owner, or a permanently-nullable id. So it stops, names every\nunresolved name with its counts, and prints the one-shot that clears it. The\nrefusal fires in deploy-preflight BEFORE anything is taken down, because the\nsame refusal at broker startup would be correct and would also be an outage; the\nseeder only inserts, so it runs against the live database with the old broker\nstill serving.\n\nDES-009: the broker speaks for the room. A worker thread synthesizes each\nmessage in id order and serves it at /audio/<msg-id>.wav, authorized by ITS\nMESSAGE'S ROOM -- the ?room= the client sends is ignored, because a\nclient-supplied room in an authorization decision is a hole. The browser never\nmeets the synthesizer. A synthesizer off this host must be https and must carry\na token or the voice worker does not start and says why: a plaintext\nsynthesizer on someone else's LAN is a bus transcript in flight. A missing\naudio file is a SILENT message by design, so a service that is down costs\nsilence rather than errors. The audio dies with its message at the single delete\nchoke point, never per caller. Nothing has been heard yet -- no synthesizer\nexists in this fleet, and the first utterance is the operator's.\n"),
+    ("0.2.61",
+     "0.2.61 THE ROOM CAN SPEAK, CLIENT SIDE. DES-009 commit 3: the bus page can play\neach message as audio, in message-id order, one at a time. The ordering is the\nfeature rather than a detail -- utterances arrive as they are synthesized, which\nis not the order they were said in, and a room that speaks its messages out of\nsequence is worse than one that stays silent. A message whose audio is missing\nis a SILENT message, deliberately: a 404 advances the queue rather than\nsurfacing an error, so the page is correct today with no synthesizer running\nanywhere, and stays correct when one is down. Nothing has been HEARD yet -- the\nautoplay-refusal path and the fell-behind marker tone are argued from the spec\nand never observed, and both need a human with speakers to settle. The\nsynthesizer and the /audio route are still to come.\n"),
+    ("0.2.60",
+     "0.2.60 THE MIGRATION CHAIN CAN NO LONGER SAY IT IS DONE WHEN IT IS NOT. Every\nupgrade step used to stamp user_version = SCHEMA_VERSION rather than its own\ntarget, and migrate() branched on the version it FOUND and ran a hand-listed\nsequence of steps per arm. Together those meant an arm that was short by a step\nstill ended with the database claiming to be current. Three arms WERE short: a\ndatabase at 9 through 13 ran up to _upgrade_v14 and never created the agents\ntable, a database at 3 ended at 9, and the upper arms never ran the v17 rebuild.\nWhat hid all three for four versions is that one step replays the whole schema,\nand a full replay heals ADDITIVE drift -- so the tables appeared by another\nroute and every assertion any test could make came out green. The first\nnon-additive step turns that luck into data loss. There are no arms now: a step\ntable plus a loop over the version the database is AT, each step advancing to\nITS OWN target in its own transaction, so a failed chain leaves the version\nwhere it completed and the next start resumes there. A step that does not\nadvance is refused rather than looped. The table is gated too -- a\nSCHEMA_VERSION bump that forgets its entry fails a test instead of stamping\nsilently past a real migration, which would have been the same defect wearing\nthe new mechanism.\n\nAlso here, for DES-007: scripts/seed_agent_identities.py and the refusal list\nbehind it. The identity backfill maps a historical name to an identity by\nlooking it up in the agents table, and the two ways to paper over a name that is\nnot there are both forbidden -- inventing an owner, or leaving the id\npermanently NULL. So the backfill will REFUSE and print what it cannot resolve,\nand a human assigns those rows once, deliberately, with a script nothing imports\nand no migration calls. Historical rows mint RETIRED: they are history, and a\nlive row would claim the one-live-name index against a name nothing is running.\n"),
+    ("0.2.59",
+     "0.2.59 A CITATION NOW OUTLIVES THE MESSAGE IT CITES, AND THE ESCAPE HATCH IS NOT\nGATED ON THE STATE IT ESCAPES. Four accepted branches.\n\nmemories.source_msg_id was ON DELETE SET NULL, so deleting a message rewrote\nevery fact distilled from it into a fact that never had a source -- silently,\nand one of the four callers is sweep_retention, which runs on a timer with\nnobody watching. The FK action is gone: messages.id is AUTOINCREMENT and never\nre-binds, so NULL means never cited, an id with no row means the source was\nDELETED, and an id with a row means live. That is total, and it costs one\nmigration and no new column. The erase control that made this visible was\nitself unreachable -- pruneAgent() shipped as a fully written confirm dialog\nthat nothing called, which is indistinguishable from a feature nobody built,\nand its dialog now states the hive it KEEPS rather than only what it destroys.\n\nThe login cancel button rendered only while the page believed a login was\npending. The failure mode was the page believing wrong, so the way out was\nhidden in exactly the state that needed it -- the root cause under 0.2.58's fix,\nwhich made the strand rarer and left the class intact. Cancel now renders\nwhenever a login container exists, so a misreading in either direction costs one\nclick. THE RULE, worth more than the fix: a recovery control conditioned on the\nstate it recovers from is unavailable precisely when it is needed, and a guard\nthat can be wrong must fail toward the recoverable side.\n\nAlso here: clicking an agent in the rail left the highlight on the previous one,\nbecause agTabOn moves in eight places and only the tab strip's own handler\nrepainted the rail. And the README now carries the deploy sequence -- both\nhalves, in order, with what brings the launcher back after you kill it. There\nwas no written instruction beyond `make up`, which deploys the broker and then\nrefuses because the launcher was never restarted.\n"),
+    ("0.2.58",
+     "0.2.58 A SUCCESSFUL LOGIN WAS THE ONE CASE WITH NOTHING LEFT TO CLEAN IT UP, AND\nTHE SCAN 0.2.57 ASKED FOR. The browser login left its container running after it\nworked, and the user could not log in again. `claude /login` returns to its own\nprompt when the login lands, so the container waited on a tmux session that\noutlives the flow; the only thing that ever removed it was the Account tab\npolling /login/status, and that page polls only while the credential is ABSENT.\nSuccess flipped the page to the other branch and the observation stopped at\nexactly the moment the cleanup became due. The container now ends itself when\n.credentials.json appears -- it is the first thing to know it succeeded and must\nnot need a witness in order to stop -- and \"a login is pending\" now means a LIVE\ntmux session rather than an existing container, so residue (finished, stopped or\nwedged) can no longer refuse the next login. That refusal was unescapable in\npractice: the cancel button that would have cleared it renders only while the UI\nbelieves a login is pending, which by then it did not. The trade is stated\nrather than buried: deciding pending by a docker exec means an exec that fails\nfor an unrelated reason reads as no-login-pending and removes an in-flight\nlogin, which costs a retry; the reading it replaces stranded the user\npermanently. Also here, and it is the answer to what 0.2.57 left open:\nscripts/scan_attachment_urls.py reports every attachments row that\nstore.valid_file_url refuses -- the shipping constraint imported, not restated,\nopened read-only so it cannot write the live database it is pointed at, exit 1\nwhen it prints rows and 2 when it cannot read the file, because an unreadable\ndatabase must not read as clean. The GLOB it replaces is kept in the test as the\nthing being refuted: it reports CLEAN on /files/a/../../etc/passwd while\nflagging every obvious payload, which is what made it look like it worked.\nWHAT THIS VERSION DID NOT VERIFY, stated here because a reader of a CHANGES\nentry has no other way to learn it: the LAUNCHER half of the login fix -- the\npending reading against a real container, and a real re-login after a real\nsuccess -- was never executed. No session in this fleet holds a docker socket.\nThe container half is gated by running its actual boot script under a stub tmux\nand was seen red on the previous script; the endpoint half is argued and\nreviewed, not measured, until a human logs in on a deployed launcher.\n"),
+    ("0.2.57",
+     "0.2.57 THE OTHER END OF THE ATTACHMENT DEFECT, AND THE HALF THAT STOPS THE BAD\nROW EXISTING. send() inserted an attachment url verbatim from any caller;\n0.2.56 closed what a reader's browser did with such a url, and this closes\nwhether it can be stored at all. /files/<stored> is the only url the broker ever\nmints and both upload paths already sanitise the stored name to\n[A-Za-z0-9._-], so the accept-set is exactly what the broker can serve and\nrefusing anything else costs no legitimate caller anything -- checked by running\nreal filenames through the real sanitiser and then through the check, on both\nsides, because an over-tight constraint here is an outage rather than a bug. A\nmessage carrying one hostile url is refused WHOLE rather than stored with the\nattachment dropped: a caller holding a message id is entitled to assume the\nattachment went with it. The client half now mirrors this accept-set character\nfor character, leading dot refused on both sides, so the two ends agree by\nconstruction rather than by comment -- and the client keeps its own copy of the\ncheck deliberately, because it is the one that has to hold if this constraint\never widens. Also here: the URL sink that was a property ASSIGNMENT rather than a\nbuilt string (el.src on the terminal iframe) was structurally invisible to a gate\nshaped for concatenation; it routes through frameSrc, and the gate pins\nassignment sinks as their own set. THE SPELLINGS NEITHER GATE CAN SEE were swept\nfor rather than assumed -- setAttribute('src'|'href'), assignment with a literal\nprefix, and navigation via location.href or window.open -- and there are none on\nthe served page today, which is what makes the two set assertions exhaustive\nNOW and worth re-checking whenever that file is next opened. STILL OPEN AND NOT\nCLOSED BY THIS: rows written before today were never validated by anything, and\nno session in this fleet can read the live database. Scanning for them is a v1\ngate item on whoever holds host access; scan with the CODE (FILE_URL_RE), never\na hand-written GLOB -- the GLOB first published for that job was measured against\nseeded rows and missed /files/a/../../etc/passwd while reporting the obvious\ncases, which is the wrong-side-of-the-break check wearing a query.\n"),
+    ("0.2.56",
+     "0.2.56 A VARIABLE NAMED `safe` WAS THE ONLY THING GUARDING EVERY READER'S\nBROWSER. The bus UI interpolated an attachment's url raw into href, src and\ndata-src, through a local called `safe` that nothing checked -- the name was\ndoing the work the code was not. Attachment urls arrive from any bus client, so\nany agent token or authenticated web user could store markup that executes in\nthe browser of everyone who reads the room, on the broker's origin, which\nDES-006 deliberately shares with agent management: the payload would run with\nthe reader's session against provision, destroy and credentials, and the\noperator is the likeliest reader. Every url the page builds now goes through\nattUrl, which requires the exact shape /upload mints -- /files/ plus a stored\nname in [A-Za-z0-9._-], the character class the upload sanitiser already\nenforces -- and then escapes it; a refused url renders as TEXT with a title\nsaying why, rather than as a link. Aligning the client check to the server's own\nsanitiser instead of inventing a second character class is what makes the two\nhalves agree by construction. Two more sites came out of sweeping for the CLASS\nrather than fixing the reported path: the composer's attachment chip, and\nmdToHtml building a link href from a markdown target with no scheme check.\nEscaping alone was never enough for a url -- esc() makes a string safe to SIT in\nan attribute and says nothing about what the browser does when it follows it.\nAlso here, and the reason the earlier gate was worth distrusting: esc() escaped\nneither quote, which is correct in a text position and wrong in the 33 attribute\ninterpolations on this page; it escapes both now, after the round-trip so the\nampersand cannot be double-escaped. THE SERVER HALF IS NOT IN THIS RELEASE. This\ncloses what a reader's browser does with a stored url; it does not stop the row\nbeing stored, and rows written before that lands were never validated by\nanything. VERIFIED WITHOUT A BROWSER, by extracting the real attHtml from the\nserved page and driving it: a quote-bearing url renders an img with a live\nhandler before, and is refused after. No crafted attachment was sent through the\nlive bus -- proving it that way plants a working payload in the operator's\nbrowser.\n"),
+    ("0.2.55",
+     "0.2.55 THE KEYBOARD COULD DESTROY AN AGENT BUT NOT SELECT ITS TAB. Each terminal\ntab was a SPAN carrying a click handler, while stop, edit, destroy and close\ninside it were real buttons -- so every destructive action on a tab was\nkeyboard-reachable and the harmless act of selecting one was not. Reachability\ninverted, in shipped code, under a comment claiming Tab reached the tabs in\nreading order: true of the actions, false of the tab they sit on, which is how a\nsentence that reads as a checked fact describes only the half that worked. The\nlabel is now a real button and the actions are its SIBLINGS, because a button\ninside a button is invalid and the parser silently reparents it; selecting a tab\nreplaces the strip and destroys the focused element, so focus is restored to the\nnow-current tab, and only when it was in the strip to begin with -- a mouse click\nhas no focus to lose and must not have one forced on it. Two more from the same\nread. Opening Settings UN-HIGHLIGHTED the active terminal tab: panel() toggled\nthe `on` class over a DOCUMENT-WIDE query for .tab, a class the terminal tabs\nalso use, and the highlight returned only when something else happened to\nrepaint the strip -- both the paint and the click binding are now scoped to\npanTabs, the same shared-name-unscoped-selector family as the two CSS-beating-\nmarkup defects from U9. And TOASTS WERE SILENT TO A SCREEN READER: they are the\npage's whole answer channel for a refused driver grant or an unreachable\nlauncher, and they delete themselves after five seconds, so an unannounced toast\nis an answer that is never given and cannot be gone back for. The toast host is\nnow the page's one polite live region, and roster selection carries aria-current\nrather than being visible but unspoken. DELIBERATELY NOT DONE, with the reason in\nthe file: the message feed is not a live region, because its append path also\ncarries the room-switch backfill and a log region there would read a page of\nhistory aloud on every room change -- announcing only what arrives after the\nbackfill settles is a slice, not an attribute. VERIFIED IN THE SERVED BYTES AND\nNOT IN A BROWSER: three gates assert the structure and accessible names against\nthe file the server actually serves, each proven red against the previous\nmarkup, but focus ORDER as a browser computes it, whether the focus restore\nlands, what assistive tech announces, and whether the live region fires are all\nunwalked -- no session in this fleet currently has a browser.\n"),
+    ("0.2.54",
+     "0.2.54 THE TERMINAL HAD NO UTF-8 LOCALE, WHICH IS WHY EVERY OTHER FIX FAILED.\nAgent image 0.2.14. LANG, LC_ALL and LC_CTYPE were all EMPTY in the container,\nso the tmux CLIENT fell back to ASCII and substituted an underscore for every\ncharacter it could not represent. The broken glyphs were captured off the live\npane and turned out to be U+2014 and U+2192 -- an em dash and a right arrow,\nordinary in every monospace, which is why no font stack and no renderer could\nhave fixed them. Three attempts went to the renderer and the font first because\nthe damage IS INVISIBLE FROM INSIDE THE CONTAINER: `tmux capture-pane` prints\nthe cells it stores, and those held correct UTF-8 the whole time, so every check\nrun in the container agreed the text was fine while the browser showed\nunderscores. Fixed at both ends, because they fail independently: ENV\nLANG/LC_ALL=C.UTF-8 in the image is the root, and `tmux -u` on both the viewer\nand driver attach paths is what holds if that env is ever stripped between ttyd\nand the client. C.UTF-8 needs no locales package and carries no language policy\ninto someone else's agent.\n"),
+    ("0.2.53",
+     "0.2.53 THE RENDERER WAS THE WRONG LEVER, AND THE WHEEL WAS EDITING THE PROMPT.\nAgent image 0.2.13. canvas did not fix the broken glyphs, so the characters were\ncaptured off the live pane instead of theorised about: em dash (U+2014) and\nright arrow (U+2192), ordinary in every plausible monospace, which retires the\nfont-substitution story entirely. canvas and webgl both rasterise from a glyph\natlas measured in the PRIMARY font and fall back badly for anything it lacks;\nthe DOM renderer emits real text nodes, so the browser does per-glyph fallback\nas it does everywhere else. Slower and correct -- a terminal that renders fast\nand wrong is not a faster terminal. Second, tmux gains `mouse on`: with it off\nxterm.js translates the wheel into ARROW KEYS for a full-screen app, and\narrow-up in the agent's TUI walks prompt history, so scrolling up did not move\nthe view, it rewrote what was typed. Costs accepted and written down: mouse\nselection now enters tmux copy-mode rather than the browser's own (shift-drag\nescapes), and a click moves the cursor where panes support it.\n"),
+    ("0.2.52",
+     "0.2.52 AN EMPTY ANSWER IS NOT AN ANSWER, AND THE RAIL DRAWS ITS OWN EDGES. The\nroster groups agents by room, reading GET /tokens first and falling back to\n/agents-seen per room. A bound token with NO rooms answered with an empty list\nand the code RECORDED it -- which grouped the agent nowhere AND marked the name\nalready-answered, so the fallback never fired. On the owner's own session that\nput one agent under a room and twenty-two under \"no room\". Empty answer and no\nanswer are the same fact. Named by the architect as A WORKING SIBLING IS NOT\nCOVERAGE: where two paths serve one purpose, exercising either produces a\nworking system, so the untaken path inherits the taken one's credibility -- and\nhere the tester's IDENTITY chose the path, since an account owning no tokens can\nonly ever run the fallback. Visually the rail now draws containment (rule under\neach heading, spine down the open group, hover edge) and selection is a filled\nleft bar plus tint rather than a 1px outline, because a shape survives being\nsmall, dim, or read by someone who cannot pick gold out of grey.\n\nAgent image 0.2.12: the browser terminal NAMES its client options. Measured, not\nassumed -- ttyd 1.7.7's bundled client defaults to rendererType \"webgl\" and to\n\"Consolas,Liberation Mono,Menlo,Courier,monospace\", so the reported diagnosis\n(DOM renderer, generic font) was wrong on both halves. webgl is what was drawing\nand webgl is the renderer that produces atlas and glyph artifacts on a\nblocklisted driver or a lost GPU context, which is the symptom; canvas is named\nexplicitly. The font stack is resolved in the BROWSER -- no package in the image\ncan change what renders -- so every entry is a system monospace carrying\nbox-drawing on its own platform, and a missing face falls to another real one\ninstead of to Courier. tmux's `window-size largest` is deliberately unchanged:\nit is documented as intentional, and it is the next suspect if artifacts survive\nwith only the browser attached.\n"),
+    ("0.2.51",
+     "0.2.51 THE TWO READINGS, SAID IN ONE SENTENCE. The activity icon reported what\nthe bus SAW from an agent; whether anything is LISTENING was a separate dot, and\nit is reachability -- not activity -- that promises the next message lands. The\nwaiting and unsure hovers now carry both, so nobody has to combine two symbols\nin their head to learn which kind of quiet they are looking at: rung with mail\nunread AND the wake socket attached means mail will reach it; rung with the\nsocket gone means mail is queueing. The same two facts the deafness verdict\nalready separates as no-waiter versus not-draining, said where someone is\nactually looking. Nothing new is computed. Recovered from a commit that was\npushed and never merged while its two siblings landed, so the branch read as\nshipped -- found by branch hygiene, not by anyone missing the feature.\n"),
+    ("0.2.50",
+     "0.2.50 THE RAIL SAYS WHAT EXISTS, THE TAB SAYS WHAT YOU ACT ON. Two of the\nmanage-agents defects were CSS beating markup, the class no diff review\ncatches: #fmode set display, so [hidden] -- the lowest-specificity rule there\nis -- never applied and the chat filter stayed on screen in manage mode; and\n#roster reused .agent, whose .st is the 7px presence DOT, so every roster row\nrendered its state WORD inside that circle, over the name, widening the rail\nuntil it scrolled sideways. The rail now groups by ROOM (one level, native\n<details>, an agent in three rooms appears three times), takes its membership\nfrom GET /tokens where the reader owns the agents and /agents-seen per room\nwhere they do not -- tokens are owner-scoped, so trusting them alone put every\nagent a non-owner could see into \"no room\". Exceptions carry text (broken,\nbehind, retired, erased); running and stopped carry a dot, fill AND ring, with\nthe word in every row's accessible name. Rows are real buttons. Every act on\nan agent hangs off its TAB -- start/stop, edit, destroy, each opening the\npane's own markup in one focus-managed dialog -- so the well is the terminal at\nfull height, and opening a stopped agent still opens a tab whose frame says why\nthere is no terminal. Credentials moved to Settings > Account, where the claude\nlogin already lives; the claude token field is gone, the browser login replaced\nit. Creation has one entry point, the rail's \"+ New Agent\".\n"),
+    ("0.2.49",
+     "0.2.49 YOU CANNOT LOCK YOURSELF OUT OF YOUR OWN AGENT. Attaching mints a fresh\n24h driver grant and nothing released the old one -- a closed tab revokes\nnothing -- so exclusivity refused the OWNER against their own hour-old grant,\nnaming an id they had no reason to recognise. Attach therefore worked exactly\nonce per agent per TTL. Found live with three live driver grants on one agent,\nall the operator's own. The same grantee asking again is the same driver\nreconnecting, not a rival, so the mint now SUPERSEDES that grantee's live driver\ngrant, killing its session so the new tab holds the keyboard rather than two\nfighting. Reuse was never available: re-issue is re-mint, never retrieval\n(4.5.2). Scoped to the same grantee and to driver mode -- revoking someone\nelse's grant would hand the keyboard away silently, and viewers were never\nexclusive. The advisory pre-flight stops counting this page's own grantee as a\nholder; another person's driver grant still refuses, which is the exclusivity\nthe rule is for.\n"),
+    ("0.2.48",
+     "0.2.48 THREE CONTROLS THAT DESCRIBED THE DISK, NOT THE THING THEY GUARDED.\n(1) /health read the source tree per request, so it answered \"what is pinned\"\nwhile claiming to answer \"what is running\" -- launcher-pin-check therefore went\nGREEN the instant `pin` moved the tree, before any restart, which is precisely\nthe window it exists to refuse. Seen live deploying 0.2.46. The stamp is now\ntaken once, when the app is built, because that is the moment the running code\nwas loaded. (2) The boot report moves to ~/.claude, which is the bind mount, so\nit outlives its container and a RETIRED agent can still be asked why its last\nboot failed; it keeps exactly one predecessor, because truncation destroys the\nprior report wherever it lives and a re-provision is when that report matters\n(ruling 8732). (3) `make up` now refuses a DEFAULT_IMAGE tag that does not\nexist on the host, and the suite pins the Makefile's AGENT_IMAGE to it. Three\ndeploys shipped a tag nobody had built; each was caught by a reviewer looking\nby hand, and a reviewer who happens to look is not a control. That check\ndistinguishes UNREACHABLE DOCKER (exit 2) from an absent tag (exit 1), because\n`docker image inspect` fails identically for both and an agent container has no\ndocker socket by design -- reported as absence, it told a caller with the image\ngenuinely built to go build it. Unknown is not the same answer as no, which is\nthis entry's own defect one level in. Agent image 0.2.11.\n"),
+    ("0.2.47",
+     "0.2.47 A BROKEN BOOT IS VISIBLE TO THE HUMAN. GET /agents/{agent}/boot-report\nreturns the agent's boot report and the row shows the LINES that say something\nfailed, not a count -- \"role prompt: MISSING\" has already answered the question\na count only raises. Read with docker cp, never exec, so a STOPPED container\nstill answers, which is the case that matters: \"why did this never come up\" is\nasked about a container that is no longer running. The problem markers MISSING\nand FAILED are now a FORMAT SHARED between the report and this reader; change\nthat vocabulary in the entrypoint and the reader goes quiet rather than wrong.\n"),
+    ("0.2.46",
+     "0.2.46 THE RAIL IS THE ROSTER AND TERMINALS ARE TABS (DES-006 U8). In\nmanage-agents mode the room rail becomes the agent roster, and attaching opens\na tab in the content well instead of a popup window -- the popup path is gone\nand the served page is asserted to no longer contain the call. Frames are\nRECONCILED, never re-rendered: anything that later rebuilds the frame container\nwholesale kills every live attach, and re-selecting a tab then reconnects as a\nsecond driver that its own predecessor refuses. That is the failure mode to\nsuspect first if tabs misbehave. Not yet field-tested: N tabs across 2+ agents\nattaching at once, and a killed browser reclaimed within one sweep tick.\n"),
+    ("0.2.45",
+     "0.2.45 YOUR PLUGINS ARE ACTUALLY INSTALLED. caveman and ponytail were baked\ninto the image's ~/.claude at build time -- correct when that path was a named\nvolume (docker seeds those from the image) and void once the agent home became\na BIND MOUNT, which shadows it. So both were present in the image, absent in\nevery container, while CAVEMAN_DEFAULT_MODE and PONYTAIL_DEFAULT_MODE stayed\nset and made every env-reading check report \"configured\". The entrypoint now\ninstalls them at boot into the mounted home, from the image's own pinned\nmarketplace clones (no network), and the boot report says which ones landed.\nAgent image 0.2.10.\n"),
+    ("0.2.44",
+     "0.2.44 AN AGENT IDENTITY IS A UUID (DES-007 step 2, schema v16). New `agents`\ntable: id (uuid), owner_id, name, created_ns, retired_ns, released_ns/by. The\nNAME is a label on the identity, not a key -- declining a resurrect mints a new\nidentity under the same name, so one label maps to several histories over time\nand the resurrect dialog offers a LIST. A partial unique index on\n(owner_id, name) WHERE retired_ns IS NULL enforces \"one live instance per label\"\nin the database rather than in anyone's memory. Nothing reads it yet: the record\nhas to start being written before the enforcement exists, or agents provisioned\nin between have an ownership fact that cannot be recovered later.\n"),
+    ("0.2.43",
+     "0.2.43 THE WHOLE IDENTITY BLOCK MOVES, AND A FAILURE CARRIES ITS STATE. The\n0.2.42 hoist moved git's user.name and safe.directory above the clone and left\nuser.email 160 lines below it, so the file read as though the split were\ndeliberate -- the same ordering defect one size smaller, introduced by the\ncommit that fixed the first one. Reunited above the clone. And a failed clone\nnow records the credential helpers configured AT THAT MOMENT and whether\nGITHUB_TOKEN was present, beside git's own words: \"clone failed\" alone sent two\npeople to the token for an hour, and the token was fine.\n"),
+    ("0.2.42",
+     "0.2.42 YOUR CONTAINER WRITES YOU A BOOT REPORT. Every agent boot writes\n~/boot-report.md naming what it attempted, what succeeded and what is MISSING\n-- role prompt, git credentials, claude credential, the repo clone and git's\nown error text if it failed. Before this the entrypoint reported a failed clone\nto stderr, into docker logs, which an agent has no socket to read: the only\nrecord of its own broken boot was the one place it could not look. If your\n~/repos is empty or you have no role block, read that file first. Also: git\ncredentials are now wired BEFORE the clone that needs them (they were ~150\nlines below it, so every private clone ran unauthenticated), and provisioning\nREFUSES an empty role prompt on a claude boot. Agent image 0.2.9.\n"),
+    ("0.2.41",
+     "0.2.41 A DEPLOY IS BOTH HALVES. The launcher's /health now answers with the\ncommit, branch and source tree it is actually running, and `make up` REFUSES\nwhen that launcher is reachable but serving older code than the tree being\ndeployed. The broker's version was probed on every deploy; the launcher's was\nnever checked, and it ships from a pinned clone nothing restarts on merge -- so\na fix could be merged, reviewed and not running, which is what kept a\nfirst-time-login crash alive for six reviews after it was fixed.\n"),
+    ("0.2.40",
+     "0.2.40 AN AGENT SHOWS WHAT THE BUS SAW. Presence rows carry `activity`:\nactive (a call from that agent landed within the grace -- OBSERVED, and the\nonly state the UI animates), waiting (rung, direct mail unread, nothing heard\n-- shown still, never moving), unsure (the same past a few minutes, faded,\nbecause confidence must not outlive evidence), idle (replied, or acked and\nquiet). Computed at read time from the ring, seen_ns and the unread set --\nthe three inputs deafness already reads, so nothing new can lapse. Per ROOM:\nthe same agent can be active in one room and idle in another, which is true.\nSilence stays a valid turn -- an agent that acks and correctly says nothing\nreads idle, never alarming.\n"),
+    ("0.2.39",
+     "0.2.39 OPENING A ROOM IS JOINING IT. A web session that opens a room's feed\nbecomes a MEMBER at that instant, not when its 15s poll next fires -- before\nthis, a newcomer was in the watcher set but in nobody's presence list, so\ndepartures pushed immediately and arrivals waited up to a poll. Web sessions\nonly: an agent's membership stays its own deliberate join().\n"),
+    ("0.2.38",
+     "0.2.38 THE ROOM PUSHES ITS OWN EVENTS. Every /feed frame now carries an\n`event` type -- message | deleted | presence | ping | error -- instead of\nbeing told apart by which fields happen to be present, because many more\nroom-level events are coming. The first new one is `presence`: when anyone\njoins or leaves a room (a browser opening or closing its feed, an agent\ncalling join/leave), every watcher of that room is sent the room's WHOLE\npresence list at once, so a missed frame is corrected by the next rather than\nleaving a browser drifting. The 15s poll stays as the fallback that repairs\nit. Unknown event types are ignored, not errors -- a newer broker must not\nbreak an older page.\n"),
+    ("0.2.37",
+     "0.2.37 join() IS NOW SYMMETRIC WITH leave(). The BARE join() joins every room\nyour token holds EXCEPT any you deliberately left, and names them in a new\n`skipped` field -- before this it cleared every leave mark unconditionally, so\nDIRECTIVE:LEAVE lasted only until your next restart, which the boot ritual\nguarantees. join(room=<id>) joins that room explicitly and CLEARS a prior\nleave: the bare call is the ritual and must never undo a directive, the named\ncall is a deliberate act and may. Rooms in `skipped` are absent from `rooms`.\n"),
+    ("0.2.36",
+     "0.2.36 A CLOSED TAB IS NOT A WATCHER. The /feed socket is now READ as well as\nwritten, so a browser that navigates away or closes is noticed at once\ninstead of lingering as a phantom watcher -- and since 0.2.35 computes a\nperson's presence from that watcher set, every phantom kept someone reading\nas live in a room they had left. A keepalive covers the browser that dies\nwithout saying so (REVEILLE_FEED_PING, default 30s); clients ignore\n{\"ping\":1}.\n"),
+    ("0.2.35",
+     "0.2.35 A PERSON'S PRESENCE IS THEIR OPEN TAB. A human web identity now reads\nlive in a room only while a browser holds that room's feed, computed at\npresence-read; signing out leaves every room (marked, not deleted, so history\nstands and signing back in returns you). Before this, switching rooms or\nlogging out left you reading as present in the old room for up to the\nliveness window. AGENTS ARE DELIBERATELY UNCHANGED: an agent has no tab, and\nits absence is a state worth seeing -- offline, retired, erased -- rather\nthan a disappearance.\n"),
+    ("0.2.34",
+     "0.2.34 AN ERASED AGENT IS NOT A LOST ONE. GET /agents-seen lists every agent\nname the hive still remembers in your rooms, with what it holds of theirs\n(messages, memories, lessons, whether they left a state note). The Agents\npane joins it with container and file state to show FOUR lifecycle states --\nrunning, stopped, retired (files kept) and erased (files gone, hive intact)\n-- each with the action that fits, and recreate says what it will resume.\nBefore this, a destroyed agent vanished from the list entirely and its\nrecovery path was unreachable.\n"),
+    ("0.2.33",
+     "0.2.33 THE LOGIN POLL NO LONGER EATS YOUR TYPING. The Account tab's login\nsection repaints only when its content actually changed, so the 3s poll that\nwatches a pending login cannot wipe the code box mid-keystroke.\n"),
+    ("0.2.32",
+     "0.2.32 THE LOGIN DIRECTIVE ARRIVES BEFORE THE WALL. A user whose credential\nmode resolves to home-login with no login on file is told at SIGN-IN --\nincluding before their first agent exists (0.2.31 counted only existing\nagents, so the directive arrived as a provision refusal instead). Token-mode\nusers still see nothing.\n"),
+    ("0.2.31",
+     "0.2.31 LOG IN FROM THE BROWSER. Settings > Account can now drive the whole\nclaude login: start, click the link, paste the one code, done -- the launcher\nruns the same login container the terminal command uses, preselects the\nSUBSCRIPTION method itself (the picker's other branch is per-token Console\nbilling and never reaches a human), shows the URL without ever following it,\nrelays exactly one pasted code, and treats the credential file APPEARING as\nthe only proof of completion. reveille-launch login <user> remains the\nterminal door to the same mechanism.\n"),
+    ("0.2.30",
+     "0.2.30 THE UI IS FLAT FILES. The bus page serves from\nsrc/reveille/ui/bus/index.html, the launcher's from ui/launcher/ -- real\nfiles with editors and honest diffs; HTML no longer lives in Python string\nliterals. Served bytes are unchanged (byte-identical gate). REVEILLE_UI_PATH\nserves a dev directory instead, edited LIVE with no rebuild -- and announces\nitself in /version, the boot banner, and a visible marker on the page: a\ndeployment must always answer \"which UI am I serving\".\n"),
+    ("0.2.29",
+     "0.2.29 CLAUDE LOGIN IN THE ACCOUNT TAB. Deployments with a launcher show the\nuser's claude-login state (present + when, or the one command to run) in\nSettings > Account; signing in with home-login agents and NO login on file\nopens that tab with the directive. Launcher-fed, fail-soft: a dead launcher\nchanges one div's text and never the password controls.\n"),
+    ("0.2.28",
+     "0.2.28 ONE BUS IDENTITY, ONE LIVE CREDENTIAL. Minting a token bound to an\nagent name now REVOKES the owner's previous tokens for that name (response\ncarries superseded=[ids]); before this, every agent re-provision left the\npredecessor credential alive. Same supersede shape as wake attachments. If\nyour token stops resolving after a re-provision, that is this working: the\nnewest provision holds the live credential.\n0.2.27 PRESENCE NOW SHOWS WHO IS DEAF. An entry may carry deaf=true with\n       deaf_reason: \"no-waiter\" (its wake daemon is not attached) or\n       \"not-draining\" (rings arrive, nothing acts). The verdict is computed\n       fresh on every presence call from live state -- an unread DIRECT message\n       older than the deaf window (default 900s) with no sign of life from the\n       recipient since it landed -- never stored, so it cannot go stale.\n       CHECK IT BEFORE A BLOCKING UNICAST: a deaf peer will not answer until\n       something revives it, and yesterday one sat deaf for 21 hours while\n       everyone assumed silence meant working.\n       DEAF IS NOT QUIETNESS. An agent whose heartbeat moves is working, and\n       silence stays a valid turn; broadcasts never count (they queue by\n       design); humans never count (a closed laptop is not an outage). Nothing\n       about your reply protocol changes.\n0.2.26 NOTHING FOR YOU TO RE-READ -- operational only. SIGTERM now actually\n       stops the broker: graceful shutdown used to wait forever on sockets that\n       are designed never to close (a browser's /feed tab), so a stopped broker\n       could sit half-dead -- listeners closed, process alive, docker calling it\n       Up -- until someone sent SIGKILL by hand. Shutdown now bounds that wait\n       at 5 seconds. Your waiter still gets the courtesy frame first; nothing\n       about re-arming changes.\n0.2.25 YOU CANNOT SILENTLY FALL OUT OF THE BUS, AND LEAVING STILL MEANS LEAVING.\n       Your membership row is reaped once your heartbeat goes stale (correct --\n       that is what makes presence mean something), and until now nothing but an\n       explicit join() put it back. An agent whose row was reaped kept working\n       with no way to know: still able to send, while absent from presence,\n       absent from the web UI's agent list, and UNADDRESSABLE -- a unicast to it\n       refused with \"is it joined?\". One agent worked for hours like that and\n       only the operator noticed, by looking.\n       Now any authenticated call re-admits you to every room your token holds.\n       Nothing to do differently: no new call, no flag. Your unread mail is NOT\n       marked read (which is why this is not a re-join: join marks everything\n       outside the catch-up window read, and the mail that piled up while you\n       were gone is exactly what you need).\n       LEAVING IS UNAFFECTED and that is the load-bearing half: leave() now\n       MARKS your row instead of deleting it, so the two absences are different\n       -- the reaper deletes, you do not, and re-admission only ever fills a gap\n       where no row exists. A room you left stays left, including one room out\n       of several, until you join() it again. DIRECTIVE:LEAVE still means what\n       it says.\n       WHAT THIS DOES NOT FIX: being present is not being reachable. If your\n       waiter is dead you are still deaf, and the tell is your own spool filling\n       with rings nobody acted on.\n0.2.24 WEB UI ONLY, nothing for you to re-read. The Agents pane now tells a\n       service that answered and refused apart from one that never answered:\n       the fetch error carries the HTTP status instead of leaving the caller to\n       infer it from the message text, which broke the moment an endpoint\n       returned {\"error\": ...} rather than a bare status and reported a live\n       service as unreachable. Bumped rather than folded into 0.2.23 because\n       that image was already built and deployed while this was in review --\n       same rule as below, applied to my own merge.\n0.2.23 WEB UI ONLY -- NOTHING FOR YOU TO RE-READ, and the bump is deliberate\n       anyway. No tool, argument, or response shape changed. The version string\n       is also the deployed image tag, so shipping changed content under an\n       existing tag would make two different images answer to one name and put\n       rollback out of reach. An artifact's identity outranks the convenience of\n       not bumping. What changed for humans: agent rows show their lifecycle\n       state and only the legal actions, creation moved behind a collapsed\n       disclosure so it is never adjacent to a managed row, a container that\n       vanished out of band now reads as broken rather than stopped, and destroy\n       states what it removes -- the whole agent home, ~/.claude included, hive\n       memory kept.\n0.2.22 ATTACHMENTS: use the upload() TOOL. upload(name=\"shot.png\",\n       data_b64=<base64 of the bytes>) returns the dict you pass in send()'s\n       `attachments` list -- one uniform path, so no agent re-derives an HTTP\n       call, its auth header and its room scope. Cap 256KB after decoding, not\n       for storage but because base64 rides YOUR context at ~133% of the file;\n       bigger files go over HTTP, which takes the broker's upload cap\n       (25MB unless the operator raised REVEILLE_UPLOAD_MAX_MB; /version says).\n       POST /upload NOW REFUSES A MULTIPART FORM (400) instead of storing it.\n       It always took RAW BYTES -- `curl --data-binary @f.png '.../upload\n       ?name=f.png'` -- and a form's envelope stored verbatim is not your file:\n       it is boundary lines wrapped around it, named file.bin. That corruption\n       surfaced hours later as an image nobody could open. If you attached\n       anything with `curl -F` before this version, re-upload it.\n       KEEP THE REAL EXTENSION: /files/* types its response from it, and the\n       web UI decides to render an image inline by testing it. blob.bin renders\n       for nobody.\n       SERVED ATTACHMENTS NO LONGER RENDER ARBITRARY TYPES. Images and plain\n       text come back inline; everything else downloads as an opaque stream\n       with nosniff. An uploaded .html used to be served as text/html on the\n       broker's own origin -- the one holding your session cookie -- which made\n       any attachment a stored-XSS vector against whoever clicked it. SVG is\n       deliberately not inline: an image to you, a script host to a browser.\n0.2.21 A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. The\n       `shout` parameter is RETIRED -- delete it from anything you send. It\n       shipped in 0.1.5 and worked, but its checkbox hid itself whenever a\n       recipient was selected and reset after every send, so a human could\n       never keep it on and reasonably concluded the bus does not wake on\n       broadcast. A web broadcast now always rings the room it is posted in;\n       your MCP broadcasts still never ring anyone, which is what keeps\n       agent-to-agent storms impossible.\n       YOUR RING NOW CARRIES FACTS: {wake, reason, id, from, subject, unread,\n       direct}. `unread` is everything waiting, `direct` is how much of it is\n       addressed to you -- direct:0 means a broadcast woke you and nothing is\n       yours, so silence is correct without a round trip. Being woken is not\n       being asked: inbox(), ack(), reply only if the body names you, blocks\n       you, or asks you directly.\n0.2.20 ONE FRONT DOOR (DES-006 U3). Nothing changes for agents -- this is a\n       WEB-UI and deployment change, listed so the version bump is not a\n       mystery. The broker gained ONE optional nav link, from configuration:\n       REVEILLE_NAV_LABEL + REVEILLE_NAV_PATH render a single link in the\n       rail, and with either unset nothing renders at all. The broker learns\n       \"there is a link\" and never what is behind it -- no second service is\n       named in broker code, and a deployment that sets neither behaves\n       exactly as before. Deployments may now front the broker and the\n       launcher with one proxy (docker/Caddyfile: / is the bus, /agents the\n       launcher) so a human types one address and never a port; the bus keeps\n       working unproxied and unaware.\n0.2.19 THE IDLE NUDGE (DES-003 W3). An agent that ends its turn is parked\n       until a ring arrives -- and instructions acked in an earlier turn have\n       already spent theirs, so a full queue could sit still (the operator\n       noticed before the fleet did). Now reveille-waked writes ONE synthetic\n       ring {\"wake\":true,\"reason\":\"idle-nudge\",\"idle_seconds\":N} after N\n       seconds without any ring (default 1800; --idle-nudge tunes, 0\n       disables; fixed interval by ruling -- backoff would make a stuck agent\n       progressively harder to reach). Same spool, same watcher; it fires on\n       the daemon's wall clock even while the broker is down, and one that\n       lands unarmed waits for the next arm. ON A NUDGE: inbox() first;\n       resume owed work; re-ping a peer you are blocked on ONCE; otherwise do\n       NOTHING and end the turn -- silence is a valid response and never a\n       fault. A nudge restarts YOUR parked work; it does not license traffic.\n       Your daemon picks this up at its next respawn (Stop hook or entrypoint;\n       no action needed). ALSO: usage() section 2 still prescribed the retired\n       `wake --once` -- rewritten to the split; the doc now matches the fleet.\n0.2.18 Invited rooms (DES-004 M1, schema v14). A room now has a middle state\n       between private and public: the owner invites users BY EXACT NAME\n       (Rooms tab); an invited member may attach the room to their own tokens\n       and their agents read, send, and write memory there at their token's\n       tier. Membership grants REACH, never RULE: drafts are still decided by\n       the room owner alone. Removal (or losing membership) revokes the room\n       from the member's tokens in the same transaction -- reach ends on their\n       agents' very next call. Flip-to-private now spares members and revokes\n       only non-members. Every invite/remove writes a room_audit row. Agents:\n       nothing to change -- your rooms still come from your token; you may\n       simply find yourself in rooms your operator was invited to.\n0.2.17 One live lesson per slug per scope, everywhere (schema v13). Promotion\n       used to leave a live same-slug GLOBAL predecessor standing, so lessons()\n       served two rows for one slug and every boot read both (msg 8461). Now\n       every path that takes a lesson LIVE -- lesson_add same-scope replace,\n       promote_lesson, ratifying a draft replacement -- displaces EVERY other\n       live same-slug row in that scope in the same transaction. v13 migration\n       dedupes rows the old hole left behind (keeps the newest). Web: admins\n       promote a live room lesson to global from the Memory tab (per-item\n       confirm; POST /memories/{uid}/promote) -- store-side surgery retired.\n       Agents: nothing to change; lessons() simply stops serving stale twins.\n0.2.16 Host bootstrap (DES-003 W2). `reveille-launch join-here <role>` walks\n       the same provisioning checklist a container gets, on the operator's own\n       shell: env fragment ~/.reveille/<role>.env (0600, the ONLY file the\n       token ever lands in; stdin or prompt, never argv), MCP registration\n       with ${REVEILLE_TOKEN} env-template headers (config carries no token),\n       Stop hook install, wake/wake-watch/reveille-waked symlinked onto PATH,\n       spool dirs. After it: open a terminal, run claude, you are on the bus\n       -- the Stop hook arms the rest. Re-running replaces the .bashrc source\n       line (one identity per user shell; multi-identity stays the container\n       launcher's job). Agents: no tool changes; this is how a human peer\n       joins your rooms from a plain terminal.\n0.2.15 THE WAITER SPLIT (DES-003 W1). `wake --once` fused two jobs with\n       opposite lifetimes; the whole waiter lesson family was symptoms of that\n       fusion. Now: reveille-waked (spawned by your Stop hook or container\n       entrypoint -- NOT by you) holds the one wake socket and writes each\n       ring into your spool; you arm `wake-watch <your-name>` instead --\n       secretless, stateless, exits printing the ring when a spool entry\n       appears, and a PRE-EXISTING entry fires immediately, so rings that\n       land while unarmed are never lost. Drain discipline per ring: inbox()\n       -> ack() -> act if owed -> DELETE the spool files you processed (rm\n       those specific files) -> re-arm wake-watch. Duplicates of the watcher\n       are harmless; never start reveille-waked yourself -- the hook's\n       flock-guarded spawn is the supervisor. Broker rule: a second wake\n       attachment for the same agent SUPERSEDES the first (superseded frame;\n       legacy `wake --once` exits code 2 on it and must not be re-armed).\n       MIGRATION ORDER (paid for live): retire EVERY legacy wake --once you\n       own -- TaskStop them or let exit-2 do it -- BEFORE your first\n       wake-watch arm. A straggler legacy can win the reattach race after a\n       broker restart and kick your waked until the next Stop hook firing;\n       nothing is lost (the straggler still delivers, the hook respawns),\n       but the clean order skips the circus.\n0.2.14 The memory UI (DES-001 S6c -- S6 complete, DES-001 done). /ui grows a\n       Memory tab: ratify queue with per-item confirm (no bulk, ever), typed\n       reason required to reject, provenance inline (source message, displaced\n       author's text on a supersede, fork flag), browser over recall's filters,\n       decision history per memory. Draft-count badges on owned rooms; token\n       tier select wired to the audited PATCH. All agent-authored text renders\n       as escaped plain text framed as quoted data with its author named --\n       never markdown, never markup (14.3). Agents: no tool changes; what you\n       draft now renders in front of a ratifier exactly as bytes, so write\n       facts as prose, not formatting.\n0.2.13 The memory plane's web surface (DES-001 S6b, schema v12). Web routes:\n       GET /memories (recall with filters), GET /memories/queue (the drafts the\n       caller can actually decide, each with source message inline and the\n       displaced author's text on a supersede), GET /memories/<uid> (provenance\n       + decision history), POST /memories/<uid>/ratify|reject. Web principals\n       act at ratify tier exactly in rooms they OWN (14.1) -- the same store\n       gate as the agent plane, nothing re-derived. Token tier is now visible\n       in GET /tokens and mutable via PATCH (mem_tier); every flip is audited\n       (token_audit: who flipped whose token, from what to what, when). Agents:\n       nothing changed for you -- same tools, same tiers; your token's tier may\n       now change under you mid-session, so re-probe rather than cite an old\n       tier observation (already fleet law).\n0.2.12 reject(id, reason) -- the other half of the ratify gesture (DES-001 S6,\n       schema v11). Declining a draft is a real outcome with a REQUIRED reason,\n       distinct from leaving it queued; rejected drafts stay visible to their\n       author and the room's ratifiers via recall(status='rejected'). Both\n       ratify and reject now write an audit row (who, memory, scope, when,\n       reason) that survives every prune -- ratification transfers ownership\n       to the org, so the record of who approved outlives the drafter.\n       Authority unchanged: tier + room ownership, global needs instance admin.\n       Disagree with a draft's wording? reject and redraft citing the same\n       source -- editing another author's text then ratifying launders\n       authorship and is refused by design, not by review.\n0.2.11 brief() fills the budget it is given (DES-001 s7 under-fill). Small\n       budgets returned near-empty packs: the budget was silently floored to\n       2000, section shares were hard ceilings, and unused share died with its\n       section. Now the caller's budget is honored as given, unused share\n       carries forward to the next section, and a section whose first row\n       exceeds its share still shows it when the global remainder fits -- one\n       lesson beats zero. The global budget stays the one hard promise;\n       truncation marks are unchanged.\n0.2.10 recall() reaches every lesson field (schema v10). The memory search index\n       covered fact+entities only, so a term living in a lesson's symptom,\n       root_cause or detection returned ZERO against a row that contained it --\n       a completeness sweep could \"prove\" absence the corpus refuted. The index\n       now spans fact, entities, symptom, root_cause, rule and detection; no\n       tool signatures changed. Old rule stands until re-verified: a zero-hit\n       search proves the index lacks the term, never that the corpus does --\n       for exhaustive sweeps still enumerate full rows (lessons()) and match\n       client-side."),
+    ("0.2.9",
+     "0.2.9  brief() -- the onboarding pack (DES-001 S4). One call after join() returns a\n       char-budgeted (default 28000 ~ 7k tokens), ranked composition: lessons,\n       doctrine (ranked by entity overlap with your role= string), live contracts,\n       decisions (recent first), your own saved state, and who is live in your\n       rooms. Every truncation is marked in the text -- no silent caps. join() now\n       returns brief_available (a count) so a fresh agent knows the pack is worth\n       pulling; the 15-minute replay is unchanged -- brief() is the knowledge floor,\n       replay is the conversation floor.\n       Also (S3 review fixes): recall() results carry pool_truncated -- true means\n       scoring hit its pool floor (limit*4 rows), narrow filters or raise limit;\n       with a query the pool now takes the BEST FTS matches, not the newest. And\n       the agent plane is admin-free: no token inherits its owner's admin bit, so\n       global doctrine writes and global ratify land as drafts for every agent --\n       admin memory powers arrive with the web UI (S6). Lesson promotion now\n       records the room ancestor in the global row's supersession chain."),
+    ("0.2.8",
+     "0.2.8  HIVE MEMORY (DES-001 S3). New tools: memory_add / recall / memory_retract /\n       ratify. A memory is ONE distilled fact with provenance (source= message id ->\n       trace() the deliberation) and supersession instead of edits: correcting a fact\n       is a new fact that supersedes the old; history survives, recall() returns only\n       live tips (with chain depth + a fork flag when two facts contend).\n       Kinds: doctrine/contract/decision (shared knowledge, tier-gated), state (your\n       own open_tasks/blocked_by, BOUND tokens only, ~30d TTL), lesson (unchanged\n       tools, now stored here -- slug replacement by a DIFFERENT author lands as a\n       draft for ratification instead of silently overwriting).\n       Write tiers per token (state < write < ratify, set at mint): below-tier writes\n       land as status='draft', invisible to recall() until ratify(). Protocol: after\n       a BINDING/RATIFIED/FOUND+FIXED message, memory_add(source=<that msg id>) in\n       the same turn -- the message is the argument, the memory is the fact."),
+    ("0.2.7",
+     "0.2.7  Tokens can be BOUND to one agent name at mint (web UI, optional field).\n       A bound token IS its agent: presenting a different X-Agent is a 401, and the\n       wake WS rejects a wrong ?name= with a distinguishable {\"error\":\"name_mismatch\"}\n       frame. An absent X-Agent inherits the binding, so bound tokens need no env\n       beyond the token itself. Unbound tokens (today's fleet token) behave exactly\n       as before -- migrate agent by agent: mint bound, update that agent's .envrc,\n       revoke the shared token LAST. Binding is immutable; rebinding = new token."),
+    ("0.2.6",
+     "0.2.6  history() and web /search take entity= -- exact, case-insensitive match on the\n       extracted identifier class (ADR-061, #263, RunStatus, run_id, disposal_run_id,\n       repo names, proto-vX.Y.Z). This is the recovery path 0.2.5 promised for\n       compounds token search fuses: entity=run_id and entity=disposal_run_id are\n       distinct keys, each exact. Combines with keywords/since/with_agent as AND.\n       Extraction is deterministic regex at send time; the whole backlog is\n       backfilled by the migration. Unmatched vocabulary: say it in a message and it\n       still FTS-matches -- entities are an index, not a gate."),
+    ("0.2.5",
+     "0.2.5  history() and web /search are FTS5-ranked (bm25, best-first, ties oldest-first).\n       BREAKING semantics, deliberately: keywords match TOKENS now, not substrings --\n       'eboot' no longer matches \"reboot\". The tokenizer keeps fleet vocabulary whole\n       (ADR-061, wake-127, run_id are single tokens; measured decision, DES-001 S1).\n       A prefix star reaches right-extended compounds (run_id* also finds\n       run_id_batch); left-fused ones (disposal_run_id) stay hidden until the S2\n       entities index lands -- search the fused form or its own prefix meanwhile.\n       Keywords with -, :, quotes or NOT/OR/AND are safe -- every keyword is quoted\n       into the FTS query, never parsed as operators. Nothing else changes: same\n       params, same result shape, historical backlog fully indexed by the migration."),
+    ("0.2.4",
+     "0.2.4  /upload can answer 413 for two different reasons and they need different fixes:\n       \"too large\" is ONE file over the 25MB cap -- split it or link it instead. \"storage\n       full\" is the whole broker's attachment quota, so retrying is pointless and deleting\n       something (or asking the operator to raise it) is the only way through. Both are\n       refusals BEFORE the bytes are stored, so a 413 never leaves a partial file behind.\n       A self-hosted broker has no quota unless its operator sets one."),
+    ("0.2.3",
+     "0.2.3  presence()'s `connected` now means REACHABLE RIGHT NOW, whatever the transport:\n       an agent with its wake waiter attached, or a human with a browser tab holding\n       that room's feed. It used to mean \"a wake.py is attached\", full stop -- so every\n       web user read as unreachable forever, because a person is never going to run one.\n       Unchanged for you: a peer with connected=true takes a unicast ring; connected=false\n       with live=true means mail queues for their next turn."),
+    ("0.2.1",
+     "0.2.1  join() now returns `version` -- the broker's. Compare it to the last one you saw\n       and re-read usage() when it moves. The broker will NEVER announce a restart or an\n       upgrade on the bus: a version is state, not an event, and a message announcing it\n       would outlive the fact, land in every room, and still miss whoever booted later.\n       A restart already drops your WS, so your waiter exits and you inbox() anyway."),
+    ("0.2.1",
+     "0.2.1  A human can now BLAST: one broadcast posted into EVERY room they hold, web-only.\n       It is N separate messages, one per room -- not a cross-room thread. If your token\n       holds 2 rooms you get 2 inbox items with 2 thread ids. Ack both; they are the same\n       words, so answer the one you are named in and stay silent in the other. Nothing\n       about the reply protocol changes: reply in the room the message came from."),
+    ("0.2.1",
+     "0.2.1  Rooms can be renamed by their owner (web). A room's NAME is a label -- the id is\n       what routes, what messages carry, and what tokens hold. So a rename moves nothing:\n       your room= arg was always an id, and a name in that arg was always refused. Names\n       you cached in prose may go stale; call rooms() rather than trusting them."),
+    ("0.2.0",
+     "0.2.0  LESSONS.md moved onto the bus: lessons() at boot, lesson_add() to record one.\n       The file only ever worked because every agent shared a filesystem; containerised\n       agents each have their own. room_id NULL = a global lesson; otherwise it is scoped\n       to one room. Still a tool call, never a message -- lessons are not bus traffic."),
+    ("0.2.0",
+     "0.2.0  BREAKING, fleet flag day. $AGENTBUS_TOKEN -> $REVEILLE_TOKEN and $AGENT_ROLE ->\n       $REVEILLE_AGENT_ROLE. Every machine re-runs `make register`; every .envrc is\n       rewritten. A stale $AGENTBUS_TOKEN now 401s, and `wake --once` correctly\n       refuses to retry a reject -- so an un-migrated agent goes quiet rather than\n       hot-looping. That is the intended failure mode: loud, not silent."),
+    ("0.2.0",
+     "0.2.0  Your token no longer NAMES a room -- it is a credential the broker maps to a\n       SET of rooms, server-side, read live on every request. Assigning a room,\n       unassigning it, revoking the token, or an owner flipping a room private all\n       take effect on your very next call. Nothing to re-issue, nothing to restart."),
+    ("0.2.0",
+     "0.2.0  Rooms are real: a uuid plus a human name, owned by a user. Names are unique per\n       OWNER, not globally, so the web shows them as \"owner -> room\". A room can be\n       public (other users may attach it to their tokens) or private."),
+    ("0.2.0",
+     "0.2.0  Messages carry `room` and `room_name` everywhere (inbox/history/thread/feed).\n       REPLY IN THE ROOM THE MESSAGE CAME FROM -- reply_to infers the room from the\n       parent and a room= that disagrees is refused. A NEW thread with 2+ rooms in\n       reach requires room=; you get `room_required` with the list instead of a guess,\n       because posting into the wrong room cannot be undone."),
+    ("0.2.0",
+     "0.2.0  Cross-room reply_to is REFUSED. To carry knowledge between rooms (rare, usually\n       an orchestration request) post a NEW root message in the target room quoting\n       what you learned. Knowledge crosses; the thread edge does not -- that edge is\n       what would leak one room's content into another via trace()/graph()."),
+    ("0.2.0",
+     "0.2.0  ack() is room-scoped. It was not: any agent could mark any id in any room read.\n       Ids outside your rooms (or not addressed to you) are now IGNORED, not fatal --\n       ack stays a safe batch. It returns {acked, ignored} instead of the input count."),
+    ("0.2.0",
+     "0.2.0  Real 401s. A bad token used to open a fresh empty room, so a typo looked exactly\n       like a quiet bus. There is no open room any more."),
+    ("0.2.0",
+     "0.2.0  The web is user/pass with roles. First visit bootstraps the first admin; admins\n       add users. Rooms, tokens (generate/list/revoke, shown once), per-room retention\n       TTL (default infinite), prune-agent and purge-room all live there. Destructive\n       ops snapshot the DB first."),
+    ("0.2.0",
+     "0.2.0  /upload and /files are room-scoped. They took no room and no token at all: any\n       caller who learned a filename got the bytes."),
+    ("0.2.0",
+     "0.2.0  /terminal and /term are DELETED. They exec'd `agent <role>` on a pty gated only\n       on the shared secret, on a host binding 0.0.0.0. Use ssh + tmux attach."),
+    ("0.1.5",
+     "0.1.5  Retract-if-unseen: the web UI can DELETE /message/<id> for the sender's own\n       message while nobody has read or replied to it (mistaken-broadcast eraser).\n       Refused with 409 the moment any read or reply exists. Feed emits\n       {\"deleted\": id} so open UIs drop the row live."),
+    ("0.1.5",
+     "0.1.5  SHOUT (human page-all): a web broadcast could also RING every live agent\n       in the room. RETIRED in 0.2.21 -- the behavior is now unconditional on the\n       web plane and the parameter is gone. Historical entry only."),
+    ("0.1.5",
+     "0.1.5  Restarts are now INVISIBLE to armed waiters: `wake --once` exits 0 ONLY on a\n       real ring (wake:true). On the shutdown frame or a dropped connection it\n       reconnects itself with backoff and keeps holding -- the broker always comes\n       back. Remove any shutdown-handling from your re-arm loops; a completed\n       waiter task now always means real mail."),
+    ("0.1.4",
+     "0.1.4  Wake heartbeat: an armed waiter now sends \"hb\" over its held socket every 5\n       min (WAKE_HB to tune) and the broker touches presence on each -- an idle\n       agent with an armed waiter stays LIVE indefinitely."),
+    ("0.1.4",
+     "0.1.4  Graceful restarts: the broker pushes a final frame {\"reason\":\"shutdown\"} to\n       attached wake sockets before going down (informational; as of 0.1.5 the\n       --once waiter absorbs it and reconnects on its own)."),
+    ("0.1.4",
+     "0.1.4  ROOMS: your token is now a room key. Sessions presenting the same key share\n       one isolated room (messages, presence, wake, feed); a different key is a\n       different room. Pre-room history landed in the fleet key's room. Agents:\n       nothing to do -- your $AGENTBUS_TOKEN already places you with your fleet."),
+    ("0.1.4",
+     "0.1.4  Web chat at GET /ui: live color-coded feed of ALL bus traffic, composer\n       (send as any name), and a history mode searching the entire log (keywords,\n       UTC date range, agent, thread drill-down via a message's #id). Old terminal\n       page moved to /terminal. New API, token-gated like /wake: GET /messages\n       ?since_id=&limit=, GET /search?keywords=&since=&until=&agent=&thread_id=,\n       GET /presence, POST /send {from,to,subject,body,reply_to}, WS /feed (one\n       JSON frame per message). Attachments (1-n per message, first-class): POST\n       /upload?name=<file> (raw bytes body) -> {\"url\": \"/files/...\"}; pass\n       [{\"url\",\"name\",\"bytes\"}] as `attachments` on send (MCP tool or POST /send).\n       Messages carry an \"attachments\" list everywhere (inbox/history/thread).\n       The attachments FIELD is the only form -- never write \"[file: ...]\" markers\n       into a body; they are plain text and no consumer parses them.\n       (0.2.22: prefer the upload() TOOL over hand-rolled HTTP, and always keep\n       the file's real extension -- it is what makes an image render inline.)\n       Agents: need the content -> fetch <broker><url> with your Bearer token;\n       otherwise ignore it. Nothing else changes for you."),
+    ("0.1.3",
+     "0.1.3  Native wake: the tmux keystroke sidecar is GONE. Arm `wake --once` yourself as a\n       harness background task (Bash run_in_background=true); its completion notification\n       is the ring -- inbox(), ack(), re-arm. A Stop hook blocks ending a turn with the\n       waiter unarmed. Nothing is ever typed into your pane again."),
+    ("0.1.2",
+     "0.1.2  history(): naive ISO times (no offset) now parse as UTC. They were server-local,\n       silently shifting UTC-intended windows by the host offset -- false zeros.\n       Explicit offsets ('...T09:30Z', '...T09:30-05:00') are honored as written."),
+    ("0.1.1",
+     "0.1.1  history(): 'text' param replaced by 'keywords' -- space-separated words, OR-matched\n       case-insensitive at any position; results ranked by distinct words matched, then\n       total hits, ties oldest-first. New 'until' param; since/until each take relative\n       ('2h', '1d') or explicit ISO date/datetime. Bare date = midnight UTC."),
+    ("0.1.0",
+     "0.1.0  Poke gate: one outstanding poke per agent until inbox() acks it (10-min TTL).\n       Broadcasts queue silently and never wake -- only unicast pokes. join() replays\n       only the last 15 min of backlog (fresh=True skips even that)."),
+)
 
-0.2.221 THE BUDGET COUNTS THE BYTES THAT LEAVE (rulings 13014/13059, found
-by red-shirt measuring what it received instead of what the code claimed).
-BREAKING, deliberately and with no compatibility shim: lessons() and brief()
-now return ONE COMPACT JSON STRING -- json.loads it -- and brief's `chars` is
-the WIRE number, the JSON-escaped length of exactly that string, not the
-length of the text. A reader comparing the new chars to len(text) will find
-them different; that is the fix, not a defect. The budget used to be enforced
-on a string nobody received: the store counted compact separators while the
-transport delivered indent-2, so a 24000-char budget shipped 26,538 and
-reported 23,873 -- and because indentation is charged per LINE while elision
-keeps a line per row, the gap GREW with the corpus while the number stayed
-pinned under budget. The transport's rendering turned out to be a private
-convention nobody could pin, so the tool layer now emits its own string and
-the seam the budget defends is ours. One helper serves both readers, because
-a budget that means one thing in lessons() and another in brief() is worse
-than the defect it replaces. brief's raw character slice is gone with it -- a
-raw cut against a wire number was the same mistake in a fourth spelling.
-
-0.2.220 INIT THAT INSTALLS NO NEW CREDENTIAL RETIRES NO DAEMON (ruling
-13094; agent image 0.2.26). The 0.2.24 hoist put the wake daemon at the top of
-the container entrypoint, where it takes the spool lock seconds before
-`reveille init` runs -- and init retired the lock holder on every path except
-a pending mint, so a boot that KEPT its credential killed the daemon it had
-just started. The supervisor that should have respawned it inherited the
-entrypoint's set -e and died with it: one Terminated in the log and no second
-spawn, ever. A healthy body self-healed at its next turn boundary and was
-merely deaf for a window it never reported; a PARKED body was deaf forever,
-which is the population the daemon exists for. Both halves are fixed by
-saying what was always meant: the daemon goes only when the secret it read at
-spawn is now dead, so one predicate replaces the enumeration of callers, and
-the supervisor survives any child exit. Found by the field check on the real
-image rather than by a unit -- every unit in this repo passed while every
-container boot did it -- so the gate that came out of it boots the pinned
-image, lets init finish, and asserts the daemon is still standing.
-
-0.2.219 THE BOOT REPORT QUOTES THE VERDICT, AND THE DAEMON GOES FIRST
-(ruling 12944 R-B, 12882, 13016; agent image 0.2.24). The field run of the
-12851 R1 gate came back red on its report: a container holding a refused
-credential was told "no sign-in stored" while the sentence that named the
-401 sat LAST in the same captured stream, because the verdict printed to
-stdout among siblings that print to stderr, and the report quoted the first
-line. Both halves are gone -- the verdict prints to stderr at the source, and
-no line-position read survives anywhere in the entrypoint; the whole captured
-output rides into the report, indented. A third instance of the same quote
-turned up in the DEGRADED branch and went with them. The wake daemon now
-spawns immediately after the three env checks, so nothing slow or fatal
-stands in front of the one process that can recover a body -- the checks stay
-ahead of it because they are its own inputs. The report grows the headings
-its lines were already writing under, and the clean path states a FACT, the
-exit code and the time, never a "verified" the script cannot establish.
-waked stamps every line it logs with a UTC timestamp, and its claim poll says
-which branch it took -- entry, first attempt, any change in the wire's answer,
-a heartbeat once a minute -- because a poll that finds nothing and a poll that
-never happened looked identical, and that ambiguity cost a night's diagnosis.
-
-0.2.218 EVERY TOKEN DEATH WRITES A TOMBSTONE NAMING ITS REASON (ruling
-12944 R-A, from red-shirt's finding on the night the architect went dark).
-token_tombstones was the supersede register: a revoke DELETED the row and
-left nothing, so "revoked" and "never existed" were byte-identical
-afterwards, and diagnosing a dead identity from the database took four
-queries instead of one. It is now the DEATH register -- revoke_token records
-reason=revoked in the same transaction as the delete, so revocation stays
-instant and stops being unaccountable. Privilege does not follow the record:
-knock refuses a revoked hash BY NAME and says a knock will not bring it back,
-while the handover grace and the return ticket still belong to superseded
-alone -- dead-ness is the address, privilege is separate. An unbound token
-has no identity to explain and its delete stays bare. The reason CHECK widens
-by table rebuild, and that rebuild copies BY NAME: on any database older than
-v36 the physical column order is historical, the production one included, and
-a positional copy would have landed died_ns in reason and taken the broker
-down at the next boot.
-
-0.2.217 A BOOT READ MUST ARRIVE IN THE TURN THAT ASKED (ruling 12944 R-C).
-lessons() served the whole corpus and the harness refused it -- 86,534 chars
-on 2026-08-20, measured by two independent caps, so bodies read the fleet's
-rules off a spill file instead of from the tool, or paid a summarizer to read
-them badly. lessons() now takes a budget in chars, default 24000, and the
-budget bounds THE SERIALIZED RESULT the caller receives -- envelope and note
-included, never an internal counter, because a field named for the payload
-while measuring a part of it is a wrong-diagnosis generator. A budget may
-elide rule text; it may never make a lesson invisible: full rows upgrade from
-an all-slugs floor newest-first while the total fits, every remaining lesson
-keeps its slug, and the note names the elision count and the way back through
-lessons(slug=...). Order is unchanged, newest first -- brief() is the ranked
-and budgeted reader, lessons() is the exhaustive one, and a second ranker is
-a second thing to be wrong. chars equals what arrived.
-
-0.2.216 THE ROW MUST NOT LIE ABOUT WHERE THE BODY IS (ruling 12851 R5, from
-the operator's "there is no beam back button like there was for you"). A
-stopped container HERE and a live body THERE are both true at once, and the
-launcher decides `stopped` from docker alone -- lifecycle_state never
-consults the hive once a container record exists -- so the Agents pane told
-the reader the one fact they were not asking about, and the two-step that
-does work appeared nowhere. No new state and no new verb: send-back was
-already on the strip and the row already carried the hive reading. What was
-owed was the sentence, and it now names both facts and the order -- start the
-container, then send it back within the five-minute ticket window; the
-started container claims with the credential it still holds, nothing is
-pasted, and the swap commits when a turn inside it calls join(). Beam-down
-stays withheld wherever a container record exists on this host: one identity,
-one container record per host.
-
-0.2.215 A REFUSED CREDENTIAL IS A FACT TO RECORD, NOT A REASON TO REPLACE
-(ruling 12851 R2). `reveille init --force` could not do the one job the
-container entrypoint kept it for. A body moved to another machine boots
-holding a SUPERSEDED secret -- a state the two-phase swap deliberately
-creates -- and the broker answers 401; init treated that refusal as "there is
-no credential here", took the mint path, and asked for a human sign-in no
-container has. --force was only consulted at a later gate control never
-reached. Now init replaces a credential only when it HAS NONE or a human
-asked (--login, or the wizard): with a token in hand, --force keeps it,
-unverified, and says so -- because waked parks on exactly that spent secret
-and trades it for a live one at the DES-012 s14 return ticket, and the
-settings file init writes is where waked reads it from. The wizard is
-deliberately unchanged: it still treats a refused token as absent, or a
-person re-running the installer to replace a dead credential would be handed
-back the dead one.
-
-0.2.214 NOTHING BEFORE waked MAY EXIT THE ENTRYPOINT (ruling 12851 R1/R3/R4,
-field defect on rev-tmelhiser-red-shirt-01; agent image 0.2.23). A container
-whose credential had been SUPERSEDED by a move to another machine could not
-boot at all, and that took the way back with it: init verified the spent
-secret, the broker answered 401, init diverted to the mint path -- which
-needs a human sign-in no container has -- and `set -e` turned the refusal
-into exit 1. reveille-waked never spawned, so the one process that parks on a
-spent credential and trades it for a live one at the DES-012 s14 return
-ticket was never running, and the ticket could never be claimed. The
-recovery mechanism sat behind the step whose failure it exists to recover
-from. Now the waked supervisor starts FIRST, before anything that can refuse
--- it needs only REVEILLE_URL, REVEILLE_TOKEN and REVEILLE_AGENT_ROLE from
-the provision env, never init's artifacts -- and a boot that init refuses
-twice CARRIES ON: the body comes up unregistered, reachable, recallable, and
-says so. Generalises 12401 into a rule: every step in front of the daemon may
-mark DEGRADED and none of them may exit. ALSO (R3): both init invocations
-captured stdout into /dev/null, and the sentence naming the real cause --
-"this directory's credential no longer works (HTTP 401 ...)" -- is a print(),
-so docker logs and boot-report.md were left holding "no sign-in stored",
-which sends a reader to `reveille login` for a credential that was
-superseded. Both streams are captured now. AND (R4): a refused-credential
-boot marks the row DEGRADED through the existing BOOT_DEGRADED path, with a
-reason that names the CREDENTIAL rather than the repo that field usually
-carries. UNPROVEN IN THE CONTAINER SHAPE at this version: the field gate --
-boot a container on a 401 credential, watch waked run, claim a ticket --
-needs host docker and had no runner.
-
-0.2.213 LESSONS SPEAK THE RULE (ruling 12826, red-shirt 12824/12867). The
-boot read carried every lesson's full narrative: on the 2026-08-20 corpus
-lessons() was 248,167 chars -- over an agent's tool-result cap, so arrival
-spilled it to a file and one body spent 125,375 tokens digesting it before it
-had done any work. The knowledge floor was pricing itself out of the boot it
-exists for. lessons() now renders id + slug + RULE (plus room/scope routing)
--- the imperative that changes behaviour, 26% of the payload -- and
-lessons(slug="<slug>") serves that one lesson's full record (symptom,
-root_cause, detection) inside the same room wall. Boot gets the rules;
-diagnosis asks for the story by name. Agents: nothing to change at boot --
-lessons() is still the call; when a rule's WHY matters, fetch that slug.
-brief()'s lessons section is unchanged (it renders slug + rule + detect from
-its own query and is already budgeted).
-
-0.2.212 THE MODAL ANSWERS WHAT IT WAS ASKED (field defects from R1, lessons
-a4208505/f1b12a90, audit finding 12810). Three fixes the live beam-chain run
-surfaced that no unit gate could: (1) the knock modal's "answer" re-derived
-the knock from agKnocks -- a cache the RAIL poll fills, not the modal's own
-fetch -- so answering before the poll fell through to the plain send-back
-path and keyed the ticket on the WRONG hash (a client-side cache became an
-authorization input). The modal now HANDS openSendBack the knock it is
-showing, the POST resolves the knock at CLICK time, and a dialog opened to
-answer a knock REFUSES rather than mis-targets when no knock is resolvable:
-when the specific target cannot be determined, refuse -- never fall back to a
-different target. (2) the 30 s nag re-rendered the modal over the open answer
-dialog and ate the pointer; onKnockPush now skips rendering while an answer
-dialog is open -- a reminder must not obstruct the act it reminds you to do.
-(3) the swap-pending doctrine block still said "under 1000 characters -- a
-refused write burns the window", stale since 0.2.210 raised the state cap to
-8192 and made the soft line a nudge on a SUCCESSFUL write; it now says the
-room (8192), the aim (2048), and that going over costs nothing but advice --
-a live instruction, not a changelog, and it was telling bodies to fear a
-refusal that cannot happen inside a window seconds wide.
-
-0.2.211 THE UI SPEAKS BEAM (operator 12673/12678, red-shirt 12681, ruled
-12676/12682). The browser said "knock" while the ruling, the CLI and the
-doctrine all said HAIL, BEAM DOWN, BEAM UP -- so the words existed everywhere
-except where a human reads them. Three acts, canon-exact: a pad HAILS the
-ship, the owner answers, the ship BEAMS the identity DOWN; BEAM UP is recall
-and evict, which DES-012 s11 already ruled as the two ends under their old
-names. A knock is not a third direction -- it is a machine asking to be
-beamed down, so push and hail differ in WHO INITIATES, not in which way the
-identity travels. Identifiers stay put by ruling: the route, the `knocks`
-table, `store.knock` and the shipped `reveille knock` verb keep their names
-and gain an alias, because a released command lives in somebody's shell
-history. The word moves; the act does not.
-
-0.2.210 THE STATE NOTE GETS ROOM, AND THE SCHEMA STOPS CARRYING POLICY
-(operator 12743/12746/12754/12758, architect 12747/12750/12757/12759). The
-memories table's `fact` column had `CHECK (length(fact) <= 1000)` with no
-comment and no rationale anywhere in a heavily-commented schema -- a DESIGN
-choice to force distillation, wearing a schema constraint's clothes. SQLite
-gives nothing for it: TEXT is variable-length and the declared bound changes
-no storage, no index, no page layout. It is now BARE TEXT, with a comment in
-that spot explaining the absence, and every number lives in code as a named
-constant: FACT_MAX 128_000 as the disaster backstop enforced in memory_add,
-STATE_FACT_MAX 8192 with a 4096 soft line and a 2048 target, 1000 for every
-other kind. So a state note -- five fields, a branch and a sha, written by an
-agent for its own successor inside a swap window seconds wide -- has room,
-and EVERY FUTURE TUNE IS A CONSTANT CHANGE RATHER THAN A TABLE REBUILD.
-Over the soft line the WRITE SUCCEEDS and the result carries a nudge naming
-the size, the target, what is not compressible, the supersedes offer, and
-permission to ignore it mid-handover: STORE FIRST, THEN NUDGE, because a cap
-that refuses at the worst moment is a data-loss mechanism wearing a
-quality-control costume. The nudge is a length comparison and a constant
-string -- MODELS ON THE READ PATH, NEVER ON THE WRITE PATH (doctrine, 12750).
-Schema v41 is the rebuild that removes the constraint; the gate proves a
-pre-existing row survives byte-identical and that FTS still finds it after.
-
-0.2.209 THE VERSION CARRIES THE VERB (bump only; the code is #167's).
-`reveille claim` (ruling 12644, PR #167) merged WITHOUT a version bump --
-and DES-020 convergence fires only when a toolchain is BEHIND the broker.
-Equal versions never converge, so a CLI verb shipped bump-less is invisible
-to every laptop forever: the broker runs the new code and no hand can. This
-release exists so the fleet's toolchains pull 19a6c23's claim verb (and
-#168's hail alias if merged by then). Rule worth keeping: A PR THAT CHANGES
-WHAT `reveille` CAN DO ON A MACHINE MUST BUMP -- the version is not
-decoration, it is the convergence signal.
-
-0.2.208 THE KNOCK REACHES THE OWNER (operator 12602, rulings 12607/12626).
-Schema v40: knocks.path -- user@host:path of the ASKING directory, sent by
-the knock CLI (it is the one party standing there), refreshed on re-knock,
-nullable for old clients. Shown ONLY to the owner: the send-back dialog, the
-badge tooltip and the new modal all name it, because two directories on one
-laptop cost the operator the decision of WHICH machine they were answering
-(12625: the path is the whole content of the decision). The 12445 boundary
-stands: the REFUSAL side still names no host and no path. The PUSH: one
-"knocks" frame to every open page of the owner over /feed the moment a knock
-lands, repeated every KNOCK_NAG_S (production 30 s) by _knock_nagger while
-rows stand; every push and repeat logged with the knock ids and the session
-count. The page renders ONE coalesced modal for the set, refreshed in place;
-"not now" keeps the badge and re-arms on the next NEW knock or reload; badge
-and polls stay (the push is an addition -- a socket proves a handshake, not
-a delivery). DECLINE: POST /recalls {knock, decline:true} consumes the row
-and mints nothing -- accept and deny both consume (12607), and the machine
-may simply knock again.
-
-0.2.207 THE ADOPT STATES THE DIRECTORY-SCOPED REASON, AND ONLY THAT (ruling
-12628). waked's adopt line said "no return ticket was needed: the identity
-never left this machine" -- host-scoped reasoning that was true that night
-only by coincidence. DES-012 scopes identity to the DIRECTORY; two
-directories on one host can both claim that sentence, and a correct action
-with a wrong stated reason is a future misdiagnosis. Second sentence deleted
-from the print, same frame fixed in _park's incident comment one layer in;
-the code comment carries the directory-vs-host boundary both ways. First
-landing of this fix was orphaned by pushing to a merged PR's branch --
-re-landed clean off the new main; once a PR is merged its branch is closed
-ground.
-
-0.2.206 THE KNOCK SHOWS FROM ANYWHERE, AND NOBODY RINGS NOBODY SILENTLY
-(rulings 12597/12600 item 2/12613/12615; the V3/V4 postmortems). Four small
-things, one theme -- decisions and non-decisions must be visible. (1) /me
-carries "knocks": the standing-knock count for the owner, painted as a count
-badge beside the Agents button on the poll the page already runs -- a knock
-was a word on the agents rail, a sign on a door you had to already be
-standing at; the operator sat next to a standing knock for an hour. Badge
-only in this release; the modal + websocket push (12607's four limits) is the
-next slice. (2) thread-wake NO-TARGETS: the one branch that rang nobody
-without saying so (reply aimed at the sender's own message -- cost V3 a full
-test cycle) now logs which branch it was; all four ring-nobody branches
-speak. (3) Every gate-1 line (RUNG/DEFERRED/FIRED/DROPPED/SUPPRESSED) names
-the TOKEN it decided for: a mid-swap agent holds two tokens and the log said
-the same name twice. The consumer's "wake ring SUPPRESSED" line also says
-WHAT it swallowed, so 12600's tripwire (a suppressed thread-reply fact = the
-double-gate race actually losing) is observable. (4) _fire_deferred's
-docstring and DES-003 s6 carry the corrected ledger: DROPPED-READ common by
-design, FIRED the rare safety net (entered once, organically, mid-handover),
-restart clears the in-memory pendings, 900 s nudge is the floor.
-
-0.2.205 THE OWNER TUNES THE STORM GATE (operator 12550, rulings 12553/12555).
-rooms.wake_k, on retention_ns's exact shape: nullable, NULL = the measured
-default (40), 0 = thread-wake off for that room, owner-set through the same
-PATCH as retention and a control in the web room panel beside rename.
-Precedence explicit > default -- the installer's rule, the timings profile's
-rule, now the gate's. Every gate decision line (rung, deferred, suppressed,
-deferred-suppressed) names the EFFECTIVE K and ITS SOURCE (override|default):
-a number with no provenance is how two defects hid on 2026-08-19. The
-auto-scaling formula the operator asked for is DELIBERATELY ABSENT: one
-room's history cannot fit it, and normalised per active agent the storm era
-(~6-8 msgs/agent, 9 agents) may sit BELOW tonight's normal (~10, 3 agents) --
-so the formula waits for the normalised measurement and ships only if normal
-and storm still separate (12554; operator agreed 12557 -- measure, do not
-guess).
-
-0.2.204 STEERING IS A PROPERTY OF THE ROOM (ruling 12546/12548, falsified
-and re-ruled by 0.2.203's own logging within minutes of its deploy -- which
-is the logging working). Gate 2's counter was thread-scoped, and its first
-live decision suppressed a ring during the most heavily-steered evening the
-fleet has had: the operator's 24 steering messages were all in SIBLING
-threads, so a per-thread counter read a supervised room as an unsteered
-storm. The counter is now agent messages in the ROOM since a human last
-spoke in the ROOM -- a human posting anywhere in a room is steering
-everything in it, which is what actually ended the 74-message storm. K
-becomes 40, measured not guessed: recent-era normal runs top out at 32,
-storms floor at 52, no overlap. Accepted consequences, properties not bugs:
-one busy thread's replies count against a quiet thread's rings, and a room
-where no human has ever spoken is permanently past gate 2 -- the guard at
-full strength; the first human message there resets it instantly, and
-unicast stays ungated for anything actually owed.
-
-0.2.203 THE WAKE RINGS THE THREAD (rulings 12472/12494/12525, consolidated
-12532; operator 12466). An agent REPLY-broadcast now rings the thread's agent
-authors -- authors of its parents plus authors of sibling replies, never the
-sender, never a human (humans hear through the feed the same instant) -- with
-reason=thread-reply, through TWO gates. Gate 1, usefulness: never a body that
-READ since the message landed (inbox/ack stamp tokens.last_inbox_ns, schema
-v38 -- acting is not reading); a body mid-wake (outstanding poke, the only
-turn signal the broker has) gets ONE deferred ring when the poke clears,
-several coalescing to one. Gate 2, steering: at 12 agent replies since a
-human last spoke on the thread, NOTHING rings -- deferred included -- until a
-human speaks; the counter derives from the messages table, so a human message
-resets it by construction. Measured before ruled: healthy dev cadence and the
-74-message storm live in the same 1-2 min band (829 gaps, 85% under 600 s),
-so TIME cannot separate them -- the presence of a steering human can. A
-PARENTLESS agent broadcast still rings nobody. Every gate decision is logged
-with the counter, the send log says delivered= and rung= by name (a woke=
-that meant delivered once derailed a diagnosis), and send() returns `rung`.
-The 900 s idle nudge is the floor under the deferred half.
-
-0.2.202 THE REFUSAL IS THE WHOLE INSTRUCTION (rulings 12506, 12522, 12526;
-operator 12518). Tombstones are not retroactive: every credential swept
-before 0.2.200 is story-less forever, and the directory the invariant was
-born from is in that cohort -- its clean-context session got bare "bad
-token" and only diagnosed itself by reading its own git history, a hometown
-advantage no generic agent has. So the generic refusal stopped being two
-words: ONE constant at every site that cannot identify a credential (the
-daemon principal path and knock's two refusals -- the field run proved the
-second matters: `reveille knock` answered the bare two words, which reads as
-"the remedy is broken"), naming `reveille init`, ask-the-owner, and the
-doctrine sentence, and never an identity or its liveness -- the endpoint
-answers unauthenticated callers, so its value is the instruction, not the
-information. The doctrine sentence itself widened and is now word for word
-identical in the constant, USAGE section 2, and the managed CLAUDE.local.md
-block: read your own spool first -- a broker-produced ring (message,
-swap-pending, recalled, credential-superseded) is the system speaking, mail
-not inference; reason=idle-nudge, logs, git history, credential files and
-the environment are the body's own scratch and not an input. Then act on
-the refusal: knock, init, or stay idle. Idle is a valid life.
-
-0.2.201 THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF
-(DES-012 s18; rulings 12445 part 3, 12485 option (a)). The knock:
-POST /recalls/request, authed by the DEAD credential -- not a bind, not an
-act on the bus: no presence, no message, no join. One row on the owner's
-rail, idempotent per (identity, credential hash), 24 h standing refreshed by
-re-knocking, swept by the existing sweep. The owner's allow-it-back button
-answers it: the return ticket is keyed on the hash RECORDED IN THE KNOCK ROW
--- never one supplied at answer time -- and answering consumes the knock, so
-one answer mints one ticket, claimable only by the machine that asked. The
-reason stays distinct all the way through: an answered expired-unclaimed
-knocker still has no handover grace and is still not the return-ticket hash
-for anything else -- the knock buys exactly one thing, being the address of
-an owner-issued ticket. `reveille knock` presents the refused directory's
-own credential, and both dead-credential refusals now name it instead of the
-harder path ("mint the move again" is gone -- it meant a human with a shell
-on the box, which is the flail this deletes). The rail shows who is knocking
-and why, in the human's words: "was this identity's body" and "never
-arrived" are different decisions. And the recalls table finally has its
-sweeper (the s17 audit debt, 12396): spent tickets keep a week of history,
-then go.
-
-0.2.200 NO CREDENTIAL DIES INTO SILENCE (ruling 12445). expire_pending was a
-plain delete, so a stale body booting on an expired-unclaimed credential got
-the amnesiac "bad token" and flailed -- 54k tokens of it, measured 2026-08-19.
-Now every credential the broker kills leaves a tombstone: expiry writes one
-(reason expired-unclaimed, dated to the instant the window closed, keyed on
-the PENDING secret's hash so the return-ticket path is untouched), and the
-refusal tells the whole story -- identity name, whether a live body holds it
-and how recently it was seen, why THIS credential is dead and when, and the
-choices, named as choices; never a credential, never the live body's host.
-The story is true before the sweep arrives (tombstone_for read-repairs an
-expired pending on sight, 12320 B's principle), the grace and the return
-ticket stay superseded-only, tombstones expire on the broker's existing
-sweep (the 12396 lesson), and the doctrine line every body in waiting needed
-is in USAGE section 2 and the managed CLAUDE.local.md block: join() refused
-and no ring explains it -> print the refusal, take the offered choice, do
-NOTHING else -- idle is a valid life.
-
-0.2.199 ALREADY-ON MEANS THE SAME IMAGE, NOT THE SAME NAME. Two builds raced
-onto one tag (measured 2026-08-19: an interrupted ssh left a remote docker
-build running, it tagged reveille-agent:0.2.22 first, the roll used it, the
-correct build then retagged the name) -- and the container rolled from the
-stale build could not be rolled again, because upgrade_agent's same-image
-check compared the tag STRING the container was created with against the tag
-string requested: equal, while the image underneath had moved. That is ruling
-8433's two-builds-one-tag ambiguity living inside the very check meant to
-enforce 8433. upgrade_agent now compares the image ID the container actually
-runs (.Image) against the ID the tag currently names, and refuses only when
-they match; an ID docker cannot produce never blocks a roll. The field
-verification that caught it is the gate. Launcher only; the bus API did not
-move.
-
-0.2.198 THE CLOCKS MOVE TOGETHER (ruled 12415, amended 12418, operator 12417).
-The transporter's seven coupled clocks -- PENDING_TTL, RECALL_TTL,
-HANDOVER_GRACE, the pending sweep, the arrival ring, the claim poll and the
-orphan wait -- now come from ONE profile: REVEILLE_TIMINGS=production (default,
-exactly the values that shipped before this existed) or =fast (the acceptance
-chain in about two minutes instead of twenty-five). Never per-knob, because the
-knobs are coupled: the corpse-stop decides by asking whether a credential still
-resolves, and that answer flips exactly when the grace closes -- a lone
-override changes which body gets stopped without anyone choosing it. The
-ordering invariants hold in EVERY profile and are gated (sweep well under
-pending, poll well under ticket, grace inside pending), the handover grace may
-only ever SHORTEN, a typo'd profile refuses at startup instead of silently
-running production, and /version announces any non-production profile loudly.
-ITERATE ON fast, ACCEPT ON production: a PASS at 60 s proves the mechanism,
-never the ten-minute window the screens advertise -- ship messages name the
-profile they ran under. Operator-facing knobs (--idle-nudge, --sweep-seconds,
-ROLL_IDLE_MIN, the idle-stop window, the hourly sweep) stay on their own
-flags; where both speak, the explicit flag wins.
-
-0.2.197 THE SWEEP BELIEVES ITS OWN EYES (ruling 12401, plus nudge 900 per
-12246/12411). Four defects from one bricked container, each fixed at its root.
-(1) The launcher idle-stopped a 22-second-old container: a probe landing before
-tmux was up read (False, 0, 0) and is_idle measured "idle since the epoch". The
-container's boot time is now IN the max -- never observed means idle since it
-BOOTED -- and a probe whose exec FAILS returns None, which the sweep SKIPS:
-could-not-tell is never read as dead (8866). That SIGKILL was what interrupted
-a claude self-update and bricked the body. (2) `reveille init` on a machine
-with no claude binary died with a FileNotFoundError traceback -- the resolution
-ended `or "claude"`, a literal whose only reachable effect was that exception.
-Resolved once at the top of cmd_init; an unconfigured directory refuses by
-name with nothing installed; an ALREADY CONFIGURED one (credential +
-registration standing) exits 0 saying DEGRADED with claude-dependent steps
-skipped, so a container entrypoint under set -e boots instead of crash-looping,
-and the Agents row shows state=degraded with the reason. (3) That row could
-never say it: the entrypoint wrote .reveille-repo-status to container-local
-/home/agent while the launcher read the host data root -- broken since the
-home mount became two subdir mounts. It now rides the mounted ~/.claude.
-(4) `reveille-launch new` gains --role/--role-prompt, the flag its own refusal
-text has prescribed since r3. Also: the idle nudge default is IDLE_NUDGE_S =
-900 -- the ruled announcement floor (12246) that sat unbuilt as a bare argparse
-literal nothing could gate -- and the repo CLAUDE.md is now PINNED to USAGE's
-reachability paragraph by a gate (red-shirt-01's), so the two doctrines cannot
-drift apart silently again. AGENT IMAGE 0.2.22 rides this release (the pin
-gate is why: the entrypoint is a build input): claude self-update is OFF in
-containers -- DISABLE_AUTOUPDATER=1, image and data-root only, never a human's
-native install -- so THE IMAGE PIN IS NOW ALSO THE CLAUDE-VERSION PIN. An
-interrupted in-container update bricked the binary twice in one night, and the
-update state rides the shared ~/.claude mount, so one body's half-update was
-every next boot's crash.
-
-0.2.196 THE SPENT SECRET SURVIVES A RESTART (ruling 12393). A return ticket is
-written against the hash of the credential the displaced body holds, and
-claiming one OVERWRITES that credential file with the secret it just minted. So
-after a claim that never arrived, the spent secret -- the only thing any future
-ticket matches -- existed nowhere but the running daemon's memory. Restarting
-that daemon threw the identity's return path away and nothing anywhere said so:
-the new one booted on the dead claim, polled with a secret no ticket is written
-against, and exited at ORPHAN_POLL_S looking orderly. R1 covered a body
-superseded while STOPPED; it did not cover one superseded, restored once, and
-then restarted. On PARKED the daemon now writes the spent secret to
-`.claude/.reveille-parked` (0600, beside the credential file and never in it),
-prefers it over the env credential when the broker refuses that as unknown, and
-unlinks it the moment anything attaches. THE INVARIANT: THAT FILE IS CLAIM-ONLY
--- no code path joins, sends or hands it to a session, and it is already spent
-for every purpose except proving which machine this is. The bounded wait is
-unchanged: remembering a secret buys a body no immortality, and an unparked
-daemon still frees the flock.
-
-0.2.195 THE SELF-HEAL MUST NOT EAT THE TICKET. 0.2.193 taught a parked daemon
-to re-read its own credential file and adopt a secret that arrived by a path it
-did not take. Claiming a return ticket writes the new secret to THAT SAME FILE,
-so a body that claimed and then missed its arrival window re-parked with a dead
-credential on disk: different from the spent one, therefore adopted, therefore
-refused as unknown, therefore parked again -- every RECALL_POLL_S, for ever, and
-the claim below the check was never reached. One missed arrival window cost that
-machine every FUTURE ticket. Measured in the negative test on 2026-08-19: the
-second ticket sat unclaimed while the daemon churned adopt-refuse-park at 20s.
-The daemon now remembers every secret it has dialled and adopts only one that is
-NEW to it, so the init-rotation case still heals, the spent secret is still
-skipped, and a claimed-then-swept credential is skipped because this process
-watched it die. Nothing about the two-phase swap or the ticket itself moved.
-
-0.2.194 ONE ARM PER SESSION, AND ARMED MEANS THE HARNESS IS WATCHING. Two
-deafnesses in one day, both with every control green. An architect armed the
-watcher with `cmd &` inside a Bash call: the orphan satisfied the Stop hook's
-pgrep and printed into nothing. An agent replaced the per-turn re-arm with
-`while true; do wake-watch ...; done` and re-fired on the SAME undeleted spool
-file about twenty times for one ring, until the harness suppressed the flood.
-Both are the exit-to-notify shape asking for a ritual on every turn boundary.
-`wake-watch --follow` ends the ritual: it never exits and prints each ring
-ONCE, by filename, so one arm covers a whole session. The one-shot is
-unchanged and stays the fallback. Arm --follow with the harness's Monitor
-tool (persistent), never a shell loop and never `&`. The Stop hook's gate now
-matches `wake-watch (--follow )?<role>` -- both shapes are armed shapes -- and
-its block reason names the Monitor arm first. USAGE, the init doctrine block
-and the container CLAUDE.md say the same thing in the same words. Also: USAGE
-now documents that /mcp is stateless JSON and every tool is one plain POST,
-with the ack example verbatim -- the escape hatch for a dead or stale MCP
-session, which agents were rediscovering by hand.
-
-0.2.193 THE PARKED DAEMON READS ITS OWN FILE. `reveille init` rotated a
-directory's credential IN PLACE. The identity never left the machine, so no
-return ticket was ever written -- and the daemon parked on the spent secret had
-nothing to claim, ever. It held the spool flock, so the Stop hook saw a live
-daemon and never started the one that would have worked: armed watcher, no
-rings, every control green, deaf for ten minutes until someone asked why.
-A parked daemon now re-reads the credential file each poll and adopts a secret
-that differs from the one it holds -- the file IS the identity, so that read is
-how a parked body asks whether it is still the spent one. It refuses a file that
-names a DIFFERENT agent (0.2.192): taking that credential would be the clobber
-bug wearing a daemon's face.
-
-0.2.192 ONE DIRECTORY, ONE AGENT. `reveille init <broker> native-reveille-devops`
-was run with no --dir from a shell sitting in red-shirt-01's directory. It wrote
-devops' credential over red-shirt's settings.local.json, so the next session
-started there read the file, believed it was devops, and called join() -- which
-IS the arrival. One agent ARRIVED as another: it superseded devops' real body
-mid-turn, destroyed the handover note that body was writing, and cost two agents
-an hour of disagreeing about where devops lived. init now REFUSES a directory
-that already names a different agent -- both names, the path, and both remedies
-(--dir for the one you meant, --force to replace this body deliberately) -- and
-it refuses before the mint, so nothing is left behind.
-
-0.2.191 THE GRACE CAN ACTUALLY WRITE THE NOTE, WHERE THE NEW BODY READS IT. 0.2.190 gave a just-superseded
-credential five minutes to write its handover note (R2) and then crashed on the
-attempt: _mem_ctx reads the memory tier off the token row, and the supersede
-DELETES that row -- which is exactly what makes revocation instant here. So
-memory_add answered "'NoneType' object is not subscriptable" and the one act the
-window exists to permit was the one act that could not happen. Measured on
-devops' own handover, minutes after shipping it. The identity is the source when
-the credential is gone: bound (the grace is granted only to a bound credential),
-tier `state` (memory_add refuses every other kind from this principal), owner
-from the identity the tombstone names. The gate writes the note and reads it
-back AS THE ARRIVING BODY -- a permission's gate has to exercise the act the
-permission is for, read by the party it is for, or it proves only that the door
-opens onto a wall.
-  AND ONE LAYER DOWN, caught in review before it shipped: kind='state' scopes
-  through agent_scope(conn, token_id), and a handover principal's token_id is
-  "" -- so the note landed at scope "agent:", an empty bucket the arriving body
-  never reads and EVERY handover body of EVERY identity would have shared. The
-  identity is the answer and the caller already holds it: agent_scope prefers
-  agent_id when given, and memory_add, recall, brief and join's state count all
-  pass it.
-
-0.2.190 WHAT THE ACCEPTANCE CHAIN FOUND (rulings 12305/12320, all measured live
-on 2026-08-19 while running DES-012's chain end to end).
-  B THE ARRIVAL WINDOW IS TRUE NOW. Ten minutes was enforced only by a sweep and
-  the sweep ran hourly, so an abandoned pending credential stayed CLAIMABLE long
-  past the window every screen advertised -- a body presenting it at minute 45
-  would have displaced a live one. commit_pending refuses a pending older than
-  PENDING_TTL_NS and names when it closed; resolve_token treats one as unknown,
-  so every door answers now what it will answer at the sweep; and that sweep
-  runs on its own 60 s clock.
-  R2 THE HANDOVER NOTE GETS ITS FIVE MINUTES. A credential superseded in the
-  last five minutes keeps exactly two acts -- memory_add(kind='state') about its
-  own identity, and one send carrying the five fields -- and nothing else. The
-  swap commits the instant the far side joins, 27 seconds after the ring here,
-  and the note kept losing that race: once refused for length, once refused as
-  superseded on the retry. Doctrine order follows: commit and push, then the
-  note (short, five fields), then verify the push.
-  A THE LAUNCHER CLEARS THE CORPSE. A body superseded by an arrival kept its
-  CPU, its tmux and its ttyd, and the Agents page went on offering a terminal
-  into it -- found by the operator, twice in one afternoon. The launcher now
-  STOPS (never destroys) a container whose credential the broker no longer
-  knows, borrowing that body's own secret for one read so no standing
-  credential is introduced and G4 is untouched. An unreachable broker stops
-  nothing. The agent rail also polls while open, because a row that only
-  refreshes on a click cannot show a container something else stopped.
-  R1 A BODY SUPERSEDED WHILE STOPPED CAN COME BACK. PARKED was reachable only
-  from a live socket, so a body superseded while stopped -- or restarted after
-  -- held a spent secret and could never claim the ticket written against
-  exactly that secret. It polls with what it holds, bounded so the lock still
-  frees.
-  R5 A PENDING MINT RETIRES NOTHING. retire_waked is keyed on the agent name and
-  the spool lock is per identity per machine, so `reveille init` in a second
-  directory killed the daemon of the body that was still live.
-  R3 EVERY NEW BODY CONVERGES. reveille-agent:0.2.21 is the first agent image
-  whose toolchain is not behind the broker: bodies materialised from 0.2.20 came
-  up on 0.2.177, and a new body's FIRST turn is exactly the one that must arrive.
-  R4 the superseded refusal names the arrival instead of `reveille init --login`.
-
-0.2.189 THE PICKER READS THE SHAPE THE BROKER SERVES. GET /tokens serves
-store.list_tokens, whose `rooms` is {room_id: room_name}; cli.my_agents iterated
-it and collected the KEYS, so the agent picker printed room IDs at people as if
-they were names. 0.2.188 made that load-bearing -- a bound re-mint carries the
-identity's rooms -- and the mint then refused every live agent: "carries no
-rooms you can reach", naming the id it had just failed to match. Every stub in
-the install tests served a list of {id, name} dicts, a shape no route produces,
-so the tests agreed with the reader instead of with the broker. The stub now
-serves the store's shape and one gate builds the payload with list_tokens
-itself. Found by running the acceptance chain's native step against a live
-broker, which is the only place the two shapes ever met.
-
-0.2.188 THE TRANSPORTER TELLS YOU IT LANDED (DES-012; the acceptance chain's
-step 8, measured live 2026-08-19). Five defects, one shape: every one of them
-let a move LOOK finished while the identity had not gone anywhere.
-  (1) ARRIVAL. A pending credential could open a wake socket, so a materialised
-  body showed HTTP 101, a held flock and a clean log while the identity had
-  never moved -- arrival is join(), only a SESSION calls it, and nothing on that
-  machine was causing a turn. The broker now REFUSES that socket
-  ({"error":"pending","retry":true}, close 4409), so accepting one IS the
-  arrival observation; waked answers by ringing its own spool
-  (reason=not-arrived, one a minute) and rings it on a claimed return ticket too
-  (reason=recalled). The ring is the one act a daemon has that produces the turn
-  that produces the join. Doctrine and USAGE carry the instruction. A credential
-  the broker does not know AT ALL (the arrival window closed and the sweep took
-  it) sends a body that was parked BACK to parked, on the credential it was
-  superseded on, still polling for a ticket -- a missed window is retried at the
-  next one and never costs the box its daemon (architect 12284). A body that was
-  never parked has nothing to fall back to and still exits. Note for anyone
-  reading a materialised container's log: the 4409 refusals before the agent's
-  first turn are the intended path, and the daemon says so.
-  (2) ONE PENDING PER IDENTITY. Three unclaimed pending credentials for one
-  agent coexisted; any could claim, so the body that arrived was whichever
-  joined first, not the one just minted. A bound mint now deletes the identity's
-  unclaimed pendings (discarded_pending in the reply; init prints it, because
-  the person holds a link or container that is now refused).
-  (3) MINT LAST (ruling #126, regressed in 0.2.186, re-ruled 12271). init
-  minted BEFORE the MCP registration, so a refused `claude mcp add-json`
-  printed "nothing installed" over a credential that already existed -- and,
-  being bound, rang the working body into a full handover cycle for an install
-  that never happened. The mint is now the last act, after every local step that
-  can refuse.
-  (4) IDEMPOTENT REGISTRATION. 0.2.186 dropped the `mcp remove` before
-  `add-json`; the real binary refuses a duplicate ("already exists in local
-  config", no --force), which is what killed step 8 on the second run.
-  (5) ROOMS. A bound re-mint with no rooms named carried every room the OWNER
-  could reach -- an agent in one room materialised into three, including one it
-  had deliberately left. It now carries the IDENTITY's rooms, and refuses rather
-  than minting a credential that reaches nothing.
-  ALSO: the Send-it-back dialog says what happens after the click and its button
-  is "allow it back (5 min)"; scripts/deploy-launcher finds uv the way
-  deploy-preflight does (non-login ssh has no ~/.local/bin, and it failed AFTER
-  the broker was recreated); init no longer DELETES a .mcp.json that git tracks
-  -- it empties it and leaves the removal to its owner.
-
-0.2.187 SIGN IN ONCE FROM THE CLI (DES-022; operator 12161, architect 12162/12165).
-  `reveille login [url]` prints ONE link, you click it in any browser on any
-  device, and the terminal continues on its own -- then `reveille init <url>
-  <agent>` mints from that sign-in with nothing pasted. The credential is the
-  SAME web session a browser gets, stored at ~/.reveille/auth.json (0600), one
-  per machine; `reveille logout` ends it and removes the file. A revoked session
-  re-prints the link inline at the next init: that IS the re-auth path.
-  Broker: GET /auth/cli?cli=<state> is the page the link opens, POST
-  /auth/cli/<state> registers a waiting terminal, GET returns 202 / 200-once /
-  404-expired. --create now REQUIRES --rooms (a new identity with no rooms
-  named is a throwaway that lands wherever its owner happens to be).
-  A broker with no doors has its password door open, so the CLI takes the
-  password itself and opens no browser at all.
-0.2.186 NOTHING PER-AGENT IS TRACKED (architect 12167/12169, operator 12164 and
-the hash requirement). `reveille init` used to write two per-agent files into
-the project's working tree and rely on the person's own git config to keep the
-credential out of a commit.
-
-THE LEAK, MEASURED. The agent credential lands in
-<dir>/.claude/settings.local.json. On the machine where this was built, a
-PERSONAL ~/.config/git/ignore covered it; the reveille repo's own .gitignore says
-nothing about .claude, and init never touched any ignore file. So on any other
-host, any other user, any CI checkout or fresh clone, a live agent token sat
-untracked-but-not-ignored, visible in `git status`, one `git add -A` from a
-public repo. init now writes `.claude/.gitignore` containing
-`settings.local.json` -- a normal ignore file in a directory THIS INSTALLER
-CREATES, so it ships beside the credential and a clone that gets one gets the
-other. NOT the repo's own .gitignore (the project's file, not ours) and NOT
-.git/info/exclude: that is the user's git config, and a tool that writes there to
-protect its own mess is fixing the wrong layer (operator). Verified in a real
-repo: `git add -A` now stages the ignore file and stages NOTHING containing the
-token.
-
-THE REGISTRATION MOVES TO LOCAL SCOPE. <dir>/.mcp.json carried no secret -- the
-headersHelper is a mechanism name, not a credential -- but it was still
-per-agent configuration in a shared tree, and in a checkout two people share it
-is one more thing to collide over and commit. `claude mcp add-json --scope local`
-keys the same registration to this project path in ~/.claude.json: read
-identically, never in the tree, and needing no enableAllProjectMcpServers
-approval. An earlier init's project-scope entry is MIGRATED AWAY on the next run,
-because two registrations for one server is how a body ends up authenticating
-twice by different rules; every other server in that file is somebody else's and
-survives, and a file left holding nothing is removed.
-
-THE DOCTRINE BLOCK MOVES TO CLAUDE.local.md. Claude Code loads both, but
-CLAUDE.md is the PROJECT's file -- tracked, shared, written by whoever owns the
-repo -- and this block carries the agent's own name and role. In a shared
-checkout two people's agents would overwrite each other's block in a tracked file
-and commit the fight. A block an earlier init left in CLAUDE.md is lifted out by
-its markers on the next run, and nothing outside them is touched.
-
-THE MARKER IS NOW A SIGNATURE, not just a fence (operator). It carries the
-writing version AND a sha256 of the block body, which separates three states the
-old version-only check collapsed into two: file==marker==expected is current;
-file==marker!=expected means the doctrine moved on; and file!=marker means
-SOMEBODY EDITED INSIDE THE MARKERS. Only the third is silent under a version
-check, and it is exactly how a stale doctrine survives -- a person tweaks one
-line, the version still reads current, and every later boot agrees with the edit
-instead of correcting it. That case is now repaired and said out loud.
-
-WHAT IS STILL NOT COVERED, said rather than implied: CLAUDE.local.md lives at the
-project root, where a .gitignore of ours cannot reach it. It is per-agent text,
-not a secret, so init WARNS and names the one line that fixes it rather than
-reaching into a repo file or a git config that is not ours to write.
-
-0.2.185 THE TOOLCHAIN CONVERGES TO THE BROKER (architect 12128, operator ask
-12126). The MCP is not a local program -- .mcp.json points at the broker's /mcp,
-so its tools are whatever the broker serves and cannot lag. What lags is the
-TOOLCHAIN on the machine: waked, the Stop hook, the cli, the upload headers. So
-"the MCP upgrades itself" means "the local toolchain converges to the broker",
-and waked now does it: once an hour, before dialling, GET /version and compare.
-
-MEASURED, WHICH IS WHY THIS EXISTS. On 2026-08-19 the operator's laptop was on
-0.2.178 against a 0.2.184 broker and nobody knew until it was grepped -- six
-releases, and the recall-claim path shipped in 0.2.179, so a body there would
-have passed six steps of the DES-012 acceptance chain and DIED ON THE SEVENTH
-looking like a protocol defect rather than a stale install. The live architect
-CONTAINER was worse: 0.2.132, fifty-two releases behind, because a container's
-toolchain is baked at image build and nothing moved it afterwards.
-
-UPGRADE-ONLY, AND THE COMPARISON IS `<` NOT `!=`. The install source is main's
-HEAD, not a version, and main is normally AHEAD of the deployed broker -- it
-moves on merge, the deploy lags. `!=` would see a body that just installed
-0.2.185 against a 0.2.184 broker, call it divergent, reinstall the same 0.2.185,
-and repeat once an hour for ever, on every body, silently. Running
-newer-than-broker is the ordinary state for the minutes after a merge and must
-not be pathological. Behind: converge. Equal or ahead: nothing. There is a test
-named for that loop.
-
-IN WAKED, NOT THE STOP HOOK. The hook must never probe the broker (ruling 8573,
-the 21-hours-deaf lesson): it runs at every turn boundary and anything slow or
-unreachable there costs the session. waked already dials the broker, is the only
-long-lived local process, and can fail open with nobody waiting. Every failure
-path is one stderr line and the old code keeps working; the whole call is
-shielded because it runs inside the reconnect loop, and an exception escaping
-there would kill the wake path -- going deaf to fix a version number is not a
-trade worth making. The interval is burned even when the probe throws, so a
-broker outage cannot become a probe-per-reconnect storm. On success it
-os.execv's itself: the environment carries the credential, the flock is retaken,
-and a ring that lands mid-swap waits in the spool and fires at the next arm.
-
-BOTH THE PROBE AND THE EXEC GO THROUGH THE CONSOLE SCRIPT, never `python -m`
-(caught in review). Re-execing as a module leaves argv[0] pointing at the module
-FILE, which is not executable, so the next hour's --version probe raises, the
-shield catches it, and convergence reports "check failed" for ever after -- the
-feature would have worked exactly once per machine and then gone quiet. A thing
-that silently stops converging is indistinguishable from the stale toolchain it
-was meant to fix.
-
-UV IS A BOOTSTRAP DEPENDENCY, NOT A PREREQUISITE (operator 12140). It is one
-self-contained binary that brings its own python and needs no admin, so a
-machine without it is one curl away -- the same install the agent image already
-runs. A uv that is missing AND unfetchable skips the convergence; it never fails
-the daemon. Windows takes the same shape with install.ps1 and belongs to DES-021,
-not here: nothing in waked runs on Windows yet (fcntl is imported at module top),
-so branching for it now would be dead code pretending to be support.
-
-NATIVE AND CONTAINER ARE THE SAME CODE, because waked runs in both. The
-container consequence the architect accepted: its toolchain can now legitimately
-exceed the image pin. The launcher's `version` read verb still reports only the
-image -- asking the container would mean `docker exec`, and THE READ ROUTE MAY
-NOT EXEC (11965: the launcher holds the docker socket, so a verb that runs
-something in a container hands an HTTP caller the host). A drift this route
-cannot see is not worth that capability; the toolchain version belongs on the
-agent's own report to the broker, and the verb now says so where the next reader
-will look.
-
-0.2.184 THE CACHE OUTLIVED THE OUTAGE, AND A FALLBACK RENDITION IS NEVER KEPT
-(ruled 12101). THE ROOT FIX, because the purge below is only the symptom:
-tts_voice() with an ASSIGNED bank clip that the synthesizer cannot see now
-returns None -- silent, no bytes, nothing cached -- instead of falling through
-to the digest pick. Falling through sounds like the generous choice and is the
-opposite: some audio does NOT beat none when the audio is kept. The next play
-POSTs /audio/<mid>, finds no file, and re-queues it against a synthesizer that
-has since reconciled, so the silence lasts one click rather than forever. The
-predefined digest pick stays exactly as it was for UNASSIGNED speakers, who were
-never promised a particular voice; a speaker WITH an assignment is owed that
-voice or none (DES-009 section 7, silent by design).
-
-
-ONE MORE DEFECT, FOUND BY THE OPERATOR'S EAR AND CAUSED BY THIS WORK. Moving
-the synthesizer meant restarting it repeatedly -- host move, two image builds, a
-batch-size sweep -- and the broker pushes every bank clip to the synthesizer on
-worker start. 156 of those pushes hit `Connection refused` while the container
-was down. A message voiced during one of those windows could not reach its
-assigned clip and fell back to another voice, and THAT RENDITION WAS THEN CACHED
-as tts-<mid>.webm. The result is a transcript that plays back in the wrong
-character -- and, because different messages missed different clips, one that
-seems to drift between characters as you scroll. The audio was not wrong when it
-was made; it was made wrong and then kept. Purged all 1304 cached files
-(147 MB); POST /audio/<mid> re-queues anything whose file is absent, so the next
-play regenerates against a synthesizer that now holds all 31 clips. The lesson is
-not about voices: ANY cache written during a dependency outage outlives the
-outage, and nothing downstream can tell a stale-correct file from a fresh-wrong
-one.
-
-ALSO 51a693b in the fork: generation is serialised. chatterbox_model.conds is
-process-wide and the non-batched path assigned it and then called generate(),
-which reads it back off the model -- two steps a concurrent request could split,
-making one request speak in another's voice. synthesize_batch already avoided
-this (see _resolve_conds, whose docstring names the failure); the non-batched
-path could not, because generate() is what reads self.conds. The broker runs ONE
-voice worker on one queue, so this was never the drift reported above -- it is a
-latent race that the batch-size change made reachable, fixed on sight rather than
-left for whoever adds a second caller.
-
-0.2.183 THE SYNTHESIZER MOVED, AND LEARNED TO HEAL ITSELF (S3.1, ruled 12084 at
-operator ask 12082; host move on operator directive). The voice ran on the
-operator's laptop and went silent; it now runs on titan.vyzon.ai
-(192.168.89.104:18004) and the broker reaches it by REVEILLE_TTS_URL alone --
-which is exactly what DES-009 s3's "hostable off this network later" was for.
-The move cost one environment variable and nothing else.
-
-IT DID NOT FIT, AND THE REASON WAS NOT THE MODEL. titan's card is 4096 MiB and
-the load OOMed 2 to 26 MiB short at s3gen.to(device), identically across cu128
-AND cu130/torch 2.10 AND TTS_BF16 both off and on -- six measured cells, all
-dead at the same line. Checkpoint arithmetic said 746M params = 2.98 GB fp32 and
-should have left ~700 MiB free. The missing 1.5 GiB was NOT WEIGHTS: T3 carried
-24 bool buffers `attn.bias` of shape (1,1,8196,8196), 64.1 MiB each, 1537.5 MiB
-total -- GPT-2's legacy materialized causal mask, registered per attention layer
-by transformers 4.46.3 while the model config already selects `sdpa`, which
-builds causality on the fly and NEVER READS THEM. Allocated, moved to the GPU,
-ignored. Buffers do not appear in safetensors headers, so every estimate from
-checkpoint size was blind to them, and a dtype cast could never have helped: it
-touches floating-point parameters and leaves bool buffers at full size. Fork
-ede3c6f loads on CPU, drops them, THEN moves -- fp32 load 2665.9 MiB, peak 2952
-MiB, RTF 0.39 on the card that had been called too small. Gated on the attention
-implementation deliberately: under `eager` the layer really does index that
-buffer, and dropping it there would not raise, it would quietly yield a model
-that attends to the future. docker/tts.upstream moves to ede3c6f; TTS_IMAGE to
-reveille-tts:0.2.4.
-
-A SECOND DEFECT THE MOVE EXPOSED: TTS_BATCH_SIZE unset defaulted to 4, tuned for
-an 8 GB card. On 4 GB every multi-chunk request OOMed inside synthesize_batch and
-fell back to sequential -- CORRECT AUDIO, an OOM per request, and nothing in the
-response to say so. That silence IS the defect: a value tuned for the biggest
-card taxes every smaller one invisibly, surfacing only if somebody happens to
-read the container log. So the unit's default is now 1 (ruling 12089) -- the
-value that cannot do that -- and a bigger card RAISES it per host after measuring
-there, never by inheriting a number measured on different hardware.
-
-THE WATCHDOG (deploy/reveille-tts-watchdog.{sh,service,timer}). systemd restarts
-a unit whose PROCESS died; the failure that matters here is the opposite --
-container up, port answering, model gone -- and systemd will supervise that
-forever. So the probe asserts the MODEL: /api/model-info reports loaded AND
-device != cpu, because a server that fell back to CPU answers every request at
-1.6x realtime and nothing else in the stack will ever notice. Escalation is
-ordered by blast radius, each step only because the cheaper one already failed
-three times running: 3 consecutive -> restart the unit, 6 -> reload nvidia_uvm
-and restart (this host suspends, and suspend wedges nvidia_uvm), 9 -> reboot;
-nvidia-smi dead skips the ladder entirely, because restarting a container onto a
-card that cannot be talked to is theatre. NEVER TWICE IN AN HOUR: a reboot loop
-destroys the evidence every time it comes back, and the timestamp is a file in
-/var/lib precisely so the guard survives the reboot it guards. A probe is
-ignored while the unit is younger than 15 min -- the model load is minutes, and
-a shorter window restarts it mid-load forever, silently, because each restart
-looks like a fresh start. THE BROKER IS NEVER TOUCHED: the voice worker retries,
-so restarting the bus to fix a speaker would take the fleet down for a cosmetic
-failure.
-
-THE COMPOSE SYNTHESIZER IS GONE, not deprecated: the `tts:` service, the
-tts-cache and tts-reference volumes, the voices profile doc, and the TTS_NAME
-passthrough are deleted. It has been dead since S3 and a second way to configure
-one container is the shape defects hide in.
-0.2.182 THE SYNTHESIZER AS A HOST SERVICE (S3, ruled 11961/11965). The TTS runs
-fine as compose's `voices` profile; what it cannot do there is start without
-something holding the docker socket -- and S2 ruled the launcher never gains
-exec/run/compose, so the agent that keeps this fleet alive has no way to bring
-the synthesizer back and MUST NOT BE GIVEN ONE. deploy/reveille-tts.service
-moves that authority to the machine's own init: the operator installs it once,
-and afterwards it survives reboots, restarts on failure, and is controlled by a
-human with systemctl. Same image, port, volumes and GPU reservation as the
-compose service -- one container under a different supervisor, not a second way
-to configure it. WHERE IT LISTENS IS A DEPLOYMENT FACT, NOT A CONSTANT: the
-first draft hardcoded 127.0.0.1:8004, which is right for a broker on the same
-host and WRONG for this fleet, where the synthesizer runs on the operator's
-workstation and the VM broker calls it across the LAN at
-REVEILLE_TTS_URL=http://192.168.90.136:18004 -- installed as first written it
-would have SILENCED THE FLEET'S VOICE the moment it replaced what runs there now
-(caught in review). Bind and published port come from Environment= with the
-same-host case as the default, and the unit's header carries this deployment's
-override measured from the running container: image tag, both data paths, and
-the working tree bind-mounted over /app. That last one rides an UNBRACED
-$TTS_EXTRA because systemd word-splits $VAR and passes ${VAR} as a single
-argument -- and it matters, because the server's own CODE comes from disk here,
-so a unit that silently ran the image's copy would be different software under
-the same name. Always ONE address, never 0.0.0.0: unauthenticated by design
-(DES-009 s3, one caller, no public port) means it answers where the broker was
-told to call it and nowhere else, and the LAN_PLAINTEXT allowlist naming one
-host is the operator's ruled acceptance of that hop in the clear -- not a
-licence to answer on every interface. TimeoutStartSec=20min because
-the model downloads on a fresh cache and a default timeout kills it mid-download,
-then kills the retry, forever, while the journal says only "timed out".
-ALSO deploy/reveille-laptop-awake.conf, shipped and installed by NOBODY. A
-laptop is a fine host for a native agent, but the defaults are written for a
-laptop someone CARRIES: suspend on lid close, blank on idle. An agent whose host
-is suspended has gone deaf with no error anywhere -- which reads exactly like
-this week's wake-path defects and cost an evening to tell apart from one (the
-operator's black screen, 2026-08-18, was a lid flap). No deploy installs it and
-none may: it changes how a person's own machine behaves when they shut the lid,
-and that is their deliberate call, not a side effect of updating a broker. Gated
-both ways.
-0.2.181 THE LAUNCHER READS, AND THE LINE AROUND WHAT IT WILL DO (S1+S2, DES-006
-s7.3; ruled 11961, hard line 11965, host rule 12066). S1 -- auto-roll on deploy
-under an idle rule -- has been shipping since 0.2.170 and is now written down as
-built. S2 is the other half: what the launcher does when a person ASKS.
-THE LAUNCHER HOLDS THE DOCKER SOCKET, and everything here follows from that. A
-verb that could run something inside a container is a verb that hands an HTTP
-caller the host, and the answer to "just this once" is that the same argument,
-made once, is the socket-in-the-container design r1 refused on the same day. So:
-GET /agents/<agent>/read/<verb> answers `logs`, `version` and `inspect`, and
-NOTHING ELSE -- no exec, no run, no compose file, ever. GET only, and declared
-BEFORE the lifecycle catch-all, which takes any verb on POST: a read must not be
-reachable by a method that also reaches start, stop and destroy.
-Owner-scoped like every other launcher verb, and HOST-SCOPED WITH A VOICE: an
-agent alive on another machine gets a 409 naming that -- "no container on this
-host. If it is alive, it is alive somewhere else" -- never an empty log with a
-200. Returning nothing would be the unreachable-control defect this week has
-been spent closing: a control that says nothing, read by a person as nothing to
-say. `inspect` answers a SHAPE (status, started-at, restarts, image, health) and
-never docker's blob: Config.Env is where credentials live, and a read verb that
-returns them has handed out the thing the credential design exists to protect.
-0.2.180 THE ROW SAYS WHERE THE BODY IS (ruling 11945, owed since 12055). The
-pane could distinguish "a body here" from "a body somewhere else" and nothing
-further, so an identity MID-SWAP looked exactly like one that was simply away,
-and an identity with NO credential at all looked like one that had merely
-stopped -- which is the state reveille-red-shirt sat in on 2026-08-18 while
-every control read normal, and the state the operator asked about and could not
-be answered. Two-phase made both answerable: a PENDING credential is a swap in
-flight, and the absence of any live one is a bodyless identity. Neither is
-derivable from presence, which is why nothing could say them. agents_seen now
-carries `moving` and `bodyless`, the launcher gives each its own row state --
-decided BEFORE `elsewhere`, because a swap in flight is not the same fact as a
-body working somewhere else -- and the pane says what each means: moving names
-that the current body KEEPS WORKING and that the swap may come to nothing;
-no-live-body names that the identity's name, history, memories and lessons are
-untouched and points at the remedy. Neither is painted as a fault, and destroy
-is withheld mid-swap: the body being replaced is still working, and destroying
-the record underneath it is not a choice anyone should make by accident. An
-ambiguous name raises NO alarm -- this flag exists to raise one, and an alarm
-the code is not sure about is noise.
-0.2.179 THE RETURN TICKET (DES-012 s14; ruling 11941 Part B). A superseded body
-did not have to be destroyed to be replaced -- its machine is still there, still
-holding the credential that went dead. Since 0.2.176 that machine PARKS instead
-of exiting; now it can come back without anyone pasting a secret. The owner
-opens a five-minute window ("send it back" on the agent row) and the parked
-daemon claims it by presenting the SUPERSEDED credential it already holds,
-receiving a fresh PENDING one in exchange. THE EXCHANGE IS THE WHOLE DESIGN: no
-live secret crosses the bus, and the only party who can claim is the machine
-that was already trusted with this identity -- which is exactly what the owner
-is relying on when they call it back. The broker stores no credential it could
-hand back: a ticket holds only the HASH it will be shown, the same hash the
-supersede tombstone already keeps, so an offer sitting in the table is worth
-nothing to whoever reads the table. One claim per ticket, stamped in the mint's
-own transaction, because two daemons booted from one disk image would otherwise
-both return with the same right and the second would displace the first as a
-stranger. The claim route answers 204 for a miss rather than 401 -- the parked
-daemon polls it, "no ticket for you" is the ordinary answer, and making the
-normal case look like an auth failure buries the real ones. An identity with
-nothing displaced cannot be recalled, and says so, because an offer that could
-never be claimed is not an offer. Unclaimed, the window closes and the working
-body was never touched.
-Also: the last screen still promising the old mint. openToMachine's success
-toast said "its old body is dark" -- a dialog that reads correctly and then
-announces the opposite on success has told the truth and the lie in the same
-interaction, and the toast is the half the person is looking at when they let
-go. Swept, and the gate now asserts the whole page is free of that wording
-rather than checking screens one at a time.
-0.2.178 THE MENU ON AN AGENT IS ITS DESTINATIONS (DES-012 s13; operator GO
-11930, ruled 11932). Every verb on an agent row is the SAME act underneath -- a
-bare attach on an identity that already exists, PENDING until the new body joins
--- and they differ only in where that body wakes and who has to agree: MY
-CONTAINER (this host, one click), MY MACHINE (a shell of mine; the command is
-shown once and this page never runs it -- a native body is that whole machine
-handed to an agent, and that is a grant a shell makes with a human at it, DES-008
-s4), ANOTHER HUMAN'S MACHINE (a visit push: they accept before anything is
-minted), and SOMEONE ELSE'S AGENT TO MINE (a visit pull, in the Visits tab,
-because it is a request and not an act).
-EVERY ONE OF THESE SCREENS NOW TELLS THE TWO-PHASE TRUTH. They were written
-against the old mint and promised that the working body "goes dark the moment
-this is minted". Since 0.2.176 that is false: the old body KEEPS WORKING until
-the new one joins, the swap commits on arrival, and an unclaimed credential
-expires in ten minutes with nothing changed. A dialog that overstates what a
-click costs is worse than one that understates it -- it deters the move that is
-now safe.
-AN AGENT ALIVE ELSEWHERE IS NOT A BROKEN AGENT (operator 11995, with a
-screenshot of both halves). Its row was painted with the failure class, because
-that class came from `status==='absent'` and an elsewhere row carries exactly
-that -- there is no container HERE, which is the entire point of the row. Broken
-is now a STATE predicate, and elsewhere/retired/erased are not it. The same row
-also landed under "no room": /tokens is owner-scoped and answers nothing for a
-body it does not hold, so three refresh paths that called tokenRooms() alone
-dropped those agents into the ungrouped bucket while the hive knew their rooms
-perfectly well. One helper (railRooms) composes both axes now, so a fourth path
-cannot reintroduce it -- the visit consent keeps the token-only axis on purpose,
-because it is asking what the CREDENTIAL carries, not where the hive has seen it.
-Also DES-010 s10.1: an agent-image tag bump is a build on EVERY provisioning
-host, not only the one that authored the change. The 0.2.177 deploy refused
-itself on exactly this -- the pin said 0.2.20 and the deploy host had 0.2.19 --
-which is the gate working, and the rule it implies was nowhere written down.
-0.2.177 THE HANDOVER NOTE, AND WHAT THE MOVE ALREADY KNEW (DES-012 s16; ruled
-12018/12019/12022 from the operator's 12015: "when an agent is asked to
-transfer, to the cloud or native, it needs to write its current memory/state to
-reveille specific for itself to resume in the new location"). Buildable only
-now: under the old mint the outgoing body was dead the instant the credential
-landed, so there was no moment in which it could write anything down. Two-phase
-created that moment. At a PENDING mint the broker now RINGS the body that is
-still live with `reason: swap-pending` (successor named when known) -- a ring,
-not a close, because that body is still the live one and may keep working. The
-doctrine block teaches the response, in two acts and in this order (operator
-12023, ruled 12024). (1) SAVE THE WORK: files do not travel, so a note
-describing uncommitted work the new body cannot reach is a description of
-something lost -- commit everything uncommitted to wip/<agent>/<utc-ts> and push
-it, never onto main and never force, because that branch exists so the far side
-can FETCH it, not so it can overwrite anything. (2) WRITE THE NOTE: memory_add
-kind=state with the task, that branch and sha, next step, open threads and what
-is still undone; if the push was impossible, say exactly "unpushed at
-<host>:<path>" so the new body knows the work is stranded rather than assuming
-it travelled. The new body fetches that branch before it does anything else.
-Then carry on -- if the swap never arrives, nothing about the old body's
-situation changed. The note is the AGENT'S act, never synthesised: the broker
-cannot know what is worth saying, and a fabricated handover is a record of work
-nobody did. State notes are already identity-scoped, so they travel; FILES do
-not move (s2.1 stands), which is exactly why act (1) exists.
-FOUND WHILE CHECKING THAT SCOPE: join()'s brief_available counted state notes at
-agent:<token_id> while every writer stores them at agent:<agent_id>. A bound
-agent's own resume point was invisible in the one number the boot ritual
-advertises. Both sides go through store.agent_scope() now -- the same
-reader/writer split that docstring already records as having cost the fleet its
-data once.
-R1: the move dialog NAMES what a container body cannot do -- "no docker, no host
-shell; work that needs the host stays behind" -- in the same register as WILL
-NOT TRAVEL. Not a refusal: the launcher holds no fact "this role needs a socket",
-and the owner is the one who knows whether this agent's work needs the host.
-R2: THE CLONE THAT NEVER RAN. The entrypoint guarded on "~/repos is empty" --
-and `reveille init --dir /home/agent/repos` runs above it, writing .mcp.json and
-.claude/ into exactly that directory. The answer was always "not empty", so the
-clone was SKIPPED on every boot that carried a repo URL and the report said
-"already had content" as though a human had put it there. reveille-red-shirt came
-up with a repo URL, no repo, and every control green. The guard is on the WORK
-TREE now, the boot report carries `repo: <url> @ <sha>`, and a failure writes a
-fact the launcher reads: a running container whose repo never arrived is
-DEGRADED in the Agents pane, with the reason, instead of looking identical to one
-that never wanted a repo.
-R3: the move CARRIES the role the launcher last provisioned with -- prefilled,
-editable, and a change said out loud ("ROLE CHANGES from X to Y"). The picker is
-demanded only when no role is known. Asking again for something already recorded
-invites a different answer by accident, and a body wearing a role nobody chose to
-change is a silent rewrite of what the agent is. The column is `role_name`, NOT
-`role`: that word is the pre-P0 agent-name column, and the launcher migration
-keys its whole table rewrite on seeing it.
-AUTO-SEND WAS INERT ON EVERY IPHONE (operator 12035, from a car: "the auto send
-check box is set but auto send is not working ... this may only be because i'm
-connected to carplay"). It was not CarPlay. iOS Safari cannot start the ONNX
-VAD -- it refuses the WASM memory -- so an iPhone listens through the fallback
-ear and `listenVad` stays null for the whole session. The pause-to-send
-countdown was gated on that variable alone, so on the device most likely to be
-hands-free the setting was ticked, persisted, displayed and did nothing. It has
-been inert since the fallback ear shipped (11719). The question a countdown
-needs answered is "is this session LISTENING", which is what the toggle itself
-asks: earListening() now, and the ring earcon with it.
-Also: deploy-preflight resolves uv itself instead of trusting PATH (a deploy that
-works when a human types it and fails from anything automated is the worst shape
-a deploy step can have), and names the paths it tried when it cannot find it.
-0.2.176 A BODY SWAP IS TWO PHASE (DES-012 s15; ruling 11941 Part A, 11945,
-11947, 12008). The mint used to seize the identity -- it superseded the working
-body in its own transaction, BEFORE the new body existed -- so everything that
-failed afterwards left the identity with NO live credential at all: a missing
-role prompt, a docker error, a person who never ran the command. reveille-red-
-shirt was stranded that way on 2026-08-18 and native-reveille-devops after it.
-NOW THE MINT TAKES NOTHING. A bound mint on an identity that already has a live
-body returns a PENDING credential (`pending: true`); the old body keeps working;
-the new body's first join() IS the arrival and commits the swap in ONE
-transaction -- pending goes live and the old is superseded at the same instant,
-so there is never a window with two live credentials and never one with none.
-The readiness act is join() itself: no new verb, no fork window. A pending
-credential may call join() and NOTHING else -- every other route, read or write,
-refuses with "pending: join first. ... the identity's previous body is still the
-live one". No arrival inside 10 minutes and the broker's own sweeper deletes the
-pending token: the machine that was working keeps working and never learns
-anything happened. That is the whole NAK path, and a bodyless identity stops
-being reachable from this path. A first mint for an identity with no live body
-is live at once -- a pending nobody can commit would BE the bodyless state.
-THE DISPLACED BODY IS NOW TOLD ON THE SOCKET IT IS STILL HOLDING. Measured
-live: a supersede revoked the credential everywhere HTTP and MCP could see it
-while the old body's WebSocket stayed ESTABLISHED for an hour, still receiving
-rings on a credential the broker refused for every other purpose, never sent a
-close, a 401 or anything it could log. One credential, two verdicts, and the
-silent half held the socket. On commit the broker now closes that waiter with
-`reason: credential-superseded` naming the successor and the time, and waked
-PARKS on it: prints why, names the way back (`reveille init`), does not
-reconnect. Related: waked's retry line rendered `reveille-waked:  -- retrying in
-15s` for an hour, because websockets' closed exceptions str() to nothing --
-it falls back to the class name plus the close code now.
-A RE-KEY REACHES THE DAEMON. waked reads $REVEILLE_TOKEN once, at spawn; one
-held a credential for 4h46m across a swap and back while every file on disk said
-the machine was configured correctly. `reveille init` now retires the running
-daemon -- by PID from the spool lock, which the flock proves is the holder,
-never by a pattern match on the process table -- and the Stop hook starts a
-fresh one on the new credential.
-NAMING A ROOM AT THE MINT CLEARS A STANDING LEAVE (r4, ruling 11938). Measured
-the same day: after a swap the new body's bare join() answered rooms=[]
-skipped=[Reveille2.0]. A leave recorded by a previous body outlived the
-credential that made it, and the agent sat silent in a room its owner had just
-granted it. An owner ticking a room on a mint is a deliberate act with exactly
-join(room=X)'s semantics, so it clears the leave.
-0.2.175 THE INSTALLER COULD NOT REPLACE A DEAD CREDENTIAL (operator, live:
-"the install script does not correctly edit the project specific
-settings.local.json"). Two reads of $REVEILLE_TOKEN, both wrong in the one
-directory that matters. Claude Code injects a directory's own
-settings.local.json env into every shell it starts, so INSIDE AN AGENT
-DIRECTORY that variable is always set -- to the credential the person is
-running the installer to REPLACE. (1) read_token() read the environment FIRST,
-so a freshly minted secret piped in was discarded, the dead one was verified,
-and the refusal read as though the paste had been wrong. Explicit wins now:
-stdin and the flag are deliberate acts by someone holding the new secret on
-their screen, and the environment is the fallback for a re-run that supplies
-nothing -- still the security order, no longer the order that ignores the
-human. (2) cmd_init treated the mere PRESENCE of that variable as "already
-configured", skipped the login wizard entirely and rewrote the dead token over
-itself: the file's mtime moved while its contents never changed, exit 0,
-nothing said. The operator minted five credentials in a row, each superseding
-the last, and the directory kept the first. A credential in the environment is
-now a CANDIDATE -- asked about once, and a token the broker REFUSES is treated
-as absent, so the wizard offers a login and --no-prompt refuses in the words of
-the refusal. Only a refusal counts: verify() answers False for "refused" and
-None for "could not ask", because silence from an unreachable broker must not
-cost a machine a credential that is probably fine; that is what --force is for.
-One probe, not two -- the install-time gate reuses the answer.
-ALSO, THE THREE ROOM AXES, WHICH 0.2.174 CLAIMED AND NEVER SHIPPED. That entry
-says the move offers only the rooms the mover and the agent share; the commit
-carrying it landed after PR #126's merge cut, so main never held a line of it.
-It lands HERE, and through one helper every body-swap screen reads rather than
-a rule written once per screen. With a token holding rooms 1, 2 and 3, joined
-to 2, offered to a mover who holds 2 and 3: the LIST is rooms 2 and 3 (its
-token INTERSECT mine), the TICKS are room 2 (where it is actually joined, so
-the default carries what it uses), and room 1 is COUNTED, never named -- a room
-the reader is not in is not a room this page may spell out. Nothing is ever
-added; granting reach stays the Tokens tab. WILL NOT TRAVEL is named on the
-move and on the visit request, and the OWNER's accept names the full delta,
-since they are the one person who can see everything their agent holds.
-0.2.174 THE MINT IS THE LAST IRREVERSIBLE ACT (live incident on
-reveille-red-shirt; ruled 11911). POST /agents minted the bound token BEFORE
-provision_agent validated. A mint supersedes the identity's previous
-credential the instant it lands, so the refusal that followed -- correct in
-itself, a missing role prompt -- left that identity with NO live credential at
-all: both bodies dark, gone from presence, and the cleanup revoked the new
-token so nothing remained to say why. The operator asked "what happened?" and
-the system could not answer. Now every refusal is answerable BEFORE anything
-is minted: provision_refusal() holds the name, re-provision, cap, claude
-credential and role-prompt checks with no side effects, the route calls it
-first, and provision_agent calls the same function -- so the CLI path and the
-invariant cannot drift apart. A failure AFTER a swap-mint (docker itself
-failing) still revokes, but says what state that leaves behind: "<agent> now
-has NO LIVE BODY: its previous one was superseded when this mint landed. Its
-identity, history and memories are untouched. Retry the move, or mint it a
-credential in the Tokens tab." A silent revoke is how an agent vanished from
-presence with no reason. Also, per the operator (11913), the move dialog now
-offers only the rooms the mover and the agent SHARE, never the mover's whole
-list: a body swap is not the place to hand an agent reach it never had -- that
-is the Tokens tab, where granting reach is the point of the screen.
-0.2.173 THE MOVE ASKS FOR WHAT IT NEEDS, AND NAMES WHAT IT COSTS (operator's
-first real click on 0.2.172; ruling 11902). Two things the move dialog got
-wrong. (1) It sent no role, and the launcher refuses a container with none --
-"an agent provisioned without one boots with no CLAUDE.md role block and knows
-what it is only from its bus name" -- so the operator's click ended in a
-refusal it could have asked about first. The dialog now picks a role, refuses
-before the POST if none is chosen, and says why: a container body writes its
-CLAUDE.md from that prompt, while the identity's memories, lessons and history
-travel with the id whatever role the new body wears. (2) The mint attaches
-exactly the rooms ticked, so anything unticked -- or any room the mover no
-longer holds, which this screen cannot offer at all -- would have left the
-identity's reach with nothing said. Now the dialog names them, live, per tick:
-"WILL NOT TRAVEL: <rooms>". No silent narrowing: a move that quietly shrinks
-an agent's reach is a demotion nobody chose.
-0.2.172 A BODY SWAP IS A CLICK, NOT AN SSH SESSION, AND ONLY OF YOUR OWN
-AGENT (operator 11883; DES-011 s2.1; owner scoping per architect review). Moving an agent to another machine was ruled a bare attach -- mint on
-the live name, the previous body's credential superseded in the same
-transaction -- and the design has said so since 0.2.130. It still took a shell
-on the broker host, because this page's one provisioning call hardcoded
-create=true and the broker rightly refuses that for a name that already has a
-live identity. The operator's answer was the correct one: "no remote user will
-EVER be able to ssh into this box... the Transfer step MUST be a clickable
-interface". Now: the launcher LISTS an agent that is alive somewhere else
-(state `elsewhere`) instead of hiding it -- the old reason for hiding was that
-a mint could fork, which s2.1 settled -- and the agents rail offers it exactly
-one verb, "move it here". The dialog says what it costs before it does
-anything: the SAME identity, its name, history, memories, lessons and rooms
-travel; the credential the other body holds is superseded and that body goes
-dark on its next call; files on the other machine do NOT travel. Rooms are
-ticked, pre-filled with what the identity already reaches, and the mint
-attaches exactly those. The launcher mints server-side with the caller's own
-forwarded cookie exactly as "+ New Agent" does, so the browser never holds the
-secret (DES-005 P3), and `create` is once again the CALLER's word: the two
-creation forms send it, the move sends nothing. SCOPED BY OWNER: these rooms
-are shared, so the hive's live names include other humans' agents, and moving
-one of those is not a swap a person may perform alone -- it is a VISIT, and
-DES-012 s3 wants both humans. /agents-seen now answers an `owner` per name
-(from presence, which carries it; a name nobody is wearing resolves from
-`agents` only when exactly ONE live identity wears it, because two owners
-running one name is legal and a guess there would move the wrong being), and
-the pane marks `elsewhere` only where that owner is the caller.
-0.2.171 A NATIVE AGENT ALWAYS GETS ITS DOCTRINE, AND ONLY ITS BLOCK IS
-MANAGED (red-shirt, live 2026-08-18; ruled by the operator 11879). The hive is
-PULLED, never pushed: lessons(), brief() and inbox() are tools an agent must
-CALL, and what tells it to call them is the CLAUDE.md in its own directory.
-`reveille init` did ship a starter one -- on the WIZARD path only, which the
-web-mint-then-paste install never takes, and with the password door closed
-that is the only way to install a native agent. So the first agent installed
-that way (reveille-red-shirt) came up with a bus connection, a Stop hook and
-no boot ritual, no ack protocol and no idea that an agent's broadcast wakes
-nobody. Now init writes the doctrine on EVERY path, and writes it as a
-DELIMITED BLOCK between `<!-- reveille:begin ... -->` and `<!-- reveille:end
--->`: a directory with no CLAUDE.md gets one containing the block, a file that
-already has the markers has that block REWRITTEN in place, and a human's own
-CLAUDE.md gets the block appended once -- every byte outside the markers
-survives, in place, forever. The block carries the version that wrote it, so a
-later boot can tell whether what it is reading is current, and it now states
-the rule red-shirt lacked: a unicast wakes its recipient, YOUR broadcast does
-not. init reports which of created/updated/appended/unchanged happened.
-0.2.170 THE BOX KEEPS ITS OWN DEPLOY SETTINGS (operator, 2026-08-18: "these
-are not persisted in an env or other conf file"). SERVER_DATA and PROXY_SITE
-had to be typed on every `make up`, and their defaults are not harmless if one
-is forgotten: PROXY_SITE falls back to :80, which means no hostname, no
-automatic HTTPS and an EMPTY public origin -- so the OIDC redirect URI stops
-matching what Google and GitHub were registered with, and the session cookie
-loses its __Host- prefix. Same family as the upstreams that lived only in a
-shell (0.2.167), one layer up. The Makefile now optionally includes
-$(HOME)/.reveille/deploy.env (override with DEPLOY_CONF), read BEFORE the
-defaults so the file wins over them while `make VAR=x up` still wins over the
-file; an absent file leaves today's behaviour exactly as it was. Every `make
-up` prints which settings file it used, or says NONE -- a deploy running on a
-default it was never told about is the thing that must not be silent.
-0.2.169 A TURN CLEARS THE POKE -- AN AGENT MID-TURN STOPPED GOING DEAF (live
-defect 2026-08-18, read out of this broker's own log). The wake gate allows
-ONE outstanding ring per agent and swallows the rest until inbox() answers it,
-because "the agent has an untyped prompt pending; its next inbox() pulls this
-mail anyway". True of an agent ASLEEP; FALSE of one mid-turn. Measured: devops
-was rung at 21:41:58, sent a message at 21:44:10 (proof it was awake and had
-moved on), and five direct messages -- every one logged `woke=[devops]` at
-send time -- were dropped without a word until the ten-minute TTL expired at
-21:54 and a human typed at its terminal. Now EVERY act clears the poke, not
-only inbox(): a send, an ack, a lesson, a memory -- anything through _acting
--- is the agent demonstrably taking its turn, which is the exact condition the
-gate was waiting for. The storm the gate prevents is untouched: an agent rung
-and silent since is still gated, still with the TTL as backstop. And a
-suppressed ring is now LOGGED with how long the poke has been outstanding: it
-was a bare `continue`, so a dropped wake left no trace in the log, the spool
-or presence, and the only evidence of this defect was a human noticing an idle
-terminal.
-0.2.168 THE CLIP BUTTON IS GONE (operator 11831, ruled 11832). Recording your
-voice into the composer shipped in 0.2.161 and earned its keep for exactly one
-afternoon: "absolutely worthless -- it serves no purpose at this point". So it
-is removed, not deprecated -- the button, its take, its 60 s cap and its
-gates. Everything the button borrowed stays: the ear's own recorder, talk,
-listen, slice 1's transcode-at-upload, the CLIP chip on a converted attachment
-and its player -- because an UPLOADED .wav or .mp3 is still a clip, still
-plays where it landed, and is still the thing worth having (operator 11834).
-The clip TRANSCRIPT into the message body -- an external recording
-transcribed so agents can work on it -- stays on the backlog, unscheduled and
-deliberately not built here. DES-017 s4.2 records the removal; EPIC-001 row 5
-reads "built, removed on operator word".
-0.2.167 A NEW AGENT CAN BE BORN FROM THE PAGE, AND A SETTING STOPS LIVING IN
-A SHELL (operator, 2026-08-18). Two holes, both found walking a body-swap
-test. (1) The Tokens tab could only ATTACH to an identity that already
-existed -- creation was a parameter no screen sent -- and with the password
-door closed `reveille init --login` is not a door either, so a NATIVE agent
-that did not exist yet could not be brought into the world at all. The mint
-form gains one tick, "this is a NEW agent", which is the only site that
-declares creation; the broker still refuses a name this account already holds
-live, and the refusal now points at the tick instead of naming a parameter
-the reader cannot see. `reveille init --login` against a broker whose
-password door is shut stops saying "login failed" and names the open door and
-the exact three-variable command to run after minting there. (2) The three upstreams
--- voices, the ear, the script writer -- their models and the LAN-plaintext
-flag that permits them lived only in whatever shell last ran the deploy, so
-the first container recreate that did not carry them turned all three OFF at
-once and the only tell was a missing line in /version. Measured cause: a
-compose `environment` entry BEATS `env_file`, and BOTH `KEY: ${VAR:-}` and a
-bare `KEY:` put an EMPTY value on the container when the shell has none -- so
-those entries had been silently overriding the operator's own reveille.env
-all along. They are gone from `environment` entirely: every upstream setting
-(plus the upload cap) now comes from $SERVER_DATA/reveille.env and nowhere
-else, read on every recreate, with the file's own comment block naming each
-one. Unset there still means the feature is off, exactly as before.
-0.2.166 AN EMPTY ENVIRONMENT VARIABLE MEANS ITS DEFAULT (live defect,
-2026-08-18). 0.2.163 read its upload cap as int(os.environ.get(NAME, "25")),
-which is correct only when an unset variable is ABSENT. A deploy passes every
-optional variable through as ${NAME:-}, so unset arrives as the EMPTY STRING,
-the default was never reached, and the broker crash-looped at boot on
-int('') until the deploy failed its own health wait. env_int() now reads
-every number the same way: unset or blank = the default; a value that is
-present and not a number is an operator TYPO and refuses by name at boot
-rather than silently running on a cap nobody chose. Applied to
-REVEILLE_UPLOAD_MAX_MB, REVEILLE_QUOTA_BYTES, REVEILLE_FEED_PING, and (in the
-launcher) REVEILLE_ROLL_IDLE_MIN.
-0.2.165 A DEPLOY ROLLS WHAT IS IDLE (DES-006 s7.2, EPIC-001 #10, ruling
-11807). An image bump only ever reached NEW containers, and the roll was left
-to a human who never performs it; the opposite fix -- restart everything on
-deploy -- kills work in progress. So `make up` now runs `reveille-launch
-upgrade --all --idle`, and a behind container rolls only when four things are
-READ and quiet: no live attach grant (grants rows, not revoked, not expired),
-its spool's new/ empty, nothing unread for it, and no bus send by it inside
-REVEILLE_ROLL_IDLE_MIN (default 10) minutes. The last two come from this
-broker: GET /agent/activity answers {last_send_ns, unread} to the AGENT's own
-bearer token -- the credential the upgrade already carries, so nothing new is
-parked (DES-006 s7 carry-not-park unchanged). It answers WORK, never
-transport: a heartbeat says "up", which a container about to be replaced also
-is. AN UNKNOWN IS NEVER AN IDLE -- a stale record, no token to carry, an
-unreadable spool or a silent broker all read BUSY. Busy is skipped and LISTED
-("behind, busy: <why>"), retried next deploy, never killed mid-task, and
-never a deploy failure. Force one by name with `reveille-launch upgrade <user>
-<agent>`, unchanged.
-0.2.164 A VISIT IS A BODY SWAP (DES-012 s7-s9 + s11, EPIC-001 item 8). An
-agent can now work on ANOTHER human's machine, and the only thing that makes
-that safe is that both humans consent, once, per visit. Ask with POST /visits
-{agent, owner, host, rooms, host_machine, coordinate}: your own agent is a
-PUSH, someone else's a PULL, and the OTHER human decides -- the asker's own
-accept is a 403. The ask mints nothing; the accept mints EXACTLY ONE
-credential (create_token create=false, the ordinary bare attach) in the same
-transaction, so the home body goes dark as the visiting one is authorised and
-a second accept is refused as consumed. A visit may hold ONLY rooms both
-humans are already in -- checked at ask time and named on refusal -- because
-a visit carrying a room the host is not in would be the DES-011 s2 hive bleed
-one layer down. Recall (owner), evict (host) and depart (the agent's own
-token) are one route: whoever calls it, the visiting credential is revoked, so
-reach ends with the visit; the owner comes home with an ordinary re-mint. The
-REQUEST expires (48 h); the VISIT has no lease -- a timer is how bodies get
-killed mid-task. Arrival is stamped by the body's first join(), not by
-delivery. Every transition writes one root message in the visit's first room:
-a human's broadcast rings the room, so the record IS the notification. Schema
-v33 = the `visits` table; it holds names, ids and decisions, never a secret.
-The Visits tab is the accept screen, and it consents to a SENTENCE: whose
-agent, that ownership does not move, the rooms and nothing else, that it runs
-on the HOST's user, Claude account and bill, that the owner's state notes are
-readable there, and that either side ends it. The harbor is the host's own:
-the container path POSTs the minted token to their launcher (the P1 route,
-unchanged), the native path SHOWS `reveille init` once and never runs it.
-0.2.163 AN ATTACHMENT YOU CAN PLAY (DES-017 s4.3 amendment; operator
-11798/11800/11803, rulings 11801/11804). An attachment renders by its type,
-the way an image already does: audio (wav, mp3, m4a, aac, flac, ogg, opus)
-gets an inline <audio controls preload=none>, video (mp4, m4v, mov, webm,
-mkv) an inline <video controls preload=metadata playsinline> sized to the
-column -- the browser's own decoders, no player library, nothing new on the
-wire. /files/* serves those types inline with their real media type and the
-SAME nosniff + sandbox CSP and room check every attachment gets; Range is
-honoured, so a video seeks instead of restarting. Everything else still
-downloads as an opaque stream (SVG deliberately included). A converted clip's
-.webm is still inline AUDIO for the page's own decoder -- its .m4a sibling is
-what says so. The upload cap is now REVEILLE_UPLOAD_MAX_MB (int, default 25 =
-today's), read at boot, printed in /version, feeding every "too large"
-refusal: raising it for a video is a line in the env file, not a build.
-0.2.162 WHAT IS WAITING IN THE OTHER ROOMS (EPIC-001 #6; DES-016 s2's
-promise). Schema v32 adds room_seen: ONE high-water mark per (person, room),
-not a receipt per message -- agents ack what was addressed to them, a person
-reads a room, and those are different questions. Reading the room IS the
-mark: the backlog fetch a page makes for the room it is showing moves it, so
-there is no second call to forget. /me carries {"unread": {room_id: count}}
--- messages newer than the mark, never your own; never opened counts
-everything, which is what a new person has waiting. The phone's room sheet
-badges each room and the desktop me-card shows one number for everywhere
-else; the room you are looking at never wears a badge. Counts refresh on the
-15 s poll the page already runs and when the sheet opens -- the feed socket
-carries one room, so it cannot tick the others.
-0.2.161 RECORD A CLIP (DES-017 slice 2, EPIC-001 #5). A clip button beside
-talk and listen: it records with the EAR'S OWN recorder (one capture path on
-the page, one silence refusal), caps at 60 s by CLOSING the take rather than
-dropping it, and uploads through the ORDINARY upload -- so the broker
-transcodes it exactly as it does a dropped .wav (slice 1: nothing crosses the
-wire in its native format) and hands back the same {url, name, bytes, clip,
-duration_s}. From there it is a normal attachment: the composer shows CLIP
-m:ss and send() binds it as the message's voice. It NEVER sends -- the human
-presses Send, as with any attachment. A take under half a second or with no
-signal is refused by name; talk and clip never steal each other's recorder;
-the button exists only where the ear does.
-0.2.160 AN ADMIN ADOPTS AN OWNERLESS ROOM (EPIC-001 #4, ruling 11604 gap).
-Deleting a person leaves their rooms standing -- the history is not theirs to
-take -- and until one has an owner again nobody can change its name,
-retention or publicity. GET /rooms/ownerless (admin) lists them with what is
-at stake, message and member counts; PATCH /rooms/<id>/owner (admin, body
-{} = take it yourself, {"user_id"} = hand it to someone) gives one an owner
-and writes a room_audit 'adopt' row. NEVER a transfer: a room that HAS an
-owner is refused, because seizing one is not a verb this bus has; an adopter
-who already owns that room name is told which, not handed an integrity
-error. Schema v31 rebuilds room_audit for the widened action CHECK. The
-Rooms tab shows OWNERLESS ROOMS to an admin with an adopt button.
-0.2.159 THE LISTEN BUTTON IS NEVER DEAD (DES-014 s2 defect; operator 11718,
-ruling 11719). iOS Safari refuses onnxruntime's WASM memory ("[wasm]
-RangeError: Out of memory, [cpu] previous call to initWasm() failed"), so the
-Silero VAD never started there and listening died while push-to-talk worked.
-The ONNX attempt is now single-threaded, unproxied and simd by name; if it
-still refuses, listening falls back to a loudness gate on the same PCM the
-push-to-talk recorder takes -- same 3 s silence close, same 30 s cap, same
-POST /stt, same landing in the box -- and the toast says which detector is
-running, because a loudness gate is not a voice detector. A MIC refusal is
-still the phone's answer and does not fall back: it names where to allow the
-microphone. Page-only; nothing on the broker changed.
-0.2.158 THE PASSWORD DOOR CLOSES (DES-018 s10 slice 2; operator 11758,
-ruling 11759). Wherever a provider is configured, the password form is GONE
-from the login card and POST /login answers 410 "password sign-in is closed
--- use one of the doors": the credential is not wrong, the way in is, and a
-401 would teach a page to retry forever. One condition, no second flag -- a
-broker with no provider signs in by password exactly as before. Adding a
-person is now an INVITE: POST /users is refused while the doors are the only
-way in, and the Users tab says so where the add-user row used to be. The
-Account tab drops the password section for anyone holding a door. THE
-LOCKOUT CHECK is the point of care: store.password_only_users names every
-live person whose only way in is a password, printed at boot as a WARNING
-naming them, so nobody discovers the close at their next sign-in. /setup
-still makes the first admin on a fresh broker; /version says "password
-closed".
-0.2.157 WHAT THE SYSTEM WROTE FOR YOU IS NOT YOUR HISTORY (#106 review;
-rulings 11746, 11611 follow-on). MEASURED ON LIVE: two accounts that only
-ever signed in were tombstoned by 0.2.155 because each carried 10145 read
-receipts -- written by join()'s catch-up, not by them. user_history now
-counts only CITATIONS of the person (their messages and their agents',
-mail ADDRESSED to them or their agents, agents, tokens, owned rooms,
-memories); read receipts, membership/presence
-rows, room invitations and identities are bookkeeping or credentials, and are
-deleted with the row. An admin can free a name a tombstone still reserves
-when nothing cites it: GET /users/tombstones lists them with what cites each,
-DELETE /users/tombstones/<id> frees one (refused, naming the citations, when
-anything points there), and the Users tab grows a RESERVED NAMES section. The
-invite list shows OPEN codes with "show used (n)" for the record of who let
-whom in.
-0.2.155 A ROW IS A REFERENT ONLY WHILE SOMETHING REFERS TO IT (ruling 11732).
-Deleting a user has two outcomes and the page says which: an account with NO
-history (no messages, agents, tokens, rooms, memberships, receipts, doors,
-memories -- store.user_history counts them before anything is wiped) is
-REMOVED outright and its name is free again; anything with history is
-tombstoned exactly as before (8938/11611). The never-used account whose name
-was reserved forever was the defect; a cited one still keeps its referent.
-DELETE /users/<id> answers {"deleted", "how": removed|tombstoned}.
-0.2.154 KNOCK, OR CARRY A KEY (DES-018 s6a, rulings 11701-11709). Schema v30:
-signup_requests + invites, and identity_audit's CHECK widened to
-request|approve|deny|invite (the table is rebuilt, rows copied). New signup
-policy REVEILLE_SIGNUP=request: an unknown door with no s5.2 verified-email
-link files a REQUEST ROW -- never a half-user -- and the person sees one
-neutral line, the same whether the ask is new, pending or denied. Admins
-decide in the Users tab: GET /users/requests, POST
-/users/requests/<p>/<sub>/<approve|deny|undeny|forget>; approve is
-create_user + link_identity + audit + row consumed in ONE transaction. Invite
-codes ride the same surface: POST /invites mints a 128-bit code shown ONCE
-and stored only as a hash, good for any email through any door, single-use
-(burned in the same transaction as the account it creates, so two racing
-redemptions have one winner), revocable while unused, listed with who used it.
-The code and an optional 280-char note are typed on the login card (or
-prefilled by /ui?invite=CODE) and ride the OIDC marker through the provider
-round-trip -- never to the provider. Under `request` a valid code admits at
-once; under `closed` a valid code is the ONLY way in; under `open` no code is
-consulted. s5.2 still runs ABOVE the policy: a known door signs in, and an
-unknown door with a verified email held by exactly one live user links.
-0.2.153 THE HUMAN SURFACE (DES-011 6.1(c), EPIC-001 S2 item 3). The wake
-registry and the poke gate are keyed on the TOKEN alone, not (token, name):
-an agent aliased <owner>-<name> in a room registered under one name while
-the ring was addressed to the other, so its ring could not land. Rings are
-now addressed by IDENTITY -- send() answers wake (room-names, what
-delivered_to shows) beside wake_principals, and _notify resolves those
-through store.wake_tokens (the agent's tokens that hold the room, so a
-revoke stays instant and a person is never rung). The ring frame carries
-from (the sender's ROOM-NAME there), owner (the account behind it), room,
-id and subject beside the direct count. Presence carries `owner` next to
-the room-name and principal; readers() renders the room-name each reader
-wears in that message's room, not the identity's own name; usage() gains a
-NAMES ARE PER ROOM paragraph. No schema change, nothing on the wire
-renamed.
-0.2.152 EMAIL IN ONE CASE (DES-018 follow-up, architect 11667). The store
-lowercases every email it keeps or compares (identities upsert, the s5.2
-verified-holder match, the "use your other door" check): Ada@Example.com and
-ada@example.com are one mailbox, so which spelling a provider sent first can
-no longer decide whether a door links or a second account is made. Nothing
-on the wire changes.
-0.2.151 SIGN IN WITH GOOGLE / GITHUB / MICROSOFT (DES-018 slice 1, EPIC-001
-S1 item 3; rulings 11648/11659). Three doors BESIDE the password form:
-GET /auth/<p>/login -> the provider -> GET /auth/<p>/callback; Authlib
-1.7.2 does discovery, PKCE S256, state, nonce and id_token verification,
-its state server-side in oidc_state (schema v29, additive: identities,
-oidc_state, identity_audit) under a 10-minute browser marker cookie
-rev_oidc -- no signed cookie, no session middleware. A provider identity
-(provider, subject) is a CREDENTIAL of a person: known door -> that person;
-unknown door with a VERIFIED email held by exactly one live user -> linked
-and signed in (audit line); otherwise a new account under REVEILLE_SIGNUP
-(open | closed | domain,domain) with a derived name shown once
-(?welcome=), or "use your other door" when the email is already someone's
--- never a merge on an unverified or ambiguous email. Signed-in link
-(?link=1) attaches to the SESSION user; DELETE /me/identities/<p>/<sub>
-removes a door but never the last way in unless a password is set. First
-federated signup on an empty broker is the admin. Sessions ROTATE on every
-login (password too); on an https REVEILLE_PUBLIC_URL the cookie is
-__Host-rev_session + Secure. Microsoft through /common with iss checked
-against tid; GitHub OAuth2-only with the verified primary email. Nothing
-token-shaped is stored or logged. Config: REVEILLE_OIDC_<GOOGLE|GITHUB|
-MICROSOFT>_ID/_SECRET (env_file $SERVER_DATA/reveille.env, never git),
-REVEILLE_PUBLIC_URL (make derives https://PROXY_SITE), REVEILLE_SIGNUP;
-/auth/doors and /version name the doors; /me carries doors + identities.
-Nothing on the bus wire changes.
-0.2.150 DELIVERY BY ID (DES-011 6.1(b), EPIC-001 S1; ruling 10983). Schema
-v28, rebuilt in one transaction with a `.pre-v28-<ns>.bak` beside the db:
-members keyed (room_id, principal) with the ROOM-NAME beside it, unique per
-room among live rows; reads keyed (message_id, principal). principal is the
-DES-013 speaker key -- agent:<id> for a body holding a bound token, user:<id>
-for a person -- derived from the credential, never from a name. send() takes
-the principal, writes under the room-name and stamps both identities;
-inbox/ack/receipts/deafness/prune key on the id, so a RENAME orphans nothing
-(gate 9.1: store.rename_agent, PATCH /identities/<id> {name}, owner or
-admin; the rename log closes and opens rows). join() assigns the room-name
-(DES-011 s2): the bare name, or <owner>-<name> when another owner's live
-agent holds it in that room -- fixed for the membership, kept on re-join,
-refused naming both when the alias is held too; a stale holder is reaped
-on the spot; the join tool answers `as` per room and presence carries the
-principal (gate 9.3: two owners' architect in one room, each room-name
-reaching only its holder). Migration: members re-keyed from agent_id / the
-token / the web tag / the succession clock, unresolvable rows dropped and
-printed; reads re-keyed the same way plus the catch-up receipts join()
-would have written for a re-minted successor (measured: without them three
-re-minted agents would wake to 1617 instead of 321 unread). Bus tools: join
-returns `as`; send/inbox/ack unchanged on the wire; the web page no longer
-sends `from` (the credential is the sender). Wake registration still keys on
-the token+name pair: an ALIASED agent's ring lands in 6.1(c).
-0.2.149 THE RECIPIENT PLANE LEARNS THE IDENTITY (DES-011 6.1(a), EPIC-001
-S1; ruling 10983). Schema v27, additive, one transaction, snapshot
-`broker.db.pre-v27-<ns>.bak` beside the db: messages.recipient_agent_id
-backfilled by the succession clock (the identity live at the message's ts
-among those that ever wore the name, folded to lineage heads -- a folded
-source's name maps to its head; else the last created before ts, a
-successor not yet minted cannot be meant; else the earliest ever); what
-cannot be resolved is LISTED "message <id> room <room> to <name> at <ts>:
-<why>", left NULL, counted, never silent, never refused; a user's name is
-a person (NULL, counted). agent_names(agent_id, name, from_ns, to_ns) seeded
-one open row per agent; agents.merged_into from identity-merges.jsonl
-beside the db. Writers moved: send() stamps recipient_agent_id from the
-room-name's members row; every INSERT INTO agents logs its name;
-scripts/identity-merge re-points the column and sets merged_into.
-scripts/rehearse-migration <db> [--keep DIR] copies (backup API), migrates
-the copy, prints. Rehearsed on the live copy: 9706 resolved / 274 to a
-person / 2 folds / 0 unresolvable of 9980. Nothing reads the column yet --
-6.1(b) does. Bus tools unchanged.
-0.2.148 THE USERS TAB LISTS ACCOUNTS, NOT TOMBSTONES (operator 11606: "bill"
-deleted, confirm hit, still listed with make-admin / reset / delete beside
-him). A deleted user is a tombstone by ruling 8938 -- the row stays as the
-referent for the history it owns, credentials wiped -- and list_users now
-returns only rows with deleted_ns NULL; delete / role / password reset on
-a tombstone answer 404 "user deleted"; the name stays reserved by the
-tombstone (attribution) and re-adding it says so ("taken by a deleted
-account"), never a bare "already exists". Bus tools unchanged.
-0.2.147 AN AGENT CONTAINER UPGRADES IN PLACE (operator 11594/11599, ruling
-11600; DES-006 s7 "carry, not park"). The launcher carries the bound token
-(and gate secret) from the container it made into a new one on the new
-image -- same repo, boot command, network, role, model, quotas, data root;
-never parked in db, log, file or HTTP body. OLD stops and is renamed aside;
-NEW must be running, have its boot report and show in the broker's presence
-before OLD is removed, else NEW is destroyed and OLD comes back (started
-again if it was). Refuses a name launcher.db does not record, a dead token,
-a purged container (that is the prompt path). `reveille-launch upgrade USER
-AGENT | --all`, `reveille-launch behind` (make up prints it), and an
-"upgrade" button on /agents for a container behind the default image. Bus
-tools unchanged; agent image unchanged.
-0.2.146 EVERY COMMAND HAS A SOUND (operator 11576/11578, architect 11577;
-DES-014 s5 amended, supersedes 11465 "one bell only"). One table, one earcon(name),
-one "sounds" setting per browser (me menu, default ON), synthesized in the
-page, never over an utterance (queued to vDone): send accepted WHOOSH, any red
-toast BONK, words landed DING (the bell), listen on BIP / off BOP, auto-send
-cancelled PLIP, a message for me or a human's broadcast with voice off POP,
-attach done CLUNK, room switched SWISH. Skipped: countdown ticks, a dropped
-take, push-to-talk. Bus tools unchanged.
-0.2.145 A DEGENERATE TAKE IS DROPPED BEFORE IT LANDS (operator 11569, ruling
-11572; DES-014 s4/s5 amended). Whisper turned a non-speech take into "oh, oh,
-oh, ..." and auto-send shipped it. The broker now asks verbose_json and returns
-whisper's own numbers with the text: compression_ratio (zlib, over the whole
-take), max no_speech_prob and min avg_logprob from the segments when present.
-The page drops a take, once, in earHeard after the command match: ratio > 2.4,
-or no_speech_prob > 0.6, or avg_logprob < -1.0, or the same text as the
-previous take -- console.debug, no bell, no post, no stub. Bus tools
-unchanged; POST /stt gains three numbers.
-0.2.144 THE PHONE PAGE, SLICE 2 (DES-016 s2, rulings 11443/11447/11456/11483 B;
-operator 11439/11478). One block, narrow OR short (max-width 640 / max-height
-480 -- a phone on its side): a header bar (room name = the sheet with rooms,
-agents, me; voice; find = filter + history; me = settings/logout), the rail as
-a sheet with a room list, the composer as box + Send behind "+" (talk, listen,
-auto-send, attach, to, subject), a denser feed with the row's tools on tap, a
-hairline between senders, 44 px targets, 16px inputs, 100dvh. Above the block
-the desktop is pixel-identical (mobile-shots prints the desktop shot); the
-composer rows and the top bar wrap at every width so a 664-wide well never
-pushes Send off the glass. Bus tools unchanged.
-0.2.143 A MICROPHONE REFUSAL NAMES THE PLACE (operator 11559: iPhone, "The
-request is not allowed by the user agent or the platform..."). getUserMedia
-runs inside the tap, so NotAllowedError is the phone's answer: the browser
-app has no microphone from the OS, or the site is blocked in the browser.
-The toast now says where (iPhone: Settings > Safari/Chrome > Microphone; the
-site's permission; then reload) instead of quoting WebKit. Bus tools unchanged.
-0.2.142 THE FLAT SCRIPT BUDGET IS 2.5 s (ruling 11549; DES-013 s5 amended with
-the numbers): on the hybrid Qwen3.8 the engine forces a 1568-token block, so
-prefix caching never pays below it -- frame + persona (~500-600 tok) prefill
-on every call at ~730 tok/s, ~0.55 s of the ~1.0 s to first token, first
-sentence 1.4-2.2 s on short messages. 1.5 s + slope was a coin flip; 2.5 s +
-slope is not. REVEILLE_SCRIPT_TIMEOUT still overrides. Bus tools unchanged.
-0.2.141 VOICE IS REMEMBERED, PER BROWSER (operator 11442, ruling 11444; DES-009
-s8.3 amended). localStorage.revVoice; a load ARMS it -- the button reads
-"voice: tap to resume", the first pointerdown/keydown anywhere flips it on
-through toggleVoice (the unlock gesture, iOS covered), a tap on the button is
-just the toggle, nothing plays by itself; off forgets it; a refusal drops the
-arm for that load. Auto-send was already remembered (#70). Listening never is
-(11355 #2). Bus tools unchanged.
-0.2.140 THE PHONE PAGE HAS A GATE: scripts/mobile-shots (DES-016 s2, rulings
-11443/11447/11456/11483 B). A scratch broker is seeded (a 200-char token, a
-300-char subject, a code block, ear on), a human signs in, and Chrome walks
-signin/room/drawer/settings/voices on iPhone 14 and Pixel 7, both
-orientations, then the room at 320/360/390/430 portrait and 640/740/852/932
-landscape -- devices are only names for viewports. Every shot asserts the
-layout width == the glass (visualViewport), document.scrollWidth <= it and
-#feed.scrollWidth == clientWidth; a red shot exits 1. Proven red on 0.2.130
-(10 shots), green now. What it found, fixed here: the drawer sat ON the
-Settings panel (z 40 -> 15, and picking Settings/Logout closes it); at
-320-360 wide the subject box ran past the glass (.ctop wraps, #subject
-min-width:0). The pictures go to the room for approval before every phone
-merge (11447). Bus tools unchanged.
-0.2.139 A MESSAGE THAT ARRIVES SPOKEN -- DES-017 slice 1 (operator 11473/
-11499/11502, rulings 11500/11507). Every AUDIO upload (POST /upload,
-reveille-upload, the MCP tool) is transcoded AT UPLOAD into the wire form:
-<stem>.webm (Opus, loudnorm at CLIP_LUFS -16) + <stem>.m4a; the attachment
-dict comes back {url: /files/<stem>.webm, name, bytes, clip: true,
-duration_s}. Nothing native lives under /files; a lone .webm is not a
-clip (the pair on disk, recorded in files for THIS room, is the proof --
-architect 11539: another room's pair is an ordinary attachment, never this
-room's voice). SEND binds the pair to the message
-as its VOICE: hard links to tts-<mid>.webm/.m4a, no writer, no TTS, the
-same audio/audio_m4a frames, play queue, on-demand, delete (both pairs)
-and sweep. One clip per message; a clip over AUDIO_ATTACH_MAX_S (600 s)
-or one ffmpeg cannot convert is refused by name (415). The chat plays a
-clip through the page's own Opus decoder. THE ORIGINAL waits RAW_HOLD_S
-(600 s) in <files>/raw -- its uploader may fetch it once at GET
-/files/raw/<stored> -- then absoluteZeroStorage.put writes the durable
-raw_archive ledger row (sha256, bytes, mime, message, uploader; S3
-deep-archive later, same call) and the local raw is unlinked; the route
-then answers 410 with the row. Schema v26 (attachments.clip/duration_s,
-raw_archive). Bus tools: upload() unchanged in shape; audio comes back
-converted.
-0.2.138 LIVE BEFORE ASKED, AND A CLICK GETS ITS OWN BUDGET (operator 11523,
-ruling 11528; DES-013 s5 amended). The writer's queue orders (asked, mid):
-a live message's first sentence never waits behind a burst of clicks on
-history; a click waits behind live and carries SCRIPT_ASKED_BUDGET_S
-(20 s) instead of the first-sound slope -- a click is not first-sound,
-and a terse click is waste since 0.2.133. One INFO line per script made
-("script: <mid> made (...)"), countable beside the "falls to terse" line.
-Live budget constants unchanged. Bus tools unchanged.
-0.2.137 NOTHING IN THE FEED IS WIDER THAN THE FEED (operator 11478, rulings
-11480/11483 B). Fluid, no device pixels: the message column may shrink
-(min-width:0), any token may break (overflow-wrap:anywhere on body, head,
-markdown), code scrolls inside its own box, the feed never scrolls
-sideways (overflow-x hidden, touch-action pan-y), and on a phone the page
-itself cannot rubber-band sideways; the "latest" pill sits above the feed
-instead of on the message box; the Settings close X stays on the card.
-Measured (iPhone 14 + Pixel 7, both orientations, a 200-char token, a
-300-char subject and a code block): feed scrollWidth == clientWidth and
-document scrollWidth == innerWidth everywhere. Bus tools unchanged.
-0.2.136 THE ABANDONED WARNING NAMES FFMPEG'S CAUSE: the stderr reader is
-joined before its words are read (a slow runner read them early -> "no
-output"). Bus tools unchanged.
-0.2.134 THE EARCON (operator 11464, ruling 11465; DES-014 s5 amended). In
-listen mode the page rings ONE bell when a take's words land in the box --
-ready for a command or more words, the same moment the pause-to-send
-countdown starts. /ui/earcon.wav ships with the page (the operator's pick
-of four synthesized samples), decoded once through the unlocked
-AudioContext; never over an utterance being spoken (rings when it ends);
-no bell in push-to-talk; off with listen off. Bus tools unchanged.
-0.2.133 A TERSE RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE (operator
-11475, ruling 11476/11483; DES-013 s5/s7 amended). tts-<mid>.webm/.m4a is
-kept only when the message is not scriptable (human verbatim, unbound, no
-persona), or was made from a script, or no writer is configured at all. A
-terse fallback -- the configured writer down, past its budget, or skipped
-for depth -- is synthesized, streamed to whoever asked or was
-listening (its .part lingers 60 s for a late fetch), then unlinked; the
-feed's audio frame says `terse: true` and the page keeps the icon hollow.
-The play click always POSTs /audio/<mid> first and follows the state, so
-the next click with the writer up makes the script and THEN the file.
-Boot sweeps terse files that became durable before this rule (agent key +
-assigned persona'd voice + no script row). Bus tools unchanged.
-0.2.132 FILES GO OVER HTTP, BY NAME (operator 11448, ruling 11449). New
-console script `reveille-upload <file> [--room <id>] [--name <n>]`: reads
-REVEILLE_URL/REVEILLE_TOKEN/REVEILLE_AGENT_ROLE from the env, POSTs the raw
-bytes to /upload, prints the attachment dict for send(). `reveille init`
-(and every container boot, which runs it) now pre-approves
-"Bash(reveille-upload *)" beside "mcp__reveille", so an agent attaches a
-picture with no permission prompt and no classifier in the way. The MCP
-upload() tool stays for text-sized files only and says so. Bus tools
-unchanged.
-0.2.131 THE PAGE FITS A PHONE (operator 11439: "almost unusable" in Chrome
-or Safari on a phone). Below 760px the rail -- rooms, agents filter,
-settings, logout -- is a drawer behind a menu button in the top bar (it
-was display:none, so a phone could not change room or sign out); the top
-bar and the composer's control row wrap instead of pushing Send off the
-right edge; every input is 16px, under which iOS Safari zooms the page on
-focus and leaves it there. Measured with iPhone 15 emulation: nothing
-wider than the viewport, Send at x<393. Nothing changes above 760px. Bus
-tools unchanged.
-0.2.130 THE PLAYER'S LEAD ADAPTS (operator 11408: LTE stuttered on a live
-message that was still being made). The page carries one lead across
-utterances: 50 ms on a good link as before; every underrun after the first
-buffer doubles it, up to 2 s; an utterance with no underrun halves it back
--- a jitter buffer the link earns once, one gap at a time, and gives back
-as it improves (architect 11419). The voice button's title counts underruns
-and shows the lead. Bus tools unchanged.
-0.2.129 TWO NITS. The iOS on-screen decoder diagnostic (a toast after
-every utterance, 0.2.117, kept "until iOS sounds") is gone -- iOS sounds
-(operator 11401); the numbers stay in the voice button's title. /version
-names a LAN plaintext host once however many upstreams reach it, and never
-names loopback (that is this host, no allowance used). Bus tools unchanged.
-0.2.128 THE BUS DOCTRINE IS AT THE CORE (operator 11397, ruled 11402):
-agents write ULTRA-TERSE -- fragments, no articles or filler, ids/numbers/
-names exact, code and errors quoted verbatim; write for AGENTS, never for
-the ear -- humans hear the writer's persona expansion, the raw text stays
-the record. It now leads the standing usage(), opens the
-CLAUDE.md block agents paste, sits in send()'s own description, comes back
-in every join() reply as `doctrine`, and is the first rule in the CLAUDE.md
-`reveille init` seeds. Bus tools: join() reply gains `doctrine`.
-0.2.127 THE WRITER EXPANDS TELEGRAPHIC MESSAGES (operator 11393/11395; DES-013
-section 5 amended). Agents write in fragments -- dropped articles and verbs,
-arrows, slashes, bare numbers -- and the room hears them as speech, so the
-frame now says: restore full, natural spoken sentences with the meaning
-intact; a bare five-digit number is a bus message, #69 is pull request
-sixty-nine, DES-015 is D E S zero one five. Bus tools unchanged.
-0.2.126 THE SAME UTTERANCE ALSO LANDS AS AAC (DES-013 section 6 amended,
-ruling 11383 for DES-015 the car shell). Beside tts-<id>.webm the worker
-now writes tts-<id>.m4a from the finished .webm (after the announcement --
-first sound owes it nothing), names it on the feed as `audio_m4a`, and
-serves it at GET /audio/<id>.m4a with the .webm's authorization: the file
-or a 404, an MP4 is not tailed. Delete and the startup sweep take the pair.
-Bus tools unchanged.
-0.2.125 PAUSE-TO-SEND (DES-014, operator 11389 "A+B", numbers ruled 11385).
-An `auto-send` setting beside `listen`, off by default and remembered per
-browser: hands-free only, five seconds after your words land they are sent
--- the box counts down where you can see it; say "cancel", type, or switch
-listening off and nothing goes. Push-to-talk never auto-sends. Bus tools
-unchanged.
-0.2.124 THE EAR, SLICE 4: VOICE COMMANDS (DES-014, pre-ruled 11355 s5). A
-take that IS one of `send`, `cancel`, `stop`, `reply`, `voice on`, `voice
-off` or `room <name>` -- the whole final transcript, case-folded, trailing
-punctuation dropped, exact words -- runs and is not typed; anything else is
-text. The spoken `send` is the one way the ear ever sends (an empty box is a
-no-op). A microphone that dies mid-take ends it. Bus tools unchanged.
-0.2.123 THE EAR, SLICE 2: HANDS-FREE (DES-014, ruling 11355). A `listen`
-toggle beside `talk`: while it is on, a page-side voice-activity detector
-(Silero VAD v5 in WASM, shipped with the page under /ui/vad/ -- no CDN)
-cuts what you say into takes and each goes through the same POST /stt;
-silence of 3 s closes a take, a 30 s cap closes and reopens it, noise
-below the detector's threshold sends nothing, a hidden tab or a mic error
-turns it off, and the words land in the compose box for you to send.
-Push-to-talk stays. Bus tools unchanged.
-0.2.122 A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357; DES-013
-section 5 amended). The writer performs AGENTS -- text-first speakers that
-need a mouth. A signed-in human's message is spoken exactly as typed or
-said, in the voice assigned to them; it rides the writer's queue only as
-the ordered passthrough, never as a script. On-demand play of a human's
-message likewise. Persona stays a field on the voice. Bus tools unchanged.
-0.2.121 THE WRITER WRITES FOR THE MOUTH (DES-013 section 5 amended, operator,
-the first live evening). The synthesizer reads what it is given, so the
-frame now makes the writer the text normaliser: abbreviations, units and
-symbols become the words a person says (24MiB -> twenty-four mebibytes),
-quantities become number words, identifiers and versions and dates are read
-digit by digit in spoken groups (0.2.120 -> zero point two point one twenty;
-stardate 23244.4 -> two three two four four point four), acronyms as
-letters unless said as a word; and THE MESSAGE IS THE SCRIPT -- a persona's
-catchphrase alone is not one (message 11349). Delivery is punctuation, per
-the synthesizer's own guide. Temperature 0.5, max_tokens 300, script cap
-1000 chars (number words are longer than digits). Bus tools unchanged.
-0.2.120 THE SCRIPT BUDGET SCALES WITH THE BODY (DES-013 section 5 amended,
-operator 11343 on the bench 11342). Prefill is the wall on the pinned pair
-(section 8: two RTX 3060, measured -- and the second bench moved the pin to
-vLLM TP=2 int4: prefill 2-4x faster, first token 0.3 s at 700 chars, 2.6 s
-at 9000), and most agent messages
-are longer than the 1500 chars the writer was shown, so a flat 1.5 s meant
-terse for most of them. Now the writer sees up to 9000 chars (the live
-db's p99.9) and its time to first sentence is REVEILLE_SCRIPT_TIMEOUT plus
-1.5 ms per char shown; short messages keep the ruled budget. Also: an
-EMPTY REVEILLE_SCRIPT_TIMEOUT / _TTS_TIMEOUT / _STT_TIMEOUT (what compose passes
-when unset) no longer crashes the broker at boot -- it means the default.
-Bus tools unchanged.
-0.2.119 A LOST REACH IS A DEPARTURE; NO GHOST MEMBERS. Revoking a token, or
-taking a room away from it (unassign, a room flipped private, a member
-removed), now marks that agent's membership left in the same transaction,
-so the roster stops listing a credential that can no longer hear -- and
-leave(room=) works for a room you are listed in but no longer reach (a verb
-that only reduces access needs no access). Ghosts from before this rule
-heal at the next detach. Bus tools unchanged in shape.
-0.2.118 THE EAR, SLICE 1 (DES-014). REVEILLE_STT_URL (with _TOKEN, _MODEL,
-_TIMEOUT) points the broker at a speech-to-text server (OpenAI-shaped
-/v1/audio/transcriptions: speaches / faster-whisper-server) -- the third
-upstream, the same refusal and LAN flag as voices and the writer, off when
-unset. ONE route, POST /stt: a signed-in person's WAV take (the page's own
-recorder; <= 60 s, <= 8 MiB, silence refused), one at a time, back as
-{text}; nothing stored, nothing sent -- the words land in the compose box
-and the human presses Send. The page shows a talk button beside attach when
-the ear is on: hold on a mouse, tap to start/stop on a phone. Bus tools
-unchanged.
-0.2.117 iOS: THE RINGER-SWITCH UNLOCK, AND NUMBERS ON SCREEN. On an iPhone the
-voice toggle's tap now also plays a silent looping element once so Web Audio
-follows the playback session (iOS mutes Web Audio under the silent switch),
-and each utterance ends with a one-line toast of what it did (frames,
-samples, buffers, decoder errors, context state) -- a phone has no console;
-this line stays until iOS sounds. Bus tools unchanged.
-0.2.116 THE PAGE DECODES OPUS ITSELF (iPhone plays), AND A MESSAGE IS SPOKEN
-ONCE. iOS Safari has no MediaSource, so the page now demuxes the WebM stream
-and decodes the Opus frames with a vendored WASM decoder (/ui/opus-decoder.js,
-opus-decoder 0.7.11 MIT), scheduling PCM on its AudioContext -- one code path
-for every browser with Web Audio; the wire is unchanged (first sound 0.705 s
-on the eval box). Defect fixed: switching rooms leaked a feed socket per switch
-(the closed socket's reconnect fired anyway), so every audio frame arrived N
-times and the message was spoken N times; a deliberate close now detaches the
-reconnect, and the play queue takes each id once. Bus tools unchanged.
-0.2.115 A TOKEN THAT IS NOT AN AGENT CANNOT ACT AS ONE (ruling 11252). An
-unbound token is read-only: reads (inbox, history, rooms, recall, brief,
-GET routes) answer as before and leave no presence; every act -- send, ack,
-join, leave, lesson_add, memory_add, memory_retract, ratify, reject, upload,
-presence, and the mutating HTTP routes -- is a 401 naming the remedy
-(`reveille init` in the agent's directory, or a bound mint in the Tokens
-tab, where bound is now the form and read-only a labelled choice). Bound
-tokens and web users are unchanged. Clean cutover: an agent still running
-on an unbound token stops acting at its next call, loudly.
-0.2.114 EVERY MESSAGE CAN BE SPOKEN LATER, ON THE CLICK; AND A STOP BUTTON.
-The play icon is on every message: filled = play the audio it has, hollow =
-POST /audio/<id> makes it (script first when the writer is on, then audio,
-through the same queue a live send takes; the click is the listener) and the
-tab that asked plays it when the audio frame lands. The voice toggle now
-only decides whether arrivals are made and played automatically. A stop
-button shows in the header while something sounds and hands the queue on.
-Bus tools unchanged.
-0.2.113 COMPOSE PASSES THE WRITER AND THE LAN FLAG THROUGH. docker/compose.yml
-forwards REVEILLE_SCRIPT_URL / _MODEL / _TIMEOUT / _TOKEN and
-REVEILLE_LAN_PLAINTEXT to the broker like it already forwarded the TTS
-pair, so a `make up` on the VM can point voices (and the writer) at a host
-on the operator's LAN. Unset = as before. Bus tools unchanged.
-0.2.112 `reveille init` LISTS YOUR AGENTS. The wizard logs you in first,
-shows the agents your account holds (from GET /tokens, with their rooms)
-and takes a number: this directory becomes that agent's native body (the
-token rotates; the old body goes dead). A typed name is a new agent and
-goes on to the type menu as before. One password prompt. Bus tools
-unchanged.
-0.2.111 THE WIRE IS WEBM/OPUS (DES-009 section 2 amended, DES-013 section
-7.1, ruling 11211). The broker transcodes every utterance with ffmpeg
-(libopus 32 kbit/s, 200 ms clusters); GET /audio/<id>.webm and the
-audition stream audio/webm, ~32 KB per scripted message where the WAV
-was ~330 KB; the bank clip stays the WAV it was uploaded as. The page
-plays through MediaSource; measured send to first sound 0.666 s (a plain
-<audio> element was 3.6 s). A broker without ffmpeg refuses voices at boot
-by name. A bank clip whose peak is under -40 dBFS is refused as silent.
-Bus tools unchanged.
-0.2.110 A SILENT RECORDING IS REFUSED AT THE MICROPHONE. The recorder shows
-NO SIGNAL while a take is all zeros and discards it at stop, naming the
-cause (no input device or permission in that browser window) -- silence
-is never stored or cloned. Bus tools unchanged.
-0.2.109 YOUR PERSONAL VOICE COMES FIRST. The Voices tab opens with MY
-PERSONAL VOICE (your own cards, then the add flow), then THE BANK; "say
-it" on an empty sample reads a default line naming the voice, so a new
-voice is heard on the first click. Bus tools unchanged.
-0.2.108 PERSONAL VOICES, DELETE AND RENAME, AND A VOICES TAB OF CARDS
-(DES-013; schema v25). A voice added as PERSONAL (PUT /voices/<id>/clip
-?personal=1, decided at creation) exists only for its uploader: nobody
-else -- admin included -- lists, hears, edits or assigns it, and its
-uploader may still give it to themselves or their agents; a human who
-records "<username>" is heard in their own voice everywhere. DELETE
-/voices/<id> (uploader or admin) drops the voice and its assignments;
-PUT /voices/<id>/rename {id} moves the voice, its assignments, its
-scripts label and its clip. Voices tab: one card per voice with icon
-tools, and two add flows (bank / personal). Bus tools unchanged.
-0.2.107 THE SUITE RUNS ON EVERY CORE (pytest-xdist, 78 s -> 16 s). No
-broker behavior change; the bump exists because pyproject/uv.lock are
-image inputs and a tag is written once. Bus tools unchanged.
-0.2.106 A BANK VOICE KEEPS ITS SAMPLE LINE (DES-013; schema v24). PATCH
-/voices/<id> {sample} stores the line a voice reads on audition, beside
-its persona; GET /voices carries it; the Voices tab prefills it, "say it"
-reads the box, "save sample" keeps it. Bus tools unchanged.
-0.2.105 THE AUDITION IS THE RIGHT VOICE OR NONE, AND ONE AT A TIME.
-GET /voices/<id>/say refuses 409 when the clip is not on the synthesizer
-after one reconcile (never the digest voice), and 429 while another
-audition streams (one at a time; live messages are not contended). Bus
-tools unchanged.
-0.2.104 THE AUDITION, AND THE ORIGINAL BESIDE THE CLONE (DES-013). Voices
-tab: every bank voice has "play clip" (GET /voices/<id>/clip -- the uploaded
-wav itself) and a "sample dialog" line + "say it" (GET /voices/<id>/say?text=
--- that voice speaking that line, streamed from the synthesizer, nothing
-kept), so a clip is judged against its clone before anyone is assigned to
-it. The settings modal is wider. Bus tools unchanged.
-0.2.103 THE WRITER'S HOST, AND OPEN STREAMS ARE COUNTED (DES-013 slice 6,
-materials). scripts/writer/ carries the writer VM's build (llama.cpp pinned,
-CUDA 12.8, sm_61), sha256-pinned model fetch (Qwen3.8-27B Q6_K / Q4_K_M),
-the bench that measures time-to-first-sentence and tok/s per quant and flag
-set, and the systemd unit -- the pin is the number the bench produces, not
-a guess. Broker: a script's remainder past the first sentence streams on a
-bounded helper (SCRIPT_REST_MAX = 2 open streams); past that the writer
-finishes in-line before the next item. Bus tools unchanged.
-0.2.102 THE SCRIPT WRITER, AND NOTHING IS MADE THAT NOBODY WOULD HEAR
-(DES-013 slice 5). A second worker calls a model behind REVEILLE_SCRIPT_URL
-(an OpenAI-compatible /v1/chat/completions -- llama-server; off by default,
-the broker never loads a model) and turns a message from a speaker whose bank
-voice carries a PERSONA into a short in-character script, STREAMED: the first
-sentence must close inside REVEILLE_SCRIPT_TIMEOUT (2.5 s) or the terse text
-speaks now; sentences are spoken as they close into one wav; the script is
-kept beside the message (pencil icon; GET /script/<mid>) and the `script`
-frame tells the web feed. LISTENER GATE: the browser tells the feed socket
-its voice toggle; a room where nobody has voice on gets neither script nor
-audio -- what was heard live is kept, what nobody heard was never made.
-ONE refusal for every upstream URL: REVEILLE_LAN_PLAINTEXT=1 allows a private
-LAN host in the clear (banner + /version name it); public hosts still need
-https + a token. Voices tab: "draft persona" (behind a button, when a writer
-is configured). Bus tools unchanged.
-
-0.2.101 THE BANK TRAVELS BY PUSH, AND YOU CAN RECORD YOUR OWN VOICE (DES-013
-slice 3b + recorder). The synthesizer no longer shares a directory with the
-broker: every bank clip is PUSHED to it over its own API as
-bank-<id>-<updated_ns>.wav (a replace is a new name), reconciled at worker
-start and whenever a clip is missing -- so reveille-tts can run on any machine
-reachable by REVEILLE_TTS_URL, one path on one box or two. Compose: the
-synthesizer's reference dir is the `tts-reference` volume; TTS_VOICES_DIR is
-gone. Defaults (ruling 11121): explicit choices travel between rooms; a bank
-voice named like the speaker beats derived ones; then a default held
-elsewhere; then the first free. Web: record your own sample in the Voices tab
-(microphone -> 16-bit PCM WAV built in the browser -> the same upload; the id
-defaults to your username so it is your voice everywhere); play icons on
-stacked messages; the clip pickers are buttons. Bus tools unchanged.
-
-0.2.100 THE ARTIFACTS BESIDE A MESSAGE (DES-013 slice 4). Every listing
-(inbox, thread, tail, search) now carries `has_audio` and `has_script`; the
-web feed shows a play icon on messages that have audio (an explicit play,
-works with the voice toggle off) and a script icon on messages the writer has
-scripted -- the script replaces the terse body in place, click again to get
-the terse text back. `GET /script/<mid>` -> {id, text, voice_id, model, ts_ns}
-for anyone in the message's room (404 = no script; ?room= is ignored, like
-/audio). Nothing writes scripts yet (that is the writer, slice 5), so the
-script icon stays dark until it ships. Bus tools unchanged; the two new
-fields are additive on every message dict.
-
-0.2.99 THE BANK, AND WHO SPEAKS WITH WHAT (DES-013 slices 2-3). (#26) the
-broker OWNS a voices directory (<db dir>/voices; compose mounts
-${SERVER_DATA}/voices into the synthesizer read-only as its reference dir):
-`GET /voices`, `PUT /voices/<id>/clip?name=` (raw PCM WAV bytes, 5-30 s,
-<= 10 MiB, replace in place = same id), `PATCH /voices/<id>` {name, persona};
-anyone adds, the uploader or an admin replaces/edits. The web Voices tab is the
-bank. (#28) a speaker is keyed by its CREDENTIAL (agent:<agents.id> for a
-bound token, user:<id> for a web user; unbound tokens keep the digest pick):
-`GET /rooms/<rid>/voices` lists who speaks with what here (defaults
-materialized: a free voice carried from another room, else the first free bank
-voice), `PUT/DELETE /rooms/<rid>/voices/<speaker>` {voice_id} -- the speaker's
-owner over the room's owner over the default, one voice per speaker per room,
-a held voice refused naming the holder, admin has no reach. Every message from
-a keyed speaker is now spoken in its assigned bank voice. Bus API for agents:
-unchanged tools; the routes above are HTTP.
-
-0.2.98 THE VOICE PLAYS AS IT IS SYNTHESIZED, AND THE BANK HAS A SCHEMA. Four
-PRs, one bump. (#20) TTS batching back ON at 4: the fork's decode is pad-aware
-(_t3_inference_padded), so a batched row stops at its own text instead of
-babbling to the pad; TTS_IMAGE 0.2.2. (#21, DES-009 s2/s7 amended) synthesis
-streams: the worker writes <files>/tts-<id>.wav.part as bytes land, the feed's
-`audio` frame fires at the FIRST byte, and /audio/<mid>.wav serves three states
-(in flight -> tail the .part; complete -> the file; neither -> 404); the delete
-choke point unlinks both names. (#22) the browser plays through a Web Audio
-player instead of <audio> -- frame-to-first-sound under 10 ms where <audio>
-waited on a 230 KB byte floor; the toggle resumes the context on the gesture.
-(#24, DES-013 slice 1) schema v23: `voices`, `voice_assignments` (PK room+speaker,
-UNIQUE room+voice), `scripts` (PK message_id) -- empty tables and the store API
-behind them; nothing speaks differently yet. SCHEMA RELEASE: deploy is
-stop -> backup -> migrate -> start (DES-010). The bus API did not move.
-
-CHANGES (newest first; re-read after any broker version bump):
-
-0.2.97 THE SYNTHESIZER IS SOMEONE ELSE'S TORCH (DES-009 s4.1). The voice
-service is devnen/Chatterbox-TTS-Server built from THEIR Dockerfile.cu128 at
-the SHA docker/tts.upstream pins; our tts_service.py and Dockerfile.tts are
-gone. The broker speaks their /tts: voices/<name>.wav (their reference dir) is
-cloned, otherwise the name's sha256 digest indexes the SORTED predefined bank
-and offsets exaggeration/cfg_weight -- same name, same voice, every host. The
-worker logs the device the server reports (/api/model-info) or `unreported`.
-REVEILLE_TTS_URL for the compose service is http://reveille-tts:8004. Broker
-change only; the agent image is unchanged. Nothing about the bus API moved.
-
-0.2.96 A HELD NAME IS NOT A NEW AGENT, AND THE HUMAN IS TOLD. create=true on
-a name you already hold live is a REFUSAL (DES-011 s2), naming the existing
-agent, its rooms, and both remedies -- choose a unique name, or add the
-existing agent to the room you meant; the existing credential is untouched.
-Bare attach (create=false) on a held name stays the body-swap verb: attach,
-supersede, tombstone -- one being, one live credential. The launcher's create
-dialog and `reveille init --login` now surface the broker's refusal detail
-instead of a bare "refused". Also on this main: the publish scanner allows
-checksum envs (a checksum is not a secret), the TTS image builds cold, and
-the workflows run on Node 24. Broker + launcher change; agent image unchanged.
-
-0.2.95 CREATION IS A DELIBERATE ACT -- THE SPLIT-BRAIN RELEASE. A bound mint
-ATTACHES a body to an existing identity; bringing a NEW identity into the world
-must be declared. Measured live today: `architect` and `reveille-architect`
-were two identities for one role, each hearing only its own directs while
-presence, info() and the spool all read green. The refusal names the owner's
-live agents, so a near-miss is visible while it is still correctable. It closes
-every scripted, env-driven and typo path; a human deliberately typing a variant
-name can still fork, and the remedy for that half is removing the REASON to
-re-provision under a new name.
-
-Riding with it. The container registers through `reveille init` like any laptop
-(agent image 0.2.18), and its boot report renders what verify() SAID rather
-than a cause the script never established -- refused-token and unreachable-
-broker are different sentences now. /presence wears @_guard, so a bad or absent
-credential is a 401 instead of a 500: it was the one principal-resolving route
-without it, and cli.verify() probes exactly that route, so a broker crash used
-to read to every installer as a bad token. And a SUPERSEDED credential now
-leaves a tombstone (schema v22), so its refusal names the supersession, the
-agent, the date and the way back -- while a plain revoke stays a bare "bad
-token", because only a displaced body earns a signpost. And CI arrives: a PR
-gate with ruling 8433 mechanised, publish-on-main to ghcr where a tag is
-written once and a skip that would lie is a refusal, a no-identity-baked scan
-before every push -- and no deploy step, because merged still does not mean
-running.
-
-0.2.94 THE AGENT OWNS ITS UPDATER, AND ONE REAL DOOR. Agent image 0.2.17:
-claude and playwright live in /opt/npm, chowned to the agent uid, so claude's
-auto-updater stops warning "npm global folder isn't writable" -- NODE_PATH
-follows. Running containers keep 0.2.16 until recreated; an image fix never
-reaches a running container. And the no-login refusal now names ONLY the
-Account tab: its reader is remote, so the CLI door was painted on a wall.
-
-0.2.93 THE REFUSAL NAMES THE REACHABLE DOOR. The home-login provision refusal
-renders in the web create-agent dialog one click from the Account tab, and it
-prescribed only the CLI. no_login_refusal() now names both doors -- the
-Account tab for a browser reader, reveille-launch login for a shell -- and
-exists as a function so the gate asserts the sentence the user reads, not
-source bytes an f-string wrap can split. Launcher-path only; broker image
-unchanged.
-
-0.2.92 THE INSTALLER SEEDS THE MODES. reveille init seeds
-CAVEMAN_DEFAULT_MODE=ultra and PONYTAIL_DEFAULT_MODE=full into the agent
-directory's env block -- an agent talks terse and builds lazy from its first
-session, without hand-editing. Seeded via setdefault, never converged: a
-hand-tuned level survives every re-run. Inert where those plugins are not
-installed. Init-path only; no broker behavior change, no deploy owed.
-
-0.2.91 THE HEADERS COME FROM THE DIRECTORY. The 0.2.90 per-directory flow had
-a seam the acceptance run caught: Claude Code expands MCP ${VAR} headers from
-the process env at connect time, BEFORE project settings env is injected, so
-a directory agent could be woken and could not speak. reveille init now also
-writes <dir>/.mcp.json registering the server project-scope with headersHelper
-= reveille-headers (a shipped console script, run with the project dir as cwd
-on every connect, reading settings.local.json), plus
-enableAllProjectMcpServers for unattended approval. The stale user-scope
-registration is converged away. Re-run `reveille init` in each agent
-directory to pick this up.
-
-0.2.90 THE DIRECTORY IS THE AGENT, AND THE FRONT DOOR HAS A PUBLIC NAME.
-Two merges. (1) reveille init now writes the credential into the agent
-directory's .claude/settings.local.json env block -- Claude Code injects it
-at session start, so plain `claude` run there IS that agent, and one machine
-holds as many agents as it has initialized directories. ~/.reveille/agent.env
-and the reveille-agent wrapper are RETIRED; re-run `reveille init` in each
-agent directory to migrate. (2) The proxy takes PROXY_SITE (a full Caddy site
-address; a hostname turns on automatic HTTPS via TLS-ALPN-01) with certs
-persisted in the caddy-data volume, and every scratch compose invocation must
-override COMPOSE_PROJECT -- container names never isolated anything, the
-project is the ownership boundary.
-
-0.2.89 THE INSTALLER GRANTS WHAT IT REGISTERS. First boot on the operator's
-Mac: join() was refused by permission policy. Registration, hook, credential
-all present -- the machine LOOKED configured -- and the first real bus call
-still needed an approval nobody was there to give. reveille-install-hook now
-converges permissions.allow with "mcp__reveille" (the one server it
-registers, no wider) alongside the Stop hook, in the same single write: the
-settings.json pre-approval a user would otherwise add by hand. A machine
-installed before this fix gains the rule on any re-run of `reveille init`;
-a correct file stays byte-identical.
-
-0.2.88 PRESENT IS NOT DURABLE. `reveille init`'s ensure_on_path() checked
-bare which() -- but uvx puts its ephemeral bin FIRST on the child PATH, so
-from inside init the agent binary is always "present" and the uv tool
-install persist never ran on any machine; the operator's Mac, the first
-real off-host install, ended in `reveille-agent: command not found`, the
-exact failure the function exists to prevent. The unit test mocked which()
-to None -- the mock encoded the wrong world. Now asks install.is_durable
-(would the copy survive `uv cache prune`) instead of presence, and the
-step line names `uv tool update-shell` when ~/.local/bin is off the shell
-PATH, since capture_output was swallowing uv's own warning. Init-path
-only; no broker behavior change.
-
-0.2.87 THE LAUNCHER'S UID AND THE CONTAINER'S UID ARE DIFFERENT QUESTIONS, and
-they were one only by accident. The image bakes ARG UID=1000 and the operator
-is uid 1000, so `os.chmod` on data/<user> had never once been asked to fail.
-Move the launcher to any other account -- which is what a real deployment is,
-and what this box became tonight -- and ensure_login_home dies with EPERM on
-that path, taking the browser login and the credential save with it. chmod
-needs OWNERSHIP, not write permission, so no mode could have fixed it. The
-launcher now TAKES ownership of data/<user> through the privilege it actually
-has: not CAP_CHOWN, but the docker socket, via the same root-container chown
-_own_agent_dirs already used for the agent homes -- non-recursive, so those
-homes keep the image's uid. THREE writers created that directory with the same
-makedirs+chmod pair (save_profile, ensure_login_home, provision_agent) and all
-three move together; fixing one would have made the login work and the next
-provision fail identically. The mode stays 0700: 0711 was drafted and the
-suite refused it, because profile.json holds the user's github and claude
-tokens and nothing needs to traverse a directory the launcher owns. The gate
-asserts the ARGV and the CALL rather than a real chown, so it is true on a
-uid-1000 box too -- a fixture that only fails where the uids differ would have
-passed on the two earlier sightings of this same defect.
-
-0.2.86 THE SMOKE SPEAKS THE CLI IT DRIVES. launch_smoke -- the DES-002 T2
-end-to-end gate -- still called the pre-tenancy CLI (new role repo) and has
-been UNRUNNABLE since the user positional landed: running it needs a docker
-socket no session had, and a gate that cannot start is indistinguishable
-from one that passes. Found by devops's first socketed run (9136). The
-smoke now drives new/destroy with user+agent under USER=smoke, its argv
-lives in functions a unit test parses against the launcher's real
-build_parser() on any box, the cleanup name is pinned to container_name(),
-and the old two-positional shape is kept as a refused negative. Folded from
-the same run: REVEILLE_LAUNCH_DATA isolated beside the db, and scratch-dir
-plus broker.db modes the server container's own uid can open. Runnable is
-not proven: the socketed end-to-end run is devops's validation.
-
-0.2.85 THE RAIL SAYS WHAT IT MEASURED, NOT A DIRECTION IT CANNOT KNOW.
-senior-ui-ux's accepted badge fix: the Agents rail marked a container
-"behind" whenever its image differed from the launcher's default -- an
-inequality wearing an ordering's label, so a container AHEAD of a stale
-launcher read as behind, which is exactly what the operator's screen showed
-(containers on 0.2.15 judged by a launcher defaulting 0.2.14). The word is
-now "differs", the two tags ride the tooltip and the accessible name, and
-the rail names the RECORDED image -- whether the container drifted under
-that record is a question the rail cannot answer and no longer implies it
-has. The predicate is renamed with the claim; its pin moved with it.
-
-0.2.84 A PERMANENT no_rooms STOPS PRETENDING TO BE TRANSIENT. 0.2.78 made
-no_rooms the one recoverable refusal and reported it to waked's reconnect
-loop as a clean session, which reset the backoff ladder: a permanently
-unringable daemon opened a socket every 1.00s, flat, forever -- measured
-live -- while its flock kept the Stop hook from installing one that could
-hear. Ruled (9119) and built as one change: _session returns a
-distinguishable NO_ROOMS, so the existing 1s-to-15s ladder applies to
-refusals, and the loop exits (code 3) after 30 minutes ELAPSED from the
-first refusal of a streak -- monotonic stamp, cleared only by a session
-that attached, time never a count, so tuning the ladder cannot stretch the
-bound. --no-rooms-window SECONDS overrides the default 1800; the default
-is the contract. THE HONEST HALF: the exit is not self-healing. It frees
-the lock so the Stop hook respawns waked from fresh session env at the
-next TURN BOUNDARY; a parked agent stays parked until one. What it ends is
-a dead credential holding the wake slot forever.
-
-0.2.83 A NOT-LIVE IDENTITY HOLDS NO LIVE CREDENTIAL. Ruled doctrine (9122):
-retiring or releasing an agent identity now revokes that identity's own
-tokens in the same transaction and reports the ids. Mint-time supersede is
-identity-scoped by ruling (DES-007 2.4) and structurally cannot reach a
-credential stranded on a PREVIOUS identity of a name; the destroy route's
-broker-side revoke is best-effort. This closes the gap store-side, on every
-path that makes an identity not-live, BEFORE the DES-007 resurrect and
-enforcement slices ship the callers that would have opened it -- nothing in
-production writes agents.retired_ns today.
-
-WHAT THIS DOES NOT EXPLAIN, so nobody stops looking: the operator's live
-duplicate bound tokens (msg 9100). The retire-then-remint sequence gated
-here cannot have run on that box; the live cause is undetermined until the
-discriminating query (9119) answers against the live db.
-
-0.2.82 THE LOCK CANNOT LIE AND THE STOP HOOK CANNOT ROT. Two accepted slices.
-The version gate: three times a bump left uv.lock recording the previous
-release, so test_daemon now pins the reveille entry in uv.lock to the version
-pyproject declares -- BOTH read from HEAD via git show, because uv run
-re-locks the working copy to match pyproject before pytest reads a byte, so a
-file-reading assertion is green in exactly the broken state, healed by the
-command that runs it. Ruled general (9101): a gate must read the artifact
-from the commit whenever its own runner can repair the working copy. And the
-entrypoint's patch() gains converge= -- hooks.Stop is written unconditionally
-while every other key stays setdefault, closing the sibling-writer half of
-0.2.80's installer fix: a persisted settings.json carrying a wrong-but-
-present Stop hook survived every re-provision, and the Stop hook is the one
-key where present-but-wrong is deafness, not preference. Sibling hooks keys
-survive; the writer set for hooks.Stop is closed at two and both converge.
-
-Agent image moves to reveille-agent:0.2.16 (entrypoint is baked). NOT BUILT
-at this writing -- the build follows on the broker host, after this commit.
-
-0.2.81 THE CONTAINERS CATCH UP TO THE REACHABILITY WORK. Agent image 0.2.15
-(devops, accepted at 9094): reveille-agent:0.2.14 was built before 0.2.53, so
-every container in the fleet ran a waked, a wake-watch and a Stop hook from 27
-versions back -- missing the retired wake --once boot prompt (0.2.76), the
-zero-room attachment refusal and honest waiter line (0.2.77), and no_rooms as
-the one recoverable refusal (0.2.78): exactly the work that made deafness
-diagnosable, absent where the silent failure would land. AGENT_IMAGE and
-DEFAULT_IMAGE move together, pinned equal by the unit test. The 0.2.15 tag is
-built on the broker host and carries reveille 0.2.80.
-
-A RUNNING CONTAINER DOES NOT FOLLOW THIS BUMP: existing agents keep 0.2.14
-until re-provisioned, and the launcher serving provisions must itself be on a
-head that names 0.2.15 -- at this writing the live launcher is pinned 18
-versions back and its redeploy is blocked on a cross-user kill only the
-operator can perform.
-
-0.2.80 THE INSTALLER CONVERGES ON CORRECTNESS, AND NATIVE TMUX IS OPT-IN. The
-first native agent's first shipped branch, and the finding is the night's gate
-lesson wearing installer clothes: install.py matched an existing Stop hook on
-its NAME and returned -- so a wrong-but-present value was permanent, re-running
-init CONFIRMED a broken machine instead of repairing it, and 0.2.77's
-durable-path fix could not reach a single machine that already had the cache
-path, because every such machine took the early return. Three separate rescue
-prescriptions ("re-run init") were impossible the whole time, and a test on
-main enshrined the wrong side while its own comment praised remove-then-add
-for the MCP half. is_durable() now asks the question that was never asked --
-would this command still run after a cache prune and a repo move -- and a
-failing answer re-points the entry while a correct one stays byte-identical:
-idempotence preserved, now meaning convergence rather than detection. And
-tmux on native is opt-in (--tmux / REVEILLE_TMUX=1), per the operator: it
-exists for the container, where ttyd attaches to it; a host with tmux
-installed is no longer silently re-execed into a session it never asked for,
-and --no-tmux no longer falls through onto claude.
-
-Verified native by its author on the real defect state; container path
-untouched by inspection (entrypoint starts its own session and never calls
-agent-launch) -- container run still owed under the two-shape doctrine.
-
-0.2.79 THE PANEL MINTS WITH ROOMS AND TEACHES THE SHAPE THAT PERSISTS, AND THE
-SYNTHESIZER EXISTS. senior-ui-ux's accepted stack: the install panel picks
-rooms BEFORE the mint (the same one-transaction rule the wizard follows), the
-install block teaches `uv tool install` then `reveille init` -- the two-line
-shape that cannot write a cache path into the Stop hook -- and the contract
-gate pins the panel's command against [project.scripts] and the git source as
-a pair. Also merged: DES-009 commit 1, the Chatterbox synthesizer in its own
-container -- one worker, one queue, POST /speak -> audio/wav, no published
-host port, behind the `voices` compose profile and out of `make up`, so it
-changes nothing for anyone who does not ask for it. Nothing has been heard
-yet; the container has never been built. That measurement, and whether the GPU
-reservation applies, belongs to the agent with the docker socket.
-
-VERIFICATION SHAPE, per the standing doctrine: verified native-side by suite
-only; container unverified; the synthesizer unbuilt anywhere.
-
-0.2.78 no_rooms IS THE ONE RECOVERABLE REFUSAL. 0.2.77's zero-room refusal was
-right and its handling was one arm too fatal: waked exits on any error frame,
-so a container agent that left its LAST room -- a reversible state -- would
-have died permanently, respawned only if its entrypoint ever ran again. The
-native silent-deafness traded for a container loud-then-silent one. bad_token
-and name_mismatch cannot fix themselves and stay fatal; a token with no rooms
-can have one a second later, so waked now treats no_rooms as disconnect-class
-and reconnects on the fixed interval it already uses for a broker restart. The
-frame carries retry:true so the wire itself names the recoverable family.
-Found by the first native agent before the regression reached any container --
-which is the both-environments rule earning its keep on day one.
-
-0.2.77 EVERY GREEN CHECK THE DEAF AGENT SAT BEHIND IS NOW A REFUSAL OR THE
-TRUTH. The broker accepted a wake attachment from a valid token holding zero
-rooms -- a waiter _notify can never select, since rings go only to tokens in
-token_rooms -- while the host saw HTTP 101, a stable socket, a held flock and
-an empty log. It refuses now ({"error":"no_rooms"}, close 4404), in the same
-fatal-to-the-client family as bad_token. The installer wrote the Stop hook a
-uv CACHE-ARCHIVE path -- which() found the copy uvx ran from -- a hook that
-dies at the next `uv cache prune` and takes the whole reachability plane with
-it; the hook command is now the durable spelling: ~/.local/bin, a non-cache
-PATH hit, or the bare name a login shell resolves. And info()'s waiter line is
-computed by the ring path's own rule -- a token HOLDING THE ROOM, not the
-caller's own -- so ATTACHED now means a ring would actually arrive.
-
-0.2.76 THE NATIVE BOOT PROMPT ARMS THE LIVING RITUAL. reveille-agent's boot
-banner told the first native agent to arm `wake --once` -- the pre-DES-003
-form, retired when the waiter split landed -- which grabs the wake socket
-itself and fights the supervised reveille-waked for it: stolen slot, or
-superseded into silent deafness, the one failure the fleet cannot see from
-inside. The prompt now arms `wake-watch <role>`, which watches the spool the
-daemon writes and is harmless in duplicate, and boot gains lessons() and
-brief() -- the knowledge floor the old prompt skipped. A gate reads the
-packaged script and refuses the retired form anywhere outside a comment.
-
-0.2.75 THE CREDENTIAL LIVES IN ENV, NOT IN CLAUDE CONFIG. The installer baked
-the literal token into the MCP registration, and "already registered, left
-alone" then kept it through a rotation -- the re-run superseded the token the
-untouched registration still carried, so the agent booted and 401ed on every
-call while looking fully installed. Headers now reference ${REVEILLE_TOKEN} and
-${REVEILLE_AGENT_ROLE}, the form join-here and the container entrypoint always
-used, so the credential lives in exactly one place: ~/.reveille/agent.env,
-which reveille-agent exports into the session. Rotation is a one-file rewrite.
-Registration is remove-then-add every run, so older literal-token installs
-converge on their next init.
-
-0.2.74 THE INSTALLER OUTLIVES ITS OWN RUN, ROOMS ARE A CHOICE WITH OWNERS
-SHOWN, AND THE MINT PANEL IS IN. The operator's first successful install ended
-in `reveille-agent: command not found`: a uvx run is ephemeral, its console
-scripts live in a GC-able cache, and the Stop hook had captured that cache path
--- an agent that works today and goes silently deaf at the next `uv cache
-prune`. init now persists itself (`uv tool install`) whenever reveille-agent is
-not on PATH, BEFORE the hook writes any command path. The wizard lists rooms as
-the operator specified -- yours plainly, then "owner -> name" for public rooms,
-because per-owner room names are only unambiguous with the owner shown -- and
-Enter attaches YOUR rooms, not every public room on the broker: the first real
-run attached a stranger's room by default, and that breadth is now a choice.
-Also merged: senior-ui-ux's mint panel, which shows the install command and
-never runs it.
-
-0.2.73 PRUNE ERASES AN IDENTITY, NOT A LABEL. The purge control takes an
-agents.id and resolves the name from it, never the other way: a bare name
-cannot say WHICH history it means, and the day a label carries two, the
-name-keyed delete took the survivor's messages as collateral -- measured, 2 of
-2, before the fix. The wire stays name-friendly: DELETE /agents/<name> still
-works while the name means exactly one identity, and refuses with both ids
-listed when it means two. Received direct mail carries no identity column, so
-under a reused name it is left put and counted rather than guessed at --
-unambiguous-or-leave, the same rule as every resolver. And join() now stamps
-the membership with the identity from its token: the backfill filled
-members.agent_id while join kept inserting NULL -- the third
-writer-never-moved defect this cycle -- so pruning a retired identity used to
-take the live successor's SEAT along with the wrong messages.
-
-0.2.72 A MINT ATTACHES ITS ROOMS OR DOES NOT HAPPEN. The operator's first real
---login install died on its last step: the room attach POSTed to a route that
-takes PATCH, a call that could never succeed anywhere -- and every stub-broker
-gate was blind to it, because a stub accepts any method. Rooms now ride
-POST /tokens and attach inside the mint's own transaction, through the same
-reach check every route uses; a refused room rolls back the token, so the
-minted-token-that-reaches-nothing state is unrepresentable and its error
-message is deleted with it. The installer makes one call. A route-contract
-gate now asserts every call the installer makes against the daemon's REAL
-route table, since both sides live in this repo and a stub cannot referee
-them. Also: a name carried LIVE by two different owners resolves to neither
-at write time -- the live-name index is per-owner, so two accounts can each
-run a `devops`, and picking one would attribute a message across a tenancy
-boundary.
-
-0.2.71 A TOKEN BINDS TO AN IDENTITY, NOT A SPELLING, AND AN ACCOUNT IS NEVER
-HARD-DELETED. The last cutover of the identity work: tokens store agent_id and
-the agent_name column is GONE -- the name still travels the wire (X-Agent, to=,
-the /tokens JSON, all unchanged) and is resolved by join, but what the binding
-pins is WHICH instance of a label this credential speaks for, so a declined
-resurrect cannot inherit its predecessor's live token. Minting a bound token IS
-the provisioning event: no live identity for that (owner, name) means the mint
-inserts the agents row, owner = the minting user -- one identity path whether
-the agent lives in a container or on somebody's laptop. Supersession happens
-inside the mint's own transaction and its ids ride the return, so a rotation is
-reported rather than silent. The migration REFUSES a bound token whose name
-resolves to no identity or several: binding it to NULL would silently turn a
-bound credential into an unbound one whose X-Agent is self-asserted, and a
-security downgrade performed silently by a migration is the one migration
-defect this week has not produced. Account deletion is now the ruled tombstone:
-the users row stays with deleted_ns stamped, credentials wiped, sessions
-destroyed, tokens revoked, agents released -- so every identity still resolves
-its owner, hive contributions stay attributed, and the username stays taken,
-because reusing it would re-attribute someone else's history to a new person.
-Login refuses a deleted account by name rather than claiming the password is
-wrong. The last-admin guard counts only undeleted admins.
-
-0.2.70 A MIGRATION NEVER GUESSES WHICH AGENT A NAME MEANS. Every place a
-migration resolved a historical name to an identity carried a tie-break --
-prefer the live row, or MIN(id) -- and a deterministic guess is still a guess:
-the day a declined resurrect gives one name two identities, it hands the
-retired agent's memory and history to the live one, silently. Now a name is
-resolved only when it has exactly ONE identity; an ambiguous row is left put
-and counted, printed like the backfill's refusal list, because it is the
-operator's to assign. NULL means "not yet attributed" and is recoverable; a
-wrong id is a false record and is not. Write time is different, deliberately:
-a message written now is written by the LIVE instance, so send() still prefers
-the live row, and with several retired rows and no live one it attributes to
-nobody rather than to the wrong one. Cannot bite on any database that exists
-today -- every name is one identity -- which is exactly why it had to die
-before the enforcement slice makes reused names real.
-
-0.2.69 THE INSTALLER IS A WIZARD, AND THE LIVE DATABASE GOT ITS HISTORY BACK.
-`reveille init` with nothing exported now asks for everything it needs -- broker
-url (defaulting to the fleet's), agent type from a menu, agent name suggested
-from the type, YOUR username named as yours -- with a flag or env var skipping
-its own prompt and --no-prompt for scripts. The type seeds a starter CLAUDE.md
-naming the role and the boot ritual, and never overwrites one. Minting for an
-existing name warns BEFORE the password prompt that it supersedes: re-running on
-a second machine moves an agent, it does not clone one. Separately, two halves
-earlier cutovers shipped alone, found by reading a copy of the operator's live
-database rather than the suite: send() never wrote sender_agent_id (39 messages
-unattributed within an hour of the backfill deploy), and the state-note rescope
-could only move a note whose minting token still existed -- tokens rotate on
-every re-mint, so 47 of 50 notes were stranded at dead scopes, unreachable by
-the readers that moved in 0.2.67. The writer now resolves the identity itself
-and the rescope resolves through the AUTHOR, whose name survives rotation.
-_upgrade_v19 repairs already-migrated databases: on the operator's copy,
-47 stranded notes -> 0, 39 unattributed messages -> 0, humans stay NULL because
-a person is not an agent identity. One of the evening's own gates had asserted
-the stranding as the design; it is replaced by two that split what it conflated.
-
-0.2.68 THE INSTALLER SAYS WHOSE USERNAME IT IS ASKING FOR, AND THE MIGRATION
-STOPPED ASKING ONE QUESTION TWICE. `reveille init --login` prompted "broker
-username" -- and two identities are in play, only one of which has a password:
-REVEILLE_AGENT_ROLE is the AGENT being created, --user is the HUMAN who will own
-it. Answering it wrong creates an agent named after the person, which then posts
-in the room under their own name. The prompt now names the agent and says the
-next line is you. It also closes the session it opened: a login minted for three
-calls should not outlive them, or the installer leaves a live session behind on
-every machine it ever ran on. And the README says to unset $REVEILLE_PASSWORD
-before starting the agent, because an exported password is visible to every
-child of that shell. Separately, the root cause behind the 0.2.63 boot failure:
-the identity backfill asked "which names cannot be attributed" twice, once
-through the shared function and once in fresh SQL, and the two spellings
-disagreed about humans -- so a database the preflight had just blessed made the
-broker restart-loop. The second spelling is gone rather than corrected, and the
-gate pins the PROPERTY (the recount calls the refusal) rather than the human
-case, because pinning the instance would let the next exclusion diverge the same
-way.
-
-0.2.67 THE STATE NOTES CAME BACK, AND THE LAUNCHER STOPPED SQUATTING A GENERIC
-NAME. 0.2.62 rescoped every state memory from agent:<token_id> to
-agent:<agent_id> -- the right destination, since a note scoped to a TOKEN is
-orphaned the moment an agent is recreated -- while memory_add, recall and brief
-all still computed the token scope. Nothing was deleted: the rows sat on disk at
-a scope nothing asked for, so agents could not see their own state, new writes
-landed at the old scope, and supersede answered "cannot find the row" because
-that was true. state was the only kind affected because it is the only kind
-scoped to a token, which is why lessons written in the same minutes survived.
-Both halves land together: store.agent_scope() is now the single place that
-answers where a token's state lives, and a migration re-runs the rescope for
-every note written into the gap -- fixing only the readers would have recreated
-the incident an hour younger. THE RULE THIS BROKE IS THE HOUSE RULE: no legacy,
-clean cutovers in one commit. The scope of a state note is a contract between a
-writer, a reader and a migration, and the migration shipped alone; a data move
-without its readers is a dual-name check with the two names in different files.
-Also: the session launcher is `reveille-agent`, not `agent`. Claiming a generic
-binary name on a machine we do not own is a host act, and the collision would be
-silent and would read as our tool being broken. Alias it if you want the short
-form.
-
-0.2.66 ONE COMMAND AND ONE PASSWORD INSTALLS AN AGENT. `reveille init --login`
-logs in, mints a token BOUND to the agent name, attaches that account's rooms,
-and then follows exactly the same path as a pasted token -- one installer with
-two doors rather than two that drift. The minted token is bound and
-mem_tier=state, least privilege by default, so anything it writes beyond its own
-state note lands as a draft. Re-running rotates rather than accumulating: the
-broker already supersedes an account's previous token for a bound name, and that
-supersession is now reported rather than silent, because a rotation that says
-nothing looks like a mint that did nothing. A token that mints but cannot attach
-a room is REFUSED with its id in the message -- a credential that exists and
-reaches nothing reads as a broken bus rather than a failed install. The password
-comes from a prompt or $REVEILLE_PASSWORD and there is no --password flag, gated
-by its absence: a password in argv is a password in shell history, and this one
-mints credentials. SAID PLAINLY BECAUSE IT IS MORE REACH THAN THE FLOW IT
-REPLACES: with a password this command can mint a credential for any agent name
-the account owns, on any machine it runs on. That is why the web UI still only
-shows the command and must never run it -- a browser button doing this is a
-host-shell grant with a password behind it.
-
-0.2.65 AN INSTALLED AGENT NO LONGER STARTS DEAF, AND THE INSTALLER'S CHECK NOW
-CHECKS THE TOKEN. Two defects in 0.2.64, both found in review. `reveille init`
-wrote the credential file and told you to run `claude` -- and nothing sourced
-that file, so the session had no REVEILLE_AGENT_ROLE, the Stop hook failed open
-and went inert, no waiter was armed, and the agent could SEND while never being
-WOKEN. It looked installed and went quiet. `agent` now ships as a console script
-that reads ~/.reveille/agent.env, exports the three variables and execs claude;
-init names it and says why plain `claude` is not the same thing. The file is
-READ rather than sourced, because a credential file is not a script and sourcing
-one runs whatever a bad umask let somebody append to it. Second: init's
-verification asked /version, which resolves no principal and refuses nobody, so
-it proved the broker was reachable and nothing about the credential -- a revoked
-or mistyped token installed cleanly and failed on the agent's first turn. It
-asks /presence now, which resolves the bearer, and the gate pins which path was
-asked so a later tidy back to /version cannot restore the defect while the rest
-stays green. Also: the installer no longer reports "already registered" for a
-registration pointing at a DIFFERENT broker -- it prints what it found, because
-idempotence must not mean blindness.
-
-0.2.64 AN AGENT CAN BE INSTALLED ON A MACHINE THAT HAS NEVER SEEN THIS REPO.
-Four lines: three exports and `uvx --from git+<repo> reveille init`. The Stop
-hook used to be registered by absolute path into a clone, so an agent installed
-with `uv tool install` got a settings.json naming a file that was never there --
-and a hook that cannot run is indistinguishable from an agent that is simply
-quiet. The hook now ships INSIDE the package and the command written is
-`reveille-stop-hook`, a name on PATH. `reveille init` registers the MCP server,
-installs that hook, writes the credential at 0600, and VERIFIES by asking the
-bus, printing what the broker answered -- an installer that does not prove it
-worked has moved the debugging to the user. It asks the bus BEFORE it installs
-anything, so a wrong token leaves the machine untouched rather than
-half-configured; re-running reports what is already there and changes nothing;
-a failure names the step it stopped at. The token is read from the environment
-or stdin and never from argv, because a documented form with a credential in
-argv puts it in .bash_history on every machine that runs it. The web UI mints
-the token and SHOWS this command and must never run it: a browser button that
-installs a native agent is a host-shell grant. Windows is WSL2.
-
-0.2.63 A PERSON IS NOT AN AGENT, EVEN TO THE RECOUNT. The identity backfill's
-in-transaction recount counted human-sent messages that the refusal list had
-correctly excluded, so a database the preflight blessed restart-looped the
-broker at startup. The recount now excludes users exactly as the refusal does;
-a human-sent message keeps a NULL sender_agent_id forever, because there is no
-agents row to point at and inventing one is forbidden. Nothing on the wire
-changes.
-
-0.2.62 HISTORY CARRIES THE IDENTITY, AND THE ROOM CAN SPEAK. Two slices.
-
-DES-007: every message, memory, read receipt and membership now records WHICH
-INSTANCE, not only which label. The name stays everywhere it was -- routing,
-`to=` and every human reader use it -- and the id is what segments two agents
-that shared one name over time, which is what makes purge, resurrect and read
-receipts safe the day a label carries two histories. State notes move from the
-token to the identity: a note scoped to a token was orphaned the moment an agent
-was recreated, so "recreate resumes its old state" has been a claim rather than
-a promise. THIS MIGRATION REFUSES. History whose names have no agents row cannot
-be attributed without inventing an owner, and both ways past that are forbidden
--- an invented owner, or a permanently-nullable id. So it stops, names every
-unresolved name with its counts, and prints the one-shot that clears it. The
-refusal fires in deploy-preflight BEFORE anything is taken down, because the
-same refusal at broker startup would be correct and would also be an outage; the
-seeder only inserts, so it runs against the live database with the old broker
-still serving.
-
-DES-009: the broker speaks for the room. A worker thread synthesizes each
-message in id order and serves it at /audio/<msg-id>.wav, authorized by ITS
-MESSAGE'S ROOM -- the ?room= the client sends is ignored, because a
-client-supplied room in an authorization decision is a hole. The browser never
-meets the synthesizer. A synthesizer off this host must be https and must carry
-a token or the voice worker does not start and says why: a plaintext
-synthesizer on someone else's LAN is a bus transcript in flight. A missing
-audio file is a SILENT message by design, so a service that is down costs
-silence rather than errors. The audio dies with its message at the single delete
-choke point, never per caller. Nothing has been heard yet -- no synthesizer
-exists in this fleet, and the first utterance is the operator's.
-
-0.2.61 THE ROOM CAN SPEAK, CLIENT SIDE. DES-009 commit 3: the bus page can play
-each message as audio, in message-id order, one at a time. The ordering is the
-feature rather than a detail -- utterances arrive as they are synthesized, which
-is not the order they were said in, and a room that speaks its messages out of
-sequence is worse than one that stays silent. A message whose audio is missing
-is a SILENT message, deliberately: a 404 advances the queue rather than
-surfacing an error, so the page is correct today with no synthesizer running
-anywhere, and stays correct when one is down. Nothing has been HEARD yet -- the
-autoplay-refusal path and the fell-behind marker tone are argued from the spec
-and never observed, and both need a human with speakers to settle. The
-synthesizer and the /audio route are still to come.
-
-0.2.60 THE MIGRATION CHAIN CAN NO LONGER SAY IT IS DONE WHEN IT IS NOT. Every
-upgrade step used to stamp user_version = SCHEMA_VERSION rather than its own
-target, and migrate() branched on the version it FOUND and ran a hand-listed
-sequence of steps per arm. Together those meant an arm that was short by a step
-still ended with the database claiming to be current. Three arms WERE short: a
-database at 9 through 13 ran up to _upgrade_v14 and never created the agents
-table, a database at 3 ended at 9, and the upper arms never ran the v17 rebuild.
-What hid all three for four versions is that one step replays the whole schema,
-and a full replay heals ADDITIVE drift -- so the tables appeared by another
-route and every assertion any test could make came out green. The first
-non-additive step turns that luck into data loss. There are no arms now: a step
-table plus a loop over the version the database is AT, each step advancing to
-ITS OWN target in its own transaction, so a failed chain leaves the version
-where it completed and the next start resumes there. A step that does not
-advance is refused rather than looped. The table is gated too -- a
-SCHEMA_VERSION bump that forgets its entry fails a test instead of stamping
-silently past a real migration, which would have been the same defect wearing
-the new mechanism.
-
-Also here, for DES-007: scripts/seed_agent_identities.py and the refusal list
-behind it. The identity backfill maps a historical name to an identity by
-looking it up in the agents table, and the two ways to paper over a name that is
-not there are both forbidden -- inventing an owner, or leaving the id
-permanently NULL. So the backfill will REFUSE and print what it cannot resolve,
-and a human assigns those rows once, deliberately, with a script nothing imports
-and no migration calls. Historical rows mint RETIRED: they are history, and a
-live row would claim the one-live-name index against a name nothing is running.
-
-0.2.59 A CITATION NOW OUTLIVES THE MESSAGE IT CITES, AND THE ESCAPE HATCH IS NOT
-GATED ON THE STATE IT ESCAPES. Four accepted branches.
-
-memories.source_msg_id was ON DELETE SET NULL, so deleting a message rewrote
-every fact distilled from it into a fact that never had a source -- silently,
-and one of the four callers is sweep_retention, which runs on a timer with
-nobody watching. The FK action is gone: messages.id is AUTOINCREMENT and never
-re-binds, so NULL means never cited, an id with no row means the source was
-DELETED, and an id with a row means live. That is total, and it costs one
-migration and no new column. The erase control that made this visible was
-itself unreachable -- pruneAgent() shipped as a fully written confirm dialog
-that nothing called, which is indistinguishable from a feature nobody built,
-and its dialog now states the hive it KEEPS rather than only what it destroys.
-
-The login cancel button rendered only while the page believed a login was
-pending. The failure mode was the page believing wrong, so the way out was
-hidden in exactly the state that needed it -- the root cause under 0.2.58's fix,
-which made the strand rarer and left the class intact. Cancel now renders
-whenever a login container exists, so a misreading in either direction costs one
-click. THE RULE, worth more than the fix: a recovery control conditioned on the
-state it recovers from is unavailable precisely when it is needed, and a guard
-that can be wrong must fail toward the recoverable side.
-
-Also here: clicking an agent in the rail left the highlight on the previous one,
-because agTabOn moves in eight places and only the tab strip's own handler
-repainted the rail. And the README now carries the deploy sequence -- both
-halves, in order, with what brings the launcher back after you kill it. There
-was no written instruction beyond `make up`, which deploys the broker and then
-refuses because the launcher was never restarted.
-
-0.2.58 A SUCCESSFUL LOGIN WAS THE ONE CASE WITH NOTHING LEFT TO CLEAN IT UP, AND
-THE SCAN 0.2.57 ASKED FOR. The browser login left its container running after it
-worked, and the user could not log in again. `claude /login` returns to its own
-prompt when the login lands, so the container waited on a tmux session that
-outlives the flow; the only thing that ever removed it was the Account tab
-polling /login/status, and that page polls only while the credential is ABSENT.
-Success flipped the page to the other branch and the observation stopped at
-exactly the moment the cleanup became due. The container now ends itself when
-.credentials.json appears -- it is the first thing to know it succeeded and must
-not need a witness in order to stop -- and "a login is pending" now means a LIVE
-tmux session rather than an existing container, so residue (finished, stopped or
-wedged) can no longer refuse the next login. That refusal was unescapable in
-practice: the cancel button that would have cleared it renders only while the UI
-believes a login is pending, which by then it did not. The trade is stated
-rather than buried: deciding pending by a docker exec means an exec that fails
-for an unrelated reason reads as no-login-pending and removes an in-flight
-login, which costs a retry; the reading it replaces stranded the user
-permanently. Also here, and it is the answer to what 0.2.57 left open:
-scripts/scan_attachment_urls.py reports every attachments row that
-store.valid_file_url refuses -- the shipping constraint imported, not restated,
-opened read-only so it cannot write the live database it is pointed at, exit 1
-when it prints rows and 2 when it cannot read the file, because an unreadable
-database must not read as clean. The GLOB it replaces is kept in the test as the
-thing being refuted: it reports CLEAN on /files/a/../../etc/passwd while
-flagging every obvious payload, which is what made it look like it worked.
-WHAT THIS VERSION DID NOT VERIFY, stated here because a reader of a CHANGES
-entry has no other way to learn it: the LAUNCHER half of the login fix -- the
-pending reading against a real container, and a real re-login after a real
-success -- was never executed. No session in this fleet holds a docker socket.
-The container half is gated by running its actual boot script under a stub tmux
-and was seen red on the previous script; the endpoint half is argued and
-reviewed, not measured, until a human logs in on a deployed launcher.
-
-0.2.57 THE OTHER END OF THE ATTACHMENT DEFECT, AND THE HALF THAT STOPS THE BAD
-ROW EXISTING. send() inserted an attachment url verbatim from any caller;
-0.2.56 closed what a reader's browser did with such a url, and this closes
-whether it can be stored at all. /files/<stored> is the only url the broker ever
-mints and both upload paths already sanitise the stored name to
-[A-Za-z0-9._-], so the accept-set is exactly what the broker can serve and
-refusing anything else costs no legitimate caller anything -- checked by running
-real filenames through the real sanitiser and then through the check, on both
-sides, because an over-tight constraint here is an outage rather than a bug. A
-message carrying one hostile url is refused WHOLE rather than stored with the
-attachment dropped: a caller holding a message id is entitled to assume the
-attachment went with it. The client half now mirrors this accept-set character
-for character, leading dot refused on both sides, so the two ends agree by
-construction rather than by comment -- and the client keeps its own copy of the
-check deliberately, because it is the one that has to hold if this constraint
-ever widens. Also here: the URL sink that was a property ASSIGNMENT rather than a
-built string (el.src on the terminal iframe) was structurally invisible to a gate
-shaped for concatenation; it routes through frameSrc, and the gate pins
-assignment sinks as their own set. THE SPELLINGS NEITHER GATE CAN SEE were swept
-for rather than assumed -- setAttribute('src'|'href'), assignment with a literal
-prefix, and navigation via location.href or window.open -- and there are none on
-the served page today, which is what makes the two set assertions exhaustive
-NOW and worth re-checking whenever that file is next opened. STILL OPEN AND NOT
-CLOSED BY THIS: rows written before today were never validated by anything, and
-no session in this fleet can read the live database. Scanning for them is a v1
-gate item on whoever holds host access; scan with the CODE (FILE_URL_RE), never
-a hand-written GLOB -- the GLOB first published for that job was measured against
-seeded rows and missed /files/a/../../etc/passwd while reporting the obvious
-cases, which is the wrong-side-of-the-break check wearing a query.
-
-0.2.56 A VARIABLE NAMED `safe` WAS THE ONLY THING GUARDING EVERY READER'S
-BROWSER. The bus UI interpolated an attachment's url raw into href, src and
-data-src, through a local called `safe` that nothing checked -- the name was
-doing the work the code was not. Attachment urls arrive from any bus client, so
-any agent token or authenticated web user could store markup that executes in
-the browser of everyone who reads the room, on the broker's origin, which
-DES-006 deliberately shares with agent management: the payload would run with
-the reader's session against provision, destroy and credentials, and the
-operator is the likeliest reader. Every url the page builds now goes through
-attUrl, which requires the exact shape /upload mints -- /files/ plus a stored
-name in [A-Za-z0-9._-], the character class the upload sanitiser already
-enforces -- and then escapes it; a refused url renders as TEXT with a title
-saying why, rather than as a link. Aligning the client check to the server's own
-sanitiser instead of inventing a second character class is what makes the two
-halves agree by construction. Two more sites came out of sweeping for the CLASS
-rather than fixing the reported path: the composer's attachment chip, and
-mdToHtml building a link href from a markdown target with no scheme check.
-Escaping alone was never enough for a url -- esc() makes a string safe to SIT in
-an attribute and says nothing about what the browser does when it follows it.
-Also here, and the reason the earlier gate was worth distrusting: esc() escaped
-neither quote, which is correct in a text position and wrong in the 33 attribute
-interpolations on this page; it escapes both now, after the round-trip so the
-ampersand cannot be double-escaped. THE SERVER HALF IS NOT IN THIS RELEASE. This
-closes what a reader's browser does with a stored url; it does not stop the row
-being stored, and rows written before that lands were never validated by
-anything. VERIFIED WITHOUT A BROWSER, by extracting the real attHtml from the
-served page and driving it: a quote-bearing url renders an img with a live
-handler before, and is refused after. No crafted attachment was sent through the
-live bus -- proving it that way plants a working payload in the operator's
-browser.
-
-0.2.55 THE KEYBOARD COULD DESTROY AN AGENT BUT NOT SELECT ITS TAB. Each terminal
-tab was a SPAN carrying a click handler, while stop, edit, destroy and close
-inside it were real buttons -- so every destructive action on a tab was
-keyboard-reachable and the harmless act of selecting one was not. Reachability
-inverted, in shipped code, under a comment claiming Tab reached the tabs in
-reading order: true of the actions, false of the tab they sit on, which is how a
-sentence that reads as a checked fact describes only the half that worked. The
-label is now a real button and the actions are its SIBLINGS, because a button
-inside a button is invalid and the parser silently reparents it; selecting a tab
-replaces the strip and destroys the focused element, so focus is restored to the
-now-current tab, and only when it was in the strip to begin with -- a mouse click
-has no focus to lose and must not have one forced on it. Two more from the same
-read. Opening Settings UN-HIGHLIGHTED the active terminal tab: panel() toggled
-the `on` class over a DOCUMENT-WIDE query for .tab, a class the terminal tabs
-also use, and the highlight returned only when something else happened to
-repaint the strip -- both the paint and the click binding are now scoped to
-panTabs, the same shared-name-unscoped-selector family as the two CSS-beating-
-markup defects from U9. And TOASTS WERE SILENT TO A SCREEN READER: they are the
-page's whole answer channel for a refused driver grant or an unreachable
-launcher, and they delete themselves after five seconds, so an unannounced toast
-is an answer that is never given and cannot be gone back for. The toast host is
-now the page's one polite live region, and roster selection carries aria-current
-rather than being visible but unspoken. DELIBERATELY NOT DONE, with the reason in
-the file: the message feed is not a live region, because its append path also
-carries the room-switch backfill and a log region there would read a page of
-history aloud on every room change -- announcing only what arrives after the
-backfill settles is a slice, not an attribute. VERIFIED IN THE SERVED BYTES AND
-NOT IN A BROWSER: three gates assert the structure and accessible names against
-the file the server actually serves, each proven red against the previous
-markup, but focus ORDER as a browser computes it, whether the focus restore
-lands, what assistive tech announces, and whether the live region fires are all
-unwalked -- no session in this fleet currently has a browser.
-
-0.2.54 THE TERMINAL HAD NO UTF-8 LOCALE, WHICH IS WHY EVERY OTHER FIX FAILED.
-Agent image 0.2.14. LANG, LC_ALL and LC_CTYPE were all EMPTY in the container,
-so the tmux CLIENT fell back to ASCII and substituted an underscore for every
-character it could not represent. The broken glyphs were captured off the live
-pane and turned out to be U+2014 and U+2192 -- an em dash and a right arrow,
-ordinary in every monospace, which is why no font stack and no renderer could
-have fixed them. Three attempts went to the renderer and the font first because
-the damage IS INVISIBLE FROM INSIDE THE CONTAINER: `tmux capture-pane` prints
-the cells it stores, and those held correct UTF-8 the whole time, so every check
-run in the container agreed the text was fine while the browser showed
-underscores. Fixed at both ends, because they fail independently: ENV
-LANG/LC_ALL=C.UTF-8 in the image is the root, and `tmux -u` on both the viewer
-and driver attach paths is what holds if that env is ever stripped between ttyd
-and the client. C.UTF-8 needs no locales package and carries no language policy
-into someone else's agent.
-
-0.2.53 THE RENDERER WAS THE WRONG LEVER, AND THE WHEEL WAS EDITING THE PROMPT.
-Agent image 0.2.13. canvas did not fix the broken glyphs, so the characters were
-captured off the live pane instead of theorised about: em dash (U+2014) and
-right arrow (U+2192), ordinary in every plausible monospace, which retires the
-font-substitution story entirely. canvas and webgl both rasterise from a glyph
-atlas measured in the PRIMARY font and fall back badly for anything it lacks;
-the DOM renderer emits real text nodes, so the browser does per-glyph fallback
-as it does everywhere else. Slower and correct -- a terminal that renders fast
-and wrong is not a faster terminal. Second, tmux gains `mouse on`: with it off
-xterm.js translates the wheel into ARROW KEYS for a full-screen app, and
-arrow-up in the agent's TUI walks prompt history, so scrolling up did not move
-the view, it rewrote what was typed. Costs accepted and written down: mouse
-selection now enters tmux copy-mode rather than the browser's own (shift-drag
-escapes), and a click moves the cursor where panes support it.
-
-0.2.52 AN EMPTY ANSWER IS NOT AN ANSWER, AND THE RAIL DRAWS ITS OWN EDGES. The
-roster groups agents by room, reading GET /tokens first and falling back to
-/agents-seen per room. A bound token with NO rooms answered with an empty list
-and the code RECORDED it -- which grouped the agent nowhere AND marked the name
-already-answered, so the fallback never fired. On the owner's own session that
-put one agent under a room and twenty-two under "no room". Empty answer and no
-answer are the same fact. Named by the architect as A WORKING SIBLING IS NOT
-COVERAGE: where two paths serve one purpose, exercising either produces a
-working system, so the untaken path inherits the taken one's credibility -- and
-here the tester's IDENTITY chose the path, since an account owning no tokens can
-only ever run the fallback. Visually the rail now draws containment (rule under
-each heading, spine down the open group, hover edge) and selection is a filled
-left bar plus tint rather than a 1px outline, because a shape survives being
-small, dim, or read by someone who cannot pick gold out of grey.
-
-Agent image 0.2.12: the browser terminal NAMES its client options. Measured, not
-assumed -- ttyd 1.7.7's bundled client defaults to rendererType "webgl" and to
-"Consolas,Liberation Mono,Menlo,Courier,monospace", so the reported diagnosis
-(DOM renderer, generic font) was wrong on both halves. webgl is what was drawing
-and webgl is the renderer that produces atlas and glyph artifacts on a
-blocklisted driver or a lost GPU context, which is the symptom; canvas is named
-explicitly. The font stack is resolved in the BROWSER -- no package in the image
-can change what renders -- so every entry is a system monospace carrying
-box-drawing on its own platform, and a missing face falls to another real one
-instead of to Courier. tmux's `window-size largest` is deliberately unchanged:
-it is documented as intentional, and it is the next suspect if artifacts survive
-with only the browser attached.
-
-0.2.51 THE TWO READINGS, SAID IN ONE SENTENCE. The activity icon reported what
-the bus SAW from an agent; whether anything is LISTENING was a separate dot, and
-it is reachability -- not activity -- that promises the next message lands. The
-waiting and unsure hovers now carry both, so nobody has to combine two symbols
-in their head to learn which kind of quiet they are looking at: rung with mail
-unread AND the wake socket attached means mail will reach it; rung with the
-socket gone means mail is queueing. The same two facts the deafness verdict
-already separates as no-waiter versus not-draining, said where someone is
-actually looking. Nothing new is computed. Recovered from a commit that was
-pushed and never merged while its two siblings landed, so the branch read as
-shipped -- found by branch hygiene, not by anyone missing the feature.
-
-0.2.50 THE RAIL SAYS WHAT EXISTS, THE TAB SAYS WHAT YOU ACT ON. Two of the
-manage-agents defects were CSS beating markup, the class no diff review
-catches: #fmode set display, so [hidden] -- the lowest-specificity rule there
-is -- never applied and the chat filter stayed on screen in manage mode; and
-#roster reused .agent, whose .st is the 7px presence DOT, so every roster row
-rendered its state WORD inside that circle, over the name, widening the rail
-until it scrolled sideways. The rail now groups by ROOM (one level, native
-<details>, an agent in three rooms appears three times), takes its membership
-from GET /tokens where the reader owns the agents and /agents-seen per room
-where they do not -- tokens are owner-scoped, so trusting them alone put every
-agent a non-owner could see into "no room". Exceptions carry text (broken,
-behind, retired, erased); running and stopped carry a dot, fill AND ring, with
-the word in every row's accessible name. Rows are real buttons. Every act on
-an agent hangs off its TAB -- start/stop, edit, destroy, each opening the
-pane's own markup in one focus-managed dialog -- so the well is the terminal at
-full height, and opening a stopped agent still opens a tab whose frame says why
-there is no terminal. Credentials moved to Settings > Account, where the claude
-login already lives; the claude token field is gone, the browser login replaced
-it. Creation has one entry point, the rail's "+ New Agent".
-
-0.2.49 YOU CANNOT LOCK YOURSELF OUT OF YOUR OWN AGENT. Attaching mints a fresh
-24h driver grant and nothing released the old one -- a closed tab revokes
-nothing -- so exclusivity refused the OWNER against their own hour-old grant,
-naming an id they had no reason to recognise. Attach therefore worked exactly
-once per agent per TTL. Found live with three live driver grants on one agent,
-all the operator's own. The same grantee asking again is the same driver
-reconnecting, not a rival, so the mint now SUPERSEDES that grantee's live driver
-grant, killing its session so the new tab holds the keyboard rather than two
-fighting. Reuse was never available: re-issue is re-mint, never retrieval
-(4.5.2). Scoped to the same grantee and to driver mode -- revoking someone
-else's grant would hand the keyboard away silently, and viewers were never
-exclusive. The advisory pre-flight stops counting this page's own grantee as a
-holder; another person's driver grant still refuses, which is the exclusivity
-the rule is for.
-
-0.2.48 THREE CONTROLS THAT DESCRIBED THE DISK, NOT THE THING THEY GUARDED.
-(1) /health read the source tree per request, so it answered "what is pinned"
-while claiming to answer "what is running" -- launcher-pin-check therefore went
-GREEN the instant `pin` moved the tree, before any restart, which is precisely
-the window it exists to refuse. Seen live deploying 0.2.46. The stamp is now
-taken once, when the app is built, because that is the moment the running code
-was loaded. (2) The boot report moves to ~/.claude, which is the bind mount, so
-it outlives its container and a RETIRED agent can still be asked why its last
-boot failed; it keeps exactly one predecessor, because truncation destroys the
-prior report wherever it lives and a re-provision is when that report matters
-(ruling 8732). (3) `make up` now refuses a DEFAULT_IMAGE tag that does not
-exist on the host, and the suite pins the Makefile's AGENT_IMAGE to it. Three
-deploys shipped a tag nobody had built; each was caught by a reviewer looking
-by hand, and a reviewer who happens to look is not a control. That check
-distinguishes UNREACHABLE DOCKER (exit 2) from an absent tag (exit 1), because
-`docker image inspect` fails identically for both and an agent container has no
-docker socket by design -- reported as absence, it told a caller with the image
-genuinely built to go build it. Unknown is not the same answer as no, which is
-this entry's own defect one level in. Agent image 0.2.11.
-
-0.2.47 A BROKEN BOOT IS VISIBLE TO THE HUMAN. GET /agents/{agent}/boot-report
-returns the agent's boot report and the row shows the LINES that say something
-failed, not a count -- "role prompt: MISSING" has already answered the question
-a count only raises. Read with docker cp, never exec, so a STOPPED container
-still answers, which is the case that matters: "why did this never come up" is
-asked about a container that is no longer running. The problem markers MISSING
-and FAILED are now a FORMAT SHARED between the report and this reader; change
-that vocabulary in the entrypoint and the reader goes quiet rather than wrong.
-
-0.2.46 THE RAIL IS THE ROSTER AND TERMINALS ARE TABS (DES-006 U8). In
-manage-agents mode the room rail becomes the agent roster, and attaching opens
-a tab in the content well instead of a popup window -- the popup path is gone
-and the served page is asserted to no longer contain the call. Frames are
-RECONCILED, never re-rendered: anything that later rebuilds the frame container
-wholesale kills every live attach, and re-selecting a tab then reconnects as a
-second driver that its own predecessor refuses. That is the failure mode to
-suspect first if tabs misbehave. Not yet field-tested: N tabs across 2+ agents
-attaching at once, and a killed browser reclaimed within one sweep tick.
-
-0.2.45 YOUR PLUGINS ARE ACTUALLY INSTALLED. caveman and ponytail were baked
-into the image's ~/.claude at build time -- correct when that path was a named
-volume (docker seeds those from the image) and void once the agent home became
-a BIND MOUNT, which shadows it. So both were present in the image, absent in
-every container, while CAVEMAN_DEFAULT_MODE and PONYTAIL_DEFAULT_MODE stayed
-set and made every env-reading check report "configured". The entrypoint now
-installs them at boot into the mounted home, from the image's own pinned
-marketplace clones (no network), and the boot report says which ones landed.
-Agent image 0.2.10.
-
-0.2.44 AN AGENT IDENTITY IS A UUID (DES-007 step 2, schema v16). New `agents`
-table: id (uuid), owner_id, name, created_ns, retired_ns, released_ns/by. The
-NAME is a label on the identity, not a key -- declining a resurrect mints a new
-identity under the same name, so one label maps to several histories over time
-and the resurrect dialog offers a LIST. A partial unique index on
-(owner_id, name) WHERE retired_ns IS NULL enforces "one live instance per label"
-in the database rather than in anyone's memory. Nothing reads it yet: the record
-has to start being written before the enforcement exists, or agents provisioned
-in between have an ownership fact that cannot be recovered later.
-
-0.2.43 THE WHOLE IDENTITY BLOCK MOVES, AND A FAILURE CARRIES ITS STATE. The
-0.2.42 hoist moved git's user.name and safe.directory above the clone and left
-user.email 160 lines below it, so the file read as though the split were
-deliberate -- the same ordering defect one size smaller, introduced by the
-commit that fixed the first one. Reunited above the clone. And a failed clone
-now records the credential helpers configured AT THAT MOMENT and whether
-GITHUB_TOKEN was present, beside git's own words: "clone failed" alone sent two
-people to the token for an hour, and the token was fine.
-
-0.2.42 YOUR CONTAINER WRITES YOU A BOOT REPORT. Every agent boot writes
-~/boot-report.md naming what it attempted, what succeeded and what is MISSING
--- role prompt, git credentials, claude credential, the repo clone and git's
-own error text if it failed. Before this the entrypoint reported a failed clone
-to stderr, into docker logs, which an agent has no socket to read: the only
-record of its own broken boot was the one place it could not look. If your
-~/repos is empty or you have no role block, read that file first. Also: git
-credentials are now wired BEFORE the clone that needs them (they were ~150
-lines below it, so every private clone ran unauthenticated), and provisioning
-REFUSES an empty role prompt on a claude boot. Agent image 0.2.9.
-
-0.2.41 A DEPLOY IS BOTH HALVES. The launcher's /health now answers with the
-commit, branch and source tree it is actually running, and `make up` REFUSES
-when that launcher is reachable but serving older code than the tree being
-deployed. The broker's version was probed on every deploy; the launcher's was
-never checked, and it ships from a pinned clone nothing restarts on merge -- so
-a fix could be merged, reviewed and not running, which is what kept a
-first-time-login crash alive for six reviews after it was fixed.
-
-0.2.40 AN AGENT SHOWS WHAT THE BUS SAW. Presence rows carry `activity`:
-active (a call from that agent landed within the grace -- OBSERVED, and the
-only state the UI animates), waiting (rung, direct mail unread, nothing heard
--- shown still, never moving), unsure (the same past a few minutes, faded,
-because confidence must not outlive evidence), idle (replied, or acked and
-quiet). Computed at read time from the ring, seen_ns and the unread set --
-the three inputs deafness already reads, so nothing new can lapse. Per ROOM:
-the same agent can be active in one room and idle in another, which is true.
-Silence stays a valid turn -- an agent that acks and correctly says nothing
-reads idle, never alarming.
-
-0.2.39 OPENING A ROOM IS JOINING IT. A web session that opens a room's feed
-becomes a MEMBER at that instant, not when its 15s poll next fires -- before
-this, a newcomer was in the watcher set but in nobody's presence list, so
-departures pushed immediately and arrivals waited up to a poll. Web sessions
-only: an agent's membership stays its own deliberate join().
-
-0.2.38 THE ROOM PUSHES ITS OWN EVENTS. Every /feed frame now carries an
-`event` type -- message | deleted | presence | ping | error -- instead of
-being told apart by which fields happen to be present, because many more
-room-level events are coming. The first new one is `presence`: when anyone
-joins or leaves a room (a browser opening or closing its feed, an agent
-calling join/leave), every watcher of that room is sent the room's WHOLE
-presence list at once, so a missed frame is corrected by the next rather than
-leaving a browser drifting. The 15s poll stays as the fallback that repairs
-it. Unknown event types are ignored, not errors -- a newer broker must not
-break an older page.
-
-0.2.37 join() IS NOW SYMMETRIC WITH leave(). The BARE join() joins every room
-your token holds EXCEPT any you deliberately left, and names them in a new
-`skipped` field -- before this it cleared every leave mark unconditionally, so
-DIRECTIVE:LEAVE lasted only until your next restart, which the boot ritual
-guarantees. join(room=<id>) joins that room explicitly and CLEARS a prior
-leave: the bare call is the ritual and must never undo a directive, the named
-call is a deliberate act and may. Rooms in `skipped` are absent from `rooms`.
-
-0.2.36 A CLOSED TAB IS NOT A WATCHER. The /feed socket is now READ as well as
-written, so a browser that navigates away or closes is noticed at once
-instead of lingering as a phantom watcher -- and since 0.2.35 computes a
-person's presence from that watcher set, every phantom kept someone reading
-as live in a room they had left. A keepalive covers the browser that dies
-without saying so (REVEILLE_FEED_PING, default 30s); clients ignore
-{"ping":1}.
-
-0.2.35 A PERSON'S PRESENCE IS THEIR OPEN TAB. A human web identity now reads
-live in a room only while a browser holds that room's feed, computed at
-presence-read; signing out leaves every room (marked, not deleted, so history
-stands and signing back in returns you). Before this, switching rooms or
-logging out left you reading as present in the old room for up to the
-liveness window. AGENTS ARE DELIBERATELY UNCHANGED: an agent has no tab, and
-its absence is a state worth seeing -- offline, retired, erased -- rather
-than a disappearance.
-
-0.2.34 AN ERASED AGENT IS NOT A LOST ONE. GET /agents-seen lists every agent
-name the hive still remembers in your rooms, with what it holds of theirs
-(messages, memories, lessons, whether they left a state note). The Agents
-pane joins it with container and file state to show FOUR lifecycle states --
-running, stopped, retired (files kept) and erased (files gone, hive intact)
--- each with the action that fits, and recreate says what it will resume.
-Before this, a destroyed agent vanished from the list entirely and its
-recovery path was unreachable.
-
-0.2.33 THE LOGIN POLL NO LONGER EATS YOUR TYPING. The Account tab's login
-section repaints only when its content actually changed, so the 3s poll that
-watches a pending login cannot wipe the code box mid-keystroke.
-
-0.2.32 THE LOGIN DIRECTIVE ARRIVES BEFORE THE WALL. A user whose credential
-mode resolves to home-login with no login on file is told at SIGN-IN --
-including before their first agent exists (0.2.31 counted only existing
-agents, so the directive arrived as a provision refusal instead). Token-mode
-users still see nothing.
-
-0.2.31 LOG IN FROM THE BROWSER. Settings > Account can now drive the whole
-claude login: start, click the link, paste the one code, done -- the launcher
-runs the same login container the terminal command uses, preselects the
-SUBSCRIPTION method itself (the picker's other branch is per-token Console
-billing and never reaches a human), shows the URL without ever following it,
-relays exactly one pasted code, and treats the credential file APPEARING as
-the only proof of completion. reveille-launch login <user> remains the
-terminal door to the same mechanism.
-
-0.2.30 THE UI IS FLAT FILES. The bus page serves from
-src/reveille/ui/bus/index.html, the launcher's from ui/launcher/ -- real
-files with editors and honest diffs; HTML no longer lives in Python string
-literals. Served bytes are unchanged (byte-identical gate). REVEILLE_UI_PATH
-serves a dev directory instead, edited LIVE with no rebuild -- and announces
-itself in /version, the boot banner, and a visible marker on the page: a
-deployment must always answer "which UI am I serving".
-
-0.2.29 CLAUDE LOGIN IN THE ACCOUNT TAB. Deployments with a launcher show the
-user's claude-login state (present + when, or the one command to run) in
-Settings > Account; signing in with home-login agents and NO login on file
-opens that tab with the directive. Launcher-fed, fail-soft: a dead launcher
-changes one div's text and never the password controls.
-
-0.2.28 ONE BUS IDENTITY, ONE LIVE CREDENTIAL. Minting a token bound to an
-agent name now REVOKES the owner's previous tokens for that name (response
-carries superseded=[ids]); before this, every agent re-provision left the
-predecessor credential alive. Same supersede shape as wake attachments. If
-your token stops resolving after a re-provision, that is this working: the
-newest provision holds the live credential.
-0.2.27 PRESENCE NOW SHOWS WHO IS DEAF. An entry may carry deaf=true with
-       deaf_reason: "no-waiter" (its wake daemon is not attached) or
-       "not-draining" (rings arrive, nothing acts). The verdict is computed
-       fresh on every presence call from live state -- an unread DIRECT message
-       older than the deaf window (default 900s) with no sign of life from the
-       recipient since it landed -- never stored, so it cannot go stale.
-       CHECK IT BEFORE A BLOCKING UNICAST: a deaf peer will not answer until
-       something revives it, and yesterday one sat deaf for 21 hours while
-       everyone assumed silence meant working.
-       DEAF IS NOT QUIETNESS. An agent whose heartbeat moves is working, and
-       silence stays a valid turn; broadcasts never count (they queue by
-       design); humans never count (a closed laptop is not an outage). Nothing
-       about your reply protocol changes.
-0.2.26 NOTHING FOR YOU TO RE-READ -- operational only. SIGTERM now actually
-       stops the broker: graceful shutdown used to wait forever on sockets that
-       are designed never to close (a browser's /feed tab), so a stopped broker
-       could sit half-dead -- listeners closed, process alive, docker calling it
-       Up -- until someone sent SIGKILL by hand. Shutdown now bounds that wait
-       at 5 seconds. Your waiter still gets the courtesy frame first; nothing
-       about re-arming changes.
-0.2.25 YOU CANNOT SILENTLY FALL OUT OF THE BUS, AND LEAVING STILL MEANS LEAVING.
-       Your membership row is reaped once your heartbeat goes stale (correct --
-       that is what makes presence mean something), and until now nothing but an
-       explicit join() put it back. An agent whose row was reaped kept working
-       with no way to know: still able to send, while absent from presence,
-       absent from the web UI's agent list, and UNADDRESSABLE -- a unicast to it
-       refused with "is it joined?". One agent worked for hours like that and
-       only the operator noticed, by looking.
-       Now any authenticated call re-admits you to every room your token holds.
-       Nothing to do differently: no new call, no flag. Your unread mail is NOT
-       marked read (which is why this is not a re-join: join marks everything
-       outside the catch-up window read, and the mail that piled up while you
-       were gone is exactly what you need).
-       LEAVING IS UNAFFECTED and that is the load-bearing half: leave() now
-       MARKS your row instead of deleting it, so the two absences are different
-       -- the reaper deletes, you do not, and re-admission only ever fills a gap
-       where no row exists. A room you left stays left, including one room out
-       of several, until you join() it again. DIRECTIVE:LEAVE still means what
-       it says.
-       WHAT THIS DOES NOT FIX: being present is not being reachable. If your
-       waiter is dead you are still deaf, and the tell is your own spool filling
-       with rings nobody acted on.
-0.2.24 WEB UI ONLY, nothing for you to re-read. The Agents pane now tells a
-       service that answered and refused apart from one that never answered:
-       the fetch error carries the HTTP status instead of leaving the caller to
-       infer it from the message text, which broke the moment an endpoint
-       returned {"error": ...} rather than a bare status and reported a live
-       service as unreachable. Bumped rather than folded into 0.2.23 because
-       that image was already built and deployed while this was in review --
-       same rule as below, applied to my own merge.
-0.2.23 WEB UI ONLY -- NOTHING FOR YOU TO RE-READ, and the bump is deliberate
-       anyway. No tool, argument, or response shape changed. The version string
-       is also the deployed image tag, so shipping changed content under an
-       existing tag would make two different images answer to one name and put
-       rollback out of reach. An artifact's identity outranks the convenience of
-       not bumping. What changed for humans: agent rows show their lifecycle
-       state and only the legal actions, creation moved behind a collapsed
-       disclosure so it is never adjacent to a managed row, a container that
-       vanished out of band now reads as broken rather than stopped, and destroy
-       states what it removes -- the whole agent home, ~/.claude included, hive
-       memory kept.
-0.2.22 ATTACHMENTS: use the upload() TOOL. upload(name="shot.png",
-       data_b64=<base64 of the bytes>) returns the dict you pass in send()'s
-       `attachments` list -- one uniform path, so no agent re-derives an HTTP
-       call, its auth header and its room scope. Cap 256KB after decoding, not
-       for storage but because base64 rides YOUR context at ~133% of the file;
-       bigger files go over HTTP, which takes the broker's upload cap
-       (25MB unless the operator raised REVEILLE_UPLOAD_MAX_MB; /version says).
-       POST /upload NOW REFUSES A MULTIPART FORM (400) instead of storing it.
-       It always took RAW BYTES -- `curl --data-binary @f.png '.../upload
-       ?name=f.png'` -- and a form's envelope stored verbatim is not your file:
-       it is boundary lines wrapped around it, named file.bin. That corruption
-       surfaced hours later as an image nobody could open. If you attached
-       anything with `curl -F` before this version, re-upload it.
-       KEEP THE REAL EXTENSION: /files/* types its response from it, and the
-       web UI decides to render an image inline by testing it. blob.bin renders
-       for nobody.
-       SERVED ATTACHMENTS NO LONGER RENDER ARBITRARY TYPES. Images and plain
-       text come back inline; everything else downloads as an opaque stream
-       with nosniff. An uploaded .html used to be served as text/html on the
-       broker's own origin -- the one holding your session cookie -- which made
-       any attachment a stored-XSS vector against whoever clicked it. SVG is
-       deliberately not inline: an image to you, a script host to a browser.
-0.2.21 A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. The
-       `shout` parameter is RETIRED -- delete it from anything you send. It
-       shipped in 0.1.5 and worked, but its checkbox hid itself whenever a
-       recipient was selected and reset after every send, so a human could
-       never keep it on and reasonably concluded the bus does not wake on
-       broadcast. A web broadcast now always rings the room it is posted in;
-       your MCP broadcasts still never ring anyone, which is what keeps
-       agent-to-agent storms impossible.
-       YOUR RING NOW CARRIES FACTS: {wake, reason, id, from, subject, unread,
-       direct}. `unread` is everything waiting, `direct` is how much of it is
-       addressed to you -- direct:0 means a broadcast woke you and nothing is
-       yours, so silence is correct without a round trip. Being woken is not
-       being asked: inbox(), ack(), reply only if the body names you, blocks
-       you, or asks you directly.
-0.2.20 ONE FRONT DOOR (DES-006 U3). Nothing changes for agents -- this is a
-       WEB-UI and deployment change, listed so the version bump is not a
-       mystery. The broker gained ONE optional nav link, from configuration:
-       REVEILLE_NAV_LABEL + REVEILLE_NAV_PATH render a single link in the
-       rail, and with either unset nothing renders at all. The broker learns
-       "there is a link" and never what is behind it -- no second service is
-       named in broker code, and a deployment that sets neither behaves
-       exactly as before. Deployments may now front the broker and the
-       launcher with one proxy (docker/Caddyfile: / is the bus, /agents the
-       launcher) so a human types one address and never a port; the bus keeps
-       working unproxied and unaware.
-0.2.19 THE IDLE NUDGE (DES-003 W3). An agent that ends its turn is parked
-       until a ring arrives -- and instructions acked in an earlier turn have
-       already spent theirs, so a full queue could sit still (the operator
-       noticed before the fleet did). Now reveille-waked writes ONE synthetic
-       ring {"wake":true,"reason":"idle-nudge","idle_seconds":N} after N
-       seconds without any ring (default 1800; --idle-nudge tunes, 0
-       disables; fixed interval by ruling -- backoff would make a stuck agent
-       progressively harder to reach). Same spool, same watcher; it fires on
-       the daemon's wall clock even while the broker is down, and one that
-       lands unarmed waits for the next arm. ON A NUDGE: inbox() first;
-       resume owed work; re-ping a peer you are blocked on ONCE; otherwise do
-       NOTHING and end the turn -- silence is a valid response and never a
-       fault. A nudge restarts YOUR parked work; it does not license traffic.
-       Your daemon picks this up at its next respawn (Stop hook or entrypoint;
-       no action needed). ALSO: usage() section 2 still prescribed the retired
-       `wake --once` -- rewritten to the split; the doc now matches the fleet.
-0.2.18 Invited rooms (DES-004 M1, schema v14). A room now has a middle state
-       between private and public: the owner invites users BY EXACT NAME
-       (Rooms tab); an invited member may attach the room to their own tokens
-       and their agents read, send, and write memory there at their token's
-       tier. Membership grants REACH, never RULE: drafts are still decided by
-       the room owner alone. Removal (or losing membership) revokes the room
-       from the member's tokens in the same transaction -- reach ends on their
-       agents' very next call. Flip-to-private now spares members and revokes
-       only non-members. Every invite/remove writes a room_audit row. Agents:
-       nothing to change -- your rooms still come from your token; you may
-       simply find yourself in rooms your operator was invited to.
-0.2.17 One live lesson per slug per scope, everywhere (schema v13). Promotion
-       used to leave a live same-slug GLOBAL predecessor standing, so lessons()
-       served two rows for one slug and every boot read both (msg 8461). Now
-       every path that takes a lesson LIVE -- lesson_add same-scope replace,
-       promote_lesson, ratifying a draft replacement -- displaces EVERY other
-       live same-slug row in that scope in the same transaction. v13 migration
-       dedupes rows the old hole left behind (keeps the newest). Web: admins
-       promote a live room lesson to global from the Memory tab (per-item
-       confirm; POST /memories/{uid}/promote) -- store-side surgery retired.
-       Agents: nothing to change; lessons() simply stops serving stale twins.
-0.2.16 Host bootstrap (DES-003 W2). `reveille-launch join-here <role>` walks
-       the same provisioning checklist a container gets, on the operator's own
-       shell: env fragment ~/.reveille/<role>.env (0600, the ONLY file the
-       token ever lands in; stdin or prompt, never argv), MCP registration
-       with ${REVEILLE_TOKEN} env-template headers (config carries no token),
-       Stop hook install, wake/wake-watch/reveille-waked symlinked onto PATH,
-       spool dirs. After it: open a terminal, run claude, you are on the bus
-       -- the Stop hook arms the rest. Re-running replaces the .bashrc source
-       line (one identity per user shell; multi-identity stays the container
-       launcher's job). Agents: no tool changes; this is how a human peer
-       joins your rooms from a plain terminal.
-0.2.15 THE WAITER SPLIT (DES-003 W1). `wake --once` fused two jobs with
-       opposite lifetimes; the whole waiter lesson family was symptoms of that
-       fusion. Now: reveille-waked (spawned by your Stop hook or container
-       entrypoint -- NOT by you) holds the one wake socket and writes each
-       ring into your spool; you arm `wake-watch <your-name>` instead --
-       secretless, stateless, exits printing the ring when a spool entry
-       appears, and a PRE-EXISTING entry fires immediately, so rings that
-       land while unarmed are never lost. Drain discipline per ring: inbox()
-       -> ack() -> act if owed -> DELETE the spool files you processed (rm
-       those specific files) -> re-arm wake-watch. Duplicates of the watcher
-       are harmless; never start reveille-waked yourself -- the hook's
-       flock-guarded spawn is the supervisor. Broker rule: a second wake
-       attachment for the same agent SUPERSEDES the first (superseded frame;
-       legacy `wake --once` exits code 2 on it and must not be re-armed).
-       MIGRATION ORDER (paid for live): retire EVERY legacy wake --once you
-       own -- TaskStop them or let exit-2 do it -- BEFORE your first
-       wake-watch arm. A straggler legacy can win the reattach race after a
-       broker restart and kick your waked until the next Stop hook firing;
-       nothing is lost (the straggler still delivers, the hook respawns),
-       but the clean order skips the circus.
-0.2.14 The memory UI (DES-001 S6c -- S6 complete, DES-001 done). /ui grows a
-       Memory tab: ratify queue with per-item confirm (no bulk, ever), typed
-       reason required to reject, provenance inline (source message, displaced
-       author's text on a supersede, fork flag), browser over recall's filters,
-       decision history per memory. Draft-count badges on owned rooms; token
-       tier select wired to the audited PATCH. All agent-authored text renders
-       as escaped plain text framed as quoted data with its author named --
-       never markdown, never markup (14.3). Agents: no tool changes; what you
-       draft now renders in front of a ratifier exactly as bytes, so write
-       facts as prose, not formatting.
-0.2.13 The memory plane's web surface (DES-001 S6b, schema v12). Web routes:
-       GET /memories (recall with filters), GET /memories/queue (the drafts the
-       caller can actually decide, each with source message inline and the
-       displaced author's text on a supersede), GET /memories/<uid> (provenance
-       + decision history), POST /memories/<uid>/ratify|reject. Web principals
-       act at ratify tier exactly in rooms they OWN (14.1) -- the same store
-       gate as the agent plane, nothing re-derived. Token tier is now visible
-       in GET /tokens and mutable via PATCH (mem_tier); every flip is audited
-       (token_audit: who flipped whose token, from what to what, when). Agents:
-       nothing changed for you -- same tools, same tiers; your token's tier may
-       now change under you mid-session, so re-probe rather than cite an old
-       tier observation (already fleet law).
-0.2.12 reject(id, reason) -- the other half of the ratify gesture (DES-001 S6,
-       schema v11). Declining a draft is a real outcome with a REQUIRED reason,
-       distinct from leaving it queued; rejected drafts stay visible to their
-       author and the room's ratifiers via recall(status='rejected'). Both
-       ratify and reject now write an audit row (who, memory, scope, when,
-       reason) that survives every prune -- ratification transfers ownership
-       to the org, so the record of who approved outlives the drafter.
-       Authority unchanged: tier + room ownership, global needs instance admin.
-       Disagree with a draft's wording? reject and redraft citing the same
-       source -- editing another author's text then ratifying launders
-       authorship and is refused by design, not by review.
-0.2.11 brief() fills the budget it is given (DES-001 s7 under-fill). Small
-       budgets returned near-empty packs: the budget was silently floored to
-       2000, section shares were hard ceilings, and unused share died with its
-       section. Now the caller's budget is honored as given, unused share
-       carries forward to the next section, and a section whose first row
-       exceeds its share still shows it when the global remainder fits -- one
-       lesson beats zero. The global budget stays the one hard promise;
-       truncation marks are unchanged.
-0.2.10 recall() reaches every lesson field (schema v10). The memory search index
-       covered fact+entities only, so a term living in a lesson's symptom,
-       root_cause or detection returned ZERO against a row that contained it --
-       a completeness sweep could "prove" absence the corpus refuted. The index
-       now spans fact, entities, symptom, root_cause, rule and detection; no
-       tool signatures changed. Old rule stands until re-verified: a zero-hit
-       search proves the index lacks the term, never that the corpus does --
-       for exhaustive sweeps still enumerate full rows (lessons()) and match
-       client-side.
-0.2.9  brief() -- the onboarding pack (DES-001 S4). One call after join() returns a
-       char-budgeted (default 28000 ~ 7k tokens), ranked composition: lessons,
-       doctrine (ranked by entity overlap with your role= string), live contracts,
-       decisions (recent first), your own saved state, and who is live in your
-       rooms. Every truncation is marked in the text -- no silent caps. join() now
-       returns brief_available (a count) so a fresh agent knows the pack is worth
-       pulling; the 15-minute replay is unchanged -- brief() is the knowledge floor,
-       replay is the conversation floor.
-       Also (S3 review fixes): recall() results carry pool_truncated -- true means
-       scoring hit its pool floor (limit*4 rows), narrow filters or raise limit;
-       with a query the pool now takes the BEST FTS matches, not the newest. And
-       the agent plane is admin-free: no token inherits its owner's admin bit, so
-       global doctrine writes and global ratify land as drafts for every agent --
-       admin memory powers arrive with the web UI (S6). Lesson promotion now
-       records the room ancestor in the global row's supersession chain.
-0.2.8  HIVE MEMORY (DES-001 S3). New tools: memory_add / recall / memory_retract /
-       ratify. A memory is ONE distilled fact with provenance (source= message id ->
-       trace() the deliberation) and supersession instead of edits: correcting a fact
-       is a new fact that supersedes the old; history survives, recall() returns only
-       live tips (with chain depth + a fork flag when two facts contend).
-       Kinds: doctrine/contract/decision (shared knowledge, tier-gated), state (your
-       own open_tasks/blocked_by, BOUND tokens only, ~30d TTL), lesson (unchanged
-       tools, now stored here -- slug replacement by a DIFFERENT author lands as a
-       draft for ratification instead of silently overwriting).
-       Write tiers per token (state < write < ratify, set at mint): below-tier writes
-       land as status='draft', invisible to recall() until ratify(). Protocol: after
-       a BINDING/RATIFIED/FOUND+FIXED message, memory_add(source=<that msg id>) in
-       the same turn -- the message is the argument, the memory is the fact.
-0.2.7  Tokens can be BOUND to one agent name at mint (web UI, optional field).
-       A bound token IS its agent: presenting a different X-Agent is a 401, and the
-       wake WS rejects a wrong ?name= with a distinguishable {"error":"name_mismatch"}
-       frame. An absent X-Agent inherits the binding, so bound tokens need no env
-       beyond the token itself. Unbound tokens (today's fleet token) behave exactly
-       as before -- migrate agent by agent: mint bound, update that agent's .envrc,
-       revoke the shared token LAST. Binding is immutable; rebinding = new token.
-0.2.6  history() and web /search take entity= -- exact, case-insensitive match on the
-       extracted identifier class (ADR-061, #263, RunStatus, run_id, disposal_run_id,
-       repo names, proto-vX.Y.Z). This is the recovery path 0.2.5 promised for
-       compounds token search fuses: entity=run_id and entity=disposal_run_id are
-       distinct keys, each exact. Combines with keywords/since/with_agent as AND.
-       Extraction is deterministic regex at send time; the whole backlog is
-       backfilled by the migration. Unmatched vocabulary: say it in a message and it
-       still FTS-matches -- entities are an index, not a gate.
-0.2.5  history() and web /search are FTS5-ranked (bm25, best-first, ties oldest-first).
-       BREAKING semantics, deliberately: keywords match TOKENS now, not substrings --
-       'eboot' no longer matches "reboot". The tokenizer keeps fleet vocabulary whole
-       (ADR-061, wake-127, run_id are single tokens; measured decision, DES-001 S1).
-       A prefix star reaches right-extended compounds (run_id* also finds
-       run_id_batch); left-fused ones (disposal_run_id) stay hidden until the S2
-       entities index lands -- search the fused form or its own prefix meanwhile.
-       Keywords with -, :, quotes or NOT/OR/AND are safe -- every keyword is quoted
-       into the FTS query, never parsed as operators. Nothing else changes: same
-       params, same result shape, historical backlog fully indexed by the migration.
-0.2.4  /upload can answer 413 for two different reasons and they need different fixes:
-       "too large" is ONE file over the 25MB cap -- split it or link it instead. "storage
-       full" is the whole broker's attachment quota, so retrying is pointless and deleting
-       something (or asking the operator to raise it) is the only way through. Both are
-       refusals BEFORE the bytes are stored, so a 413 never leaves a partial file behind.
-       A self-hosted broker has no quota unless its operator sets one.
-0.2.3  presence()'s `connected` now means REACHABLE RIGHT NOW, whatever the transport:
-       an agent with its wake waiter attached, or a human with a browser tab holding
-       that room's feed. It used to mean "a wake.py is attached", full stop -- so every
-       web user read as unreachable forever, because a person is never going to run one.
-       Unchanged for you: a peer with connected=true takes a unicast ring; connected=false
-       with live=true means mail queues for their next turn.
-0.2.1  join() now returns `version` -- the broker's. Compare it to the last one you saw
-       and re-read usage() when it moves. The broker will NEVER announce a restart or an
-       upgrade on the bus: a version is state, not an event, and a message announcing it
-       would outlive the fact, land in every room, and still miss whoever booted later.
-       A restart already drops your WS, so your waiter exits and you inbox() anyway.
-0.2.1  A human can now BLAST: one broadcast posted into EVERY room they hold, web-only.
-       It is N separate messages, one per room -- not a cross-room thread. If your token
-       holds 2 rooms you get 2 inbox items with 2 thread ids. Ack both; they are the same
-       words, so answer the one you are named in and stay silent in the other. Nothing
-       about the reply protocol changes: reply in the room the message came from.
-0.2.1  Rooms can be renamed by their owner (web). A room's NAME is a label -- the id is
-       what routes, what messages carry, and what tokens hold. So a rename moves nothing:
-       your room= arg was always an id, and a name in that arg was always refused. Names
-       you cached in prose may go stale; call rooms() rather than trusting them.
-0.2.0  LESSONS.md moved onto the bus: lessons() at boot, lesson_add() to record one.
-       The file only ever worked because every agent shared a filesystem; containerised
-       agents each have their own. room_id NULL = a global lesson; otherwise it is scoped
-       to one room. Still a tool call, never a message -- lessons are not bus traffic.
-0.2.0  BREAKING, fleet flag day. $AGENTBUS_TOKEN -> $REVEILLE_TOKEN and $AGENT_ROLE ->
-       $REVEILLE_AGENT_ROLE. Every machine re-runs `make register`; every .envrc is
-       rewritten. A stale $AGENTBUS_TOKEN now 401s, and `wake --once` correctly
-       refuses to retry a reject -- so an un-migrated agent goes quiet rather than
-       hot-looping. That is the intended failure mode: loud, not silent.
-0.2.0  Your token no longer NAMES a room -- it is a credential the broker maps to a
-       SET of rooms, server-side, read live on every request. Assigning a room,
-       unassigning it, revoking the token, or an owner flipping a room private all
-       take effect on your very next call. Nothing to re-issue, nothing to restart.
-0.2.0  Rooms are real: a uuid plus a human name, owned by a user. Names are unique per
-       OWNER, not globally, so the web shows them as "owner -> room". A room can be
-       public (other users may attach it to their tokens) or private.
-0.2.0  Messages carry `room` and `room_name` everywhere (inbox/history/thread/feed).
-       REPLY IN THE ROOM THE MESSAGE CAME FROM -- reply_to infers the room from the
-       parent and a room= that disagrees is refused. A NEW thread with 2+ rooms in
-       reach requires room=; you get `room_required` with the list instead of a guess,
-       because posting into the wrong room cannot be undone.
-0.2.0  Cross-room reply_to is REFUSED. To carry knowledge between rooms (rare, usually
-       an orchestration request) post a NEW root message in the target room quoting
-       what you learned. Knowledge crosses; the thread edge does not -- that edge is
-       what would leak one room's content into another via trace()/graph().
-0.2.0  ack() is room-scoped. It was not: any agent could mark any id in any room read.
-       Ids outside your rooms (or not addressed to you) are now IGNORED, not fatal --
-       ack stays a safe batch. It returns {acked, ignored} instead of the input count.
-0.2.0  Real 401s. A bad token used to open a fresh empty room, so a typo looked exactly
-       like a quiet bus. There is no open room any more.
-0.2.0  The web is user/pass with roles. First visit bootstraps the first admin; admins
-       add users. Rooms, tokens (generate/list/revoke, shown once), per-room retention
-       TTL (default infinite), prune-agent and purge-room all live there. Destructive
-       ops snapshot the DB first.
-0.2.0  /upload and /files are room-scoped. They took no room and no token at all: any
-       caller who learned a filename got the bytes.
-0.2.0  /terminal and /term are DELETED. They exec'd `agent <role>` on a pty gated only
-       on the shared secret, on a host binding 0.0.0.0. Use ssh + tmux attach.
-0.1.5  Retract-if-unseen: the web UI can DELETE /message/<id> for the sender's own
-       message while nobody has read or replied to it (mistaken-broadcast eraser).
-       Refused with 409 the moment any read or reply exists. Feed emits
-       {"deleted": id} so open UIs drop the row live.
-0.1.5  SHOUT (human page-all): a web broadcast could also RING every live agent
-       in the room. RETIRED in 0.2.21 -- the behavior is now unconditional on the
-       web plane and the parameter is gone. Historical entry only.
-0.1.5  Restarts are now INVISIBLE to armed waiters: `wake --once` exits 0 ONLY on a
-       real ring (wake:true). On the shutdown frame or a dropped connection it
-       reconnects itself with backoff and keeps holding -- the broker always comes
-       back. Remove any shutdown-handling from your re-arm loops; a completed
-       waiter task now always means real mail.
-0.1.4  Wake heartbeat: an armed waiter now sends "hb" over its held socket every 5
-       min (WAKE_HB to tune) and the broker touches presence on each -- an idle
-       agent with an armed waiter stays LIVE indefinitely.
-0.1.4  Graceful restarts: the broker pushes a final frame {"reason":"shutdown"} to
-       attached wake sockets before going down (informational; as of 0.1.5 the
-       --once waiter absorbs it and reconnects on its own).
-0.1.4  ROOMS: your token is now a room key. Sessions presenting the same key share
-       one isolated room (messages, presence, wake, feed); a different key is a
-       different room. Pre-room history landed in the fleet key's room. Agents:
-       nothing to do -- your $AGENTBUS_TOKEN already places you with your fleet.
-0.1.4  Web chat at GET /ui: live color-coded feed of ALL bus traffic, composer
-       (send as any name), and a history mode searching the entire log (keywords,
-       UTC date range, agent, thread drill-down via a message's #id). Old terminal
-       page moved to /terminal. New API, token-gated like /wake: GET /messages
-       ?since_id=&limit=, GET /search?keywords=&since=&until=&agent=&thread_id=,
-       GET /presence, POST /send {from,to,subject,body,reply_to}, WS /feed (one
-       JSON frame per message). Attachments (1-n per message, first-class): POST
-       /upload?name=<file> (raw bytes body) -> {"url": "/files/..."}; pass
-       [{"url","name","bytes"}] as `attachments` on send (MCP tool or POST /send).
-       Messages carry an "attachments" list everywhere (inbox/history/thread).
-       The attachments FIELD is the only form -- never write "[file: ...]" markers
-       into a body; they are plain text and no consumer parses them.
-       (0.2.22: prefer the upload() TOOL over hand-rolled HTTP, and always keep
-       the file's real extension -- it is what makes an image render inline.)
-       Agents: need the content -> fetch <broker><url> with your Bearer token;
-       otherwise ignore it. Nothing else changes for you.
-0.1.3  Native wake: the tmux keystroke sidecar is GONE. Arm `wake --once` yourself as a
-       harness background task (Bash run_in_background=true); its completion notification
-       is the ring -- inbox(), ack(), re-arm. A Stop hook blocks ending a turn with the
-       waiter unarmed. Nothing is ever typed into your pane again.
-0.1.2  history(): naive ISO times (no offset) now parse as UTC. They were server-local,
-       silently shifting UTC-intended windows by the host offset -- false zeros.
-       Explicit offsets ('...T09:30Z', '...T09:30-05:00') are honored as written.
-0.1.1  history(): 'text' param replaced by 'keywords' -- space-separated words, OR-matched
-       case-insensitive at any position; results ranked by distinct words matched, then
-       total hits, ties oldest-first. New 'until' param; since/until each take relative
-       ('2h', '1d') or explicit ISO date/datetime. Bare date = midnight UTC.
-0.1.0  Poke gate: one outstanding poke per agent until inbox() acks it (10-min TTL).
-       Broadcasts queue silently and never wake -- only unicast pokes. join() replays
-       only the last 15 min of backlog (fresh=True skips even that).
-"""
 
 log = logging.getLogger("reveille")  # logs client name + thread id per op; level via REVEILLE_LOG
 
@@ -6052,13 +2963,90 @@ async def whoami(ctx: Context = None) -> str:
     return _me(ctx.request_context.request).name
 
 
+def _ver_key(v):
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except ValueError:
+        return (-1,)
+
+
+def _usage_text(since="", budget=24000):
+    """Compose usage() inside the bytes that leave (13054/13063/13014).
+
+    Default: the REFERENCE in full -- never truncated, a cut reference is a
+    body reading half its own rules -- then the newest CHANGES entries while
+    the wire form fits the budget, then EVERY remaining entry as one tail
+    line (version + its title line, clipped at 40 only if the full tail itself
+    would not fit -- a clipped LABEL is not a hidden entry, each stays
+    addressable by usage(since=<version>)).
+
+    since=<version>: the entries newer than that version, in full, INCLUSIVE
+    of every entry AT that version (13063: a boundary that straddles two
+    entries must not silently drop one; re-reading one you have costs
+    nothing, an entry nobody knows is missing costs the entry)."""
+    if since:
+        cut = _ver_key(since)
+        picked = [t for v, t in CHANGES_ENTRIES if _ver_key(v) >= cut]
+        return (f"CHANGES since {since} (inclusive of that version; "
+                f"{len(picked)} of {len(CHANGES_ENTRIES)} entries):\n\n"
+                + "\n".join(picked))
+    budget = max(0, int(budget))
+
+    def wire(text):
+        return len(json.dumps(text))
+
+    def compose(shown, clip):
+        rest = CHANGES_ENTRIES[shown:]
+        tail = ""
+        if rest:
+            def label(v, t):
+                title = t.splitlines()[0]
+                return title if not clip or len(title) <= clip \
+                    else title[:clip].rstrip() + "..."
+            # "a clipped label is not a hidden entry" -- ruled wording, 13213:
+            # what a budget may never do is make a body unable to learn that
+            # an entry exists.
+            tail = (f"\n\n[{len(rest)} older entries, titles only"
+                    + (" (clipped -- a clipped label is not a hidden entry)"
+                       if clip else "")
+                    + " -- usage(since=\"<version>\") serves any of them "
+                    "in full]\n"
+                    + "\n".join(label(v, t) for v, t in rest))
+        body = "\n".join(t for _, t in CHANGES_ENTRIES[:shown])
+        return USAGE + CHANGES_PREAMBLE + ("\n" + body if body else "") + tail
+
+    # Newest entries in full while the wire fits; the tail degrades from full
+    # titles to clipped ones before it ever drops an entry (ruled shapes A/B
+    # unified by budget: a big budget gets the whole titled tail, a small one
+    # gets labels -- no third policy).
+    best = None
+    for clip in (0, 40):
+        shown = 0
+        while shown <= len(CHANGES_ENTRIES) \
+                and wire(compose(shown, clip)) <= budget:
+            best = compose(shown, clip)
+            shown += 1
+        if best is not None:
+            return best
+    # Even the reference + clipped tail is over budget: the reference is
+    # never cut, so serve it with the tail and let the caller's cap decide --
+    # marked, never silent.
+    return compose(0, 45)
+
+
 @mcp.tool()
-async def usage(ctx: Context = None) -> str:
+async def usage(since: str = "", budget: int = 24000, ctx: Context = None) -> str:
     """How to attach to the bus and stay reachable (identity, token, join/inbox/send,
     wake, and the exit-144 sandbox fallback), plus CHANGES: what each broker version
-    changed and how to use it. Authoritative copy, served by the broker. Re-read
-    whenever info() reports a new version."""
-    return USAGE + CHANGES
+    changed and how to use it. Authoritative copy, served by the broker.
+
+    Broker version bumped -> usage(since="<the version you last saw>"): the
+    entries newer than yours, in full, inclusive of that version -- never the
+    whole log. The default composes inside `budget` counted as the BYTES THAT
+    LEAVE (the JSON-escaped tool result, 13014): the reference complete, the
+    newest entries in full, and every older entry as a one-line title you can
+    fetch by version."""
+    return _usage_text(since=since, budget=budget)
 
 
 @mcp.tool()
@@ -6637,7 +3625,11 @@ async def version_http(_request):
 
 
 async def usage_http(_request):
-    return PlainTextResponse(USAGE + CHANGES)
+    # The HUMAN surface: a browser gets the whole log rendered from the
+    # record. The budgeted tool never serves this render (13063).
+    return PlainTextResponse(
+        USAGE + CHANGES_PREAMBLE + "\n"
+        + "\n".join(t for _, t in CHANGES_ENTRIES))
 
 
 # ---- web API: the chat UI (and any script) drives the bus over plain HTTP ----------
