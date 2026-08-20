@@ -323,13 +323,14 @@ def test_login_code_shape_is_opaque_but_bounded():
 
 
 def test_login_bg_argv_is_scoped_and_credential_free():
-    argv = rl.login_bg_argv("acme", "img:1", "net", data_base="/d")
+    argv = rl.login_bg_argv("acme", "img:1", "net", "424242", data_base="/d")
     assert "rev-acme-login" in argv and "-d" in argv
     assert "/d/acme/claude-auth:/home/agent/.claude" in argv
     # NO credential env may ride into a login container -- the whole point is
-    # that claude writes a fresh one; SEED is the only env name passed.
+    # that claude writes a fresh one; only SEED and the FP0 baseline (13353,
+    # a fingerprint, not a secret) ride, both BY NAME.
     names = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
-    assert names == ["SEED"]
+    assert names == ["SEED", "FP0"]
     # and the boot script advances the PICKER itself: choice 1, subscription
     # -- the picker must never reach a human (ruling 8644)
     boot = argv[-1]

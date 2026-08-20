@@ -922,6 +922,7 @@ def login_argv(user, image, network, data_base=None):
 # The container is the first to know it succeeded; it should not need a witness
 # in order to stop.
 _LOGIN_BOOT = r"""
+: "${FP0:?the stamped credential fingerprint must ride in -- existence is not a sentinel (13353)}"
 python3 -c "$SEED"
 tmux new-session -d -s login -x 220 -y 50 "claude /login"
 for i in $(seq 1 120); do
@@ -931,8 +932,11 @@ for i in $(seq 1 120); do
   fi
   sleep 0.5
 done
+fp() { python3 -c 'import os
+try: print(os.stat(os.path.expanduser("~/.claude/.credentials.json")).st_mtime_ns)
+except OSError: print("nothing")'; }
 while tmux has-session -t login 2>/dev/null; do
-  [ -f "$HOME/.claude/.credentials.json" ] && break
+  [ "$(fp)" != "$FP0" ] && break
   sleep 1
 done
 """
@@ -949,15 +953,24 @@ def login_container_name(user):
     return f"rev-{user}-login"
 
 
-def login_bg_argv(user, image, network, data_base=None):
+# ONE constant for the two sites that must agree: login_bg_argv writes it,
+# login_status inspects it. Two literals is how they drift.
+_LOGIN_FP_LABEL = "reveille-login-fp0"
+
+
+def login_bg_argv(user, image, network, fp0, data_base=None):
     """The DETACHED login container (browser path): same mounts and same
     no-credential-env rule as login_argv, but it holds a tmux the launcher can
-    read, and its boot script advances the picker itself. Pure."""
+    read, and its boot script advances the picker itself. fp0 is the credential
+    fingerprint stamped BEFORE the flow (13353): the boot script waits for it
+    to MOVE, and the label lets login_status judge the same way. Pure."""
     return ["docker", "run", "-d",
             "--name", login_container_name(user),
             "--network", network,
+            "--label", f"{_LOGIN_FP_LABEL}={fp0}",
             "-v", f"{user_auth_root(user, data_base)}:/home/agent/.claude",
             "-e", "SEED",   # the first-run seed rides env BY NAME, like every secretish value
+            "-e", "FP0",
             "--entrypoint", "sh", image, "-c", _LOGIN_BOOT]
 
 
@@ -2694,6 +2707,30 @@ def claude_login_state(user, base=None):
         return {"present": False, "logged_in_at_ns": None}
 
 
+def login_fingerprint(user, base=None):
+    """THE sentinel (ruling 13353): the credential's IDENTITY, never its
+    existence -- A SENTINEL THAT PRE-EXISTS THE WORK CANNOT SIGNAL THE WORK,
+    and on a RE-login the file pre-exists by definition. Absent is the
+    fingerprint "nothing", so a first login falls out of the same rule
+    instead of being a special case. Stamped at login_start, compared at
+    login_status; the boot script makes the same comparison in-container
+    against $FP0. Pure aside from the stat."""
+    path = os.path.join(user_auth_root(user, base), ".credentials.json")
+    try:
+        return str(os.stat(path).st_mtime_ns)
+    except OSError:
+        return "nothing"
+
+
+def login_reap_due(fp0, current):
+    """Completion is FINGERPRINT MOVED, never FILE PRESENT (13353): the old
+    reap keyed on `present and container` and would kill a live RE-login on
+    the page's first poll -- the previous account's credential satisfies
+    present. fp0 is the stamp read off the container's label, None when no
+    stamped flow exists to judge. Pure."""
+    return fp0 is not None and current != fp0
+
+
 def revoke_bound_tokens(auth_url, cookie_header, agent):
     """Destroy's counterpart to the broker's mint-time supersede: an agent
     that no longer exists must not leave a live credential answering to its
@@ -3318,6 +3355,15 @@ def build_api(auth_url):
                        login_container_name(user), check=False,
                        capture=True).returncode == 0
 
+    def _login_fp0(user):
+        """The baseline stamped at login_start, read off the container
+        itself -- the flow carries its own yardstick, so status needs no
+        table. None when no container exists: nothing to judge."""
+        r = _docker("inspect", "-f",
+                    '{{index .Config.Labels "' + _LOGIN_FP_LABEL + '"}}',
+                    login_container_name(user), check=False, capture=True)
+        return r.stdout.strip() if r.returncode == 0 else None
+
     @guarded
     async def login_start(request, p, conn):
         if _login_pending(p["user"]):
@@ -3328,8 +3374,12 @@ def build_api(auth_url):
         _docker("rm", "-f", login_container_name(p["user"]), check=False,
                 capture=True)   # a finished or stopped login holds the name
         ensure_login_home(p["user"], DEFAULT_IMAGE)
-        env = dict(os.environ, SEED=_SEED_BASE)
-        subprocess.run(login_bg_argv(p["user"], DEFAULT_IMAGE, DEFAULT_NETWORK),
+        # the stamp is taken BEFORE the flow it judges (13353) -- a baseline
+        # taken after the start is the pre-existence coincidence again
+        fp0 = login_fingerprint(p["user"])
+        env = dict(os.environ, SEED=_SEED_BASE, FP0=fp0)
+        subprocess.run(login_bg_argv(p["user"], DEFAULT_IMAGE, DEFAULT_NETWORK,
+                                     fp0),
                        env=env, check=True, stdout=subprocess.DEVNULL)
         _audit("LOGIN_START", user=p["user"])
         return JSONResponse({"started": True})
@@ -3337,17 +3387,21 @@ def build_api(auth_url):
     @guarded
     async def login_status(request, p, conn):
         """The pending login as a READING: the credential file fresh, the pane
-        fresh. Completion is the FILE appearing -- when it has, the container
-        is done being useful and is removed here, on observation. The removal
-        covers an EXITED container too: the container ends itself on the
-        credential now, so reaping only what still runs would leave the
-        finished one holding the name against the next login."""
+        fresh. Completion is the FINGERPRINT MOVING (13353) -- the file
+        appearing was the old sentinel, and it pre-exists a RE-login, so this
+        reap used to kill a live re-login container on the page's first poll.
+        When the fingerprint has moved the container is done being useful and
+        is removed here, on observation. The removal covers an EXITED
+        container too: the container ends itself on the new credential, so
+        reaping only what still runs would leave the finished one holding the
+        name against the next login. A flow that never mints is NEVER
+        reported complete; its residue is cancel's to remove."""
         out = dict(claude_login_state(p["user"]))
-        if out["present"] and _login_container(p["user"]):
+        if login_reap_due(_login_fp0(p["user"]), login_fingerprint(p["user"])):
             _docker("rm", "-f", login_container_name(p["user"]), check=False,
                     capture=True)
             _audit("LOGIN_DONE", user=p["user"])
-        if not out["present"] and _login_pending(p["user"]):
+        if _login_pending(p["user"]):
             pane = _docker("exec", login_container_name(p["user"]), "tmux",
                            "capture-pane", "-t", "login", "-p",
                            check=False, capture=True).stdout
