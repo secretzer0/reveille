@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -300,13 +300,19 @@ CREATE TABLE IF NOT EXISTS tokens (
 -- handover grace and the return ticket belong to 'superseded' alone.
 -- last_refusal_ns doubles as S3's liveness reading ("a human used that
 -- machine at T"). No FK: same discipline as token_audit, the record outlives
--- both the token and, if pruned, the agent it names. Plain revoke does NOT
--- tombstone -- revocation is deliberate and gets the generic refusal.
+-- both the token and, if pruned, the agent it names. This table is the DEATH
+-- REGISTER, not the supersede register (ruling 12944 R-A): every bound
+-- token's death writes a row naming its reason -- reason='revoked' is a
+-- deliberate owner act, and recording it is what lets the DB answer "was
+-- this credential revoked, or did it never exist", the question the
+-- 2026-08-20 architect outage cost four queries to answer. Privilege stays
+-- separate from the record: the handover grace and the return ticket still
+-- belong to 'superseded' alone.
 CREATE TABLE IF NOT EXISTS token_tombstones (
     secret_hash     TEXT PRIMARY KEY,
     agent_id        TEXT NOT NULL,
     reason          TEXT NOT NULL DEFAULT 'superseded'
-                    CHECK (reason IN ('superseded','expired-unclaimed')),
+                    CHECK (reason IN ('superseded','expired-unclaimed','revoked')),
     died_ns         INTEGER NOT NULL,
     last_refusal_ns INTEGER
 );
@@ -2019,6 +2025,34 @@ def _upgrade_v40(conn, db_path):
         conn.execute("PRAGMA user_version=41")
 
 
+def _upgrade_v41(conn, db_path):
+    """v41 -> v42 (ruling 12944 R-A): the reason CHECK widens to admit
+    'revoked' -- the table becomes the death register, not the supersede
+    register. SQLite cannot ALTER a CHECK, so this is a table rebuild, same
+    shape as v40: snapshot, rename, recreate from the canonical schema, copy
+    BY NAME, drop. Named columns because the physical order is historical on
+    any db that predates v36 -- v35's ADD COLUMN appended `reason` after
+    `last_refusal_ns` (the production broker.db answers exactly that order),
+    and a positional SELECT * lands died_ns in reason and NULL in died_ns.
+    Snapshot because this table keys a parked body's whole recovery."""
+    snapshot(conn, f"{db_path}.pre-v42-{time.time_ns()}.bak")
+    cols = "secret_hash, agent_id, reason, died_ns, last_refusal_ns"
+    with tx(conn):
+        conn.execute("ALTER TABLE token_tombstones RENAME TO token_tombstones_old")
+        conn.execute("""CREATE TABLE token_tombstones (
+            secret_hash     TEXT PRIMARY KEY,
+            agent_id        TEXT NOT NULL,
+            reason          TEXT NOT NULL DEFAULT 'superseded'
+                            CHECK (reason IN ('superseded','expired-unclaimed',
+                                              'revoked')),
+            died_ns         INTEGER NOT NULL,
+            last_refusal_ns INTEGER)""")
+        conn.execute(f"INSERT INTO token_tombstones({cols}) "
+                     f"SELECT {cols} FROM token_tombstones_old")
+        conn.execute("DROP TABLE token_tombstones_old")
+        conn.execute("PRAGMA user_version=42")
+
+
 def _upgrade_v37(conn, db_path):
     """v37 -> v38 (ruling 12532): tokens.last_inbox_ns -- when this credential
     last READ its mail. Additive; NULL is correct for every existing row (no
@@ -2257,7 +2291,7 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40)}
+              37, 38, 39, 40, 41)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -3437,20 +3471,37 @@ def token_audit_rows(conn, token_id=None, limit=200):
 
 
 def revoke_token(conn, token_id, owner_id):
-    """Revoke = DELETE the token, not tombstone it.
+    """Revoke = DELETE the token AND record its death (ruling 12944 R-A).
 
-    A soft-revoke would need an audit log to be worth anything, and there isn't one by
-    design; the secret is already unrecoverable, so a revoked row carries no information
-    and just accumulates forever -- the exact sprawl purge exists to kill. resolve_token()
-    returns None for a missing row just as it did for a revoked one, so revocation stays
-    instant either way.
+    The delete keeps revocation instant -- resolve_token() returns None the
+    moment the row is gone -- and the tombstone, written in the same
+    transaction, is what lets the DB answer "was this credential revoked, or
+    did it never exist" afterwards. Those two states were byte-identical on
+    2026-08-20 and the architect's outage took four queries to diagnose for
+    exactly that reason; the register row answers on the first, and
+    tombstone_for already speaks `reason` to its callers, so a revoked body
+    is told what happened instead of a bare 401. ON CONFLICT DO NOTHING: when
+    supersede_bound_tokens executes a supersede it writes the truer
+    'superseded' reason first, and the grace and the return ticket both key
+    on that reason surviving. An UNBOUND token has no identity to explain --
+    the register keys deaths on the agent -- so its delete stays bare.
+    Revoked rows age out on the existing TOMBSTONE_TTL_NS sweep like every
+    other; privilege stays separate from the record (knock refuses 'revoked'
+    by name, the grace stays 'superseded'-only).
     """
     with tx(conn):
-        r = conn.execute("SELECT owner_id FROM tokens WHERE id=?", (token_id,)).fetchone()
+        r = conn.execute("SELECT owner_id, agent_id, secret_hash FROM tokens "
+                         "WHERE id=?", (token_id,)).fetchone()
         if not r:
             raise BusError("no such token")
         if r["owner_id"] != owner_id:
             raise AccessError("not your token")
+        if r["agent_id"]:
+            conn.execute(
+                "INSERT INTO token_tombstones(secret_hash, agent_id, reason, "
+                "died_ns) VALUES(?,?,'revoked',?) "
+                "ON CONFLICT(secret_hash) DO NOTHING",
+                (r["secret_hash"], r["agent_id"], time.time_ns()))
         # members.token_id REFERENCES tokens(id): orphan the memberships first or any
         # agent still joined under this token turns the delete into a FK violation --
         # AND MARK THEM LEFT (operator relay 11337): a revoke that only orphaned the
@@ -3511,8 +3562,10 @@ def supersede_bound_tokens(conn, owner_id, agent_id, except_id=None):
     for r in rows:
         # The tombstone rides the same transaction as the supersede (S2, ruling
         # 10876): the displaced credential's refusal becomes a signpost naming
-        # the way back, and its last_refusal_ns is S3's liveness reading. Only
-        # supersession tombstones -- plain revoke_token stays a bare delete.
+        # the way back, and its last_refusal_ns is S3's liveness reading.
+        # Written BEFORE revoke_token runs on the same credential: revoke's own
+        # register insert (12944 R-A) is ON CONFLICT DO NOTHING, so the truer
+        # 'superseded' reason recorded here survives the delete that executes it.
         conn.execute(
             "INSERT OR REPLACE INTO token_tombstones"
             "(secret_hash, agent_id, reason, died_ns) VALUES(?,?,'superseded',?)",
@@ -3719,6 +3772,16 @@ def knock(conn, secret, now=None, path=None):
     ts = tombstone_for(conn, secret)
     if not ts:
         raise AuthError(BAD_TOKEN)
+    if ts["reason"] == "revoked":
+        # BY NAME, never the generic refusal (12944 R-A): dead-ness is the
+        # address, privilege is separate -- the death register admitting
+        # 'revoked' must not hand knock privilege to every revoked body. The
+        # sentence says what happened and that this door does not open.
+        raise AuthError(
+            f"revoked: this credential for {ts['agent_name']!r} was revoked "
+            f"by its owner. A knock will not bring it back -- ask the owner "
+            f"to mint a fresh credential (`reveille init` here once they "
+            f"have). " + REFUSAL_DOCTRINE)
     owner = conn.execute("SELECT owner_id FROM agents WHERE id=?",
                          (ts["agent_id"],)).fetchone()
     if not owner:
