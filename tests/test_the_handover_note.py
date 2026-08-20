@@ -83,7 +83,12 @@ def test_the_work_is_saved_before_the_note_is_written():
     # read was the one thing the swap deleted.
     assert block.index("COMMIT AND PUSH") < block.index("WRITE THE NOTE")
     assert block.index("WRITE THE NOTE") < block.index("VERIFY THE PUSH")
-    assert "under 1000 characters" in block, (
+    assert "under 1000 characters" not in block, (
+        "0.2.210 raised the state cap to 8192 and made the soft line a nudge "
+        "on a SUCCESSFUL write -- a note in that band no longer burns the "
+        "window (audit finding 12810); a doctrine block that still says '1000' "
+        "and 'a refused write burns the window' is a stale live instruction")
+    assert "8192" in block and "costs nothing but advice" in block, (
         "a refused write burns a window seconds wide -- one note failed for length "
         "and its retry hit the supersede")
     assert "FIVE FIELDS" in block
