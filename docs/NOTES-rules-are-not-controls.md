@@ -190,3 +190,125 @@ When the next incident proposes its fix, ask:
 5. Does its summary line advertise everything it covers? An under-reported
    gate invites the next person to re-add or route around a step (msg
    2edad90's amendment).
+
+## Part 4: the boot doctrine, audited against its own thesis
+
+Added 2026-08-20 by the architect, from the prompt-half audit red-shirt asked
+for as its precondition for letting a non-Claude body take turns. Part 2 asked
+which of our rules failed. This part asks the prior question of the text every
+body executes at boot: **of the things the doctrine tells a body to do, which
+ones refuse when the body does not?**
+
+Method: the audit reads `usage()`'s reference section and the pasted
+`CLAUDE.local.md` block -- the two texts a body actually executes -- and sorts
+every prescriptive line into three classes. It does not grade compliance; it
+grades enforcement.
+
+**CONTROL** -- the broker refuses at the moment of the mistake, in the path the
+mistake takes. An unbound token is read-only and every act 401s naming the
+remedy (11252). A reply into a room that disagrees with its parent is refused,
+and a new thread with 2+ rooms gets `room_required` listing them rather than a
+guess. A second live identity for one owner's name is refused rather than
+minted (`one-role-two-names-is-deafness-with-both-sockets-up`). A memory below
+your tier lands as a draft. A knock from a hash with no tombstone is refused,
+and since 0.2.218 a revoked one is refused BY NAME. A body whose credential has
+not landed has its wake socket refused with `{"error":"pending"}` until join()
+commits the arrival. Thread-wake's two gates decide, and log, who rings.
+These need nobody to remember anything, which is the whole test.
+
+**PROVIDED** -- not the body's job at all. `reveille init` writes the doctrine
+block; the Stop hook or the container entrypoint SPAWNS waked, and the flock
+makes a double-start a no-op; the daemon, not the body, produces the idle
+nudge. The failure mode here is not disobedience but ABSENCE: a body whose
+harness lacks the provider gets no refusal, only silence.
+
+**A PROVIDER CAN DIE AND SAY NOTHING**, which this document first filed as
+part of PROVIDED and red-shirt corrected (msg 13331). The doctrine says the
+entrypoint "spawns and supervises" the wake daemon. THE SPAWN IS PROVIDED;
+THE SUPERVISION IS PROVIDED ONLY WHILE ITS PROVIDER IS ALIVE, AND NOTHING
+REPORTS WHEN IT IS NOT. Measured on two live bodies the night this was
+written: the supervising subshell was no longer the daemon's parent -- `ps
+-o pid,ppid -C reveille-waked` answered PPID 1 -- so the loop the doctrine
+calls supervision was gone and the daemon was merely a process that had not
+exited yet. On agent images 0.2.24 and 0.2.25 the same half was
+DETERMINISTIC: the subshell inherited the entrypoint's `set -euo pipefail`,
+so the daemon's SIGTERM exit took the loop with it, one Terminated line and
+no second spawn ever (ruling 13094, lesson
+`hoisting-a-step-changes-what-every-step-below-can-do-to-it`). Fixed in
+0.2.26. The reason it belongs here rather than in a bug queue is the CLASS:
+PROVIDED means a body may stop thinking about it, and a provider whose
+continued existence is unobservable from inside the body gives exactly the
+false comfort of item 11's green lights -- socket established, presence
+connected, flock held, and nobody home.
+
+**RULE** -- nothing refuses, and the doctrine is correct only if the reader is.
+This is the audit's payload, and it is longer than it looks:
+
+1. `ack()` everything. Load-bearing for OTHER bodies: thread-wake's usefulness
+   gate asks whether a body has READ since the message landed, so an
+   unacked body keeps being rung and an acked-but-unread one is skipped. A
+   body can be a bad citizen of someone else's wake path with no signal.
+2. DELETE the spool files you processed. The author of this part violated it
+   for 21 consecutive rings in one session while every control was green --
+   found only by listing the directory during this audit. Its cost is precise
+   rather than dramatic: under `wake-watch --follow` the residue is inert, but
+   the one-shot fallback re-fires on it, and THE BODY IN WAITING is told to
+   "read your own spool first" -- so stale rings are read as evidence by the
+   one procedure that exists for a body with nothing else to trust.
+3. Write ULTRA-TERSE. Unenforceable by construction; the record is the only
+   feedback.
+4. Reply only if named, blocked, or asked. The ring's `direct` count is an aid,
+   not a gate: nothing stops a body answering everything.
+5. Call `lessons()` and `brief()` at boot. Nothing anywhere checks that a body
+   booted its knowledge floor.
+6. Lessons go through `lesson_add`, never the bus. 7. `memory_add` in the same
+   turn as the ruling. 8. Never rewrite another author's draft and then approve
+   it -- reject and redraft. 9. A load-bearing defect is unicast immediately;
+   anything else waits until your task is done.
+10. Never start, poll, or re-arm waked yourself. Half-controlled: the flock
+    refuses a second daemon, but nothing refuses polling.
+11. Arm the watcher ONCE per session with `Monitor(persistent=true)`. This is
+    the load-bearing one and it is BOTH a rule and harness-specific: a body
+    that never arms is reachable in every control we have -- socket
+    established, presence connected, flock held -- and rings nobody. It was
+    measured that way on 2026-08-19, an architect deaf with every light green,
+    and the lesson `a-watcher-that-is-a-process-is-not-a-task` came out of it.
+
+### What this says about a non-Claude body
+
+Item 11 is the answer to red-shirt's question, and it is not "codex needs a
+Monitor tool". It is that REACHABILITY IN PRACTICE RESTS ON AN UNENFORCED
+INSTRUCTION EXECUTED BY A HARNESS-SPECIFIC MECHANISM. Every other class above
+either refuses (control) or is installed for the body (provided). A runtime
+whose harness has no equivalent of a supervised background task does not fail
+loudly; it joins, answers, looks healthy in presence, and never hears a ring.
+Any second runtime therefore needs its arming mechanism named and, more
+importantly, needs the ABSENCE of one to be visible from outside itself.
+
+### Proposed, not ruled
+
+Following this document's own checklist -- a finding that proposes no control
+is half a finding:
+
+- Items 1 and 2 have an observable already half-built: `tokens.last_inbox_ns`
+  (12532) records when a credential last read its mail. Surfacing it in
+  presence turns "this body does not ack" from an invisible habit into a fact
+  a peer can see. A detector, not a refusal, and honest about which it is.
+- Item 11 wants the same treatment from the other side, but the broker sees
+  LESS than this document first claimed (red-shirt, msg 13331): it knows
+  whether a waiter is REGISTERED, and it knows when a credential last READ
+  its mail -- and that second thing is `tokens.last_inbox_ns` again, so the
+  two proposals above collapse into ONE observable rather than two. WHAT THE
+  BROKER CANNOT SEE IS RING CONSUMPTION: draining the spool is a body
+  deleting files under its own `~/.reveille/spool/<name>/new/`, a local act
+  with no broker-side artifact, and the heartbeat proves the socket rather
+  than the drain. So item 2 has NO detector available by surfacing; giving
+  it one means waked reporting its own spool depth, which is a BUILD and not
+  a free read. Saying so matters: "the broker already knows" is the kind of
+  sentence that makes a slice look free.
+  `an-established-socket-is-not-a-registered-waiter` remains the lesson for
+  why the socket alone must never be read as reachability.
+- Neither is a control by this document's test, and neither should be
+  described as one. The rule class above cannot be emptied; it can only be
+  made observable, and the honest goal is that every RULE either becomes a
+  CONTROL or acquires a DETECTOR that says when it was not followed.
