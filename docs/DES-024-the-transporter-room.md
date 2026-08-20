@@ -1,6 +1,9 @@
 # DES-024: The Transporter Room — an identity, its bodies, and the doors between them
 
-Status: DRAFT, not built. Ruled in outline by operator directive 2026-08-20
+Status: RULED IN OUTLINE, not built. Merged under operator directive 12705
+("run all of this to ground") so the build can cite it; sections marked
+UNRULED stay open and the operator may amend any of it on reading.
+Originally drafted 2026-08-20 03:00Z. Ruled in outline by operator directive 2026-08-20
 (msgs 12647, 12652 with annotated screenshot, choosing option (A) of 12651);
 architect frame at 12653; devops reading at 12650/12654. Depends on DES-012
 (the transporter machinery itself: recall, ticket, claim, knock) and DES-011
