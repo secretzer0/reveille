@@ -1132,8 +1132,31 @@ def cmd_init(a):
         checked = (token, ok, said)          # asked ONCE; the gate below reuses it
         if ok is False:
             print(f"reveille: this directory's credential no longer works "
-                  f"({said}). It will not be reinstalled -- mint a new one.")
+                  f"({said})."
+                  + (" --force: kept anyway, unverified -- a body that was moved "
+                     "off parks on exactly this secret and trades it for a live "
+                     "one at the return ticket."
+                     if a.force else
+                     " It will not be reinstalled -- mint a new one."))
     usable = bool(token) and not (checked and checked[1] is False)
+    # A REFUSED CREDENTIAL IS A FACT TO RECORD, NOT A REASON TO REPLACE
+    # (architect R2, ruling 12851). init replaces a credential only when it has
+    # NONE or a human asked (--login / the wizard) -- so --force with a token in
+    # hand keeps that token and falls through to the verify gate below, which
+    # already installs under force and refuses without it.
+    #
+    # DELIBERATELY NOT FOLDED INTO `usable`: the wizard must go on reading a
+    # refused token as absent, or a person re-running the installer to replace a
+    # dead credential would be handed back the dead one. This flag is read by
+    # the mint gate and nothing else.
+    #
+    # MEASURED 2026-08-20 (rev-tmelhiser-red-shirt-01): a container moved to
+    # another machine boots holding the SUPERSEDED secret; the broker answers
+    # 401; init diverted to the mint path, which needs a human sign-in no
+    # container has; `set -e` in docker/entrypoint.sh turned that into exit 1,
+    # so waked never spawned and the DES-012 s14 return ticket could never be
+    # claimed. --force is the entrypoint's own fallback and it could not work.
+    keep_refused = bool(token) and a.force
     if wizard and not (url and name and usable):
         print("reveille: setting this machine up as an agent.\n")
         url = url or ask("broker url", DEFAULT_URL)
@@ -1176,7 +1199,7 @@ def cmd_init(a):
     # runs -- `will_mint` is the only thing that decides it does.
     will_mint, user, keep, cookie = False, None, False, cookie
     minted_pending = False
-    if a.login or not usable:
+    if a.login or (not usable and not keep_refused):
         # MINT FIRST, then fall into exactly the same path as a pasted token.
         # One installer, not two: everything after this point cannot tell where
         # the credential came from, so there is one flow to get right.

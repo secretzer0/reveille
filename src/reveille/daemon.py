@@ -351,6 +351,22 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.215 A REFUSED CREDENTIAL IS A FACT TO RECORD, NOT A REASON TO REPLACE
+(ruling 12851 R2). `reveille init --force` could not do the one job the
+container entrypoint kept it for. A body moved to another machine boots
+holding a SUPERSEDED secret -- a state the two-phase swap deliberately
+creates -- and the broker answers 401; init treated that refusal as "there is
+no credential here", took the mint path, and asked for a human sign-in no
+container has. --force was only consulted at a later gate control never
+reached. Now init replaces a credential only when it HAS NONE or a human
+asked (--login, or the wizard): with a token in hand, --force keeps it,
+unverified, and says so -- because waked parks on exactly that spent secret
+and trades it for a live one at the DES-012 s14 return ticket, and the
+settings file init writes is where waked reads it from. The wizard is
+deliberately unchanged: it still treats a refused token as absent, or a
+person re-running the installer to replace a dead credential would be handed
+back the dead one.
+
 0.2.214 NOTHING BEFORE waked MAY EXIT THE ENTRYPOINT (ruling 12851 R1/R3/R4,
 field defect on rev-tmelhiser-red-shirt-01; agent image 0.2.23). A container
 whose credential had been SUPERSEDED by a move to another machine could not
