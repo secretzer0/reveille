@@ -63,20 +63,42 @@ def test_a_big_budget_serves_the_full_titled_tail():
 
 def test_since_is_inclusive_at_the_boundary_version():
     """13063, load-bearing since 0.1.4 carries FOUR entries: a boundary that
-    straddles entries must not silently drop one."""
+    straddles entries must not silently drop one. Inclusive means PRESENT --
+    full text when the budget holds it, a titled line otherwise (13245); an
+    entry may lose its text to the budget, never its existence."""
     out = daemon._usage_text(since="0.1.4")
     at_boundary = [t for v, t in daemon.CHANGES_ENTRIES if v == "0.1.4"]
     assert len(at_boundary) == 4, "the corpus moved -- re-pin this fixture"
     for t in at_boundary:
-        assert t in out, "an entry AT the since version was dropped"
-    newer = [t for v, t in daemon.CHANGES_ENTRIES
-             if daemon._ver_key(v) > daemon._ver_key("0.1.4")]
-    for t in newer:
-        assert t in out
+        assert t in out or t.splitlines()[0][:35].rstrip() in out, (
+            "an entry AT the since version was dropped")
+    # a window small enough for the budget serves every picked entry in FULL
+    small = daemon._usage_text(since=daemon.CHANGES_ENTRIES[1][0])
+    for v, t in daemon.CHANGES_ENTRIES[:2]:
+        assert t in small
     older = [t for v, t in daemon.CHANGES_ENTRIES
              if daemon._ver_key(v) < daemon._ver_key("0.1.4")]
     for t in older:
         assert t not in out, "since= must not re-serve the whole log"
+
+
+def test_since_fits_the_turn_for_the_longest_absent_body():
+    """13245: the doctrine sends the LONGEST-ABSENT body to since=, and
+    since="0.1.4" measured 243,395 wire chars before this -- the prescribed
+    verb refused the exact body that most needs its read. Same budget, same
+    elision, note naming the count and how to narrow. Red on the pre-fix
+    head at this size assertion, on the field's own number."""
+    out = daemon._usage_text(since="0.1.4")
+    wire = len(json.dumps(out))
+    assert wire <= 24000, (
+        f"since= wired to {wire} chars against the 24000 default")
+    assert "over the 24000-char budget as titles" in out
+    assert "narrow with a newer since=" in out
+    picked = [(v, t) for v, t in daemon.CHANGES_ENTRIES
+              if daemon._ver_key(v) >= daemon._ver_key("0.1.4")]
+    for v, t in picked:
+        assert t in out or t.splitlines()[0][:35].rstrip() in out, (
+            f"picked entry {v} vanished under the budget")
 
 
 def test_the_record_is_the_writers_and_reconstructs_the_log():

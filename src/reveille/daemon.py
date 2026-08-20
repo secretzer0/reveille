@@ -355,6 +355,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words\nof the day it changed; USAGE above is what is true now. An entry that disagrees\nwith USAGE is history, and USAGE wins -- never work a released entry backwards\ninto a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.223",
+     "0.2.223 THE PRESCRIBED READ FITS TOO (ruling 13245, found by probing the\nslice's own boundary case an hour after it shipped). 0.2.222 budgeted the\nusage() DEFAULT and left usage(since=) unbounded -- and the doctrine sends a\nbody to since= AT ITS OWN VERSION, so the read fit a current-ish body and\nrefused a far-behind one. That is backwards: the body passing the OLDEST\nversion is the one that has been away longest -- parked, beamed, restored\nfrom a corpse -- and it is the one that most needs its read to arrive.\nMeasured before the fix: since=\"0.1.4\" wired 243,395 chars, and the 24,000\nline fell about twenty entries back, between since=0.2.205 and 0.2.200.\nsince= now takes the SAME budget and the SAME elision as the default --\nfull entries newest-first while the wire fits, every remaining picked entry\nas a titled line, and a header that names the count, the budget, and the two\nways to get the rest: a newer since=, or GET /usage, which stays the\nunbudgeted human surface by design. Calls that already fit are unchanged to\nthe character.\n"),
     ("0.2.222",
      "0.2.222 usage() FITS THE TURN, AND THE CHANGELOG BECOMES A RECORD (rulings\n13054/13063/13213). The boot doctrine told every body to re-read usage() at\nany version bump, and the read was unexecutable: 253,565 chars, refused by\ntwo independent harness caps on the same night, 93% of it history. The\ndefault now composes inside the bytes that leave -- the reference COMPLETE,\nbecause a cut reference is a body reading half its own rules, then every\nentry as an addressable one-line title; at today's corpus that leaves room\nfor no full entry at all, which is correct rather than a shortfall -- a\ndefault must not carry an arbitrary slice of a series. usage(since=\"<the\nversion you last saw>\") serves what actually moved, in full, INCLUSIVE of\nevery entry at that version, and that is the read the doctrine prescribes\nnow; the doctrine line moved with the code in this same commit rather than a\nrelease later. The entries stopped being text to re-parse and became\nRECORDS: three separate counts of that log by pattern -- 245, 244, 240 --\nwere each self-consistent and each wrong, and only a byte-identical round\ntrip settled it at 144 over 127 distinct versions, four of which carry\nseveral entries from the old multi-bullet format. The converter died with\nthis commit, so there is nothing left to re-parse; the human surface at GET\n/usage renders the whole log from the same record.\n"),
     ("0.2.221",
@@ -2982,20 +2984,56 @@ def _usage_text(since="", budget=24000):
     would not fit -- a clipped LABEL is not a hidden entry, each stays
     addressable by usage(since=<version>)).
 
-    since=<version>: the entries newer than that version, in full, INCLUSIVE
-    of every entry AT that version (13063: a boundary that straddles two
-    entries must not silently drop one; re-reading one you have costs
-    nothing, an entry nobody knows is missing costs the entry)."""
-    if since:
-        cut = _ver_key(since)
-        picked = [t for v, t in CHANGES_ENTRIES if _ver_key(v) >= cut]
-        return (f"CHANGES since {since} (inclusive of that version; "
-                f"{len(picked)} of {len(CHANGES_ENTRIES)} entries):\n\n"
-                + "\n".join(picked))
+    since=<version>: the entries newer than that version, INCLUSIVE of every
+    entry AT that version (13063: a boundary that straddles two entries must
+    not silently drop one; re-reading one you have costs nothing, an entry
+    nobody knows is missing costs the entry) -- INSIDE THE SAME BUDGET AND
+    THE SAME ELISION (13245: the doctrine sends the LONGEST-ABSENT body to
+    this call, and since="0.1.4" measured 243,395 wire chars -- the default
+    was fixed while the prescribed verb could still refuse the exact body
+    that most needs its read). Full entries newest-first while the wire
+    fits, every remaining picked entry as a titled line, the note naming
+    the count and how to narrow. The whole log, unbudgeted, is GET /usage
+    -- the human surface, by design."""
     budget = max(0, int(budget))
 
     def wire(text):
         return len(json.dumps(text))
+
+    if since:
+        cut = _ver_key(since)
+        picked = [(v, t) for v, t in CHANGES_ENTRIES if _ver_key(v) >= cut]
+
+        def compose_since(shown, clip):
+            head = (f"CHANGES since {since} (inclusive of that version; "
+                    f"{len(picked)} of {len(CHANGES_ENTRIES)} entries"
+                    + (f"; {len(picked) - shown} over the {budget}-char "
+                       f"budget as titles -- narrow with a newer since=, "
+                       f"or GET /usage for the whole log"
+                       if shown < len(picked) else "")
+                    + "):\n\n")
+            body = "\n".join(t for _, t in picked[:shown])
+            tail = ""
+            if shown < len(picked):
+                def label(t):
+                    title = t.splitlines()[0]
+                    if not clip or len(title) <= clip:
+                        return title
+                    return title[:clip].rstrip() + "..."
+                tail = (("\n\n" if body else "")
+                        + "\n".join(label(t) for _, t in picked[shown:]))
+            return head + body + tail
+
+        best = None
+        for clip in (0, 40):
+            shown = 0
+            while shown <= len(picked) \
+                    and wire(compose_since(shown, clip)) <= budget:
+                best = compose_since(shown, clip)
+                shown += 1
+            if best is not None:
+                return best
+        return compose_since(0, 40)   # marked, never silent; the cap decides
 
     def compose(shown, clip):
         rest = CHANGES_ENTRIES[shown:]
