@@ -237,3 +237,24 @@ timer; the nudge JSON is distinguishable by `reason` so a session can log it as
 such; `--idle-nudge 0` writes none, ever; and a nudge arriving while a watcher
 is unarmed still fires at the next arm (the I3 property must hold for
 synthetic rings too).
+
+## 6. Thread-wake pendings are in-memory, and that is a decision
+
+Thread-wake's deferred half (`_thread_pending`, rulings 12472/12532) parks the
+one pending thread-reply ring per recipient token in broker memory, not in the
+database. A broker restart clears the in-memory pendings — deliberately: the
+pending is a *courtesy accelerator*, not a delivery guarantee. The mail it
+points at is already durably in the messages table; the body still learns of
+it on its next turn's `inbox()`, and the 900 s idle nudge is the floor under a
+body that never takes one (section 5; ruling 12494). Persisting the pendings
+would buy seconds of latency in a restart window at the cost of a table whose
+rows outlive the sockets they were deferred for.
+
+Field shape, measured (2026-08-20, corrected ledger 12618/12619): DROPPED-READ
+is the common exit by design — the outstanding poke that deferred the ring is
+already an untyped prompt in front of the body, and its next act is almost
+always `inbox()`, which stamps the read and makes the ring pointless. FIRED is
+the rare branch: the safety net for a body that sends and goes quiet without
+reading. It was entered once in its first night, organically, mid-handover
+(DEFERRED 01:58:46 -> FIRED 02:00:16). The rarity is the fleet reading its
+mail, not a defect in the branch.
