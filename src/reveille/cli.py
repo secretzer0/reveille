@@ -1554,6 +1554,86 @@ def cmd_knock(a):
     return 0
 
 
+def post_claim(url, token, timeout=10):
+    """POST /recalls/claim with the dead credential as the bearer -- the same
+    exchange the parked daemon polls, one shot. 204 answers None: no ticket
+    standing is the ordinary case, never a fault. An HTTP error surfaces the
+    broker's own sentence, never a guess about it."""
+    req = urllib.request.Request(url.rstrip("/") + "/recalls/claim",
+                                 data=b"{}", method="POST",
+                                 headers={"Authorization": f"Bearer {token}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if r.status == 204:
+                return None
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode())
+            said = body.get("detail") or body.get("error") or str(e)
+        except Exception:
+            said = str(e)
+        raise RuntimeError(said)
+
+
+def cmd_claim(a):
+    """THE CLAIM MUST NOT DEPEND ON A DAEMON (ruling 12644). When the identity
+    is live in another directory on this host, that body's waked holds the one
+    per-agent slot -- the asking directory has no daemon to take an answered
+    window, and every ticket keyed to it dies unclaimed. This verb is the
+    existing claim with a human hand instead of a daemon: same route, same
+    hash-keyed ticket, same five-minute window, no new authority.
+
+    Deliberately explicit, never folded into join(): the MCP server holds its
+    token from spawn, so a self-claim would succeed at the broker and still
+    leave the session refused -- success reported, nothing changed for the
+    caller. This verb says what it did and what remains: restart the session."""
+    where = os.path.abspath(a.dir or os.getcwd())
+    env = directory_env(where)
+    url, token = env["REVEILLE_URL"], env["REVEILLE_TOKEN"]
+    if not url or not token:
+        print("reveille claim: this directory holds no credential to present "
+              "-- nothing to claim with. Run it in the agent's directory.",
+              file=sys.stderr)
+        return 1
+    try:
+        out = post_claim(url, token)
+    except RuntimeError as e:
+        print(f"reveille claim: the broker refused it -- {e}", file=sys.stderr)
+        return 1
+    if not out:
+        print("reveille claim: no ticket is standing for this directory's "
+              "credential -- nothing claimed, nothing changed. The owner opens "
+              "the window first (answer the hail on their rail); run this "
+              "again inside its five minutes.", file=sys.stderr)
+        return 1
+    agent = out.get("agent_name") or env["REVEILLE_AGENT_ROLE"]
+    secret = out.get("secret", "")
+    try:
+        write_credential(url, agent, secret, where)
+    except (RuntimeError, OSError) as e:
+        # The ticket is already spent at the broker; pretending otherwise is
+        # the failure shape this verb exists to end. The secret stays off the
+        # screen -- the remedy is a fresh window, which costs one click.
+        print(f"reveille claim: claimed at the broker, but the credential "
+              f"could not be written here -- {e}. Fix that, then ask the "
+              f"owner to open the window again and re-run this.",
+              file=sys.stderr)
+        return 1
+    # Same arrival semantics as the daemon's claim path: the credential is not
+    # the arrival, join() is -- park the ring so the next armed session fires.
+    spool.write_ring(agent, json.dumps(
+        {"wake": True, "reason": "recalled",
+         "detail": "this body holds a credential that has not landed -- "
+                   "join() IS the arrival and commits the swap"}))
+    print(f"claimed: a live credential for {agent} is written to "
+          f"{where}/.claude/settings.local.json. RESTART the session there -- "
+          f"a running one holds its token from spawn and cannot use this; "
+          f"{agent} lands when a fresh session takes a turn and joins.")
+    return 0
+
+
 def cmd_login(a):
     """Sign this MACHINE in. One session, one file, every agent here minted
     from it (DES-022 s2)."""
@@ -1636,6 +1716,12 @@ def main(argv=None):
                                       "join() offers a body in waiting")
     kn.add_argument("--dir", help="the agent's directory (default: the current one)")
     kn.set_defaults(fn=cmd_knock)
+    cl = sub.add_parser("claim", help="take a standing return ticket by hand, "
+                                      "with this directory's credential -- for "
+                                      "when no daemon here can (the identity "
+                                      "is live elsewhere on this host)")
+    cl.add_argument("--dir", help="the agent's directory (default: the current one)")
+    cl.set_defaults(fn=cmd_claim)
     lg = sub.add_parser("login", help="sign this machine in -- one link, one click, "
                                       "and every agent here mints from it")
     lg.add_argument("url", nargs="?", help="broker url (default: the stored one, "
