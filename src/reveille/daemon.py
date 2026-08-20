@@ -351,6 +351,26 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.219 THE BOOT REPORT QUOTES THE VERDICT, AND THE DAEMON GOES FIRST
+(ruling 12944 R-B, 12882, 13016; agent image 0.2.24). The field run of the
+12851 R1 gate came back red on its report: a container holding a refused
+credential was told "no sign-in stored" while the sentence that named the
+401 sat LAST in the same captured stream, because the verdict printed to
+stdout among siblings that print to stderr, and the report quoted the first
+line. Both halves are gone -- the verdict prints to stderr at the source, and
+no line-position read survives anywhere in the entrypoint; the whole captured
+output rides into the report, indented. A third instance of the same quote
+turned up in the DEGRADED branch and went with them. The wake daemon now
+spawns immediately after the three env checks, so nothing slow or fatal
+stands in front of the one process that can recover a body -- the checks stay
+ahead of it because they are its own inputs. The report grows the headings
+its lines were already writing under, and the clean path states a FACT, the
+exit code and the time, never a "verified" the script cannot establish.
+waked stamps every line it logs with a UTC timestamp, and its claim poll says
+which branch it took -- entry, first attempt, any change in the wire's answer,
+a heartbeat once a minute -- because a poll that finds nothing and a poll that
+never happened looked identical, and that ambiguity cost a night's diagnosis.
+
 0.2.218 EVERY TOKEN DEATH WRITES A TOMBSTONE NAMING ITS REASON (ruling
 12944 R-A, from red-shirt's finding on the night the architect went dark).
 token_tombstones was the supersede register: a revoke DELETED the row and
