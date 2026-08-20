@@ -351,6 +351,19 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.211 THE UI SPEAKS BEAM (operator 12673/12678, red-shirt 12681, ruled
+12676/12682). The browser said "knock" while the ruling, the CLI and the
+doctrine all said HAIL, BEAM DOWN, BEAM UP -- so the words existed everywhere
+except where a human reads them. Three acts, canon-exact: a pad HAILS the
+ship, the owner answers, the ship BEAMS the identity DOWN; BEAM UP is recall
+and evict, which DES-012 s11 already ruled as the two ends under their old
+names. A knock is not a third direction -- it is a machine asking to be
+beamed down, so push and hail differ in WHO INITIATES, not in which way the
+identity travels. Identifiers stay put by ruling: the route, the `knocks`
+table, `store.knock` and the shipped `reveille knock` verb keep their names
+and gain an alias, because a released command lives in somebody's shell
+history. The word moves; the act does not.
+
 0.2.210 THE STATE NOTE GETS ROOM, AND THE SCHEMA STOPS CARRYING POLICY
 (operator 12743/12746/12754/12758, architect 12747/12750/12757/12759). The
 memories table's `fact` column had `CHECK (length(fact) <= 1000)` with no
