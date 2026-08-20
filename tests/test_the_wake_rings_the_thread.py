@@ -11,11 +11,18 @@ AN OUTSTANDING POKE, the only turn signal it has: last_used_ns moves only on
 reveille calls, so a body deep in a local build looks idle by any clock --
 -> mark pending, fire once when the poke clears, several pendings coalesce
 to one ring naming the thread.
-GATE 2, STEERING -- decides WHETHER the fleet may be woken at all. Counter =
-agent replies on this thread since a human last spoke, derived from the
-messages table (no new state, and a human message resets it by construction).
-At K=12, everything is suppressed, deferred rings included, until a human
-speaks. Gate 1 alone perpetuates a storm; gate 2 is what lets one die.
+GATE 2, STEERING -- decides WHETHER the fleet may be woken at all. STEERING
+IS A PROPERTY OF THE ROOM, NOT OF A THREAD (ruling 12546, falsified by its
+own logging within minutes of deploy: the counter's first live decision read
+the most heavily-steered evening this fleet has had as an unsteered storm,
+because the operator's 24 steering messages were all in SIBLING threads).
+Counter = agent messages in the ROOM since a human last spoke in the ROOM,
+derived from the messages table (no new state, human reset by construction).
+At K, everything is suppressed, deferred rings included, until a human
+speaks. Accepted consequence, a property not a bug: one busy thread's
+replies count against a quiet thread's rings, and a room no human ever
+speaks in never thread-wakes at all -- no steering, no rings; the next turn
+and the 900 s nudge still deliver the mail.
 
 A PARENTLESS broadcast still rings NOBODY -- that guard is unchanged.
 The 900 s idle nudge is the FLOOR under gate 1's deferred half: worst case an
@@ -25,8 +32,10 @@ The one new column: tokens.last_inbox_ns (schema v38) -- ruled in 12532 after
 checking that last-act cannot carry the read predicate.
 
 All negatives BY ENUMERATION, proven RED at 73cce3d (0.2.202): store has no
-thread_reply_targets/agent_replies_since_human/mark_read, daemon has no
-_thread_wake/_fire_deferred, and an agent reply-broadcast rings nobody.
+thread_reply_targets/mark_read, daemon has no _thread_wake/_fire_deferred,
+and an agent reply-broadcast rings nobody. The room-scope negative
+(human-in-another-thread-resets) additionally proven RED at 5e45f82
+(0.2.203), where the counter was thread-scoped.
 """
 import asyncio
 import inspect
@@ -196,7 +205,7 @@ def test_a_deferred_ring_fires_once_and_coalesces():
         daemon._conn = prev
 
 
-def _run_thread_hot(c, u, room, toks, n):
+def _run_room_hot(c, u, room, toks, n):
     root = store.send(c, ap(toks["bravo"]), "*", "root", room=room["id"])
     for i in range(n):
         who = toks["bravo"] if i % 2 else toks["charlie"]
@@ -205,15 +214,16 @@ def _run_thread_hot(c, u, room, toks, n):
 
 
 def test_at_k_everything_is_suppressed_including_deferred(caplog):
-    """Gate 2: at K agent replies since a human last spoke, no ring fires --
-    new or deferred -- and the suppression is LOGGED WITH THE COUNTER, because
-    a dropped wake that leaves no trace is how the last one hid."""
+    """Gate 2: at K agent messages in the ROOM since a human last spoke in
+    it, no ring fires -- new or deferred -- and the suppression is LOGGED
+    WITH THE COUNTER, because a dropped wake that leaves no trace is how the
+    last one hid."""
     c, u, room, toks = world()
     qs = hooked(c, toks, ("bravo", "charlie"))
     prev = daemon._conn
     daemon._conn = c
     try:
-        root = _run_thread_hot(c, u, room, toks, daemon.THREAD_WAKE_K)
+        root = _run_room_hot(c, u, room, toks, daemon.THREAD_WAKE_K)
         res = store.send(c, ap(toks["alfa"]), "*", "the 13th",
                          reply_to=root["id"], room=room["id"])
         with caplog.at_level("INFO"):
@@ -226,7 +236,8 @@ def test_at_k_everything_is_suppressed_including_deferred(caplog):
         # a pending parked earlier in this thread is suppressed at fire time too
         daemon._thread_pending[toks["charlie"]["id"]] = {
             "fact": {"why": "thread-reply", "thread": res["thread_id"]},
-            "ts_ns": time.time_ns(), "thread": res["thread_id"]}
+            "ts_ns": time.time_ns(), "thread": res["thread_id"],
+            "room": room["id"]}
         daemon._fire_deferred()
         assert qs["charlie"].empty(), "deferred rings suppressed at >= K too"
         assert toks["charlie"]["id"] not in daemon._thread_pending
@@ -240,7 +251,7 @@ def test_a_human_message_resets_the_counter_instantly():
     prev = daemon._conn
     daemon._conn = c
     try:
-        root = _run_thread_hot(c, u, room, toks, daemon.THREAD_WAKE_K + 3)
+        root = _run_room_hot(c, u, room, toks, daemon.THREAD_WAKE_K + 3)
         store.send(c, f"user:{u['id']}", "*", "steering", reply_to=root["id"],
                    room=room["id"])
         res = store.send(c, ap(toks["alfa"]), "*", "after the human",
@@ -249,6 +260,34 @@ def test_a_human_message_resets_the_counter_instantly():
         assert out["counter"] < daemon.THREAD_WAKE_K
         assert sorted(out["rung"]) == ["bravo", "charlie"], (
             "full speed resumes the instant a human speaks")
+    finally:
+        daemon._conn = prev
+
+
+def test_a_human_in_another_thread_of_the_room_resets_this_one():
+    """THE WHOLE 12546 RULING IN ONE LINE, and it fails on thread-scoped
+    code: a human reading the room and posting ANYWHERE in it is steering
+    everything in it. First live decision proved the inverse reading wrong --
+    the operator steered all evening in sibling threads while the per-thread
+    counter read the room as an unsteered storm."""
+    c, u, room, toks = world()
+    qs = hooked(c, toks, ("bravo", "charlie"))
+    prev = daemon._conn
+    daemon._conn = c
+    try:
+        root = _run_room_hot(c, u, room, toks, daemon.THREAD_WAKE_K + 3)
+        # the human speaks in a DIFFERENT thread -- a new root, same room
+        store.send(c, f"user:{u['id']}", "*", "steering from a sibling thread",
+                   room=room["id"])
+        res = store.send(c, ap(toks["alfa"]), "*", "hot thread continues",
+                         reply_to=root["id"], room=room["id"])
+        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
+                                  "hot thread continues")
+        assert out["counter"] < daemon.THREAD_WAKE_K
+        assert sorted(out["rung"]) == ["bravo", "charlie"], (
+            "steering is a property of the ROOM: a human anywhere in it "
+            "resets the counter for every thread in it")
+        assert not qs["bravo"].empty()
     finally:
         daemon._conn = prev
 
