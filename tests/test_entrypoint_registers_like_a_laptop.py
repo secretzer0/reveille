@@ -62,7 +62,8 @@ def _force_note_fn():
 
 
 def _render(said):
-    script = ("say() { printf '%s\\n' \"$1\"; }\n"
+    script = ("BOOT_REPORT=/dev/stdout\n"
+              "say() { printf '%s\\n' \"$1\"; }\n"
               "note() { printf '%s\\n' \"$1\"; }\n"
               + _force_note_fn() + "\n"
               + 'mcp_force_note "$1"\n')
@@ -104,8 +105,16 @@ def test_the_two_worlds_render_differently():
 # `reveille` stubbed to refuse exactly as it did in the field.
 
 
-def _boot_block():
+def _waked_block():
+    # The R1 block sits at the TOP now (hoisted, ruling 12882): from its
+    # marker to the boot-report section that follows it.
     start = ENTRYPOINT.index("# ---- R1: NOTHING BEFORE waked MAY EXIT")
+    end = ENTRYPOINT.index("# ---- BOOT REPORT")
+    return ENTRYPOINT[start:end]
+
+
+def _init_block():
+    start = ENTRYPOINT.index('BOOT_DEGRADED=""')
     end = ENTRYPOINT.index("# Provision step 3.2.4")
     return ENTRYPOINT[start:end]
 
@@ -140,8 +149,11 @@ def _run_boot_block(tmp_path, init_rc=1, force_rc=1):
         f'BOOT_REPORT="{report}"\n'
         'say() { printf "%s\\n" "$*" >> "$BOOT_REPORT"; }\n'
         'note() { printf "%s\\n" "$*" >> "$BOOT_REPORT"; printf "%s\\n" "$*" >&2; }\n'
-        'mcp_force_note() { note "- mcp: registered via reveille init --force"; }\n'
-        + _boot_block()
+        # the SHIPPED mcp_force_note, never a stub: the stub is exactly how
+        # the first-line-quote defect survived this harness (12944 R-B)
+        + _force_note_fn() + "\n"
+        + _waked_block()
+        + _init_block()
         + '\nprintf "REACHED_END degraded=%s\\n" "$BOOT_DEGRADED"\nkill 0\n')
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", HOME=str(home),
                REVEILLE_URL="http://b:8765", REVEILLE_AGENT_ROLE="dev-agent",
@@ -171,6 +183,13 @@ def test_waked_starts_before_anything_that_can_refuse():
         "so nothing that can fail may stand in front of it")
     assert ENTRYPOINT.count("reveille-waked --url") == 1, \
         "one supervisor, one place -- a second spawn is two daemons racing one flock"
+    # HOISTED (ruling 12882): immediately after the `:?` checks -- before the
+    # boot report, the plugin loop, everything. "Before the one step we know
+    # refused" was the weaker rule that left the next slow or fatal step in
+    # front of the daemon.
+    assert spawn < ENTRYPOINT.index("# ---- BOOT REPORT"), (
+        "the daemon spawn must precede the whole boot-report section, not "
+        "just `reveille init`")
 
 
 def test_a_credential_the_broker_refuses_does_not_end_the_boot(tmp_path):
@@ -203,3 +222,52 @@ def test_an_init_that_succeeds_leaves_the_row_undegraded(tmp_path):
         f"one init call, and the daemon still spawned; ran {order}"
     line = [ln for ln in r.stdout.splitlines() if ln.startswith("REACHED_END")][0]
     assert line.strip() == "REACHED_END degraded=", line
+
+
+# ---- R-B (ruling 12944) + the two 12908 report items ------------------------
+# The field gate's (b) RED: the force-success branch quoted only the FIRST
+# line of init's captured output, and buffering put the true verdict LAST --
+# so boot-report.md said "no sign-in stored" (go log in) for a credential the
+# broker had refused. These run the SHIPPED mcp_force_note; the stub that
+# used to stand in for it is how the defect survived this harness.
+
+
+def test_the_force_kept_credential_report_carries_the_verdict(tmp_path):
+    """R-B: init refused, --force kept the credential -- the report must carry
+    the whole captured output, the 401 sentence included, wherever buffering
+    put it. Proven red on the pre-fix entrypoint, where this exact run left
+    the report holding only the REFUSING line."""
+    _r, _order, report = _run_boot_block(tmp_path, init_rc=1, force_rc=0)
+    assert "no longer works" in report and "HTTP 401" in report, report
+    assert "the credential is UNVERIFIED" in report, report
+
+
+def test_no_first_line_quote_survives_anywhere():
+    """R-B b2's invariant, asserted on the shipped text: no line-position read
+    of a captured variable -- the idiom is named here in words and built from
+    pieces so this file never contains what it forbids in the file it greps."""
+    idiom = "%" * 2 + "$'" + "\\n" + "'*"
+    assert idiom not in ENTRYPOINT, (
+        "a first-line-of-a-captured-variable quote is back in the entrypoint")
+
+
+def test_the_report_sections_hold_their_own_facts():
+    """12908 item 2: '## repo' stood empty while the repo line printed under
+    '## plugins'. The mcp story gets its own heading, and the repo heading
+    sits directly above the block that writes repo lines."""
+    assert ENTRYPOINT.count('say "## repo"') == 1
+    assert ENTRYPOINT.count('say "## mcp"') == 1
+    assert (ENTRYPOINT.index('say "## mcp"')
+            < ENTRYPOINT.index("reveille init --no-prompt --dir /home/agent/repos"))
+    assert (ENTRYPOINT.index('say "## repo"')
+            < ENTRYPOINT.index("REPO_STATUS=none")), (
+        "the repo heading must sit directly above the clone block it labels")
+    assert ENTRYPOINT.index('say "## mcp"') < ENTRYPOINT.index('say "## repo"')
+
+
+def test_a_clean_init_reports_a_fact_not_silence(tmp_path):
+    """12908 item 1: a boot inside the handover grace lands on the same clean
+    rc as a healthy one, so silence-means-verified was unreadable. The good
+    path states what was observed -- init's exit code and when."""
+    _r, _order, report = _run_boot_block(tmp_path, init_rc=0)
+    assert "init exit 0 at " in report, report

@@ -1392,7 +1392,11 @@ def test_boot_report_lives_on_the_mount_and_keeps_one_predecessor(tmp_path):
         "the reader and the writer disagree about where the report is")
 
     # Execute the shipped rotation, twice, against a temp home.
-    lines = [ln for ln in ep.splitlines()
+    # Scoped to the boot-report SECTION: the hoisted R1 block above it now
+    # carries its own `mkdir -p` (12882), and a whole-file prefix grep would
+    # capture that line and drop the truncate off the [:5].
+    sect = ep[ep.index("# ---- BOOT REPORT"):ep.index("say() {")]
+    lines = [ln for ln in sect.splitlines()
              if ln.startswith(("BOOT_REPORT=", "BOOT_REPORT_PREV=", "mkdir -p ",
                                "[ -f ", ": > "))][:5]
     # Under the shipped shell's OWN flags. `[ -f x ] && mv` returns 1 on the
@@ -1748,7 +1752,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.23", (
+    assert tag == "reveille-agent:0.2.24", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.23 CARRIES THE R1 ENTRYPOINT (ruling 12851): reveille-waked is spawned
     # BEFORE `reveille init`, and no step in front of it may exit. 0.2.22 and

@@ -10,6 +10,32 @@ set -euo pipefail
 : "${REVEILLE_TOKEN:?set REVEILLE_TOKEN (your bus credential)}"
 : "${REVEILLE_URL:=http://127.0.0.1:8765}"
 
+# ---- R1: NOTHING BEFORE waked MAY EXIT THE ENTRYPOINT (architect 12851; -----
+# hoisted per 12882). The wake socket holder (DES-003 2.1): one daemon, one
+# attachment, rings become spool files. In a container the entrypoint is the
+# supervisor -- it dies and restarts with the container; the flock makes a
+# double-start a no-op. Token rides this shell's env, never argv.
+#
+# IMMEDIATELY AFTER THE `:?` CHECKS, AND NOWHERE LOWER. 12851 R1 says "before
+# ANYTHING that can refuse"; the first hoist put it "before the one step we
+# already know refused", which left every slow or fatal step in front of the
+# daemon to be discovered in the field (ruled 12882). The `:?` checks stay in
+# front -- they are not a step before the daemon, they are the daemon's own
+# inputs: a boot with no REVEILLE_TOKEN has nothing for waked to hold, and
+# failing loudly there is correct. waked needs only these three values, never
+# init's artifacts; it parks on a spent secret and trades it for a live one at
+# the return ticket (DES-012 s14), so putting it behind anything that can
+# refuse makes recovery depend on the very thing that failed. The trade,
+# accepted at ruling: waked.log is the daemon's evidence -- the boot report
+# below does not exist yet at this point, and that is fine.
+ws_url="${REVEILLE_URL/http/ws}/wake"
+mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
+( while :; do
+    reveille-waked --url "$ws_url" --name "$REVEILLE_AGENT_ROLE" \
+      >>"$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log" 2>&1
+    sleep 2
+  done ) &
+
 # ---- BOOT REPORT (architect ruling 8691) -------------------------------------
 # A diagnostic is only a diagnostic if the party who needs it can reach it.
 #
@@ -71,10 +97,6 @@ elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; t
 else
   note "- claude credential: **MISSING** -- claude will stop at a login prompt"
 fi
-say ""
-say "## repo"
-say ""
-
 # ---- PLUGINS: INSTALLED AT BUILD, MASKED AT RUNTIME --------------------------
 # The image installs caveman and ponytail at build time into /home/agent/.claude
 # -- correct when that path was a NAMED VOLUME, because docker seeds an empty
@@ -156,38 +178,31 @@ done
 # re-provision at the wrong thing.
 mcp_force_note() {
   note "- mcp: registered via reveille init --force -- the credential is UNVERIFIED"
-  say "  init said: ${1%%$'\n'*}"
+  say "  init said:"
+  # THE WHOLE CAPTURED OUTPUT, INDENTED -- never one line of it (ruling 12944
+  # R-B b2). Under 2>&1 capture the stream's ORDER is the buffering's, not the
+  # cause's: the field run put the true verdict ("credential no longer works,
+  # HTTP 401") LAST while the first line said "no sign-in stored", and quoting
+  # by position handed the reader the wrong remedy twice. No line-position
+  # read survives anywhere in this file; the boot report is the one surface a
+  # body can read about its own broken boot (8691), and truncating it is how
+  # the body learned the wrong sentence.
+  printf '%s\n' "$1" | sed 's/^/      /' >> "$BOOT_REPORT"
   say "  waked will keep retrying the bus"
 }
-# ---- R1: NOTHING BEFORE waked MAY EXIT THE ENTRYPOINT (architect 12851) -----
-# The wake socket holder (DES-003 2.1): one daemon, one attachment, rings become
-# spool files. In a container the entrypoint is the supervisor -- it dies and
-# restarts with the container; the flock makes a double-start a no-op. Token
-# rides this shell's env, never argv.
-#
-# IT STARTS FIRST, AND THAT IS THE FIX. It used to start ~300 lines below, after
-# `reveille init` -- so a boot that init refused never reached it. Measured
-# 2026-08-20 on rev-tmelhiser-red-shirt-01: a container whose credential had been
-# SUPERSEDED by a move to another machine came up holding a secret the broker
-# answers 401 to, init took the mint path (which needs a human sign-in no
-# container has), `set -e` turned that into exit 1, and the daemon never ran.
-# waked is the one process that can undo that state -- it parks on the spent
-# secret and trades it for a live one at the return ticket (DES-012 s14) -- so
-# putting it behind anything that can refuse makes recovery depend on the very
-# thing that failed. It needs only the launcher's env ($REVEILLE_URL,
-# $REVEILLE_TOKEN, $REVEILLE_AGENT_ROLE), never init's artifacts.
-#
-# GENERALISED (ruling 12851 R1, extending 12401): every step in front of the
-# daemon may mark DEGRADED, and none of them may exit.
-ws_url="${REVEILLE_URL/http/ws}/wake"
-mkdir -p "$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}"
-( while :; do
-    reveille-waked --url "$ws_url" --name "$REVEILLE_AGENT_ROLE" \
-      >>"$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log" 2>&1
-    sleep 2
-  done ) &
+# The wake socket holder is spawned at the TOP of this file, immediately after
+# the `:?` checks -- see the R1 block there (12851, hoisted by 12882).
+# GENERALISED (ruling 12851 R1, extending 12401): every step from there down
+# may mark DEGRADED, and none of them may exit.
 
 BOOT_DEGRADED=""
+# Its own heading: these lines are the REGISTRATION story, and they used to
+# print under "## plugins" while "## repo" stood empty two sections up --
+# an empty heading reads as MISSING to exactly the reader the preamble
+# addresses (red-shirt, 12908).
+say ""
+say "## mcp"
+say ""
 # R3: STDOUT IS CAPTURED TOO. This read `2>&1 >/dev/null`, which keeps stderr and
 # throws stdout away -- and the sentence naming the actual cause,
 # "this directory's credential no longer works (HTTP 401 ...)", is a print(), so
@@ -204,10 +219,18 @@ if [ "$init_rc" -eq 0 ]; then
     # how a bricked claude (interrupted self-update) turned one bad stop into
     # a container that could never come back. The row reads this through the
     # same file the repo status rides; no new state, no new file.
-    note "- mcp: DEGRADED -- ${init_said%%$'\n'*}"
+    # The whole output, same rule as mcp_force_note (12944 R-B b2): no
+    # line-position read survives anywhere in this file.
+    note "- mcp: DEGRADED -- init said:"
+    printf '%s\n' "$init_said" | sed 's/^/      /' >> "$BOOT_REPORT"
     BOOT_DEGRADED="failed: claude binary missing -- init ran degraded; re-provision this container (an interrupted claude self-update leaves no binary)"
   else
-    say "- mcp: registered via reveille init (project scope, headersHelper) in ~/repos"
+    # THE GOOD PATH SAYS A FACT, NOT NOTHING (red-shirt 12908): a boot inside
+    # the post-supersede handover grace also lands here with a clean rc, so
+    # silence-means-verified was unreadable. The line states what was
+    # OBSERVED -- init's exit code and when -- never a "verified" this script
+    # did not establish.
+    say "- mcp: registered via reveille init (project scope, headersHelper) in ~/repos -- init exit 0 at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   fi
 else
   force_rc=0
@@ -278,6 +301,9 @@ fi
 # "already had content" as though a human had put it there. red-shirt came up
 # with a repo URL and no repo and nothing said otherwise. The question this
 # means to ask is whether the WORK TREE exists.
+say ""
+say "## repo"
+say ""
 REPO_STATUS=none
 if [ -n "${REVEILLE_REPO_URL:-}" ] && [ ! -e /home/agent/repos/work ]; then
   if git clone "${REVEILLE_REPO_URL}" /home/agent/repos/work 2>/tmp/clone.err; then
