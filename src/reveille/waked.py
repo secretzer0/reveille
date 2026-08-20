@@ -383,10 +383,9 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
         # green). `reveille init` rotated this directory's credential in place;
         # the rotation was a mint, not a move, so no return ticket was ever
         # written and this loop would have polled for one until the process
-        # died. (This used to say "the identity never left the machine" --
-        # host-scoped reasoning, ruled wrong in 12628: DES-012 scopes identity
-        # to the DIRECTORY, and the fact that matters here is that the file in
-        # THIS directory changed.) Meanwhile it held the spool flock, so the Stop hook saw a live
+        # died. (This narrative used to justify itself by host scope -- ruled
+        # wrong in 12628: DES-012 scopes identity to the DIRECTORY, and the
+        # fact that matters here is that the file in THIS directory changed.) Meanwhile it held the spool flock, so the Stop hook saw a live
         # daemon and never started the one that would have worked: armed
         # watcher, no rings, nothing anywhere disagreeing.
         # The file is the identity (write_credential's own rule), so reading it
@@ -407,8 +406,8 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
             fresh = read_env(agent)
             if fresh and fresh != secret and fresh not in (tried or ()):
                 # THE REASON IS DIRECTORY-SCOPED, AND ONLY THAT (ruled 12628).
-                # This line used to add "the identity never left this machine"
-                # -- host-scoped reasoning that was true that night only by
+                # This line used to add a second sentence justifying the adopt
+                # by host scope -- reasoning that was true that night only by
                 # coincidence. DES-012 scopes identity to the DIRECTORY; two
                 # directories on one host can both hold this agent's past, and
                 # the adopt is justified by the credential changing IN THIS
