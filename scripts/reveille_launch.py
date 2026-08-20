@@ -452,20 +452,31 @@ def _db(path=None):
     path = path or os.environ.get(
         "REVEILLE_LAUNCH_DB", os.path.expanduser("~/.reveille/launcher.db"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    # 30s busy timeout, CHOSEN BY A MEASUREMENT (13245 half 2, repro first as
-    # ruled at 13280): the roll step's open waited the full 5s DEFAULT (Python
-    # sets busy_timeout=5000 on connect -- a 5000 pragma here was refused as a
-    # no-op) and died at 5.006s against a write transaction held longer, the
-    # trip's own restarted-launcher-init shape. Not the 0.000s read-to-write
-    # upgrade signature -- that hypothesis was tested and did not reproduce on
-    # this path. 30s is six times the observed holder with the same one-knob
-    # shape; if a holder ever outlives THIS, the red trip (#189) says so now.
+    # 30s busy timeout (13245 half 2, repro first as ruled at 13280): the
+    # roll step's open waited the full 5s DEFAULT (Python sets
+    # busy_timeout=5000 on connect -- a 5000 pragma here was refused as a
+    # no-op) and died at 5.006s, exhaustion not refusal. Not the 0.000s
+    # read-to-write upgrade signature; that hypothesis was tested on this
+    # path and did not reproduce. HONEST PROVENANCE OF THE 30 (13323 rider):
+    # the only PRODUCTION fact is that the real holder outlived 5.006s -- its
+    # true duration is UNMEASURED; 30 is six times the REPRO FIXTURE's 8s
+    # holder, a modelled number, not an observed one. The slow-open line
+    # below is what turns "30 is enough" from a belief into a series of
+    # observations; a holder that outlives even this turns the #189-honest
+    # trip red and names itself.
+    _t0 = time.monotonic()
     conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='containers'").fetchone():
         _migrate_launcher_db(conn)
     _launcher_tables(conn)
     _add_role_name(conn)
+    waited = time.monotonic() - _t0
+    if waited > 1.0:
+        # instrument-and-wait (13323): the next contention MEASURES the
+        # holder instead of us modelling it
+        print(f"launcher.db open waited {waited:.1f}s (lock contention)",
+              file=sys.stderr)
     return conn
 
 
