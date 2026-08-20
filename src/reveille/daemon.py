@@ -351,6 +351,26 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.212 THE MODAL ANSWERS WHAT IT WAS ASKED (field defects from R1, lessons
+a4208505/f1b12a90, audit finding 12810). Three fixes the live beam-chain run
+surfaced that no unit gate could: (1) the knock modal's "answer" re-derived
+the knock from agKnocks -- a cache the RAIL poll fills, not the modal's own
+fetch -- so answering before the poll fell through to the plain send-back
+path and keyed the ticket on the WRONG hash (a client-side cache became an
+authorization input). The modal now HANDS openSendBack the knock it is
+showing, the POST resolves the knock at CLICK time, and a dialog opened to
+answer a knock REFUSES rather than mis-targets when no knock is resolvable:
+when the specific target cannot be determined, refuse -- never fall back to a
+different target. (2) the 30 s nag re-rendered the modal over the open answer
+dialog and ate the pointer; onKnockPush now skips rendering while an answer
+dialog is open -- a reminder must not obstruct the act it reminds you to do.
+(3) the swap-pending doctrine block still said "under 1000 characters -- a
+refused write burns the window", stale since 0.2.210 raised the state cap to
+8192 and made the soft line a nudge on a SUCCESSFUL write; it now says the
+room (8192), the aim (2048), and that going over costs nothing but advice --
+a live instruction, not a changelog, and it was telling bodies to fear a
+refusal that cannot happen inside a window seconds wide.
+
 0.2.211 THE UI SPEAKS BEAM (operator 12673/12678, red-shirt 12681, ruled
 12676/12682). The browser said "knock" while the ruling, the CLI and the
 doctrine all said HAIL, BEAM DOWN, BEAM UP -- so the words existed everywhere

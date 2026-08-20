@@ -170,3 +170,37 @@ def test_the_page_carries_the_modal_the_ruled_shape():
     # The WORD moved to hail (12673/12682, D4 slice); the asker is still named.
     assert "hailing from" in PAGE, "the asker is named (12626)"
     assert "knockBadge" in PAGE, "the badge stays -- the push is an addition"
+
+
+def test_the_modal_answer_carries_its_own_knock_id():
+    """Field defect (R1, lesson a4208505 / f1b12a90): the modal's answer
+    re-derived the knock from agKnocks -- a cache the RAIL poll fills, not the
+    modal's own fetch -- so answering before the poll fell through to the
+    plain send-back path and keyed the ticket on the WRONG hash. A fallback
+    that changes the target is worse than a failure. Fix: the modal HANDS
+    openSendBack the knock it already holds, and the POST resolves the knock
+    at CLICK time, refusing rather than mis-targeting when a dialog opened to
+    answer a knock can no longer resolve one."""
+    flat = PAGE.replace(" ", "")
+    assert "functionopenSendBack(name,knock)" in flat, (
+        "openSendBack accepts an explicit knock -- the caller hands it in, "
+        "never only re-derives from the rail cache")
+    # the modal answer handler passes the knock object, not just the name
+    assert "openSendBack(el.dataset.kmopen,k)" in flat, (
+        "the modal answers with the knock it is already showing")
+    # the refusal guard: a dialog opened to answer a knock refuses if the
+    # knock cannot be resolved at POST, rather than sending a plain send-back
+    assert "NO-TARGET-REFUSE" in PAGE, (
+        "when the knock target cannot be determined, REFUSE -- never fall "
+        "back to a different target (a4208505)")
+
+
+def test_the_nag_does_not_obstruct_the_open_answer_dialog():
+    """Field defect (R1, defect 2): the 30s knock nag re-rendered the modal
+    over the open send-back dialog and ate the pointer. A reminder must not
+    obstruct the act it is reminding you to do. onKnockPush skips rendering
+    while the answer dialog is open."""
+    push = PAGE[PAGE.index("async function onKnockPush"):]
+    push = push[:push.index("\nfunction renderKnockModal")]
+    assert "agDlg" in push and "classList.contains('on')" in push, (
+        "the nag does not re-open the modal while an answer dialog is open")
