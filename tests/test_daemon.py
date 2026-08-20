@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Pure-function checks for the daemon (no server). Run: uv run pytest.
 The live HTTP/WS path is covered by tests/smoke_ws.py."""
+import inspect
 import os
 import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from reveille import __version__, daemon  # noqa: E402
+from reveille import __version__, daemon, store  # noqa: E402
 
 # The bus page, now a flat file (ui/bus/index.html) read through the same
 # fixed-table loader the server uses -- so what these tests inspect is what
@@ -355,32 +356,35 @@ def test_unconfigured_page_renders_no_link_element():
     assert "<!--NAVLINK-->" not in page         # and no leftover placeholder
 
 
-# ---- who wakes whom (msg 8496) ----------------------------------------------
-# One table pins the entire rule: a HUMAN broadcast wakes the room, an AGENT
-# broadcast does not, and unicast wakes its recipient on either plane. The
-# agent-broadcast row is the ONLY thing terminating an agent-agent broadcast
-# loop -- the poke gate coalesces simultaneous rings, not the ~2.4-minute
-# cadence the 74-message storm actually ran at.
-
-def _woke(plane, to, delivery):
-    """The one line each plane computes, extracted so the rule is testable
-    without a broker: web always wakes, MCP never wakes on broadcast."""
-    if plane == "web":
-        return delivery
-    return delivery if to != "*" else []
-
+# ---- who wakes whom (msg 8496; amended by rulings 12472/12532) --------------
+# The table: a HUMAN broadcast wakes the room; an agent PARENTLESS broadcast
+# wakes nobody; an agent REPLY-broadcast rings the thread's agent authors
+# through the two thread-wake gates (tests/test_the_wake_rings_the_thread.py
+# owns those); unicast wakes its recipient on either plane. What terminates an
+# agent-agent storm is no longer "never ring" -- it is gate 2's steering
+# counter, which suppresses everything once a thread runs THREAD_WAKE_K agent
+# replies deep with no human in it.
 
 def test_web_broadcast_wakes_the_whole_room():
-    assert _woke("web", "*", ["a", "b", "c"]) == ["a", "b", "c"]
+    # send_http is wrapped by _guard, so slice the module source instead
+    src = inspect.getsource(daemon)
+    block = src[src.index("async def send_http"):src.index("async def voices_http")]
+    assert 'woke = res["wake_principals"]' in block, (
+        "the web plane rings on broadcast unconditionally -- a person paging")
 
 
-def test_agent_broadcast_wakes_nobody():
-    assert _woke("mcp", "*", ["a", "b", "c"]) == []
+def test_an_agent_parentless_broadcast_still_wakes_nobody():
+    src = inspect.getsource(daemon._thread_wake)
+    # the guard is structural: no parents -> no targets -> nothing rings
+    assert "thread_reply_targets" in src
+    src2 = inspect.getsource(store.thread_reply_targets)
+    assert "if not parents" in src2
 
-
-def test_unicast_wakes_its_recipient_on_either_plane():
-    assert _woke("web", "dev", ["dev"]) == ["dev"]
-    assert _woke("mcp", "dev", ["dev"]) == ["dev"]
+def test_unicast_wakes_its_recipient_on_the_mcp_plane():
+    src = inspect.getsource(daemon.send.fn if hasattr(daemon.send, "fn")
+                            else daemon.send)
+    assert 'if to != store.BROADCAST:' in src
+    assert '_notify(rid, res["wake_principals"]' in src
 
 
 def test_shout_parameter_is_gone_from_the_served_surface():
