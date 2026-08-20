@@ -403,10 +403,16 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
         if read_env:
             fresh = read_env(agent)
             if fresh and fresh != secret and fresh not in (tried or ()):
+                # THE REASON IS DIRECTORY-SCOPED, AND ONLY THAT (ruled 12628).
+                # This line used to add "the identity never left this machine"
+                # -- host-scoped reasoning that was true that night only by
+                # coincidence. DES-012 scopes identity to the DIRECTORY; two
+                # directories on one host can both hold this agent's past, and
+                # the adopt is justified by the credential changing IN THIS
+                # ONE, never by anything about the machine.
                 print(f"reveille-waked: this directory's credential changed while "
-                      f"{agent} was parked -- adopting it and reconnecting. No "
-                      f"return ticket was needed: the identity never left this "
-                      f"machine.", file=sys.stderr)
+                      f"{agent} was parked -- adopting it and reconnecting.",
+                      file=sys.stderr)
                 return fresh
         got = await _claim(url, secret)
         if not got:
