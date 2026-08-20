@@ -19,9 +19,10 @@ from reveille import store  # noqa: E402
 
 DEFAULT_BUDGET = 24000
 FAT_RULE = "NEVER DO THE LONG THING; ALWAYS DO THE SHORT ONE. " * 30   # ~1.4KB
+SHORT_RULE = "SHORT IMPERATIVE, KEPT NEAR TWO HUNDRED CHARS FOR THE TAIL. " * 3
 
 
-def fixture(n=40):
+def fixture(n=40, rule=FAT_RULE):
     path = os.path.join(tempfile.mkdtemp(), "broker.db")
     c = store.connect(path)
     store.migrate(c, path)
@@ -30,22 +31,45 @@ def fixture(n=40):
     for i in range(n):
         store.add_lesson(c, author="architect", slug=f"rule-{i:03d}",
                          symptom="story", root_cause="cause",
-                         rule=f"{i:03d}: {FAT_RULE}",
+                         rule=f"{i:03d}: {rule}",
                          detection="grep", room_id=None)
     return c, admin, room
 
 
 def test_the_default_payload_fits_the_turn():
     """The budget bounds the SERIALIZED RESULT the caller receives -- rows,
-    envelope and note together, no tail riding outside the number (12957).
-    This is the assertion that was red on the unfixed head (64,560 chars
-    serialized against the 24000 budget)."""
+    envelope and note together. On MAIN, where lessons() had no budget at
+    all, this was the predicted red: "serialized to 64560 chars -- over the
+    24000 budget it exists to honor". This fat-rule fixture cannot express
+    the tail-outside-the-accounting defect (its tail is ~600 chars); the
+    gate for that one is test_the_tail_cannot_ride_outside_the_budget."""
     c, admin, room = fixture()
     got = store.lessons(c, [room["id"]])
     size = len(json.dumps(got))
     assert size <= DEFAULT_BUDGET, (
         f"lessons() serialized to {size} chars -- over the {DEFAULT_BUDGET} "
         f"budget it exists to honor")
+
+
+def test_the_tail_cannot_ride_outside_the_budget():
+    """The 12957 defect, expressed so it FIRES: many short rules, a slug tail
+    far bigger than the envelope, a budget the all-slugs floor sits
+    comfortably under -- so a red here blames the tail accounting, never the
+    ruled floor (the floor check proves it). The pre-fix code counted only
+    full rows against the budget and appended the tail after; on this corpus
+    that lands thousands of chars over, where the fat-rule fixture's 600-char
+    tail hid it. Proven red on ce429b9, the head that carried the defect."""
+    budget = 8000
+    c, admin, room = fixture(n=200, rule=SHORT_RULE)
+    floor = store.lessons(c, [room["id"]], budget=0)
+    assert len(json.dumps(floor)) < budget, (
+        "fixture broken: the all-slugs floor itself exceeds the budget, so a "
+        "red here would blame the ruled floor rather than the tail accounting")
+    got = store.lessons(c, [room["id"]], budget=budget)
+    size = len(json.dumps(got))
+    assert size <= budget, (
+        f"lessons() serialized to {size} chars -- over the {budget} budget "
+        f"it exists to honor: the slug tail rode outside the accounting")
 
 
 def test_chars_names_what_the_caller_received():
