@@ -22,7 +22,10 @@ def test_production_is_the_ruled_set_exactly():
     assert timings.PROFILES["production"] == {
         "PENDING_TTL_S": 600, "RECALL_TTL_S": 300, "HANDOVER_GRACE_S": 300,
         "PENDING_SWEEP_S": 60, "ARRIVAL_RING_S": 60, "RECALL_POLL_S": 20,
-        "ORPHAN_POLL_S": 900}
+        "ORPHAN_POLL_S": 900,
+        # 0.2.208: the standing-knock repeat push -- 30 s is the operator's own
+        # number (12602), so it is part of the ruled set from birth.
+        "KNOCK_NAG_S": 30}
 
 
 def test_every_profile_holds_the_ordering_invariants():

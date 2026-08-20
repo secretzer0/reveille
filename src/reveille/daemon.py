@@ -110,6 +110,9 @@ SWEEP_SECS = 3600
 # several ticks per window whatever the profile, so the promise and the table
 # agree well inside the window itself.
 PENDING_SWEEP_SECS = timings.PENDING_SWEEP_S
+# The standing-knock repeat push (operator 12602, architect 12607): its own
+# knob because the nag cadence is a human-facing promise, not a sweep detail.
+KNOCK_NAG_S = timings.KNOCK_NAG_S
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
@@ -244,7 +247,12 @@ USE:
    send the identity here (POST /recalls/request, authed by the dead
    credential). It records ONE row on the owner's rail and nothing else; the
    answer lands on its own through the return ticket. The clean body may ask
-   to be beamed; it may never beam itself.
+   to be beamed; it may never beam itself. The row carries the asking
+   machine's user@host:path, shown only to the OWNER (their dialog, badge
+   tooltip and modal name it); the owner's open pages are pushed a knocks
+   frame the moment the row lands and every KNOCK_NAG_S until it is answered,
+   declined, or expires. The owner may DECLINE (the row goes, nothing is
+   minted, the machine may knock again).
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
    BEING WOKEN IS NOT BEING ASKED. A ring means mail arrived, never that you owe a
    reply. Reply ONLY if: it names you in NEED:, blocks your work, or asks you a
@@ -342,6 +350,24 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.208 THE KNOCK REACHES THE OWNER (operator 12602, rulings 12607/12626).
+Schema v40: knocks.path -- user@host:path of the ASKING directory, sent by
+the knock CLI (it is the one party standing there), refreshed on re-knock,
+nullable for old clients. Shown ONLY to the owner: the send-back dialog, the
+badge tooltip and the new modal all name it, because two directories on one
+laptop cost the operator the decision of WHICH machine they were answering
+(12625: the path is the whole content of the decision). The 12445 boundary
+stands: the REFUSAL side still names no host and no path. The PUSH: one
+"knocks" frame to every open page of the owner over /feed the moment a knock
+lands, repeated every KNOCK_NAG_S (production 30 s) by _knock_nagger while
+rows stand; every push and repeat logged with the knock ids and the session
+count. The page renders ONE coalesced modal for the set, refreshed in place;
+"not now" keeps the badge and re-arms on the next NEW knock or reload; badge
+and polls stay (the push is an addition -- a socket proves a handshake, not
+a delivery). DECLINE: POST /recalls {knock, decline:true} consumes the row
+and mints nothing -- accept and deny both consume (12607), and the machine
+may simply knock again.
 
 0.2.207 THE ADOPT STATES THE DIRECTORY-SCOPED REASON, AND ONLY THAT (ruling
 12628). waked's adopt line said "no return ticket was needed: the identity
@@ -5100,6 +5126,52 @@ def _push_presence(room):
     _feed_push(room, {"event": "presence", "room": room, "agents": agents})
 
 
+def _push_knocks(owner_id, repeat=False):
+    """One frame to every open page of the OWNER (operator 12602, ruled 12607):
+    a standing knock is a decision the system is blocked on, and the badge
+    alone waits for the eye. Coalesced PER OWNER -- the frame carries a count
+    and the page fetches /recalls for the set, so two stale directories can
+    never stack two modals. The push is an ADDITION: the badge and the polls
+    stay, because a socket proves a handshake, not a delivery.
+
+    LOGGED EVERY TIME, repeat included, with the knock ids and the session
+    count (12607 limit 4): without the line, "the modal never appeared" is
+    another hour of inferring from silence. n=0 sessions is exactly the
+    silence worth a line."""
+    rows = store.knocks_for(_conn, owner_id)
+    if not rows:
+        return 0
+    owner = _conn.execute("SELECT name FROM users WHERE id=?",
+                          (owner_id,)).fetchone()
+    if not owner:
+        return 0
+    frame = {"event": "knocks", "count": len(rows)}
+    n = 0
+    for q, (_room, name) in list(_feed.items()):
+        if name == owner["name"]:
+            q.put_nowait(frame)
+            n += 1
+    log.info("knock push %s to %s owner session(s)%s",
+             [r["id"][:8] for r in rows], n, " (repeat)" if repeat else "")
+    return n
+
+
+async def _knock_nagger():
+    """The repeat half of the knock push (operator 12602: re-send every 30 s
+    until accept or deny). The ARRIVAL pushes from the knock route; this only
+    nags while rows stand -- answered, declined, or expired rows fall out of
+    knocks_for and the nag falls silent with them. The page's "not now" is
+    client-side by design (12607 limit 2): the nag keeps arriving and the
+    snoozed page keeps the badge, so a second open tab still hears it."""
+    while True:
+        await asyncio.sleep(KNOCK_NAG_S)
+        try:
+            for oid in store.owners_with_knocks(_conn):
+                _push_knocks(oid, repeat=True)
+        except Exception:
+            log.exception("knock nag failed")
+
+
 def _annotate_activity(agents, rooms):
     """Stamp `activity` onto presence rows, at read time, from the same inputs
     deafness reads. See store.activity: the label names what the bus SAW, never
@@ -8282,6 +8354,18 @@ async def recalls_http(request):
                              "knocks": store.knocks_for(_conn, p.user_id)})
     d = await request.json()
     kid = (d.get("knock") or "").strip()
+    if kid and d.get("decline"):
+        # DECLINING A KNOCK (ruled 12607: accept and deny both consume). The
+        # row goes and NOTHING is minted -- no window, no ticket. The machine
+        # that asked is not punished: it still holds its dead credential and
+        # can simply knock again.
+        k = store.knock_take(_conn, p.user_id, kid)
+        if not k:
+            raise store.BusError("no such knock -- it may have expired or been "
+                                 "answered already")
+        log.info("%s declined a knock (%s) for agent %s",
+                 p.name, k["reason"], k["agent_id"])
+        return JSONResponse({"declined": kid})
     if kid:
         # ANSWERING A KNOCK (DES-012 s18, ruling 12485): the ticket is keyed on
         # the hash RECORDED IN THE KNOCK ROW -- never on a hash supplied here
@@ -8348,10 +8432,21 @@ async def recall_request_http(request):
     one row on the owner's rail; the existing allow-it-back button answers it,
     and 11252 stands -- the owner acts, the knocker waits. THE CLEAN BODY MAY
     ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF."""
-    secret = _bearer(request) or (await request.json()).get("secret", "")
-    out = store.knock(_conn, secret)
-    log.info("knock: %s (%s) asks its owner to send the identity back",
-             out["agent"], out["reason"])
+    try:
+        d = await request.json()
+    except Exception:
+        d = {}
+    secret = _bearer(request) or d.get("secret", "")
+    # `machine` is the CLI's own user@host:path (12626) -- recorded for the
+    # OWNER's dialog, capped because it is caller-supplied text. The knocker's
+    # RESPONSE stays as it was: no owner data, no other machines' paths.
+    machine = (d.get("machine") or "").strip()[:512] or None
+    out = store.knock(_conn, secret, path=machine)
+    log.info("knock: %s (%s) asks its owner to send the identity back%s",
+             out["agent"], out["reason"],
+             f" from {machine}" if machine else "")
+    # The arrival IS the first push (12607): the nag only repeats it.
+    _push_knocks(out.pop("owner_id"))
     return JSONResponse(out)
 
 
@@ -8858,11 +8953,13 @@ def build_app():
         async with mcp_app.router.lifespan_context(app):
             task = asyncio.create_task(_sweeper())
             pending_task = asyncio.create_task(_pending_sweeper())
+            knock_task = asyncio.create_task(_knock_nagger())
             try:
                 yield
             finally:
                 task.cancel()
                 pending_task.cancel()
+                knock_task.cancel()
 
     return Starlette(
         routes=[

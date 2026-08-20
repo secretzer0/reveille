@@ -274,6 +274,14 @@
  .unread{background:var(--gold);color:#14161a;border-radius:999px;font-size:.68rem;
   font-weight:700;padding:.05rem .38rem;min-width:1.15rem;text-align:center;line-height:1.5}
  .unread:empty{display:none}
+ /* The knock modal: fixed overlay so it reaches the owner on ANY view. */
+ #knockModal{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:90;
+  display:flex;align-items:center;justify-content:center}
+ #knockModal[hidden]{display:none}
+ #kmCard{background:var(--panel,#1c1f24);color:var(--fg);border:1px solid var(--line);
+  border-radius:10px;padding:1rem;max-width:34rem;width:calc(100% - 2rem)}
+ #kmList .kmRow{margin:.55rem 0;line-height:1.45}
+ #kmList .kmFrom{color:var(--dim);word-break:break-all}
  #meCard .avatar{width:30px;height:30px;font-size:.72rem}
  #meCard .mename{font-size:.85rem;font-weight:700;line-height:1.2}
  /* The room line is a CONTROL, not a label. It used to render in --faint -- the same
@@ -952,6 +960,19 @@
      pane to #agUnavail -- chat/rooms/memory/presence never know it happened,
      because the broker's own code never touches docker or a launcher URL;
      this is the browser doing an extra fetch, nothing more. -->
+<!-- THE KNOCK MODAL (operator 12602, ruled 12607). Its own overlay, NOT a row
+     on the agents rail: a knock is an IDENTITY-level ask from a machine, and
+     it must reach the owner on whatever view they are in. One modal for the
+     whole SET of standing knocks (coalesced per owner), refreshed in place by
+     the repeat push. "not now" keeps the badge and re-arms on the next NEW
+     knock or on reload. -->
+<div id="knockModal" hidden>
+ <div id="kmCard">
+  <div class="pRow"><b>A machine is knocking</b></div>
+  <div id="kmList"></div>
+  <div class="pRow"><button type="button" id="kmLater">not now</button></div>
+ </div>
+</div>
 <div id="agentsWell">
  <div class="pRow"><b>AGENTS</b><span class="lnk" id="agBack">&larr; back to chat</span></div>
  <div id="agUnavail" hidden><span id="agUnavailMsg"></span>
@@ -2139,6 +2160,12 @@ function connect(){
   case 'script':{const mm=msgs.get(m.id);if(mm){mm.has_script=true;mm.script=m.text||mm.script;
     mm.script_voice=m.voice_id||mm.script_voice;paintIcons(mm);}return;}
   case 'message':return add(m);
+  // A standing knock is an owner decision the system is blocked on (12602/
+  // 12607): the frame is a POKE carrying a count -- the page fetches the SET
+  // from /recalls and renders one coalesced modal, so two stale directories
+  // can never stack two dialogs. The badge and the polls stay: this push is
+  // an ADDITION, because a socket proves a handshake, not a delivery.
+  case 'knocks':onKnockPush();return;
   default:return;       // an event this build does not know is not an error --
   }                     // the broker may be newer, and the poll still covers us
  };
@@ -3230,9 +3257,12 @@ async function openSendBack(name){
  const kAgo=k?Math.max(1,Math.round((Date.now()-k.last_ns/1e6)/60000)):0;
  openAgDlg(
   '<div class="pRow"><b id="agDlgTitle">Send '+esc(name)+' back</b></div>'+
-  (k?'<div class="pAsk"><b>A machine is knocking:</b> '+kWord+', and it asked '+
+  (k?'<div class="pAsk"><b>A machine is knocking'+
+   (k.path?' from '+esc(k.path):'')+':</b> '+kWord+', and it asked '+
    'to come back ~'+kAgo+' min ago. Answering opens the window for THE '+
-   'MACHINE THAT ASKED.</div>':'')+
+   'MACHINE THAT ASKED'+(k.path?' -- '+esc(k.path):'')+', and nowhere else. '+
+   'The knocking machine may be one you do not recognise; the path above is '+
+   'the whole content of this decision.</div>':'')+
   '<div class="pAsk">This opens a five-minute window in which the machine '+esc(name)+
   ' was moved OFF can take the identity back. That machine claims it with the '+
   'credential it is still holding -- nothing is pasted, and no live secret '+
@@ -3662,6 +3692,54 @@ async function refreshUnread(){
  if(document.hidden||!me)return;
  try{const d=await api('/me');if(d&&d.unread){me.unread=d.unread;me.knocks=d.knocks;paintMe();}}catch(e){}
 }
+
+// ---- the knock modal (operator 12602, ruled 12607) -------------------------
+// One modal for the SET of standing knocks, triggered by the 'knocks' feed
+// frame and refreshed IN PLACE by the 30 s repeat. "not now" (kmLater) keeps
+// the badge and stays quiet until a NEW knock id appears or the page reloads
+// -- knockSeen/knockSnoozed are deliberately in-memory. The push is an
+// ADDITION: the badge paints from /me and the rail polls /recalls unchanged.
+let knockSeen=new Set(),knockSnoozed=false;
+async function onKnockPush(){
+ if(!me)return;
+ let rc;try{rc=await api('/recalls');}catch(e){return;}
+ const ks=rc.knocks||[];
+ // The badge's tooltip names the askers (12626): user@host:path is the whole
+ // content of the decision when two directories can both be an agent's past.
+ const b=$('knockBadge');
+ if(b)b.title=ks.length?ks.map(k=>k.agent+' knocking from '+(k.path||'an unnamed machine')).join('\n')
+                       :'machines knocking to come back';
+ if(!ks.length){closeKnockModal();knockSeen.clear();knockSnoozed=false;return;}
+ if(ks.some(k=>!knockSeen.has(k.id)))knockSnoozed=false;   // a NEW knock re-arms
+ for(const k of ks)knockSeen.add(k.id);
+ if(knockSnoozed)return;
+ renderKnockModal(ks);
+}
+function renderKnockModal(ks){
+ $('kmList').innerHTML=ks.map(k=>{
+  const word=k.reason==='superseded'?"that machine was this identity's body"
+    :'the move minted for that machine never arrived';
+  const ago=Math.max(1,Math.round((Date.now()-k.last_ns/1e6)/60000));
+  return '<div class="kmRow"><b>'+esc(k.agent)+'</b> is knocking'+
+   (k.path?' from <span class="kmFrom">'+esc(k.path)+'</span>':'')+
+   ' -- '+word+', asked ~'+ago+' min ago<br>'+
+   '<button type="button" data-kmopen="'+esc(k.agent)+'">answer</button> '+
+   '<button type="button" data-kmdecline="'+esc(k.id)+'">decline</button></div>';
+ }).join('');
+ for(const el of document.querySelectorAll('[data-kmopen]'))el.onclick=()=>{
+  closeKnockModal();
+  if(typeof AGBASE!=='undefined'){openAgentsWell();openAgent(el.dataset.kmopen);openSendBack(el.dataset.kmopen);}
+  else toast('answering needs the agents pane -- no launcher is configured here');
+ };
+ for(const el of document.querySelectorAll('[data-kmdecline]'))el.onclick=async()=>{
+  try{await api('/recalls',{method:'POST',body:JSON.stringify({knock:el.dataset.kmdecline,decline:true})});}
+  catch(e){toast(e.message);}
+  onKnockPush();                       // re-render from what actually stands
+ };
+ $('knockModal').hidden=false;
+}
+function closeKnockModal(){$('knockModal').hidden=true;}
+$('kmLater').onclick=()=>{knockSnoozed=true;closeKnockModal();};
 
 // A DELIBERATE CLOSE DETACHES THE RECONNECT FIRST (operator, 2026-08-17: every
 // agent message was read twice). ws.close() here used to leave the old socket's

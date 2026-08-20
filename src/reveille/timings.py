@@ -42,6 +42,7 @@ PROFILES = {
         "ARRIVAL_RING_S": 60,     # join-me ring cadence
         "RECALL_POLL_S": 20,      # parked daemon's claim poll
         "ORPHAN_POLL_S": 900,     # never-parked bounded wait
+        "KNOCK_NAG_S": 30,        # standing-knock repeat push (operator 12602)
     },
     # Same system, faster laps. The ORDERING relationships hold (gated):
     # sweep well under pending, poll well under ticket, grace <= pending.
@@ -53,6 +54,7 @@ PROFILES = {
         "ARRIVAL_RING_S": 10,
         "RECALL_POLL_S": 5,
         "ORPHAN_POLL_S": 60,
+        "KNOCK_NAG_S": 5,
     },
 }
 
@@ -73,3 +75,4 @@ PENDING_SWEEP_S = _P["PENDING_SWEEP_S"]
 ARRIVAL_RING_S = _P["ARRIVAL_RING_S"]
 RECALL_POLL_S = _P["RECALL_POLL_S"]
 ORPHAN_POLL_S = _P["ORPHAN_POLL_S"]
+KNOCK_NAG_S = _P["KNOCK_NAG_S"]

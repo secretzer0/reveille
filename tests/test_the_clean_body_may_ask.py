@@ -280,7 +280,7 @@ def test_the_knock_cli_reads_the_directory_it_stands_in(tmp_path, monkeypatch):
         '"REVEILLE_AGENT_ROLE": "wanderer", "REVEILLE_TOKEN": "dead-secret"}}')
     seen = {}
 
-    def fake_post(url, token):
+    def fake_post(url, token, machine=None):
         seen["url"], seen["token"] = url, token
         return {"agent": "wanderer", "reason": "superseded"}
     monkeypatch.setattr(cli, "post_knock", fake_post)
@@ -306,7 +306,7 @@ def test_the_knock_cli_disambiguates_the_story_less_case(tmp_path, monkeypatch, 
         '"REVEILLE_AGENT_ROLE": "wanderer", "REVEILLE_TOKEN": "dead-secret"}}')
     monkeypatch.chdir(tmp_path)
 
-    def storyless(url, token):
+    def storyless(url, token, machine=None):
         raise RuntimeError(store.BAD_TOKEN)
     monkeypatch.setattr(cli, "post_knock", storyless)
     assert cli.main(["knock"]) == 1
@@ -314,7 +314,7 @@ def test_the_knock_cli_disambiguates_the_story_less_case(tmp_path, monkeypatch, 
     assert "knocking cannot help here" in said
     assert "no story with the broker" in said
 
-    def alive(url, token):
+    def alive(url, token, machine=None):
         raise RuntimeError("a live credential needs no knock -- this machine "
                            "already holds the identity")
     monkeypatch.setattr(cli, "post_knock", alive)
