@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -519,6 +519,24 @@ CREATE TABLE IF NOT EXISTS recalls (
     token_id     TEXT                  -- the ONE credential this offer minted
 );
 CREATE INDEX IF NOT EXISTS recalls_claim ON recalls(claim_hash);
+-- DES-012 s18, rulings 12445/12485: THE KNOCK. A stale body holding a DEAD
+-- credential may ask the owner to send the identity to its machine -- and may
+-- do nothing else: a knock creates no presence, sends no message, joins
+-- nothing. THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF.
+-- One row per (identity, credential hash): a re-knock refreshes last_ns, so a
+-- flailing session cannot spam the owner's rail. The owner's answer keys the
+-- return ticket on secret_hash -- the hash RECORDED here, never one supplied
+-- at answer time -- and consumes the row.
+CREATE TABLE IF NOT EXISTS knocks (
+    id          TEXT PRIMARY KEY,
+    agent_id    TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,         -- whose rail shows it, who may answer
+    secret_hash TEXT NOT NULL,         -- the address the answer's ticket is keyed on
+    reason      TEXT NOT NULL,         -- the tombstone's: how this credential died
+    first_ns    INTEGER NOT NULL,
+    last_ns     INTEGER NOT NULL,
+    UNIQUE (agent_id, secret_hash)
+);
 """
 
 # DES-013: THE BANK reveille owns (section 3), WHO SPEAKS WITH WHAT in a room
@@ -1910,6 +1928,30 @@ CREATE INDEX IF NOT EXISTS recalls_claim ON recalls(claim_hash);
 """
 
 
+KNOCKS_SCHEMA = """-- DES-012 s18: THE KNOCK (rulings 12445/12485). A stale body holding a dead
+-- credential asks the owner to send the identity to its machine; the owner's
+-- existing allow-it-back button answers, keyed on the hash recorded here.
+CREATE TABLE IF NOT EXISTS knocks (
+    id          TEXT PRIMARY KEY,
+    agent_id    TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    secret_hash TEXT NOT NULL,
+    reason      TEXT NOT NULL,
+    first_ns    INTEGER NOT NULL,
+    last_ns     INTEGER NOT NULL,
+    UNIQUE (agent_id, secret_hash)
+);
+"""
+
+
+def _upgrade_v36(conn, db_path):
+    """v36 -> v37 (DES-012 s18): knocks. Additive, one empty table; no broker
+    has ever held a knock, so there is nothing to backfill."""
+    with tx(conn):
+        _exec_script(conn, KNOCKS_SCHEMA)
+        conn.execute("PRAGMA user_version=37")
+
+
 def _upgrade_v35(conn, db_path):
     """v35 -> v36 (ruling 12445): the tombstone stops being supersession-only.
     superseded_ns becomes died_ns -- the column is now the instant ANY death
@@ -2128,7 +2170,7 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -3519,6 +3561,117 @@ def sweep_tombstones(conn, now=None):
     with tx(conn):
         return conn.execute("DELETE FROM token_tombstones WHERE died_ns < ?",
                             (now - TOMBSTONE_TTL_NS,)).rowcount
+
+
+# THE KNOCK'S STANDING (DES-012 s18). A day: long enough that an owner away
+# overnight still finds it on the rail, short enough that a machine nobody
+# has thought about in a week is not a standing invitation. Re-knocking
+# refreshes it, so a body that still wants back stays visible.
+KNOCK_TTL_NS = 24 * 3600 * 1_000_000_000
+
+
+def knock(conn, secret, now=None):
+    """A dead credential asks the owner to send the identity here (DES-012
+    s18, rulings 12445/12485). Records the ask and NOTHING else: no presence,
+    no message, no join -- THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER
+    BEAM ITSELF. Idempotent per (identity, credential hash): a re-knock
+    refreshes last_ns on the same row, so a flailing session cannot spam the
+    rail.
+
+    Only a tombstoned hash may knock (12485 constraint 2): a live credential
+    needs no knock, a pending one's answer is join(), and an unknown or
+    story-less hash is a stranger -- tombstone_for already prunes aged rows on
+    sight, so its None covers both.
+    """
+    now = now or time.time_ns()
+    live = resolve_token(conn, secret)
+    if live:
+        if live["pending"]:
+            raise BusError("this credential is a pending arrival: join() is "
+                           "the answer, not a knock -- that call IS the beam")
+        raise BusError("a live credential needs no knock -- this machine "
+                       "already holds the identity")
+    ts = tombstone_for(conn, secret)
+    if not ts:
+        raise AuthError("bad token")
+    owner = conn.execute("SELECT owner_id FROM agents WHERE id=?",
+                         (ts["agent_id"],)).fetchone()
+    if not owner:
+        raise AuthError("bad token")
+    h = _sha(secret)
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO knocks(id, agent_id, owner_id, secret_hash, reason, "
+            "first_ns, last_ns) VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(agent_id, secret_hash) "
+            "DO UPDATE SET last_ns=excluded.last_ns",
+            (uuid.uuid4().hex, ts["agent_id"], owner["owner_id"], h,
+             ts["reason"], now, now))
+    r = conn.execute("SELECT id, first_ns FROM knocks WHERE agent_id=? AND "
+                     "secret_hash=?", (ts["agent_id"], h)).fetchone()
+    return {"id": r["id"], "agent": ts["agent_name"], "reason": ts["reason"],
+            "since_ns": r["first_ns"]}
+
+
+def knocks_for(conn, owner_id, now=None):
+    """The standing knocks on this owner's rail -- who is asking, why their
+    credential is dead, and how recently they asked. Aged rows are simply not
+    answered here; the sweep deletes them."""
+    now = now or time.time_ns()
+    out = []
+    for r in conn.execute(
+            "SELECT k.*, a.name AS agent FROM knocks k "
+            "JOIN agents a ON a.id = k.agent_id "
+            "WHERE k.owner_id=? AND k.last_ns >= ? ORDER BY k.last_ns DESC",
+            (owner_id, now - KNOCK_TTL_NS)):
+        out.append({"id": r["id"], "agent": r["agent"], "reason": r["reason"],
+                    "first_ns": r["first_ns"], "last_ns": r["last_ns"]})
+    return out
+
+
+def knock_take(conn, owner_id, knock_id, now=None):
+    """The owner answers a knock: consume the row (12485 constraint 3) and
+    return what the answer needs -- the agent and the hash the ticket is keyed
+    on (constraint 1: the hash comes from the ROW, never from the request).
+    None for anything that is not this owner's living knock: someone else's,
+    already answered, or aged past its standing -- the row goes either way,
+    but a story that expired is refused at the act too."""
+    now = now or time.time_ns()
+    r = conn.execute("SELECT * FROM knocks WHERE id=?", (knock_id,)).fetchone()
+    if not r or r["owner_id"] != owner_id:
+        return None
+    with tx(conn):
+        conn.execute("DELETE FROM knocks WHERE id=?", (knock_id,))
+    if r["last_ns"] < now - KNOCK_TTL_NS:
+        return None
+    return {"agent_id": r["agent_id"], "secret_hash": r["secret_hash"],
+            "reason": r["reason"]}
+
+
+def sweep_knocks(conn, now=None):
+    """Delete knocks past KNOCK_TTL_NS; returns how many. Rides the broker's
+    existing sweep -- expires quietly, swept, bounded (ruling 12445)."""
+    now = now or time.time_ns()
+    with tx(conn):
+        return conn.execute("DELETE FROM knocks WHERE last_ns < ?",
+                            (now - KNOCK_TTL_NS,)).rowcount
+
+
+# How long a spent or expired return ticket stays readable in recalls_for
+# before the sweep takes the row. A week of history, then gone -- the DES-012
+# s17 audit debt: nothing swept this table, so rows accumulated forever
+# behind recalls_for's LIMIT 50 (12396).
+RECALL_KEEP_NS = 7 * 86_400 * 1_000_000_000
+
+
+def sweep_recalls(conn, now=None):
+    """Delete return tickets whose window closed more than RECALL_KEEP_NS ago,
+    claimed or not; returns how many. An expired row was already unclaimable
+    (recall_claim's predicate) -- this is retention, not enforcement."""
+    now = now or time.time_ns()
+    with tx(conn):
+        return conn.execute("DELETE FROM recalls WHERE expires_ns < ?",
+                            (now - RECALL_KEEP_NS,)).rowcount
 
 
 def assign_room(conn, token_id, room_id, actor_id):

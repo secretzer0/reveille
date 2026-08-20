@@ -1142,7 +1142,9 @@ def test_the_rail_claims_no_direction_and_names_both_tags():
     # before the direction assertion -- that assertion is the one predicted to
     # fire on the unfixed head, and an earlier extraction error would hide it.
     imgs = _served_statement(lines, "const imgs=", optional=True) or "const imgs='';"
-    prog = "let agDefaultImage='';\n" + pred + """
+    # agKnocks arrived with DES-012 s18: the word expression consults it, so
+    # the scaffold supplies the quiet default -- nobody knocking.
+    prog = "let agDefaultImage='';let agKnocks={};\n" + pred + """
 function render(a, s){
   const gone=()=>false;
 """ + _served_statement(lines, "const word=") + "\n" + imgs + """

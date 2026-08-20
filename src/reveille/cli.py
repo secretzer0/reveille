@@ -1465,6 +1465,70 @@ def cmd_init(a):
     return 0
 
 
+def directory_env(workdir):
+    """The REVEILLE_* env block of the directory's settings.local.json, or {}.
+    The knock runs OUTSIDE a session as easily as inside one, so it reads the
+    same file the installer writes rather than trusting the process env alone;
+    the process env fills any gap (a session already carries the identity)."""
+    path = pathlib.Path(workdir) / ".claude" / "settings.local.json"
+    try:
+        env = json.loads(path.read_text()).get("env") or {}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        env = {}
+    out = {}
+    for k in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE", "REVEILLE_TOKEN"):
+        out[k] = (env.get(k) or os.environ.get(k, "")).strip()
+    return out
+
+
+def post_knock(url, token, timeout=10):
+    """POST /recalls/request with the dead credential as the bearer. The
+    broker's refusal is the only diagnostic, so an HTTP error surfaces the
+    broker's own sentence, never a guess about it."""
+    req = urllib.request.Request(url.rstrip("/") + "/recalls/request",
+                                 data=b"{}", method="POST",
+                                 headers={"Authorization": f"Bearer {token}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode())
+            said = body.get("detail") or body.get("error") or str(e)
+        except Exception:
+            said = str(e)
+        raise RuntimeError(said)
+
+
+def cmd_knock(a):
+    """THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF (DES-012
+    s18). Presents THIS directory's credential -- the dead one join() just
+    refused -- and asks the owner to send the identity here. Records one row
+    on the owner's rail and nothing else; their answer lands here on its own,
+    through the same return ticket a parked daemon already claims."""
+    env = directory_env(a.dir or os.getcwd())
+    url, token = env["REVEILLE_URL"], env["REVEILLE_TOKEN"]
+    if not url or not token:
+        print("reveille knock: this directory holds no credential to present "
+              "-- nothing to knock with. Run it in the agent's directory.",
+              file=sys.stderr)
+        return 1
+    try:
+        out = post_knock(url, token)
+    except RuntimeError as e:
+        print(f"reveille knock: the broker refused it -- {e}", file=sys.stderr)
+        return 1
+    reason = {"superseded": "this machine was the identity's body",
+              "expired-unclaimed": "the move minted for this machine never "
+                                   "arrived"}.get(out.get("reason"), out.get("reason"))
+    print(f"knocked: asked the owner to send {out.get('agent')!r} back here "
+          f"({reason}). Their answer lands on its own -- keep the daemon "
+          f"running or take a turn here later. Nothing else to do; idle is a "
+          f"valid life.")
+    return 0
+
+
 def cmd_login(a):
     """Sign this MACHINE in. One session, one file, every agent here minted
     from it (DES-022 s2)."""
@@ -1542,6 +1606,11 @@ def main(argv=None):
                    help="install even if the broker did not answer, or over a "
                         "directory that already belongs to a different agent")
     i.set_defaults(fn=cmd_init)
+    kn = sub.add_parser("knock", help="ask the owner to send this directory's "
+                                      "identity back -- the choice a refused "
+                                      "join() offers a body in waiting")
+    kn.add_argument("--dir", help="the agent's directory (default: the current one)")
+    kn.set_defaults(fn=cmd_knock)
     lg = sub.add_parser("login", help="sign this machine in -- one link, one click, "
                                       "and every agent here mints from it")
     lg.add_argument("url", nargs="?", help="broker url (default: the stored one, "

@@ -219,6 +219,11 @@ USE:
    ring explains it -> print the refusal, take the choice it offers (knock,
    or idle), do NOTHING else. NEVER read, print, compare or copy credential
    files -- the broker's refusal is the only diagnostic. Idle is a valid life.
+   THE KNOCK: `reveille knock` in the refused directory asks the owner to
+   send the identity here (POST /recalls/request, authed by the dead
+   credential). It records ONE row on the owner's rail and nothing else; the
+   answer lands on its own through the return ticket. The clean body may ask
+   to be beamed; it may never beam itself.
 3. Protocol, on a ring or any turn: inbox(), ack() everything.
    BEING WOKEN IS NOT BEING ASKED. A ring means mail arrived, never that you owe a
    reply. Reply ONLY if: it names you in NEED:, blocks your work, or asks you a
@@ -314,6 +319,27 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.201 THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF
+(DES-012 s18; rulings 12445 part 3, 12485 option (a)). The knock:
+POST /recalls/request, authed by the DEAD credential -- not a bind, not an
+act on the bus: no presence, no message, no join. One row on the owner's
+rail, idempotent per (identity, credential hash), 24 h standing refreshed by
+re-knocking, swept by the existing sweep. The owner's allow-it-back button
+answers it: the return ticket is keyed on the hash RECORDED IN THE KNOCK ROW
+-- never one supplied at answer time -- and answering consumes the knock, so
+one answer mints one ticket, claimable only by the machine that asked. The
+reason stays distinct all the way through: an answered expired-unclaimed
+knocker still has no handover grace and is still not the return-ticket hash
+for anything else -- the knock buys exactly one thing, being the address of
+an owner-issued ticket. `reveille knock` presents the refused directory's
+own credential, and both dead-credential refusals now name it instead of the
+harder path ("mint the move again" is gone -- it meant a human with a shell
+on the box, which is the flail this deletes). The rail shows who is knocking
+and why, in the human's words: "was this identity's body" and "never
+arrived" are different decisions. And the recalls table finally has its
+sweeper (the s17 audit debt, 12396): spent tickets keep a week of history,
+then go.
 
 0.2.200 NO CREDENTIAL DIES INTO SILENCE (ruling 12445). expire_pending was a
 plain delete, so a stale body booting on an expired-unclaimed credential got
@@ -4975,12 +5001,15 @@ def _agent_principal(request):
                     f"{ts['agent_name']!r} was minted for a body swap and its "
                     f"arrival window closed at {when} before anything arrived "
                     f"on it -- it never carried the identity. {alive} Your "
-                    f"choices: ask the owner to mint the move again. {idle}")
+                    f"choices: run `reveille knock` here to ask the owner to "
+                    f"send the identity to this machine -- their answer lands "
+                    f"here on its own, nothing is pasted. {idle}")
             when = time.strftime("%Y-%m-%d", time.gmtime(ts["died_ns"] / 1e9))
             raise store.AuthError(
                 f"superseded: this credential for {ts['agent_name']!r} was "
-                f"replaced on {when}. {alive} Your choices: the owner sends "
-                f"it back from the bus and a turn in this directory calls "
+                f"replaced on {when}. {alive} Your choices: run `reveille "
+                f"knock` here to ask the owner, and the owner sends "
+                f"it back from the bus; a turn in this directory then calls "
                 f"join(): that call IS the arrival. `reveille init` also "
                 f"works. To reach the live body, use the bus web UI. {idle}")
         raise store.AuthError("bad token")
@@ -7952,8 +7981,27 @@ async def recalls_http(request):
     """
     p = _user_principal(request)
     if request.method == "GET":
-        return JSONResponse({"recalls": store.recalls_for(_conn, p.user_id)})
+        return JSONResponse({"recalls": store.recalls_for(_conn, p.user_id),
+                             "knocks": store.knocks_for(_conn, p.user_id)})
     d = await request.json()
+    kid = (d.get("knock") or "").strip()
+    if kid:
+        # ANSWERING A KNOCK (DES-012 s18, ruling 12485): the ticket is keyed on
+        # the hash RECORDED IN THE KNOCK ROW -- never on a hash supplied here
+        # (constraint 1) -- and the answer consumes the row (constraint 3), so
+        # one answer mints one ticket. knock_take is owner-scoped, so answering
+        # somebody else's knock is a miss, not a lever.
+        k = store.knock_take(_conn, p.user_id, kid)
+        if not k:
+            raise store.BusError("no such knock -- it may have expired or been "
+                                 "answered already; the machine can knock again")
+        out = store.recall_offer(_conn, agent_id=k["agent_id"],
+                                 owner_id=p.user_id,
+                                 superseded_secret_hash=k["secret_hash"],
+                                 rooms=list(d.get("rooms") or []))
+        log.info("%s answered a knock (%s) for agent %s (expires in %.0fs)",
+                 p.name, k["reason"], k["agent_id"], store.RECALL_TTL_NS / 1e9)
+        return JSONResponse(out)
     a = store.live_agent(_conn, p.user_id, (d.get("agent") or "").strip())
     if a["owner_id"] != p.user_id:
         raise store.AccessError("only an agent's owner may offer it a return ticket")
@@ -7989,6 +8037,24 @@ async def recall_claim_http(request):
     if not out:
         return Response(status_code=204)
     log.info("return ticket claimed for %s -- pending until it joins", out["agent_name"])
+    return JSONResponse(out)
+
+
+@_guard
+async def recall_request_http(request):
+    """THE KNOCK (DES-012 s18, rulings 12445/12485): a stale body presents its
+    DEAD credential and asks the owner to send the identity to this machine.
+
+    Authed by the dead credential itself, like /recalls/claim -- the bearer IS
+    the proof, and it is one the broker refuses for every other purpose. Not a
+    bind and not an act on the bus: no presence, no message, no join. It puts
+    one row on the owner's rail; the existing allow-it-back button answers it,
+    and 11252 stands -- the owner acts, the knocker waits. THE CLEAN BODY MAY
+    ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF."""
+    secret = _bearer(request) or (await request.json()).get("secret", "")
+    out = store.knock(_conn, secret)
+    log.info("knock: %s (%s) asks its owner to send the identity back",
+             out["agent"], out["reason"])
     return JSONResponse(out)
 
 
@@ -8466,6 +8532,12 @@ async def _sweeper():
             gone = store.sweep_tombstones(_conn)
             if gone:
                 log.info("swept %s expired token tombstone(s)", gone)
+            gone = store.sweep_knocks(_conn)
+            if gone:
+                log.info("swept %s expired knock(s)", gone)
+            gone = store.sweep_recalls(_conn)
+            if gone:
+                log.info("swept %s spent return ticket(s)", gone)
             if dropped:
                 log.info("retention swept %s message(s)", dropped)
         except Exception:
@@ -8525,6 +8597,7 @@ def build_app():
             Route("/visits", visits_http, methods=["GET", "POST"]),
             Route("/recalls", recalls_http, methods=["GET", "POST"]),
             Route("/recalls/claim", recall_claim_http, methods=["POST"]),
+            Route("/recalls/request", recall_request_http, methods=["POST"]),
             Route("/visits/{vid}/{verb:str}", visit_http, methods=["POST"]),
             Route("/rooms/{rid}", room_http, methods=["PATCH"]),
             Route("/rooms/{rid}", purge_room_http, methods=["DELETE"]),

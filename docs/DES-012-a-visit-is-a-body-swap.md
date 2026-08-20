@@ -489,3 +489,69 @@ five-minute grace is the BROKER's to keep, because a just-superseded credential
 answers 200 for exactly as long as it may still write its handover note and 401
 the instant that window closes. No clock on the launcher side. An unreachable
 broker stops nothing -- `None` is never read as "every body here is dead".
+
+## 18. THE BODY IN WAITING (rulings 12445, 12485; AS BUILT 0.2.200 + 0.2.201)
+
+A directory whose credential is dead is not an error state; it is a body in
+waiting, and it has exactly one honest channel: the broker's refusal. On
+2026-08-19 a clean-context session booted on an expired-unclaimed credential
+and burned 54k tokens flailing against an amnesiac "bad token" -- reading,
+comparing and copying credential files, guessing at its own identity. This
+section is what that session should have been handed instead.
+
+**Three states, not one (12445).** A credential presented at join() is (A)
+live and mine -- boot, nothing to decide; (B) a valid PENDING successor --
+join() IS the arrival, the human already authorised the beam by minting it,
+nothing to ask; or (C) DEAD -- superseded, or expired-unclaimed. C is the
+entire gap. A dead credential cannot displace anybody, which is what makes
+everything below safe.
+
+**The invariant.** THE BROKER NEVER DELETES A CREDENTIAL INTO SILENCE. Every
+credential the broker kills leaves a tombstone naming what killed it, when,
+and what the holder may do next. Superseded credentials obeyed this from S2
+(ruling 10876); expired-unclaimed pendings did not -- `expire_pending` was a
+plain delete -- and that asymmetry was the defect. The tombstone now carries
+`reason` ('superseded' | 'expired-unclaimed') and `died_ns`, and the story is
+true before the sweep arrives: `tombstone_for` read-repairs an expired
+pending on sight, the same at-the-act principle as ruling 12320 B.
+
+**The refusal is the channel.** One text, both dead reasons, liveness filled
+in: the identity's name; alive elsewhere and how recently seen, or not alive
+at all; why THIS credential is dead and when; and the choices, named as
+choices. NEVER the successor credential, NEVER the live body's host or path
+-- in the visit case that is another human's machine.
+
+**The knock (12485, option (a)).** `POST /recalls/request`, authed by the
+dead credential itself. Not a bind, not an act on the bus: it creates no
+presence, sends no message, joins nothing -- it puts one row on the owner's
+rail, and the existing allow-it-back button answers it. The operator's words,
+verbatim, and they are the section's law:
+
+> THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF.
+
+Bounds, all ruled and all gated: only a tombstoned hash may knock -- no live
+hash, no unknown hash, no story-less hash whose tombstone aged out.
+Idempotent per (identity, credential hash): a re-knock refreshes the same
+row, so a flailing session cannot spam the rail. The owner's answer keys the
+return ticket on the hash RECORDED IN THE KNOCK ROW -- never on a hash
+supplied at answer time -- and consumes the knock: one answer, one ticket.
+The reason stays distinct all the way through: an answered expired-unclaimed
+knocker still has no handover grace and is still not `superseded_hash_for` --
+the knock buys exactly one thing, being the address of an owner-issued
+ticket. Knocks expire quietly (24 h, refreshed by re-knocking) and are swept
+by the broker's existing sweep; so, now, are spent return tickets (the s17
+audit debt, 12396). The rail names the reason in the human's words -- "was
+this identity's body" and "never arrived" are different decisions.
+
+**The doctrine line** (USAGE section 2 and the managed CLAUDE.local.md
+block), which is what the 54k tokens bought: join() refused and no ring
+explains it -> print the refusal, take the choice it offers (knock, or idle),
+do NOTHING else. NEVER read, print, compare or copy credential files -- the
+broker's refusal is the only diagnostic. Idle is a valid life.
+
+**What was refused, and why it stays refused (12445).** A read-only probe
+verb (`status()` / extended whoami): it answers, in a second weaker voice,
+the question the refusal already answers, and it can disagree with the broker
+at the moment of the act -- ONE AUTHORITY, the refusal, at the act. And
+`join(arrive=True)`: it breaks state B, the designed transporter path, to fix
+state C, which is not in it.
