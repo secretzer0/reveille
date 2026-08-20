@@ -78,7 +78,9 @@ def test_the_brief_seam_is_bounded_and_honest(tmp_path, monkeypatch):
     defect (13014)."""
     _seed(tmp_path, monkeypatch)
     emitted = asyncio.run(daemon.brief(budget=4000, ctx=_Ctx()))
-    assert isinstance(emitted, str)
+    assert isinstance(emitted, str), (
+        "the tool layer must emit its own rendered string -- a dict here means "
+        "the seam belongs to the transport again")
     wire = len(json.dumps(emitted))
     assert wire <= 4000, f"the wire form is {wire} chars against a 4000 budget"
     payload = json.loads(emitted)
