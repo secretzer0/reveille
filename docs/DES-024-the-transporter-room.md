@@ -195,6 +195,39 @@ A tab per identity, and what it shows follows the CURRENT BODY's kind.
 The asymmetry is honest and is the point: the verbs are the same, the view
 differs because the reality differs.
 
+**WHY THE TERMINAL IS A CONTAINER CAPABILITY** (operator 12700): the terminal
+never travels as a raw port — it rides the single origin (DES-006), Caddy
+proxying `/attach/*` to the launcher, which fronts each container's ttyd. So
+reachability is THE PROXY'S, NOT THE BROWSER'S: any browser anywhere sees a
+terminal the proxy can reach, and a phone on LTE is the designed path rather
+than an exception (measured 2026-08-20).
+
+**The one case it cannot cover is a TRUE NATIVE body, because ttyd is
+something WE SHIP IN AN IMAGE and a borrowed host carries whatever it
+carries.** Not "never" — a native host may happen to have it — but never
+ASSUMED: terminal availability on a native pad is a DETECTED property on the
+metadata card, never inferred from the pad kind.
+
+**THE GENERAL RULE, and this is its second instance:** anything that requires
+software we ship is guaranteed on pads WE BUILD and optional on pads WE
+BORROW. Runtime choice (§12.3) lands on the container side for the same
+structural reason — we control the image, we do not control someone's machine.
+Two independent capabilities landing on the same side is not a coincidence, and
+it is why **the smaller grant keeps turning out to be the more capable pad**
+(§11.3).
+
+**Remaining unplumbed case**, correctly scoped: a container pad the proxy
+cannot reach — someone else's NAT'd machine, i.e. the enterprise visit. The
+shape is already proven in the building: that machine cannot be dialled INTO,
+but it dials OUT to the broker constantly (the wake socket has carried rings
+across arbitrary networks all night). A terminal relay is that shape, not a
+research problem.
+
+**And watching is consented to, not implied** (devops 12696): "you may watch
+this terminal" is a bigger grant than a metadata card and belongs in the accept
+beside the pad kind. §7 describes what we CAN show; the accept decides what we
+MAY.
+
 ## 8. What is already built
 
 - The whole transport layer: recall, ticket, claim, two-phase swap, handover
