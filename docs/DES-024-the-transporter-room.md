@@ -196,3 +196,51 @@ differs because the reality differs.
   DES-012 §11 visit request. My prior is reuse.
 - The Windows body (DES-021) is a pad kind with its own receiver questions and
   is not settled by this document.
+
+## 11. Preparing a pad (operator 12660; architect 12662)
+
+`reveille landing-pad` creates the PAD and starts the RECEIVER in one human
+act: it makes the directory, writes the credential file, self-declares its
+address (§3.1), and execs `claude` there with a first command that
+materialises the body. One command, both halves of §6.1 — otherwise
+"prepare a pad" is a two-step ritual nobody remembers.
+
+### 11.1 Two pad kinds on a native host
+
+- **DIRECT** — a directory, entered as that user, with that user's reach. What
+  every native body is today.
+- **VIRTUAL** — `--virtual /some/dir`: a CONTAINER on the host, mounting ONLY
+  that directory and linking the host's `~/.claude/.credentials.json`.
+
+The virtual kind is the one that matters for the multi-human story: **it turns
+the container from a cloud thing into a SANDBOX FOR A NATIVE HOST.** It answers
+"I will host your agent, but not with the run of my machine" — the host offers
+one directory and the visiting agent cannot see the rest. The parts exist: the
+image is built, the launcher provisions containers, and DES-005's
+`claude_mode=home-login` already copies a shared login home into a body at
+boot. This is a new shape over built machinery, not new machinery.
+
+### 11.2 RULED: push needs a code, knock does not
+
+- **PUSH** — the destination holds nothing, so the owner mints an INVITATION
+  and a human carries it across the gap. Reuse DES-022's device-flow code
+  (`XXXX-XXXXX`, human-transcribable); do not invent a second code. Running it
+  is what creates the pad — the code is the pad's birth certificate.
+- **KNOCK** — the asking machine ALREADY HOLDS a dead credential, and that
+  credential is the proof. No code, no typed secret, authorization stays
+  hash-keyed (12485).
+
+Same consent in both — the owner's click. Different proof, because the two
+directions start from different places, and the knock direction is the safer
+one precisely because nothing is typed.
+
+### 11.3 UNRULED: who pays
+
+Linking the host's Claude credentials means **the visiting agent's model calls
+bill the HOST's account.** That is a real transfer of value and must be a
+knowing act, stated in the invitation, never a side effect of a mount flag.
+The alternative — the visiting agent brings its OWNER's credential — inverts
+the problem: the owner pays while running on hardware they do not control.
+
+Architect's prior: host pays, host decides, stated plainly at accept. NOT
+RULED — deliberately left for a waking operator.
