@@ -87,7 +87,7 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_mcp_plane(tmp_path, monkey
     assert asyncio.run(daemon.rooms(ctx))["rooms"]
     assert len(asyncio.run(daemon.inbox(ctx))["messages"]) == 1
     assert asyncio.run(daemon.history(ctx=ctx))["count"] >= 1
-    asyncio.run(daemon.lessons(ctx))
+    asyncio.run(daemon.lessons(ctx=ctx))
     asyncio.run(daemon.recall(ctx=ctx))
     # ... and leave no footprint: reading is not being present.
     assert not any(a["name"] == "ghost" for a in store.presence(c, [rid])), \
