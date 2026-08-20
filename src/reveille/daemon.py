@@ -3525,7 +3525,11 @@ def _fire_deferred():
             continue
         if _poke_ok(tid):
             _thread_pending.pop(tid, None)
-            _poke_pending[tid] = time.time_ns()
+            # THE CONSUMER OWNS THE STAMP (#159 blocker): wake_ws runs the
+            # poke gate on every queued fact before it becomes a frame, so a
+            # stamp here would veto this very delivery -- and, when no waiter
+            # is attached, would block the body's next REAL ring for a frame
+            # it never received. The pop above is what prevents a re-fire.
             for q in list(_waiters.get(tid, ())):
                 q.put_nowait(entry["fact"])
             log.info("thread-wake deferred ring FIRED for %s (gate 1: idle "

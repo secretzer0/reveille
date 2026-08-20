@@ -177,6 +177,16 @@ def test_a_deferred_ring_fires_once_and_coalesces():
         assert len(daemon._thread_pending) == 1, "pendings COALESCE per recipient"
         daemon._poke_pending.pop(toks["bravo"]["id"])
         daemon._fire_deferred()
+        # THE CONSUMER OWNS THE STAMP (#159 blocker): wake_ws runs the poke
+        # gate on every queued fact before it becomes a frame, so a producer
+        # that stamps the poke itself vetoes its own delivery -- the log said
+        # FIRED, the body got nothing, and the 900 s floor silently became
+        # the mechanism. The queue receiving the fact is not the body
+        # receiving the frame; this is the assertion the consumer's veto
+        # cannot hide from (lesson a-gate-that-reads-through-the-same-wrong-
+        # accessor, again).
+        assert daemon._poke_ok(toks["bravo"]["id"]), (
+            "the consumer must still be ALLOWED to deliver what was just enqueued")
         rings = drain(qs["bravo"])
         assert len(rings) == 1, "fires EXACTLY ONCE on the idle transition"
         assert rings[0]["why"] == "thread-reply"
