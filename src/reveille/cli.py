@@ -1517,12 +1517,19 @@ def cmd_knock(a):
     refused -- and asks the owner to send the identity here. Records one row
     on the owner's rail and nothing else; their answer lands here on its own,
     through the same return ticket a parked daemon already claims."""
+    # THE WORD MOVED, THE ACT DID NOT (12676/12682): hail is the human-facing
+    # word, knock the shipped identifier -- one function, two spellings, and
+    # the old one points at the new one instead of silently renaming.
+    word = getattr(a, "word", "knock")
+    if word == "knock":
+        print("reveille knock: the word is now `reveille hail` -- same act, "
+              "same answer; knock keeps working.", file=sys.stderr)
     where = os.path.abspath(a.dir or os.getcwd())
     env = directory_env(where)
     url, token = env["REVEILLE_URL"], env["REVEILLE_TOKEN"]
     if not url or not token:
-        print("reveille knock: this directory holds no credential to present "
-              "-- nothing to knock with. Run it in the agent's directory.",
+        print(f"reveille {word}: this directory holds no credential to present "
+              f"-- nothing to {word} with. Run it in the agent's directory.",
               file=sys.stderr)
         return 1
     # user@host:path -- so the owner's dialog can name WHICH machine is asking
@@ -1547,7 +1554,7 @@ def cmd_knock(a):
     reason = {"superseded": "this machine was the identity's body",
               "expired-unclaimed": "the move minted for this machine never "
                                    "arrived"}.get(out.get("reason"), out.get("reason"))
-    print(f"knocked: asked the owner to send {out.get('agent')!r} back here "
+    print(f"{word}ed: asked the owner to send {out.get('agent')!r} back here "
           f"({reason}). Their answer lands on its own -- keep the daemon "
           f"running or take a turn here later. Nothing else to do; idle is a "
           f"valid life.")
@@ -1715,7 +1722,12 @@ def main(argv=None):
                                       "identity back -- the choice a refused "
                                       "join() offers a body in waiting")
     kn.add_argument("--dir", help="the agent's directory (default: the current one)")
-    kn.set_defaults(fn=cmd_knock)
+    kn.set_defaults(fn=cmd_knock, word="knock")
+    hl = sub.add_parser("hail", help="hail the ship: ask the owner to beam this "
+                                     "directory's identity back down -- the word "
+                                     "for what `reveille knock` does (12676)")
+    hl.add_argument("--dir", help="the agent's directory (default: the current one)")
+    hl.set_defaults(fn=cmd_knock, word="hail")
     cl = sub.add_parser("claim", help="take a standing return ticket by hand, "
                                       "with this directory's credential -- for "
                                       "when no daemon here can (the identity "
