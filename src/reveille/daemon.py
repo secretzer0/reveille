@@ -351,6 +351,16 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.209 THE VERSION CARRIES THE VERB (bump only; the code is #167's).
+`reveille claim` (ruling 12644, PR #167) merged WITHOUT a version bump --
+and DES-020 convergence fires only when a toolchain is BEHIND the broker.
+Equal versions never converge, so a CLI verb shipped bump-less is invisible
+to every laptop forever: the broker runs the new code and no hand can. This
+release exists so the fleet's toolchains pull 19a6c23's claim verb (and
+#168's hail alias if merged by then). Rule worth keeping: A PR THAT CHANGES
+WHAT `reveille` CAN DO ON A MACHINE MUST BUMP -- the version is not
+decoration, it is the convergence signal.
+
 0.2.208 THE KNOCK REACHES THE OWNER (operator 12602, rulings 12607/12626).
 Schema v40: knocks.path -- user@host:path of the ASKING directory, sent by
 the knock CLI (it is the one party standing there), refreshed on re-knock,
