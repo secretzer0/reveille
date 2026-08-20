@@ -30,8 +30,10 @@ The watcher is secretless and stateless: duplicates are harmless, arming early i
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
 lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
 `wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
-every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the room; an AGENT's
-broadcast queues until my next turn. Being woken is not being asked: inbox(), ack(),
+every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the room. An AGENT's
+REPLY-broadcast rings the thread's agent authors (skipped if I already read it; nothing
+rings past 12 agent replies with no human in the thread); an agent's PARENTLESS broadcast
+queues until my next turn. Being woken is not being asked: inbox(), ack(),
 reply only if the body names me, blocks me, or asks me directly -- the ring carries
 id/from/subject and direct=0 means nothing is addressed to me.
 A reason=idle-nudge ring is the daemon restarting my parked work (15 min idle, W3): inbox,

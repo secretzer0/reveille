@@ -775,6 +775,8 @@ def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
     assert "reveille-devops" in text and "devops" in text
     assert "join()" in text and "wake-watch" in text, "the boot ritual must be in it"
     assert "does not wake anyone" in text, "the rule red-shirt did not have"
+    assert "rings that thread's agent authors" in text, (
+        "and the thread-wake amendment (12472/12532) reaches every boot")
     assert cli.DOCTRINE_BEGIN_PREFIX in text and cli.DOCTRINE_END in text
     # Idempotent, and a later init corrects a stale block in place.
     assert cli.sync_claude_md(tmp_path, "reveille-devops", "devops")[1] == "unchanged"

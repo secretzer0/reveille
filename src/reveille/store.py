@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -279,7 +279,12 @@ CREATE TABLE IF NOT EXISTS tokens (
     pending_ns   INTEGER
                  CHECK (mem_tier IN ('state','write','ratify')),
     created_ns   INTEGER NOT NULL,
-    last_used_ns INTEGER
+    last_used_ns INTEGER,
+    -- When this credential last READ its mail (inbox/ack -- ruling 12532).
+    -- Distinct from last_used_ns on purpose: acting is not reading, and the
+    -- thread-wake's usefulness gate must not skip a body that sent without
+    -- ever seeing the message.
+    last_inbox_ns INTEGER
 );
 -- THE BROKER NEVER DELETES A CREDENTIAL INTO SILENCE (ruling 12445; S2,
 -- ruling 10876 before it): every credential the broker kills leaves a
@@ -1944,6 +1949,17 @@ CREATE TABLE IF NOT EXISTS knocks (
 """
 
 
+def _upgrade_v37(conn, db_path):
+    """v37 -> v38 (ruling 12532): tokens.last_inbox_ns -- when this credential
+    last READ its mail. Additive; NULL is correct for every existing row (no
+    read has been stamped yet, so the thread-wake errs toward ringing)."""
+    with tx(conn):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(tokens)")}
+        if "last_inbox_ns" not in have:
+            conn.execute("ALTER TABLE tokens ADD COLUMN last_inbox_ns INTEGER")
+        conn.execute("PRAGMA user_version=38")
+
+
 def _upgrade_v36(conn, db_path):
     """v36 -> v37 (DES-012 s18): knocks. Additive, one empty table; no broker
     has ever held a knock, so there is nothing to backfill."""
@@ -2170,7 +2186,8 @@ def _upgrade_v0(conn, db_path):
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36)}
+              21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+              37)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -5379,6 +5396,53 @@ def wake_tokens(conn, room_id, principals):
     return [r["id"] for r in conn.execute(
         f"SELECT t.id FROM tokens t JOIN token_rooms tr ON tr.token_id=t.id "
         f"WHERE tr.room_id=? AND t.agent_id IN ({_ph(ids)})", [room_id] + ids)]
+
+
+def mark_read(conn, token_id):
+    """Stamp the READ, from inbox() and ack() only (ruling 12532): the
+    thread-wake's usefulness gate asks "has this recipient seen its mail since
+    the message landed", and an act that is not a read must not answer it."""
+    if token_id:
+        conn.execute("UPDATE tokens SET last_inbox_ns=? WHERE id=?",
+                     (time.time_ns(), token_id))
+
+
+def read_since(conn, token_id, ts_ns):
+    """Has this credential read its mail since ts_ns. False on no stamp: a
+    body that has never read errs toward being rung."""
+    r = conn.execute("SELECT last_inbox_ns FROM tokens WHERE id=?",
+                     (token_id,)).fetchone()
+    return bool(r and r["last_inbox_ns"] and r["last_inbox_ns"] > ts_ns)
+
+
+def thread_reply_targets(conn, parents, sender_principal, room):
+    """Who a reply-broadcast may ring (ruling 12532): authors(parents) UNION
+    authors(replies to the same parents), minus the sender, AGENTS ONLY -- a
+    person has no wake socket and hears through the feed the same instant.
+    Returns [(agent_name, principal)] like _wake_targets, so _notify and
+    wake_tokens treat both paths identically."""
+    if not parents:
+        return []
+    me = agent_of(sender_principal)
+    rows = conn.execute(
+        f"SELECT DISTINCT m.sender_agent_id AS aid, a.name AS name "
+        f"FROM messages m JOIN agents a ON a.id = m.sender_agent_id "
+        f"WHERE m.room=? AND (m.id IN ({_ph(parents)}) "
+        f"OR m.parent_id IN ({_ph(parents)}))",
+        [room] + list(parents) + list(parents)).fetchall()
+    return [(r["name"], f"agent:{r['aid']}") for r in rows if r["aid"] != me]
+
+
+def agent_replies_since_human(conn, thread_id):
+    """Gate 2's counter (ruling 12532): agent messages on this thread since a
+    human last spoke in it. Derived from the table on every ask -- no state to
+    reset, so a human message resets it by construction."""
+    last_human = conn.execute(
+        "SELECT max(id) FROM messages WHERE thread_id=? AND sender_agent_id IS NULL",
+        (thread_id,)).fetchone()[0] or 0
+    return conn.execute(
+        "SELECT count(*) FROM messages WHERE thread_id=? AND id>? "
+        "AND sender_agent_id IS NOT NULL", (thread_id, last_human)).fetchone()[0]
 
 
 def resolve_send_room(rooms, room=None, parent_room=None):

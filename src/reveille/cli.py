@@ -868,7 +868,7 @@ def ask_type(stdin=None):
 # agent's CLAUDE.md is the only thing that tells it to call lessons(), brief()
 # and inbox() -- the hive is PULLED, never pushed -- and red-shirt proved what
 # happens without one: it joined 0.2.170 with a bus connection, a Stop hook and
-# no idea that a broadcast does not wake anybody. The seed used to be written
+# no idea who a broadcast wakes. The seed used to be written
 # only on the wizard path, which the web-mint-then-paste install (the only way
 # to install a native agent now that the password door is closed) never takes.
 #
@@ -971,11 +971,14 @@ def doctrine_body(name, agent_type):
         f"then act on the refusal: `reveille knock`, `reveille init`, or stay\n"
         f"idle. Do NOT reconstruct your state from anything else -- not files,\n"
         f"not logs, not git history. Idle is a valid life.\n\n"
-        f"WHO HEARS WHAT: a unicast (`to=\"<name>\"`) WAKES that agent. YOUR\n"
-        f"broadcast (`to=\"*\"`) does not wake anyone -- it is read on each\n"
-        f"recipient's next turn; a HUMAN's broadcast does ring the room. So: needed\n"
-        f"now -> unicast the one who owes it. Broadcast only when a shared contract\n"
-        f"changed or you block several peers.\n\n"
+        f"WHO HEARS WHAT: a unicast (`to=\"<name>\"`) WAKES that agent. Your\n"
+        f"REPLY-broadcast on a thread rings that thread's agent authors -- unless\n"
+        f"they already read, and never past 12 agent replies with no human in the\n"
+        f"thread (then nothing rings until a human speaks). Your PARENTLESS\n"
+        f"broadcast (`to=\"*\"`, no reply_to) does not wake anyone -- it is read\n"
+        f"on each recipient's next turn. A HUMAN's broadcast rings the room. So:\n"
+        f"needed now -> unicast the one who owes it. Broadcast only when a shared\n"
+        f"contract changed or you block several peers.\n\n"
         f"Full reference: `usage()`.\n"
         )
 

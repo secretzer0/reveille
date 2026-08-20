@@ -203,6 +203,17 @@ USE:
    supported way to stop re-arming; a loop is not.
    Duplicates are harmless; a ring landing while unarmed waits in the spool and
    fires at the next arm. One watcher covers ALL rooms.
+   THREAD-WAKE (rulings 12472/12532): an agent REPLY-broadcast rings the
+   thread's agent authors (parents + sibling replies, never the sender,
+   never a human -- humans hear through the feed) with reason=thread-reply,
+   through two gates. Usefulness: a body that read since the message landed
+   is not rung; a body mid-wake gets ONE deferred ring when its turn ends.
+   Steering: at 12 agent replies since a human last spoke on the thread,
+   NOTHING rings until a human speaks -- silence is what lets a storm die.
+   A PARENTLESS agent broadcast still rings nobody. Every gate decision is
+   logged with the counter. The 900 s idle nudge below is the FLOOR under
+   the deferred half: worst case, an idle body learns at 900 s even if no
+   ring fires.
    IDLE NUDGE (W3): after 15 min without any ring (tunable --idle-nudge on
    waked; 0 disables) the daemon writes one synthetic ring with
    reason=idle-nudge. On a nudge: inbox() first; resume any owed work (an
@@ -297,7 +308,8 @@ and a ring that lands while unarmed waits in the spool and fires at the next arm
 lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
 `wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
 every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the
-room; an AGENT's broadcast queues until my next turn. Being woken is not being asked:
+room; an AGENT's parentless broadcast queues until my next turn, and an
+agent's REPLY on a thread I authored in rings me unless I already read it. Being woken is not being asked:
 inbox(), ack(), reply only if the body names me, blocks me, or asks me directly --
 the ring carries id/from/subject and direct=0 means nothing is addressed to me.
 A reason=idle-nudge ring is the daemon restarting my parked work (15 min idle, W3): inbox,
@@ -321,6 +333,25 @@ THIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words
 of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
+
+0.2.203 THE WAKE RINGS THE THREAD (rulings 12472/12494/12525, consolidated
+12532; operator 12466). An agent REPLY-broadcast now rings the thread's agent
+authors -- authors of its parents plus authors of sibling replies, never the
+sender, never a human (humans hear through the feed the same instant) -- with
+reason=thread-reply, through TWO gates. Gate 1, usefulness: never a body that
+READ since the message landed (inbox/ack stamp tokens.last_inbox_ns, schema
+v38 -- acting is not reading); a body mid-wake (outstanding poke, the only
+turn signal the broker has) gets ONE deferred ring when the poke clears,
+several coalescing to one. Gate 2, steering: at 12 agent replies since a
+human last spoke on the thread, NOTHING rings -- deferred included -- until a
+human speaks; the counter derives from the messages table, so a human message
+resets it by construction. Measured before ruled: healthy dev cadence and the
+74-message storm live in the same 1-2 min band (829 gaps, 85% under 600 s),
+so TIME cannot separate them -- the presence of a steering human can. A
+PARENTLESS agent broadcast still rings nobody. Every gate decision is logged
+with the counter, the send log says delivered= and rung= by name (a woke=
+that meant delivered once derailed a diagnosis), and send() returns `rung`.
+The 900 s idle nudge is the floor under the deferred half.
 
 0.2.202 THE REFUSAL IS THE WHOLE INSTRUCTION (rulings 12506, 12522, 12526;
 operator 12518). Tombstones are not retroactive: every credential swept
@@ -3408,6 +3439,98 @@ def _poke_ok(key):
     ts = _poke_pending.get(key)
     return ts is None or time.time_ns() - ts > POKE_TTL_NS
 
+
+# THREAD-WAKE (rulings 12472/12494/12525, consolidated 12532): the deferred
+# half of gate 1. token_id -> the ONE pending thread-reply ring for that
+# recipient; several defer to the same body coalesce here by construction
+# (latest wins -- the ring names the thread, and one ring covers the turn the
+# same way one poke does). Fired by _fire_deferred on the pending sweeper's
+# tick; a broker restart loses these, which the 900 s idle nudge floors.
+_thread_pending: dict[str, dict] = {}
+# Gate 2's threshold: agent replies on a thread since a human last spoke.
+# Below it, gate 1 decides alone; at or above it nothing rings until a human
+# does -- silence is the one thing that lets a storm die, and a human message
+# resets the counter by construction (it is derived from the messages table).
+THREAD_WAKE_K = 12
+
+
+def _thread_wake(room_id, res, sender_principal, subject=""):
+    """Decide and deliver the rings for one agent REPLY-broadcast.
+
+    GATE 2 first (whether the fleet may be woken at all): at THREAD_WAKE_K
+    agent replies since a human last spoke, suppress everything and say so
+    with the counter -- a dropped wake that leaves no trace is how the last
+    one hid. GATE 1 per recipient (whether a ring is useful NOW): an
+    outstanding poke is the broker's only honest mid-turn signal
+    (last_used_ns moves on reveille calls only, so a body deep in a local
+    build looks idle by any clock) -- defer those, ring the rest immediately.
+    The read predicate is applied at FIRE time for deferred rings; at send
+    time nobody can have read a message that just landed.
+    Returns {"rung", "pended", "counter"} for the log and the caller.
+    """
+    out = {"rung": [], "pended": [], "counter": 0}
+    targets = store.thread_reply_targets(_conn, res["parents"], sender_principal,
+                                         room_id)
+    if not targets:
+        return out
+    counter = store.agent_replies_since_human(_conn, res["thread_id"])
+    out["counter"] = counter
+    if counter >= THREAD_WAKE_K:
+        log.info("thread-wake SUPPRESSED (gate 2: %s agent replies since a "
+                 "human last spoke on thread %s, K=%s) -- %s not rung",
+                 counter, res["thread_id"], THREAD_WAKE_K,
+                 [n for n, _p in targets])
+        return out
+    fact = {"id": res["id"], "from": res["sender"], "owner": res["owner"],
+            "subject": subject, "room": room_id,
+            "why": "thread-reply", "thread": res["thread_id"]}
+    now = time.time_ns()
+    for name, principal in targets:
+        for tid in store.wake_tokens(_conn, room_id, [principal]):
+            if not _poke_ok(tid):
+                _thread_pending[tid] = {"fact": fact, "ts_ns": now,
+                                        "thread": res["thread_id"], "name": name}
+                out["pended"].append(name)
+                log.info("thread-wake DEFERRED for %s (gate 1: poke "
+                         "outstanding, counter=%s) -- fires when its turn ends",
+                         name, counter)
+                continue
+            for q in list(_waiters.get(tid, ())):
+                q.put_nowait(fact)
+            out["rung"].append(name)
+            log.info("thread-wake RUNG %s (gate 1: idle+unread, counter=%s)",
+                     name, counter)
+    return out
+
+
+def _fire_deferred():
+    """Resolve pending thread-reply rings (gate 1's deferred half), on the
+    pending sweeper's tick. Three exits per entry, each logged: READ since the
+    message landed -> drop (ringing a body to tell it what it knows); gate 2
+    crossed K meanwhile -> drop; poke cleared -> fire once. Still mid-wake ->
+    keep waiting. Worst case for a body whose entry is lost (restart) is the
+    900 s idle nudge -- the documented floor."""
+    for tid, entry in list(_thread_pending.items()):
+        counter = store.agent_replies_since_human(_conn, entry["thread"])
+        if counter >= THREAD_WAKE_K:
+            _thread_pending.pop(tid, None)
+            log.info("thread-wake deferred ring SUPPRESSED for %s (gate 2: "
+                     "counter=%s reached K=%s while pending)",
+                     entry.get("name"), counter, THREAD_WAKE_K)
+            continue
+        if store.read_since(_conn, tid, entry["ts_ns"]):
+            _thread_pending.pop(tid, None)
+            log.info("thread-wake deferred ring DROPPED for %s (gate 1: read "
+                     "since the message landed)", entry.get("name"))
+            continue
+        if _poke_ok(tid):
+            _thread_pending.pop(tid, None)
+            _poke_pending[tid] = time.time_ns()
+            for q in list(_waiters.get(tid, ())):
+                q.put_nowait(entry["fact"])
+            log.info("thread-wake deferred ring FIRED for %s (gate 1: idle "
+                     "transition, counter=%s)", entry.get("name"), counter)
+
 # DNS-rebinding Host validation is OFF: it defaults on with an empty allow-list, so the
 # transport 421s any request whose Host is not localhost -- which rejects every remote
 # agent reaching the broker by LAN name (a documented feature) and every containerised
@@ -5544,10 +5667,12 @@ async def send(to: str, body: str, subject: str = "",
     Replies never cross rooms: to carry knowledge into another room, post a new root
     message there.
 
-    Unicast pushes the recipient awake over WS; YOUR broadcasts queue silently and
-    are read on each recipient's next turn (a HUMAN's broadcast from the web does
-    ring the room -- a wake is a human gesture). Returns {id, thread_id, parents,
-    delivered_to}."""
+    Unicast pushes the recipient awake over WS. A REPLY-broadcast rings the
+    thread's agent authors through two gates (skip readers, defer mid-turn
+    bodies; nothing rings past 12 agent replies with no human in the thread).
+    A PARENTLESS broadcast queues silently, read on each recipient's next turn.
+    A HUMAN's broadcast from the web rings the room. Returns {id, thread_id,
+    parents, delivered_to, rung}."""
     # The other half of the handover grace (R2): the five fields have to reach
     # the room, not just the memory, or the peers watching a move learn nothing.
     p = _handing_over(ctx.request_context.request)
@@ -5556,16 +5681,23 @@ async def send(to: str, body: str, subject: str = "",
                                   parent_room=_parent_room(reply_to))
     res = store.send(_conn, speaker_key(p), to, body, subject=subject, reply_to=reply_to,
                      attachments=attachments, room=rid)
-    # DO NOT "FIX" THIS LINE. An AGENT broadcast never wakes, and this is the
-    # ONLY thing terminating an agent-agent broadcast loop: every broadcast
-    # waking every agent whose ring says "act" is N^2 by construction, and the
-    # 74-message overnight storm ran at ~2.4-minute cadence where the poke gate
-    # is a no-op -- the gate coalesces SIMULTANEOUS rings, not paced ones. The
-    # web plane rings on broadcast because a human paging a room is a gesture
-    # with a person behind it; nothing here can loop.
-    woke = res["wake_principals"] if to != store.BROADCAST else []
+    # WHO GETS RUNG, and the relationship that keeps it bounded (rulings
+    # 12472/12532, replacing the old never-wake rule): a unicast rings its one
+    # recipient; an agent REPLY-broadcast rings the thread's agent authors
+    # through TWO gates -- usefulness (never a body that read since, defer a
+    # body mid-wake) and STEERING (at THREAD_WAKE_K agent replies since a
+    # human last spoke, nothing rings until a human does). The steering gate
+    # is what lets a storm die: the 74-message overnight run had no human in
+    # it, and silence is the only thing that ended it. A PARENTLESS agent
+    # broadcast still rings NOBODY -- there is no thread whose participants
+    # asked to hear it, and that guard is unchanged.
     me = res["sender"]          # the ROOM-NAME the store wrote (alias if in force)
-    _notify(rid, woke, res["id"], me, subject, owner=res["owner"])
+    if to != store.BROADCAST:
+        _notify(rid, res["wake_principals"], res["id"], me, subject, owner=res["owner"])
+        rung, pended = list(res["wake"]), []
+    else:
+        tw = _thread_wake(rid, res, speaker_key(p), subject)
+        rung, pended = tw["rung"], tw["pended"]
     _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
                           # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
@@ -5573,11 +5705,16 @@ async def send(to: str, body: str, subject: str = "",
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
                 "attachments": attachments or [], "ts_ns": time.time_ns()})
     _voice_of_send(res["id"], rid, me, subject, body, speaker_key(p), attachments)
-    log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s woke=%s",
+    # DELIVERED IS NOT RUNG, by name (lesson log-label-says-woke-means-
+    # delivered): delivered= is who can read this on their next turn; rung= is
+    # who a wake frame was actually pushed toward, right now.
+    log.info("%s send -> %s room=%s thread=%s id=%s%s delivered=%s rung=%s%s",
              me, to, p.rooms.get(rid), res["thread_id"], res["id"],
-             f" reply_to={reply_to}" if reply_to is not None else "", res["wake"], woke)
+             f" reply_to={reply_to}" if reply_to is not None else "",
+             res["wake"], rung, f" pended={pended}" if pended else "")
     return {"id": res["id"], "thread_id": res["thread_id"], "room": rid,
-            "parents": res["parents"], "delivered_to": res["wake"]}
+            "parents": res["parents"], "delivered_to": res["wake"],
+            "rung": rung}
 
 
 @mcp.tool()
@@ -5593,6 +5730,7 @@ async def inbox(ctx: Context = None) -> dict:
     # clears it for every OTHER act; this line covers the read-only callers that
     # never reach _acting.
     _poke_pending.pop(p.token_id, None)
+    store.mark_read(_conn, p.token_id)   # the READ stamp (12532): gate 1's predicate
     msgs = store.inbox(_conn, speaker_key(p), p.rooms)
     log.info("%s inbox -> %s unread across %s room(s)", p.name, len(msgs), len(p.rooms))
     return {"messages": msgs}
@@ -5604,6 +5742,7 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
     or not addressed to you are ignored, not fatal -- an ack is a batch and one stale
     id must not fail the rest. Returns {acked, ignored}."""
     p = _acting(ctx.request_context.request)
+    store.mark_read(_conn, p.token_id)   # an ack proves the mail was seen (12532)
     out = store.ack(_conn, speaker_key(p), message_ids, p.rooms)
     log.info("%s ack %s (ignored %s)", p.name, out["acked"], len(out["ignored"]))
     return out
@@ -6001,10 +6140,12 @@ async def wake_ws(ws: WebSocket):
             # `from` is the sender's ROOM-NAME in that room, `owner` the account
             # behind it (6.1(c)): the woken agent reads the ring the way a human
             # reads the feed.
-            await ws.send_json({"wake": True, "reason": "message",
+            await ws.send_json({"wake": True,
+                                "reason": fact.get("why", "message"),
                                 "unread": n, "direct": direct,
                                 "id": fact.get("id"), "from": fact.get("from"),
                                 "owner": fact.get("owner"), "room": fact.get("room"),
+                                **({"thread": fact["thread"]} if fact.get("thread") else {}),
                                 "subject": fact.get("subject", "")})
             log.info("%s wake ring (%s direct of %s unread)", name, direct, n)
     except WebSocketDisconnect:
@@ -8537,6 +8678,9 @@ async def _pending_sweeper():
             for tid in store.expire_pending(_conn):
                 log.info("pending credential %s expired unclaimed -- the previous "
                          "body keeps the identity", tid)
+            # gate 1's deferred half rides the same tick: a deferral nothing
+            # sweeps is a wake that never fires (the 12396 shape, again)
+            _fire_deferred()
         except Exception:
             log.exception("pending sweep failed")
 
