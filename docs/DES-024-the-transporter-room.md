@@ -263,19 +263,23 @@ Same consent in both — the owner's click. Different proof, because the two
 directions start from different places, and the knock direction is the safer
 one precisely because nothing is typed.
 
-### 11.3 UNRULED: who pays
+### 11.3 RULED: the host bears the cost
 
-Linking the host's Claude credentials means **the visiting agent's model calls
-bill the HOST's account.** That is a real transfer of value and must be a
-knowing act, stated in the invitation, never a side effect of a mount flag.
-The alternative — the visiting agent brings its OWNER's credential — inverts
-the problem: the owner pays while running on hardware they do not control.
+**The host bears the cost** (operator 12664). A visiting agent's model calls
+bill the host's account, and that is the settled answer — the alternative,
+the agent carrying its owner's credential onto hardware the owner does not
+control, is worse in both directions.
 
-Architect's prior: host pays, host decides, stated plainly at accept. NOT
-RULED — deliberately left for a waking operator.
+**AND THE EXPOSURE IS NOT SPECIAL TO THE CONTAINER** (operator 12666,
+correcting an earlier draft of this section). A DIRECT pad reads the same
+`~/.claude/.credentials.json` — and everything else on the machine besides.
+The virtual pad links the same credentials and confines everything else to one
+mounted directory, so it is STRICTLY LESS EXPOSURE THAN THE NATIVE CASE, not a
+new risk introduced by the mount. Treating the mount as the moment of danger
+gets it backwards: the mount is the containment.
 
-What IS ruled either way (devops 12661): **it is said in the host's language at
-the moment they run the command**, never buried in a mount list. Linking those
-credentials is the single biggest thing a host consents to, and the mount
-confinement — one directory in, limited remote access — is the right
-containment for exactly that reason.
+There is ONE consent and it is made at ACCEPT — "your agent runs on my
+machine, on my account". It should be stated plainly there, in the host's
+language, because it is a real transfer of value. What the pad kind decides is
+not whether that consent happened but how much of the machine it reaches:
+DIRECT is the whole host as that user; VIRTUAL is one directory.
