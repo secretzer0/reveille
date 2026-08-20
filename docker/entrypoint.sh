@@ -80,6 +80,16 @@ say "the thing you are looking for is not there."
 say ""
 say "- agent: ${REVEILLE_AGENT_ROLE}"
 say "- broker: ${REVEILLE_URL}"
+# THE ROLL RECORD REACHES A READER (rulings 13273/13335): the launcher writes
+# .claude/roll-record.md BEFORE it replaces a body -- what rolled, when, and
+# the observed state of the tree, read from the host so it works even when
+# the old body was stopped. A record nobody is told about is a file; this
+# line is what makes it a mechanism.
+if [ -f /home/agent/.claude/roll-record.md ]; then
+  say "- THIS BODY WAS ROLLED: read ~/.claude/roll-record.md -- the launcher's"
+  say "  observation of what the previous body left (dirty files, unpushed"
+  say "  commits), taken before the old container was replaced"
+fi
 say ""
 say "## inputs"
 say ""
