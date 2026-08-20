@@ -1,0 +1,14 @@
+# Dockerfile.codex -- minimal sandbox for measuring a non-Claude runtime
+# (DES-024 s12 feasibility; architect 12684). The CONTAINER is the sandbox:
+# codex's own inner sandbox may be relaxed in here because nothing outside
+# the mounts exists to protect. auth.json is MOUNTED at run time, never
+# copied into the image -- the image must stay credential-free.
+FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates curl wget procps ripgrep jq     git ca-certificates && rm -rf    git ca-certificates && rm -rf rm -rf /var/lib/apt/lists/*
+# Pin the exact version measured on Titan (2026-08-20): the hooks system is
+# new and the recipe is version-specific.
+RUN npm install -g @openai/codex@0.148.0
+USER node
+WORKDIR /home/node/work
+ENV CODEX_HOME=/home/node/.codex

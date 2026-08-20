@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [
+          { "type": "command",
+            "command": "/home/node/.codex/stop-hook.sh",
+            "timeout": 10 }
+      ] }
+    ]
+  }
+}
