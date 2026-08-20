@@ -379,3 +379,49 @@ runtime is offered on a pad only when:
 
 Two gates, because "we can run it" and "you can pay for it" are different
 facts and only the second is about the person clicking.
+
+### 12.5 RULED: designed for two, ships what is earned (operator 12692)
+
+**The transporter room is designed for two live runtimes from the start.** Not
+"Claude, with room for others later" — two, in the model, in the record, and in
+the box. Retrofitting a second runtime into a surface built for one is how the
+agents rail became a container roster (§1), and we are not repeating it one
+layer up.
+
+**WHAT SHIPS IS DECIDED BY THE EARNED-LIST RULE, NOT BY THIS DECISION** (§12.4).
+The box shows the runtimes that have been woken and that the pad's host can pay
+for. If Codex passes its gates it appears; if it does not, the box has one
+option and tells no lie. So "two from the start" costs nothing and promises
+nothing — which is exactly why it is safe to commit to now.
+
+**THREE GATES STAND BETWEEN CODEX AND A LIVE OPTION**, and none is answered by
+the turn-end result:
+
+1. **THE MANAGED HOOK-TRUST ROUTE.** Non-managed hooks are skipped until
+   reviewed. A provisioned body must NOT ship
+   `--dangerously-bypass-hook-trust` — its working directory is a repo,
+   frequently someone else's, and bypassing trust turns "clone a project" into
+   "run their code as me". **If there is no managed route, Codex cannot be a
+   provisioned body at all**, whatever its hook does.
+2. **A LIVE MCP CALL THROUGH THE BROKER.** Q3 stands on documented config only.
+3. **Q5, CREDENTIALS.** Whose account, how a body receives it, and how the
+   pad-level offer gate (§12.4) knows whether this host holds one. Predicted to
+   bite second (red-shirt 12681) and unchanged by the hook result.
+
+**AND ONE PRECONDITION THAT IS THE ARCHITECT'S, NOT DEVOPS'S**: the prompt-half
+audit (§12.6) must land before any non-Claude body takes a turn.
+
+### 12.6 The prompt-half audit
+
+Our protocol is BROKER-ENFORCED; our ritual is PROMPT-ENFORCED. A different
+runtime will obey the first perfectly and drift on the second, and the drift
+will file as bus defects.
+
+**Deliverable: every doctrine line enumerated and marked REFUSAL-BACKED or
+CLAUDE-COMPLIANCE.** Written by the architect, who wrote most of the doctrine.
+Expected to be uncomfortable and useful in that order — anything in the second
+column is a rule we believe we have and do not.
+
+It is worth doing even if no second runtime ever ships: a heterogeneous fleet
+is only the FORCING FUNCTION that makes the question urgent, not the reason it
+matters.
