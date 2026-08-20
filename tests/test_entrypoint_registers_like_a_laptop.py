@@ -309,3 +309,7 @@ def test_the_roll_record_reaches_a_reader():
         "the pointer must sit in the boot report's opening lines, where a "
         "rolled body reads first")
     assert "THIS BODY WAS ROLLED" in ENTRYPOINT
+    # 13340 rider: the pointer quotes the record's own `- when:` -- a status
+    # word that cannot carry its own timestamp is read as current forever
+    assert "grep -m1 '^- when: ' /home/agent/.claude/roll-record.md" in ENTRYPOINT
+    assert "rolled_when" in ENTRYPOINT
