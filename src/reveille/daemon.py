@@ -351,6 +351,24 @@ of the day it changed; USAGE above is what is true now. An entry that disagrees
 with USAGE is history, and USAGE wins -- never work a released entry backwards
 into a procedure.
 
+0.2.221 THE BUDGET COUNTS THE BYTES THAT LEAVE (rulings 13014/13059, found
+by red-shirt measuring what it received instead of what the code claimed).
+BREAKING, deliberately and with no compatibility shim: lessons() and brief()
+now return ONE COMPACT JSON STRING -- json.loads it -- and brief's `chars` is
+the WIRE number, the JSON-escaped length of exactly that string, not the
+length of the text. A reader comparing the new chars to len(text) will find
+them different; that is the fix, not a defect. The budget used to be enforced
+on a string nobody received: the store counted compact separators while the
+transport delivered indent-2, so a 24000-char budget shipped 26,538 and
+reported 23,873 -- and because indentation is charged per LINE while elision
+keeps a line per row, the gap GREW with the corpus while the number stayed
+pinned under budget. The transport's rendering turned out to be a private
+convention nobody could pin, so the tool layer now emits its own string and
+the seam the budget defends is ours. One helper serves both readers, because
+a budget that means one thing in lessons() and another in brief() is worse
+than the defect it replaces. brief's raw character slice is gone with it -- a
+raw cut against a wire number was the same mistake in a fourth spelling.
+
 0.2.220 INIT THAT INSTALLS NO NEW CREDENTIAL RETIRES NO DAEMON (ruling
 13094; agent image 0.2.26). The 0.2.24 hoist put the wake daemon at the top of
 the container entrypoint, where it takes the spool lock seconds before
