@@ -110,7 +110,7 @@ def test_the_record_carries_observed_numbers(monkeypatch, tmp_path):
     (work / "dirty.txt").write_text("uncommitted")
     monkeypatch.setattr(rl, "data_root", lambda u, a, base=None: str(root))
     rl.leave_roll_record("u", "a", to_image="img:2", why="upgrade (image roll)")
-    text = (root / ".claude" / "roll-record.md").read_text()
+    text = (root / "claude" / "roll-record.md").read_text()
     assert "written by the LAUNCHER" in text
     assert "img:1 -> img:2" in text
     assert "dirty files in /home/agent/repos/work: 1" in text
@@ -133,7 +133,7 @@ def test_an_ownership_refusal_is_named_not_misread(monkeypatch, tmp_path):
             stderr="fatal: detected dubious ownership in repository"))
     monkeypatch.setattr(rl, "data_root", lambda u, a, base=None: str(tmp_path))
     rl.leave_roll_record("u", "a", to_image="img:2", why="upgrade (image roll)")
-    text = (tmp_path / ".claude" / "roll-record.md").read_text()
+    text = (tmp_path / "claude" / "roll-record.md").read_text()
     assert "unreadable: ownership refused" in text
     assert ": 0" not in text, "a refusal must never read as a clean tree"
 
@@ -145,7 +145,7 @@ def test_an_unreadable_tree_is_recorded_not_skipped(monkeypatch, tmp_path):
                         lambda name: _running(image="img:1"))
     monkeypatch.setattr(rl, "data_root", lambda u, a, base=None: str(tmp_path))
     rl.leave_roll_record("u", "a", to_image="img:2", why="re-provision (--replace)")
-    text = (tmp_path / ".claude" / "roll-record.md").read_text()
+    text = (tmp_path / "claude" / "roll-record.md").read_text()
     assert text.count("unreadable (no repo") == 2
 
 
@@ -153,7 +153,7 @@ def test_no_body_no_record(monkeypatch, tmp_path):
     monkeypatch.setattr(rl, "_inspect_container", lambda name: None)
     monkeypatch.setattr(rl, "data_root", lambda u, a, base=None: str(tmp_path))
     rl.leave_roll_record("u", "a", to_image="img:2", why="re-provision (--replace)")
-    assert not (tmp_path / ".claude" / "roll-record.md").exists(), (
+    assert not (tmp_path / "claude" / "roll-record.md").exists(), (
         "there was no roll -- a record about a body that never existed is noise")
 
 
@@ -169,3 +169,15 @@ def test_the_record_is_written_before_the_stop():
     call2 = src.index("leave_roll_record(user, agent, to_image=image", prov)
     rm = src.index('_docker("rm", "-f", name', prov)
     assert call2 < rm, "the replace path's record must precede its rm -f"
+
+
+def test_the_record_lands_inside_the_mount():
+    """The path is a CONTRACT with docker_run_argv, read from the source of
+    both sides rather than asserted twice independently: the record's subdir
+    must be the exact host dir the argv builder binds to /home/agent/.claude.
+    The first write targeted the dot-name sibling and no container ever saw
+    it -- and the unit gates missed it by faking data_root flat."""
+    src = pathlib.Path(rl.__file__).read_text()
+    assert "'claude')}:/home/agent/.claude" in src, "the mount moved -- re-read both sides"
+    assert '"claude", "roll-record.md"' in src
+    assert '".claude", "roll-record.md"' not in src
