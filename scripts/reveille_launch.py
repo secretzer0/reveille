@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.27")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.28")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -1325,9 +1325,16 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         # THE MARKER IS THE STATE (13443/13444, measured 13446): the writable
         # layer keeps it across stop/start, and the rm THIS function performs
         # on --replace is what loses it -- so the declaration is re-copied
-        # here, on every path that creates a container.
-        _docker("exec", name, "touch", "/home/agent/.multi-driver",
-                check=False, capture=True)
+        # here, on every path that creates a container. ONE SPELLING with the
+        # gate and flip: "$HOME/.multi-driver", never a hardcoded home.
+        r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
+                    check=False, capture=True)
+        if r.returncode != 0:
+            # Never fail the provision over it, never keep quiet about it
+            # (13450): a silent revert is the defect this slice exists for.
+            print(f"multi-driver declaration did NOT land on {user}/{agent} "
+                  f"(exec rc={r.returncode}) -- flip it by hand: "
+                  f"reveille-launch flip {user} {agent} on", file=sys.stderr)
     _record(conn, user, agent, creds["repo_url"], image, broker,
             role_name=split_role_prompt(role_prompt or "", ROLE_PROMPTS)[0])
     owner = claim_agent_name(conn, user, agent)
@@ -1550,8 +1557,12 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         # Same re-copy as provision: the upgrade's rm is a path that loses
         # the marker, and the idle auto-roll reaches HERE with no human
         # present to notice a silent revert (13448).
-        _docker("exec", name, "touch", "/home/agent/.multi-driver",
-                check=False, capture=True)
+        r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
+                    check=False, capture=True)
+        if r.returncode != 0:
+            print(f"multi-driver declaration did NOT land on {user}/{agent} "
+                  f"(exec rc={r.returncode}) -- flip it by hand: "
+                  f"reveille-launch flip {user} {agent} on", file=sys.stderr)
     # HEALTH BEFORE DESTROY (11600 s3): running, boot report written, presence shows it.
     if not wait_healthy(health_url, agent, token, timeout):
         rollback(f"not present on the broker within {timeout}s")

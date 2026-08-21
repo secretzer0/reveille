@@ -77,8 +77,13 @@ def test_provision_and_upgrade_write_the_marker_after_the_run():
         end = SRC.index("\ndef ", start + 10)
         body = SRC[start:end]
         run = body.index("subprocess.run(argv, env=env, check=True")
-        touch = body.index('"touch", "/home/agent/.multi-driver"')
+        touch = body.index("touch \"$HOME/.multi-driver\"")
         assert run < touch, f"{fn} writes the marker before the container runs"
+        # 13450: the touch can fail (exec race, unhealthy container) and the
+        # declaration then did not land -- both writers read the rc and SAY
+        # so, naming the by-hand fix, without failing the provision.
+        fail = body.index("declaration did NOT land", touch)
+        assert "reveille-launch flip" in body[fail:fail + 300]
 
 
 def test_every_recreating_path_funnels_through_the_marker_writers():
