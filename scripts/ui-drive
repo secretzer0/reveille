@@ -47,6 +47,10 @@ AGENTS = [
      "image": "reveille-agent:0.2.28", "role_name": "ui-ux", "room_id": "r1"},
     {"agent": "old-scout", "status": "absent", "state": "stopped",
      "image": "reveille-agent:0.2.21", "role_name": "scout", "room_id": "r1"},
+    # A CROSS-OWNER IDENTITY (DES-011 s2 alias, <owner>-<name>) is the longest
+    # thing this table ever holds, and it is what the phone card has to wrap.
+    {"agent": "tmelhiser-native-reveille-devops", "status": "stopped", "state": "stopped",
+     "image": "reveille-agent:0.2.29", "role_name": "devops", "room_id": "r1"},
 ]
 FAILED, MISSES = [], []
 
@@ -267,6 +271,9 @@ def scene_manager(ctx, url, out, tag, phone):
           // line-height arithmetic, which reads "normal" and lies.
           return {over: t.scrollWidth - w.clientWidth,
                   lines: n.querySelector('b').getClientRects().length}; }""")
+    # `n` is the FIRST row's name (old-scout, 9 chars): an ordinary name must
+    # hold its line. A cross-owner alias may wrap -- what it may not do is push
+    # the acts column out, which the check above measures.
         check("the table fits the panel, acts and all", fit["over"] <= 0,
               f"{fit['over']}px past the panel")
         check("an agent name holds one line", fit["lines"] <= 1, f"{fit['lines']} lines")
@@ -274,6 +281,17 @@ def scene_manager(ctx, url, out, tag, phone):
     check("the manager never leaks into the terminal well", well == 0, f"{well} in #agentsWell")
     shoot(p, out, f"{tag}-manager")
     if phone:
+        fit = p.evaluate("""() => { const w = document.querySelector('.mgrWrap');
+          return w.scrollWidth - w.clientWidth; }""")
+        check("no sideways scroll in a card layout", fit <= 0, f"{fit}px past the card")
+        # WRAPPING IS NOT THE ASSERTION -- STAYING INSIDE THE CARD IS. A name
+        # that happens to fit needs no wrap; one that does not must not spill.
+        spill = p.evaluate("""() => { let worst = 0;
+          for (const b of document.querySelectorAll('.mgrName b')) {
+            const card = b.closest('tr').getBoundingClientRect();
+            worst = Math.max(worst, Math.round(b.getBoundingClientRect().right - card.right)); }
+          return worst; }""")
+        check("the longest identity stays inside its card", spill <= 0, f"{spill}px past the card")
         lbl = p.evaluate("""() => {
           const c = document.querySelector('table.mgr tbody td');
           return getComputedStyle(c, '::before').content; }""")

@@ -596,7 +596,12 @@
     scripts/ui-drive photographed the result: "roc-api-dev" stacked on three lines
     while the image tag held one, and the acts column -- destroy included -- was
     pushed past the panel's edge into the scroller. */
- table.mgr .mgrName{color:var(--fg);white-space:nowrap}
+ /* Wrapping is ALLOWED and the break lands on the hyphens an identity already
+    has; what was wrong before was word-break:break-word, which breaks mid-word
+    and stacked "roc-api-dev" on three lines while the image column held one.
+    The image gives way first (overflow-wrap:anywhere below), so a short name
+    keeps its line and only a cross-owner alias ever wraps. */
+ table.mgr .mgrName{color:var(--fg)}
  table.mgr .mgrImg{color:var(--dim);font-size:.74rem;overflow-wrap:anywhere}
  .mgrDiff{color:var(--gold)}
  .mgrActs{white-space:nowrap;text-align:right}
@@ -872,6 +877,12 @@
   table.mgr td{border:0;padding:.15rem 0}
   table.mgr td:empty{display:none}
   table.mgr .mgrImg{white-space:normal}
+  /* The desktop nowrap exists to stop the name stealing width from the acts
+     COLUMN. A card has no columns -- every td is display:block -- so the reason
+     is gone and only the cost remains: a cross-owner identity
+     (tmelhiser-native-reveille-devops) cannot wrap in a 360px card and drives
+     .mgrWrap's own sideways scroller. (architect, 13533) */
+  table.mgr .mgrName{white-space:normal;overflow-wrap:anywhere}
   .mgrActs{text-align:left;white-space:normal;margin-top:.35rem}
   button.mgrAct{margin:.2rem .35rem .2rem 0;min-height:2.75rem;padding:.4rem .7rem}
   #mmNav button{flex:1 1 0}
