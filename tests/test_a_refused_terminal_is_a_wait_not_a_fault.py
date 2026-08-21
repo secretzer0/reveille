@@ -76,13 +76,17 @@ def test_refused_then_up_yields_the_page(capsys):
     assert "ttyd answered after 1.8s" in err and "3 dials" in err
 
 
-def test_a_first_dial_win_logs_nothing():
+def test_a_first_dial_win_logs_nothing(capsys):
     """The warm path stays silent: no naps, no line -- the instrument
-    measures waits, and a wait that never happened is not an observation."""
+    measures waits, and a wait that never happened is not an observation.
+    The silence IS the design: warm is the common path, and an instrument
+    that prints on every attach turns a measurement into log noise (13435)."""
     status, _, _ = rl.fetch_with_boot_grace(
         "http://c:7681/", opener=lambda req, timeout: _Resp(),
         clock=lambda: 0.0, snooze=lambda s: None)
     assert status == 200
+    out = capsys.readouterr()
+    assert out.err == "", out.err
 
 
 def test_the_grace_gives_up_and_is_bounded(capsys):
