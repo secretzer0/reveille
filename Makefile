@@ -8,12 +8,14 @@ PID  := $(REPO)/reveille.pid
 # launcher.db image records ambiguous.
 AGENT_IMAGE ?= reveille-agent:0.2.29
 
-.PHONY: help sync build test smoke daemon start stop restart status logs register unregister lint clean agent-image agent-container agent-spike server-image tts-image up down branch-orphans
+.PHONY: help sync build test smoke daemon start stop restart status logs register unregister lint clean agent-image agent-container agent-spike server-image tts-image up down branch-orphans shots ui-drive
 
 help:
 	@echo "make sync           create/refresh the uv env (Python 3.14, locked)"
 	@echo "make test           unit suite (uv run pytest)"
 	@echo "make smoke          end-to-end smoke: real daemon, HTTP-MCP + WS wake + auth"
+	@echo "make shots          phone-layout pictures + the width gate (scripts/mobile-shots)"
+	@echo "make ui-drive       drive the page in a real browser -> shots/ui + the checks"
 	@echo "make build          sync + test + smoke"
 	@echo "make daemon         run the broker in the FOREGROUND (Ctrl-C to stop)"
 	@echo "make start          start the broker in the background -> reveille.log. Env: REVEILLE_PORT, REVEILLE_DB"
@@ -41,6 +43,20 @@ test:
 
 smoke:
 	uv run python tests/smoke_ws.py
+
+# THE INSTRUMENT IS PART OF THE WORK (lesson a-harness-that-lived-in-a-session-
+# dies-with-it): both harnesses drive a scratch broker in headless chromium and
+# EXIT NON-ZERO on a failed check, so they are gates that also leave pictures.
+# They have a make target because a script nobody can name is a script nobody
+# runs -- and mobile-shots, committed but targetless, had been dead since
+# store.send stopped taking bare names, which no gate noticed.
+# Chromium comes from ~/.cache/ms-playwright; if it is missing:
+#   uv run --with playwright playwright install chromium
+shots:
+	scripts/mobile-shots $(OUT)
+
+ui-drive:
+	scripts/ui-drive $(OUT)
 
 # The broker daemon. One process on an always-on host serves every agent (local at
 # 127.0.0.1, remote at the LAN name) over the same SQLite -> one bus. Set
