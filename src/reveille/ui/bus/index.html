@@ -576,6 +576,25 @@
  #panCard{background:var(--card);border:1px solid var(--line);border-radius:14px;
   width:46rem;max-width:94vw;box-shadow:0 12px 48px rgba(0,0,0,.5);overflow:hidden;
   display:flex;flex-direction:column;max-height:82vh}
+ /* THE AGENT MANAGER (DES-025 s5). A table on a desktop, because comparing
+    agents is the job it exists for and a column you can run your eye down is
+    what comparison wants. The phone rules below turn each row into a card --
+    same markup, because two markups for one list is two things to keep true. */
+ .mgrWrap{overflow-x:auto}          /* wide content scrolls ITSELF, never the page */
+ table.mgr{width:100%;border-collapse:collapse;font-size:.82rem}
+ table.mgr th{text-align:left;color:var(--dim);font-weight:600;font-size:.72rem;
+  text-transform:uppercase;letter-spacing:.04em;padding:.3rem .5rem;
+  border-bottom:1px solid var(--line);white-space:nowrap}
+ table.mgr td{padding:.4rem .5rem;border-bottom:1px solid var(--line);vertical-align:middle}
+ table.mgr .mgrName{color:var(--fg);word-break:break-word}
+ table.mgr .mgrImg{color:var(--dim);font-size:.74rem;white-space:nowrap}
+ .mgrDiff{color:var(--gold)}
+ .mgrActs{white-space:nowrap;text-align:right}
+ button.mgrAct{background:none;border:1px solid var(--line);color:var(--dim);
+  border-radius:.4rem;font:inherit;font-size:.74rem;cursor:pointer;
+  padding:.25rem .5rem;margin-left:.25rem;min-height:2rem}
+ button.mgrAct:hover{color:var(--gold);border-color:var(--gold)}
+ button.mgrAct.danger:hover{color:#ff8a8a;border-color:#ff8a8a}
  #panTabs{display:flex;align-items:center;gap:.15rem;padding:.5rem .6rem 0;
   border-bottom:1px solid var(--line);flex:none}
  .tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
@@ -825,6 +844,26 @@
      thumb reaches without crossing the screen, the same reason the rail
      became a sheet. */
   #mediaModal{width:100vw;height:100dvh;max-width:100vw;max-height:100dvh;border-radius:0}
+  /* THE MANAGER ON A PHONE: a five-column table in 360px is a horizontal
+     scroll nobody finds, so each row becomes a card and the headers go away
+     -- the labels ride the cells. Same DOM, different shape. */
+  /* The header row is dropped and each cell NAMES ITSELF instead -- an
+     off-screen -9999px header is a device pixel in a layout rule (11483 B)
+     and a card whose fields have no names is worse than the table it
+     replaced. data-lbl carries the column heading down into the card. */
+  table.mgr thead{display:none}
+  table.mgr td::before{content:attr(data-lbl);color:var(--dim);font-size:.68rem;
+   text-transform:uppercase;letter-spacing:.04em;display:inline-block;
+   min-width:4.5em;margin-right:.4em}
+  table.mgr td:not([data-lbl])::before{content:none}
+  table.mgr,table.mgr tbody,table.mgr tr,table.mgr td{display:block;width:100%}
+  table.mgr tr{border:1px solid var(--line);border-radius:.5rem;
+   padding:.4rem .5rem;margin:.5rem 0}
+  table.mgr td{border:0;padding:.15rem 0}
+  table.mgr td:empty{display:none}
+  table.mgr .mgrImg{white-space:normal}
+  .mgrActs{text-align:left;white-space:normal;margin-top:.35rem}
+  button.mgrAct{margin:.2rem .35rem .2rem 0;min-height:2.75rem;padding:.4rem .7rem}
   #mmNav button{flex:1 1 0}
   #mmNav .sp{display:none}
   /* THE HEADER BAR: room name (tap = the sheet), voice, find (filter + history), me. */
@@ -1106,6 +1145,7 @@
    <button class="tab" data-tab="rooms">Rooms</button>
    <button class="tab" data-tab="memory">Memory</button>
    <button class="tab" data-tab="tokens">Tokens</button>
+   <button class="tab" data-tab="manage">Agents</button>
    <button class="tab" data-tab="visits">Visits</button>
    <button class="tab" data-tab="voices">Voices</button>
    <button class="tab" data-tab="users">Users</button>
@@ -2520,6 +2560,10 @@ function panel(tab,html){
   // /users is admin-only server-side; showing the tab to a plain user would just
   // hand them a 403. Don't offer what cannot work.
   if(b.dataset.tab==='users')b.style.display=(me&&me.is_admin)?'':'none';
+  // The manager talks to the LAUNCHER. Where AGBASE was never declared there
+  // is nothing behind this tab, and a tab that opens onto "unavailable" is
+  // the unreachable-control defect wearing the opposite face.
+  if(b.dataset.tab==='manage')b.style.display=(typeof AGBASE!=='undefined')?'':'none';
  }
  $('panBody').innerHTML=html;
  $('panWho').textContent=myName+(me&&me.is_admin?' · admin':'');
@@ -2530,6 +2574,7 @@ $('panX').onclick=closePanel;
 $('pan').onclick=e=>{if(e.target.id==='pan')closePanel();};
 $('panOut').onclick=async()=>{await fetch('/logout',{method:'POST'});location.reload();};
 const TABS={rooms:()=>openRooms(),memory:()=>openMemories(),tokens:()=>openTokens(),
+ manage:()=>openManage(),
  visits:()=>openVisits(),voices:()=>openVoices(),users:()=>openUsers(),
  account:()=>openAccount()};
 for(const b of $('panTabs').querySelectorAll('.tab'))b.onclick=()=>TABS[b.dataset.tab]();
@@ -3915,6 +3960,85 @@ function agEditPanel(a){
    '<button data-agedno="'+esc(a.agent)+'">close</button>'+
    '<span data-agedstatus class="pDim"></span></div>'+
   verdict+'</div>';
+}
+// ===== THE AGENT MANAGER (DES-025 s5, merged main 3f91e28) =====
+// WHERE IT LIVES, and it is a UI/UX call the design left to this surface (s8):
+// BESIDE the per-agent modals, never replacing them, and NOT in the terminal
+// well. Ruling 8751 took the management list OUT of that well on purpose --
+// the well is the terminal, full size, with nothing competing for the space --
+// and putting one back would undo a decision rather than build on it. So the
+// manager is a Settings tab: the panel that already answers "show me all of
+// my X" for rooms, tokens and voices now answers it for agents too.
+// TWO DOORS, ONE EDITOR: every act here calls the SAME function the tab's own
+// icon calls -- openEdit, openDestroy, agLifecycle, openAgent. A manager that
+// reimplemented the edit form would be a second editor to keep in step, which
+// is the defect this fleet keeps filing under one-state-one-writer.
+//
+// THE ADDRESS IS THE IDENTITY (DES-025 s4, gate 6). There are no display names
+// yet -- devops holds that storage -- and s6 already rules what to render
+// without one: the identity IS the label. This helper is that rule, so the day
+// the field lands the manager shows "Display (identity)" and every surface
+// that takes a typed address still shows the thing that works.
+function agLabel(a){
+ const id=a.agent||'';
+ return a.display_name?a.display_name+' ('+id+')':id;
+}
+async function openManage(){
+ panel('manage','<div class="pDim">reading your agents&hellip;</div>');
+ // The panel can be opened before the rail ever was, so this must not render
+ // a blank list and call it "no agents" -- an empty cache is not an answer.
+ if(!agAll.length)await refreshAgents();
+ drawManage();
+}
+function drawManage(){
+ if(curTab!=='manage')return;      // a background poll must not steal the panel
+ if(!agAll.length){
+  $('panBody').innerHTML='<div class="pDim">No agents on this launcher yet. '+
+   'Create one from the rail&rsquo;s &ldquo;+ New Agent&rdquo; &mdash; the one '+
+   'entry point, deliberately (msg 8751).</div>';
+  return;
+ }
+ const stateOf=a=>a.state||(a.status==='running'?'running':'stopped');
+ const gone=a=>['retired','erased'].includes(stateOf(a));
+ const rows=agAll.slice().sort((x,y)=>x.agent.localeCompare(y.agent)).map(a=>{
+  const s=stateOf(a),differs=!!(a.image&&agDefaultImage&&a.image!==agDefaultImage);
+  const act=(k,txt,cls)=>'<button type="button" class="mgrAct'+(cls?' '+cls:'')+
+   '" data-mgr="'+k+'" data-agent="'+esc(a.agent)+'">'+txt+'</button>';
+  let acts='';
+  if(!gone(a)&&a.status!=='absent')acts+=act('open','terminal');
+  if(!gone(a)&&a.status!=='absent')acts+=act('edit','edit');
+  if(a.status==='running')acts+=act('stop','stop');
+  else if(!gone(a)&&a.status!=='absent')acts+=act('start','start');
+  acts+=act('destroy','destroy&hellip;','danger');
+  return '<tr>'+
+   '<td class="mgrName" data-lbl="agent"><b>'+esc(agLabel(a))+'</b></td>'+
+   '<td data-lbl="role">'+esc(a.role_name||'')+'</td>'+
+   // The recorded tag, and WHAT IT DIFFERS FROM -- the rail learned that a
+   // difference you cannot see the other side of is not actionable.
+   '<td class="mgrImg" data-lbl="image">'+esc(a.image||'')+
+     (differs?'<span class="mgrDiff" title="the launcher default is '+
+       esc(agDefaultImage)+'"> \u2260 '+esc(agDefaultImage)+'</span>':'')+'</td>'+
+   '<td data-lbl="state">'+esc(s)+(a.status==='absent'?' <span class="mgrDiff">broken</span>':'')+'</td>'+
+   '<td class="mgrActs">'+acts+'</td></tr>';
+ }).join('');
+ $('panBody').innerHTML=
+  '<div class="pAsk">Every agent on this launcher. Editing opens the same '+
+  'form as the agent&rsquo;s own tab &mdash; one editor, two doors.</div>'+
+  '<div class="mgrWrap"><table class="mgr"><thead><tr>'+
+  '<th>agent</th><th>role</th><th>image</th><th>state</th><th></th>'+
+  '</tr></thead><tbody>'+rows+'</tbody></table></div>';
+ for(const el of $('panBody').querySelectorAll('[data-mgr]'))el.onclick=()=>{
+  const n=el.dataset.agent,k=el.dataset.mgr;
+  // The terminal is the one act that is somewhere ELSE: closing the panel is
+  // part of the act, not a side effect the user has to perform afterwards.
+  if(k==='open'){closePanel();openAgentsWell();openAgent(n);return;}
+  if(k==='edit'){closePanel();openEdit(n);return;}
+  // Destroy keeps its OWN per-item confirm (DES-025 s5): it names the agent,
+  // spells out retire vs erase, and types-to-confirm the erase. A generic
+  // "are you sure" is not a confirm, so this reuses the real one.
+  if(k==='destroy'){closePanel();openDestroy(n);return;}
+  agLifecycle(n,k).then(()=>{if(curTab==='manage')drawManage();});
+ };
 }
 async function refreshAgents(){
  $('agUnavail').hidden=true;
