@@ -290,16 +290,32 @@ importantly, needs the ABSENCE of one to be visible from outside itself.
 Following this document's own checklist -- a finding that proposes no control
 is half a finding:
 
-- Items 1 and 2 have an observable already half-built: `tokens.last_inbox_ns`
-  (12532) records when a credential last read its mail. Surfacing it in
-  presence turns "this body does not ack" from an invisible habit into a fact
-  a peer can see. A detector, not a refusal, and honest about which it is.
+- Item 1 has an observable, and it is NOT `tokens.last_inbox_ns` -- red-shirt,
+  correcting its own msg 13331, which put it there and which this document
+  adopted. `store.mark_read` on main (3436178) stamps that column "from
+  inbox() and ack() only": INBOX STAMPS IT TOO, so a body that reads every
+  ring and acks nothing is indistinguishable there from a body that acks.
+  Surfacing it detects a body that does not READ; item 1's rule is `ack()`.
+  THE ACK ALREADY LEAVES ITS OWN BROKER-SIDE ARTIFACT: a row in
+  `reads(message_id, principal, read_ns)`, written by `store.ack`, and
+  `store.deafness` already queries it -- `NOT EXISTS (SELECT 1 FROM reads r
+  WHERE r.message_id = m.id AND r.principal = mem.principal)`. Today that
+  predicate is ANDed with `m.ts_ns > mem.seen_ns`, and `seen_ns` is advanced
+  by `_seen()` on ANY authenticated call (daemon `_seen` -> `store.touch`),
+  so a body that sends and never acks clears the deaf verdict without having
+  read anything. Item 1's detector is that same query MINUS the `seen_ns`
+  predicate: unacked direct mail per member, computed at read time, no new
+  column and no new write path. One honest caveat: `join()` backfills `reads`
+  for every message older than the catch-up window, so the count means
+  "unacked since your last join", never lifetime. A detector, not a refusal.
 - Item 11 wants the same treatment from the other side, but the broker sees
   LESS than this document first claimed (red-shirt, msg 13331): it knows
   whether a waiter is REGISTERED, and it knows when a credential last READ
-  its mail -- and that second thing is `tokens.last_inbox_ns` again, so the
-  two proposals above collapse into ONE observable rather than two. WHAT THE
-  BROKER CANNOT SEE IS RING CONSUMPTION: draining the spool is a body
+  its mail -- and that second thing is `tokens.last_inbox_ns`, which is item
+  11's observable and not item 1's, so the two proposals do NOT collapse:
+  they read different state for different rules, and 13331's collapse claim
+  is corrected in the bullet above. WHAT THE BROKER CANNOT SEE IS RING
+  CONSUMPTION: draining the spool is a body
   deleting files under its own `~/.reveille/spool/<name>/new/`, a local act
   with no broker-side artifact, and the heartbeat proves the socket rather
   than the drain. So item 2 has NO detector available by surfacing; giving
