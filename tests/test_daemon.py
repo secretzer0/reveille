@@ -723,7 +723,15 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
     sites = {}
     for expr in re.findall(r'(?:href|src|data-src)="\'\+([A-Za-z_]+)', PAGE):
         sites[expr] = sites.get(expr, 0) + 1
-    assert sites == {"esc": 1, "safe": 6, "tile": 1, "u": 1}, \
+    # safe 6 -> 9 at the media modal (ruling 13413), and the arithmetic is the
+    # review this gate exists to force: the modal added FOUR stage sinks (img
+    # src, video src, audio src, and the download href for a type we do not
+    # play) and REMOVED ONE -- the image's old target=_blank anchor, now a
+    # button that opens the dialog instead of navigating. Every one of the four
+    # interpolates `safe`, which is attUrl()'s return, checked at the sink
+    # rather than inherited from the feed: a modal is a new sink for a foreign
+    # url (8816) and a new sink is where an old gate gets skipped.
+    assert sites == {"esc": 1, "safe": 9, "tile": 1, "u": 1}, \
         f"a URL interpolation appeared or moved: {sites} -- every one needs a check"
     # AND THE SINKS THAT ARE NOT BUILT STRINGS. The regex above sees only
     # concatenation, so a URL set by PROPERTY ASSIGNMENT was invisible to it --
