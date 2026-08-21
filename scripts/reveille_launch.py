@@ -3123,6 +3123,31 @@ def _ui_read(name):
         return f.read()
 
 
+def fetch_with_boot_grace(url, *, opener=urllib.request.urlopen,
+                          clock=time.monotonic, snooze=time.sleep):
+    """One GET with a BOUNDED grace for the attach boot race (13407, ruled
+    13408): a ConnectionRefusedError from a RUNNING container means ttyd has
+    not bound its port yet -- press-play-then-connect loses that race by a
+    couple of seconds, and the operator's close-tab-and-reopen was the retry
+    this loop now performs. Refusals are retried at 250ms steps for ~3s, then
+    the refusal propagates; ANY other failure -- timeout, resolution, HTTP
+    error -- propagates on the FIRST throw, because retrying those turns a
+    fault into a hang. The injectable opener/clock/snooze exist so the
+    give-up half is testable without wall time."""
+    deadline = clock() + 3.0
+    while True:
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with opener(req, timeout=10) as r:
+                return r.status, r.read(), r.headers.get("Content-Type", "")
+        except urllib.error.URLError as e:
+            if not isinstance(e.reason, ConnectionRefusedError):
+                raise
+            if clock() >= deadline:
+                raise
+            snooze(0.25)
+
+
 def build_api(auth_url):
     """The starlette app. Deferred imports: the CLI paths must keep working on a
     box that only ever uses the launcher as a CLI."""
@@ -3728,16 +3753,24 @@ def build_api(auth_url):
         url = f"http://{target}/{sub}"
         if request.url.query:
             url += f"?{request.url.query}"
-
-        def fetch():
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=10) as r:
-                return r.status, r.read(), r.headers.get("Content-Type", "")
         try:
-            status, body, ctype = await asyncio.to_thread(fetch)
+            status, body, ctype = await asyncio.to_thread(
+                fetch_with_boot_grace, url)
         except urllib.error.HTTPError as e:
             return Response(e.read(), status_code=e.code)
-        except OSError:
+        except OSError as e:
+            if isinstance(getattr(e, "reason", None), ConnectionRefusedError):
+                # The grace ran out and ttyd is STILL not bound: name the
+                # state (13408) -- not-up-yet is a wait, not a fault, and
+                # "unreachable" reads as broken-or-gone.
+                started = (_docker(
+                    "inspect", "-f", "{{.State.StartedAt}}",
+                    container_name(_p["user"], agent),
+                    check=False, capture=True).stdout or "").strip()
+                return PlainTextResponse(
+                    f"terminal not listening yet -- container running since "
+                    f"{started or '(unknown)'}; try again",
+                    status_code=502)
             return PlainTextResponse("agent terminal unreachable",
                                      status_code=502)
         return Response(body, status_code=status, media_type=ctype or None)
