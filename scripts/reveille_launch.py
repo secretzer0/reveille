@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.27")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.28")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -392,6 +392,24 @@ def _add_role_name(conn):
         conn.commit()
 
 
+def _add_roll_desired(conn):
+    """Additive: containers.roll_desired_running -- the IN-FLIGHT record of
+    what a roll FOUND running (ruled 13457, property 1). Set before the
+    roll's first mutation, cleared by the per-body restore; an orphaned row
+    means a roll died between the start and the restore, and the next sweep
+    tick reconciles it. NULL = no roll in flight."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(containers)")}
+    if "roll_desired_running" not in cols:
+        conn.execute("ALTER TABLE containers ADD COLUMN roll_desired_running INTEGER")
+        conn.commit()
+    if "roll_deadline_ns" not in cols:
+        # 13460: the deadline is what lets the sweep thread and the roller
+        # PROCESS share one db without a lock -- a record younger than its
+        # own deadline is a LIVE roll, not an orphan.
+        conn.execute("ALTER TABLE containers ADD COLUMN roll_deadline_ns INTEGER")
+        conn.commit()
+
+
 def _launcher_tables(conn):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS containers("
@@ -471,6 +489,7 @@ def _db(path=None):
         _migrate_launcher_db(conn)
     _launcher_tables(conn)
     _add_role_name(conn)
+    _add_roll_desired(conn)
     waited = time.monotonic() - _t0
     if waited > 1.0:
         # instrument-and-wait (13323): the next contention MEASURES the
@@ -717,13 +736,26 @@ def merge_profile(prof, updates, agent=None):
     if updates.get("claude_mode") and updates["claude_mode"] not in CLAUDE_MODES:
         raise LaunchError(f"claude_mode must be one of {CLAUDE_MODES}, "
                           f"not {updates['claude_mode']!r}")
-    for k in ("claude_token", "github_token", "repo_url", "claude_mode"):
+    if updates.get("multi_driver") and updates["multi_driver"] not in ("on", "off"):
+        raise LaunchError(f"multi_driver must be \"on\" or \"off\", "
+                          f"not {updates['multi_driver']!r}")
+    for k in ("claude_token", "github_token", "repo_url", "claude_mode",
+              "multi_driver"):
         if k in updates:
             if updates[k]:
                 target[k] = updates[k]
             else:
                 target.pop(k, None)
     return prof
+
+
+def resolve_multi_driver(prof, agent):
+    """Per-agent override > user global, the resolve_credentials shape.
+    THE PROFILE IS THE DECLARATION (ruled 13448): provision copies it into
+    the container as the ~/.multi-driver marker; `flip` mutates only the
+    runtime copy. -> "on" | "off" | ""."""
+    a = (prof.get("agents") or {}).get(agent) or {}
+    return a.get("multi_driver") or prof.get("multi_driver") or ""
 
 
 def resolve_credentials(prof, agent, repo_url_req=""):
@@ -1061,6 +1093,8 @@ def masked_profile(prof):
             out["repo_url"] = d["repo_url"]
         if d.get("claude_mode"):   # a choice, not a secret
             out["claude_mode"] = d["claude_mode"]
+        if d.get("multi_driver"):   # also a choice, never a secret
+            out["multi_driver"] = d["multi_driver"]
         return out
     body = mask(prof)
     body["agents"] = {name: mask(o) for name, o in
@@ -1245,7 +1279,8 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         raise LaunchError("no token given")
 
     # P2: the user's stored credentials, override > global > request repo_url.
-    creds = resolve_credentials(load_profile(user), agent, repo_url)
+    prof = load_profile(user)
+    creds = resolve_credentials(prof, agent, repo_url)
     cred_names, cred_env, kind = credential_env(creds)
     # No claude credential + the default boot (claude itself) = an agent that
     # will hang at a login prompt nobody is watching -- or worse, find some
@@ -1305,6 +1340,20 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                            boot_cmd=boot_cmd, extra_env=extra_env,
                            auth_mount=auth_mount)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
+    if resolve_multi_driver(prof, agent) == "on":
+        # THE MARKER IS THE STATE (13443/13444, measured 13446): the writable
+        # layer keeps it across stop/start, and the rm THIS function performs
+        # on --replace is what loses it -- so the declaration is re-copied
+        # here, on every path that creates a container. ONE SPELLING with the
+        # gate and flip: "$HOME/.multi-driver", never a hardcoded home.
+        r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
+                    check=False, capture=True)
+        if r.returncode != 0:
+            # Never fail the provision over it, never keep quiet about it
+            # (13450): a silent revert is the defect this slice exists for.
+            print(f"multi-driver declaration did NOT land on {user}/{agent} "
+                  f"(exec rc={r.returncode}) -- flip it by hand: "
+                  f"reveille-launch flip {user} {agent} on", file=sys.stderr)
     _record(conn, user, agent, creds["repo_url"], image, broker,
             role_name=split_role_prompt(role_prompt or "", ROLE_PROMPTS)[0])
     owner = claim_agent_name(conn, user, agent)
@@ -1441,6 +1490,38 @@ def image_id_of(tag):
     return (res.stdout or "").strip() if res.returncode == 0 else ""
 
 
+def record_found_state(conn, user, agent, running, timeout):
+    """Property 1 (13457): what the roll FOUND, written durably BEFORE the
+    first mutation. A MAINTENANCE ACTION RETURNS THE SYSTEM TO THE STATE IT
+    FOUND -- and a crash between the start and the restore must leave a row
+    that knows the body should be down, never a lost local variable (the
+    thirteen-body field case rode exactly that gap).
+
+    The DEADLINE rides with it (13460): the sweep is a thread in serve, the
+    roller is a separate process, and during a roll of a stopped body the
+    new container is DELIBERATELY running for wait_healthy -- a tick landing
+    in that window must see a live roll, not an orphan. 2x the roller's own
+    timeout: no shared constant, nothing has to agree with anything."""
+    conn.execute("UPDATE containers SET roll_desired_running=?, "
+                 "roll_deadline_ns=? WHERE user=? AND agent=?",
+                 (1 if running else 0,
+                  time.time_ns() + 2 * int(timeout) * 10**9, user, agent))
+    conn.commit()
+
+
+def restore_found_state(conn, user, agent, was_running):
+    """Property 2: per body, immediately after the health gate -- never at
+    the end of the walk, which is the race the hand-restore lost in the
+    field. Clears the in-flight record and returns the FINAL-state word for
+    the log line: the line names the outcome, not the transition."""
+    if not was_running:
+        _docker("stop", container_name(user, agent), check=False, capture=True)
+    conn.execute("UPDATE containers SET roll_desired_running=NULL, "
+                 "roll_deadline_ns=NULL WHERE user=? AND agent=?", (user, agent))
+    conn.commit()
+    return "running" if was_running else "stopped as found"
+
+
 def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH,
                   timeout=120):
     """Re-provision an agent's container on `image`, carrying the bound token
@@ -1479,7 +1560,8 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         raise LaunchError(f"not upgrading {user}/{agent}: {why}")
     broker = old["env"].get("REVEILLE_URL") or DEFAULT_BROKER
     repo_url = old["env"].get("REVEILLE_REPO_URL", "")
-    creds = resolve_credentials(load_profile(user), agent, repo_url)
+    prof = load_profile(user)
+    creds = resolve_credentials(prof, agent, repo_url)
     cred_names, cred_env, kind = credential_env(creds)
     boot_cmd = boot_cmd_of(old["cmd"], _image_cmd(old["image"]))
     if kind == "none" and not boot_cmd:
@@ -1501,6 +1583,7 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
     quotas = _quotas_for(conn, user)
     argv = docker_run_argv(user, agent, image, old["network"] or DEFAULT_NETWORK, quotas,
                            boot_cmd=boot_cmd, extra_env=extra_env, auth_mount=auth_mount)
+    record_found_state(conn, user, agent, old["running"], timeout)
     prev = f"{name}.prev"
     _docker("rm", "-f", prev, check=False, capture=True)      # a leftover from a crashed upgrade
     leave_roll_record(user, agent, to_image=image, why="upgrade (image roll)")
@@ -1513,6 +1596,12 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         _docker("rename", prev, name, check=False, capture=True)
         if old["running"]:
             _docker("start", name, check=False, capture=True)
+        # The old world is back exactly as found -- the in-flight record is
+        # satisfied, not orphaned (13457 property 1).
+        conn.execute("UPDATE containers SET roll_desired_running=NULL, "
+                     "roll_deadline_ns=NULL WHERE user=? AND agent=?",
+                     (user, agent))
+        conn.commit()
         _audit("UPGRADE-ROLLBACK", user=user, agent=agent, image=image, reason=reason)
         raise LaunchError(f"upgrade of {user}/{agent} to {image} failed: {reason} -- "
                           f"the old container ({old['image']}) is back"
@@ -1522,6 +1611,16 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, OSError) as e:
         rollback(f"docker run refused ({e})")
+    if resolve_multi_driver(prof, agent) == "on":
+        # Same re-copy as provision: the upgrade's rm is a path that loses
+        # the marker, and the idle auto-roll reaches HERE with no human
+        # present to notice a silent revert (13448).
+        r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
+                    check=False, capture=True)
+        if r.returncode != 0:
+            print(f"multi-driver declaration did NOT land on {user}/{agent} "
+                  f"(exec rc={r.returncode}) -- flip it by hand: "
+                  f"reveille-launch flip {user} {agent} on", file=sys.stderr)
     # HEALTH BEFORE DESTROY (11600 s3): running, boot report written, presence shows it.
     if not wait_healthy(health_url, agent, token, timeout):
         rollback(f"not present on the broker within {timeout}s")
@@ -1539,8 +1638,11 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
     _docker("rm", "-f", prev, check=False, capture=True)
     conn.execute("UPDATE containers SET image=? WHERE user=? AND agent=?", (image, user, agent))
     conn.commit()
-    _audit("UPGRADE", user=user, agent=agent, image_from=old["image"], image_to=image)
-    return {"from": old["image"], "to": image, "was_running": old["running"]}
+    final = restore_found_state(conn, user, agent, old["running"])
+    _audit("UPGRADE", user=user, agent=agent, image_from=old["image"],
+           image_to=image, final=final)
+    return {"from": old["image"], "to": image, "was_running": old["running"],
+            "final": final}
 
 
 def behind_image(conn, image=DEFAULT_IMAGE):
@@ -1784,8 +1886,8 @@ def roll_idle(conn, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH, timeout=1
             res = upgrade_agent(conn, user, agent, image, health_url=health_url,
                                 timeout=timeout)
             rolled.append((user, agent))
-            out(f"  {user}/{agent}: rolled {res['from']} -> {res['to']}"
-                + ("" if res["was_running"] else " (was stopped; now running)"))
+            out(f"  {user}/{agent}: rolled {res['from']} -> {res['to']}, "
+                f"{res['final']}")
         except (LaunchError, subprocess.CalledProcessError) as e:
             busy.append((user, agent, str(e)))
             out(f"  {user}/{agent}: behind, busy: {e}")
@@ -1945,8 +2047,8 @@ def cmd_upgrade(a):
             try:
                 out = upgrade_agent(conn, user, agent, a.image, health_url=a.health_url,
                                     timeout=a.timeout)
-                print(f"upgraded {user}/{agent}: {out['from']} -> {out['to']}"
-                      + ("" if out["was_running"] else " (was stopped; now running)"))
+                print(f"upgraded {user}/{agent}: {out['from']} -> {out['to']}, "
+                      f"{out['final']}")
             except LaunchError as e:
                 failed += 1
                 print(f"FAILED {user}/{agent}: {e}", file=sys.stderr)
@@ -2180,6 +2282,19 @@ def cmd_flip(a):
     finally:
         conn.close()
     name = container_name(a.user, a.agent)
+    if a.state == "off":
+        # A TOGGLE NEVER REPORTS A CHANGE IT DID NOT MAKE (13443/13444): the
+        # gate is env OR marker, and rm-ing the marker under a hand-set env
+        # would print "off" while the gate still says on. We never set the
+        # env; if someone did, refuse and name it.
+        r = _docker("exec", name, "sh", "-c",
+                    '[ "${REVEILLE_MULTI_DRIVER:-0}" = 1 ]',
+                    check=False, capture=True)
+        if r.returncode == 0:
+            die(f"flip off refused: {name} was created with "
+                f"REVEILLE_MULTI_DRIVER=1 in its environment -- the gate's "
+                f"env door stays open no matter what this toggle removes; "
+                f"recreate the container without the variable")
     # Runtime toggle rides a marker file the gate checks per-attach: ttyd's
     # children only ever see create-time env, so env alone cannot flip live.
     shell = ("touch ~/.multi-driver" if a.state == "on"
@@ -2189,7 +2304,16 @@ def cmd_flip(a):
         die(f"flip failed in {name} -- is it running?")
     _audit("FLIP", user=a.user, agent=a.agent, multi_driver=a.state,
            actor="launcher-cli")
-    print(f"{a.user}/{a.agent}: multi-driver {a.state}")
+    # A FLIP STATES ITS OWN LIFETIME (13448): the profile is the declaration
+    # and this is a live override of the runtime copy -- real until the next
+    # re-provision copies the declaration back. One act, one scope; flip
+    # never writes the profile (two writers of one boolean is the defect).
+    declared = resolve_multi_driver(load_profile(a.user), a.agent)
+    scope = ""
+    if declared and declared != a.state:
+        scope = (f" on this container until it is re-provisioned; "
+                 f"the profile still says {declared}")
+    print(f"{a.user}/{a.agent}: multi-driver {a.state}{scope}")
     return 0
 
 
@@ -2357,8 +2481,35 @@ def _sweep_once(conn, idle_window_ns=0):
     # lock; the writes are a handful of tiny rows and land in one short
     # transaction at the end of the tick.
     record = []
-    for c in conn.execute("SELECT user, agent FROM containers").fetchall():
+    reconciled = []
+    for c in conn.execute("SELECT user, agent, roll_desired_running, "
+                          "roll_deadline_ns FROM containers").fetchall():
         user, agent = c["user"], c["agent"]
+        if c["roll_desired_running"] is not None:
+            # AN IN-FLIGHT RECORD. Younger than its own deadline = a LIVE
+            # roll in another process -- during a roll of a stopped body the
+            # new container is deliberately running for wait_healthy, and a
+            # tick that stopped it would fail the roll at random wearing an
+            # unhealthy-image mask (13460). Only a record PAST its deadline
+            # is an orphan (13457 property 3): desired-stopped but running
+            # gets stopped, with the staleness named; the other polarity
+            # just clears -- a WIP row must not live forever.
+            deadline = c["roll_deadline_ns"] or 0
+            if now <= deadline:
+                continue
+            if c["roll_desired_running"] == 0:
+                st = (_docker("inspect", "-f", "{{.State.Running}}",
+                              container_name(user, agent),
+                              check=False, capture=True).stdout or "").strip()
+                if st == "true":
+                    _docker("stop", container_name(user, agent),
+                            check=False, capture=True)
+                    _audit("ROLLRECONCILE", user=user, agent=agent,
+                           reason=f"a roll died between the start and the "
+                                  f"restore (deadline passed "
+                                  f"{(now - deadline) // 10**9}s ago) -- "
+                                  f"stopped as the record says it was found")
+            reconciled.append((user, agent))
         # Expired grant ROWS are kept on purpose. The row is the only thing that
         # answers "whose session was that" for an audit line, and the gate's
         # ATTACH lines are harvested a tick LATE -- delete on expiry and the
@@ -2422,6 +2573,10 @@ def _sweep_once(conn, idle_window_ns=0):
     _stop_superseded(conn)
     # WRITE PHASE: everything above observed; only now does the transaction
     # open, and it holds nothing but these rows.
+    for user, agent in reconciled:
+        conn.execute("UPDATE containers SET roll_desired_running=NULL, "
+                     "roll_deadline_ns=NULL WHERE user=? AND agent=?",
+                     (user, agent))
     for user, agent, sessions in record:
         conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
                      (user, agent))
@@ -3126,26 +3281,46 @@ def _ui_read(name):
 def fetch_with_boot_grace(url, *, opener=urllib.request.urlopen,
                           clock=time.monotonic, snooze=time.sleep):
     """One GET with a BOUNDED grace for the attach boot race (13407, ruled
-    13408): a ConnectionRefusedError from a RUNNING container means ttyd has
-    not bound its port yet -- press-play-then-connect loses that race by a
-    couple of seconds, and the operator's close-tab-and-reopen was the retry
-    this loop now performs. Refusals are retried at 250ms steps for ~3s, then
-    the refusal propagates; ANY other failure -- timeout, resolution, HTTP
-    error -- propagates on the FIRST throw, because retrying those turns a
-    fault into a hang. The injectable opener/clock/snooze exist so the
-    give-up half is testable without wall time."""
-    deadline = clock() + 3.0
+    13408, re-ruled 13433 on the OPERATOR'S numbers): a
+    ConnectionRefusedError from a RUNNING container means ttyd has not bound
+    its port yet -- press-play-then-connect loses that race, and the
+    operator's close-tab-and-reopen was the retry this loop now performs.
+
+    THE LADDER: one early probe 0.25s after the first refusal (the common
+    bind is ~hundreds of ms and must stay fast), then 1.5s steps to a 15.0s
+    deadline. 15 came from the operator who watched the field case; the
+    original 3 was a number that felt like a boot and had nothing behind it.
+    15 is MODELLED, same discipline as the launcher.db 30 (13348): the wait
+    lines below are the observations that let it retire to a measured number
+    -- or be found WRONG, at which point the COLD START is the problem, not
+    the wait. Printed values are OBSERVED, never a success word.
+
+    ANY other failure -- timeout, resolution, HTTP error -- propagates on
+    the FIRST throw: retrying those turns a fault into a hang. The
+    injectable opener/clock/snooze exist so the give-up half is testable
+    without wall time."""
+    t0 = clock()
+    deadline = t0 + 15.0
+    dials = 0
     while True:
         req = urllib.request.Request(url, method="GET")
+        dials += 1
         try:
             with opener(req, timeout=10) as r:
+                if dials > 1:
+                    print(f"attach boot grace: ttyd answered after "
+                          f"{clock() - t0:.1f}s ({dials} dials)",
+                          file=sys.stderr)
                 return r.status, r.read(), r.headers.get("Content-Type", "")
         except urllib.error.URLError as e:
             if not isinstance(e.reason, ConnectionRefusedError):
                 raise
             if clock() >= deadline:
+                print(f"attach boot grace: exhausted after "
+                      f"{clock() - t0:.1f}s ({dials} dials, all refused)",
+                      file=sys.stderr)
                 raise
-            snooze(0.25)
+            snooze(0.25 if dials == 1 else 1.5)
 
 
 def build_api(auth_url):

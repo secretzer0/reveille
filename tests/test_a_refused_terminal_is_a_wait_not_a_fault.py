@@ -49,9 +49,12 @@ def _refusal():
     return urllib.error.URLError(ConnectionRefusedError(111, "refused"))
 
 
-def test_refused_then_up_yields_the_page():
+def test_refused_then_up_yields_the_page(capsys):
     """The boot race won by waiting: two refusals while ttyd binds, then the
-    page -- the operator's close-tab-and-reopen, done by the code."""
+    page. The ladder is the OPERATOR'S (13432, ruled 13433): one early probe
+    at 0.25s so a 300ms bind keeps the fast path fast, then 1.5s steps. And
+    the win is MEASURED, not announced: the line prints the observed wait
+    and dial count, never a success word."""
     calls = {"n": 0}
     def opener(req, timeout):
         calls["n"] += 1
@@ -68,13 +71,29 @@ def test_refused_then_up_yields_the_page():
     status, body, ctype = rl.fetch_with_boot_grace(
         "http://c:7681/", opener=opener, clock=clock, snooze=snooze)
     assert (status, body, ctype) == (200, b"ttyd page", "text/html")
-    assert snoozes == [0.25, 0.25]
+    assert snoozes == [0.25, 1.5]
+    err = capsys.readouterr().err
+    assert "ttyd answered after 1.8s" in err and "3 dials" in err
 
 
-def test_the_grace_gives_up_and_is_bounded():
-    """The half nobody sees until it matters (13410): a retry loop must be
-    SEEN to give up. Refusals forever -> the refusal propagates once the ~3s
-    grace is spent, after a bounded number of naps."""
+def test_a_first_dial_win_logs_nothing(capsys):
+    """The warm path stays silent: no naps, no line -- the instrument
+    measures waits, and a wait that never happened is not an observation.
+    The silence IS the design: warm is the common path, and an instrument
+    that prints on every attach turns a measurement into log noise (13435)."""
+    status, _, _ = rl.fetch_with_boot_grace(
+        "http://c:7681/", opener=lambda req, timeout: _Resp(),
+        clock=lambda: 0.0, snooze=lambda s: None)
+    assert status == 200
+    out = capsys.readouterr()
+    assert out.err == "", out.err
+
+
+def test_the_grace_gives_up_and_is_bounded(capsys):
+    """The half nobody sees until it matters (13410), now five times longer
+    so five times more owed: refusals forever -> the refusal propagates once
+    the 15s grace is spent, after a bounded ladder (0.25 then 1.5s steps),
+    and the exhaustion is LOGGED with the same measured fields as a win."""
     snoozes = []
     t = {"now": 0.0}
     def clock():
@@ -87,7 +106,10 @@ def test_the_grace_gives_up_and_is_bounded():
     with pytest.raises(urllib.error.URLError):
         rl.fetch_with_boot_grace("http://c:7681/", opener=opener,
                                  clock=clock, snooze=snooze)
-    assert 0 < len(snoozes) <= 13, f"{len(snoozes)} naps -- the grace never ends"
+    assert 0 < len(snoozes) <= 12, f"{len(snoozes)} naps -- the grace never ends"
+    assert snoozes[0] == 0.25 and set(snoozes[1:]) == {1.5}, snoozes
+    err = capsys.readouterr().err
+    assert "exhausted after" in err and "refused" in err
 
 
 def test_a_non_refusal_is_not_retried_into_a_hang():

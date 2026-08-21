@@ -80,7 +80,7 @@ def test_db_holds_no_token_bytes(tmp_path):
     cols = {r[1] for r in sqlite3.connect(str(db)).execute(
         "PRAGMA table_info(containers)")}
     assert cols == {"user", "agent", "repo_url", "container", "image",
-                    "broker_url", "created_ns", "role_name"}, (
+                    "broker_url", "created_ns", "role_name", "roll_desired_running", "roll_deadline_ns"}, (
         "the record is the non-secret config and nothing else -- role_name is "
         "the role the agent was provisioned with (r3), never a credential")
 
@@ -1753,7 +1753,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.27", (
+    assert tag == "reveille-agent:0.2.28", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.23 CARRIES THE R1 ENTRYPOINT (ruling 12851): reveille-waked is spawned
     # BEFORE `reveille init`, and no step in front of it may exit. 0.2.22 and

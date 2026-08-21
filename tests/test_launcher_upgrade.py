@@ -150,7 +150,7 @@ def _nothing_parked(w):
 def test_upgrade_carries_the_token_and_keeps_the_agent(world):
     w = world
     out = rl.upgrade_agent(w.conn, "ana", "scout", "reveille-agent:0.2.19", health_url="http://h", timeout=5)
-    assert out == {"from": "reveille-agent:0.2.17", "to": "reveille-agent:0.2.19", "was_running": True}
+    assert out == {"from": "reveille-agent:0.2.17", "to": "reveille-agent:0.2.19", "was_running": True, "final": "running"}
     new = w.d.c["rev-ana-scout"]
     assert new["image"] == "reveille-agent:0.2.19" and new["running"]
     env = rl.env_of(new["env"])
