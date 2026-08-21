@@ -307,6 +307,9 @@
  /* The feed's own image tile becomes the door. A button, not an anchor: it
     opens a viewer on this page rather than navigating, and a button is what a
     keyboard and a screen reader already know how to work. */
+ /* multi-driver ON: the strip's one stateful control, so it says so in
+    colour as well as in its label -- gold is this page's "live" already. */
+ [data-agact="multidriver"].mdOn{color:var(--gold);border-color:var(--gold)}
  .atts button.attimgbtn{background:none;border:0;padding:0;line-height:0;
   cursor:zoom-in;border-radius:8px;display:block}
  .atts button.attimgbtn:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
@@ -2776,6 +2779,26 @@ function tabActions(t){
  // a blank form reads as "this agent is configured with nothing" rather
  // than "we cannot see it". Destroy is still the honest action there.
  if(!broken&&!gone)out+=b('edit','&#9998;','edit '+t.agent);
+ // MULTI-DRIVER (ruling 13443 part 3). docker/attach-gate refuses a second
+ // driver and NAMES the remedy -- which was a CLI the reader of that refusal
+ // cannot run. This is that remedy, on the page where the refusal appears.
+ // ONLY ON A RUNNING ROW: the state lives in the container as a marker file,
+ // so a stopped body has no runtime state to show and a toggle drawn over
+ // "unknown" would be inventing one.
+ if(a.status==='running'){
+  const m=agMulti[t.agent];
+  const on=m&&m.on;
+  // The label carries the STATE and the ACT, never a bare icon: a toggle whose
+  // current position you have to infer from a highlight is a toggle you flip
+  // to find out.
+  out+=b('multidriver','&#9000;',
+   (m?('multi-driver is '+(on?'ON':'OFF')+(m.here?'':' (unreadable -- container not answering)')
+       +' -- click to turn it '+(on?'off':'on')
+       +(m.declared&&m.declared!==(on?'on':'off')
+         ? '; the profile declares '+m.declared+', which returns at the next re-provision':''))
+      :'multi-driver: reading the container...'),
+   on?'mdOn':'');
+ }
  // UPGRADE IN PLACE (ruling 11600): a container whose recorded image differs
  // from the launcher's default gets one button; the launcher carries the bound
  // token from the container it made -- no form, no token, no credential
@@ -2923,6 +2946,11 @@ function drawTabs(){
  for(const el of strip.querySelectorAll('[data-tabx]'))el.onclick=ev=>{
   ev.stopPropagation();closeTab(el.dataset.tabx);
  };
+ // Read the runtime state ONCE per agent, when its actions are first drawn:
+ // never in the /agents poll, which would be one docker exec per agent per
+ // tick for a fact that changes only when somebody flips it.
+ for(const el of strip.querySelectorAll('[data-agact="multidriver"]'))
+  if(!(el.dataset.agent in agMulti))agMultiRead(el.dataset.agent,true);
  for(const el of strip.querySelectorAll('[data-agact]'))el.onclick=ev=>{
   ev.stopPropagation();
   const n=el.dataset.agent,k=el.dataset.agact;
@@ -2933,6 +2961,7 @@ function drawTabs(){
   else if(k==='tomachine')openToMachine(n);
   else if(k==='sendto')openSendTo(n);
   else if(k==='sendback')openSendBack(n);
+  else if(k==='multidriver')agMultiFlip(n);
   else agLifecycle(n,k);
  };
  if(refocus){
@@ -3772,6 +3801,35 @@ async function openCreate(name){
 // drop what it was showing and reopen it: a started agent lands on its
 // terminal and a stopped one lands on the sentence saying why it has none,
 // without a second click to find out.
+// MULTI-DRIVER STATE, OBSERVED (ruling 13443 s3, 13447). What the CONTAINER
+// holds, never what this page last sent: the launcher answers with the gate's
+// own decision (env OR marker) plus the profile's declaration, because those
+// two legitimately differ and a reader shown one alone cannot tell which.
+const agMulti={};          // agent -> {here,on,declared,...}; absent = not read yet
+const agMultiBusy={};      // one flight per agent, or a repaint starts another
+async function agMultiRead(name,repaint){
+ if(agMultiBusy[name])return;
+ agMultiBusy[name]=true;
+ try{agMulti[name]=await lapi('/agents/'+encodeURIComponent(name)+'/multi-driver');}
+ // A FAILED READ IS ITS OWN STATE, not a silent "off". here=false renders as
+ // unreadable, which is the honest word for it.
+ catch(e){agMulti[name]={here:false,on:null,declared:'',error:e.message};}
+ finally{agMultiBusy[name]=false;}
+ if(repaint)drawTabs();
+}
+async function agMultiFlip(name){
+ const cur=agMulti[name];
+ const want=(cur&&cur.on)?'off':'on';
+ let r=null;
+ try{r=await lapi('/agents/'+encodeURIComponent(name)+'/multi-driver',
+  {method:'POST',body:JSON.stringify({state:want})});}
+ catch(e){toast(e.message);await agMultiRead(name,true);return;}
+ // THE ANSWER IS THE READ-BACK, so this renders what the container reports
+ // after the act rather than the value it asked for.
+ agMulti[name]=r;
+ toast('multi-driver '+(r.on?'on':'off')+' for '+name+(r.scope||''),true);
+ drawTabs();
+}
 async function agLifecycle(name,verb){
  let r=null;
  if(verb==='upgrade')toast('upgrading '+name+' to '+agDefaultImage+' -- old container stays until the new one is healthy (a minute or two)',true);

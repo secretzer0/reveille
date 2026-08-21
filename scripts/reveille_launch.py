@@ -2273,47 +2273,95 @@ def cmd_revoke(a):
     return 0
 
 
-def cmd_flip(a):
+MULTI_DRIVER_STATES = ("on", "off")
+# The gate's env door, quoted here ONCE and used by every reader of it: the
+# probe below and the refusal both mean this exact expression, which is what
+# docker/attach-gate's multi_driver() tests.
+_ENV_DOOR = '[ "${REVEILLE_MULTI_DRIVER:-0}" = 1 ]'
+# The runtime state itself. A FIXED command with no caller-supplied fragment --
+# that is the whole difference between this and the exec verb ruling 11961
+# refused: nothing an HTTP caller types reaches a shell.
+_MARKER_PROBE = '[ -e "$HOME/.multi-driver" ]'
+
+
+def read_multi_driver(user, agent):
+    """OBSERVE the runtime state, never infer it from what was last written.
+
+    Returns {"here", "marker", "env", "on", "declared"}. `on` is what the
+    GATE would decide -- env OR marker -- because a reader who is told "off"
+    while the gate says on has been lied to in the only way that matters.
+    A container that is not running answers here=False and reports the
+    DECLARATION alone, saying which it is: a stopped body has no runtime
+    state, and guessing one for it would be the same lie facing the other way.
+    """
+    name = container_name(user, agent)
+    env = _docker("exec", name, "sh", "-c", _ENV_DOOR, check=False, capture=True)
+    declared = resolve_multi_driver(load_profile(user), agent)
+    # 125/126/127 and friends: no such container, not running, exec refused.
+    # Any of them means we did not observe a runtime, so we must not report one.
+    if env.returncode not in (0, 1):
+        return {"here": False, "marker": None, "env": None, "on": None,
+                "declared": declared}
+    mark = _docker("exec", name, "sh", "-c", _MARKER_PROBE, check=False, capture=True)
+    marker = mark.returncode == 0
+    return {"here": True, "marker": marker, "env": env.returncode == 0,
+            "on": marker or env.returncode == 0, "declared": declared}
+
+
+def flip_multi_driver(user, agent, state, actor):
+    """THE ONE WRITER OF THE ONE STATE, shared by the CLI and the HTTP route
+    so the two agree by construction rather than by comment.
+
+    Never writes the profile: the profile is the DECLARATION and this is the
+    RUNTIME copy (13448). Two writers of one boolean is the defect, and a
+    route that "helpfully" wrote both would be it.
+    """
+    if state not in MULTI_DRIVER_STATES:
+        raise LaunchError(f'multi-driver state must be "on" or "off", not {state!r}')
     conn = _db()
     try:
-        _known_agent(conn, a.user, a.agent)
-    except LaunchError as e:
-        die(str(e))
+        _known_agent(conn, user, agent)
     finally:
         conn.close()
-    name = container_name(a.user, a.agent)
-    if a.state == "off":
+    name = container_name(user, agent)
+    if state == "off":
         # A TOGGLE NEVER REPORTS A CHANGE IT DID NOT MAKE (13443/13444): the
         # gate is env OR marker, and rm-ing the marker under a hand-set env
         # would print "off" while the gate still says on. We never set the
         # env; if someone did, refuse and name it.
-        r = _docker("exec", name, "sh", "-c",
-                    '[ "${REVEILLE_MULTI_DRIVER:-0}" = 1 ]',
-                    check=False, capture=True)
+        r = _docker("exec", name, "sh", "-c", _ENV_DOOR, check=False, capture=True)
         if r.returncode == 0:
-            die(f"flip off refused: {name} was created with "
+            raise LaunchError(
+                f"flip off refused: {name} was created with "
                 f"REVEILLE_MULTI_DRIVER=1 in its environment -- the gate's "
                 f"env door stays open no matter what this toggle removes; "
                 f"recreate the container without the variable")
     # Runtime toggle rides a marker file the gate checks per-attach: ttyd's
     # children only ever see create-time env, so env alone cannot flip live.
-    shell = ("touch ~/.multi-driver" if a.state == "on"
+    shell = ("touch ~/.multi-driver" if state == "on"
              else "rm -f ~/.multi-driver")
     res = _docker("exec", name, "sh", "-c", shell, check=False, capture=True)
     if res.returncode != 0:
-        die(f"flip failed in {name} -- is it running?")
-    _audit("FLIP", user=a.user, agent=a.agent, multi_driver=a.state,
-           actor="launcher-cli")
+        raise LaunchError(f"flip failed in {name} -- is it running?")
+    _audit("FLIP", user=user, agent=agent, multi_driver=state, actor=actor)
     # A FLIP STATES ITS OWN LIFETIME (13448): the profile is the declaration
     # and this is a live override of the runtime copy -- real until the next
     # re-provision copies the declaration back. One act, one scope; flip
     # never writes the profile (two writers of one boolean is the defect).
-    declared = resolve_multi_driver(load_profile(a.user), a.agent)
+    declared = resolve_multi_driver(load_profile(user), agent)
     scope = ""
-    if declared and declared != a.state:
+    if declared and declared != state:
         scope = (f" on this container until it is re-provisioned; "
                  f"the profile still says {declared}")
-    print(f"{a.user}/{a.agent}: multi-driver {a.state}{scope}")
+    return {"state": state, "declared": declared, "scope": scope}
+
+
+def cmd_flip(a):
+    try:
+        out = flip_multi_driver(a.user, a.agent, a.state, actor="launcher-cli")
+    except LaunchError as e:
+        die(str(e))
+    print(f"{a.user}/{a.agent}: multi-driver {out['state']}{out['scope']}")
     return 0
 
 
@@ -3536,6 +3584,46 @@ def build_api(auth_url):
         return JSONResponse({verb: name})
 
     @guarded
+    async def agent_multi_driver(request, p, conn):
+        """THE CONTROL FOR THE REFUSAL (ruling 13443 part 3). docker/attach-gate
+        refuses a second driver unless multi-driver is on, and it NAMES the
+        remedy -- which lived only in a CLI the reader of that refusal cannot
+        run. A remedy named to someone who cannot reach it is the
+        unreachable-control defect, so it gets a door on the page.
+
+        GET reports what the CONTAINER holds, never what the page last sent:
+        `on` is what the GATE would decide (env OR marker), plus the profile's
+        declaration beside it, because those two legitimately differ and a
+        reader shown one of them alone cannot tell which they are looking at.
+        POST {"state": "on"|"off"} is the HTTP twin of `reveille-launch flip`
+        -- the SAME function, so the two cannot drift -- and like flip it
+        writes ONLY the runtime marker. The profile is the declaration and it
+        moves through /agents/{agent}/profile; two writers of one boolean is
+        the defect ruling 13448 refused.
+
+        NOT AN EXEC VERB. Ruling 11961 refused handing an HTTP caller anything
+        that runs a string in a container. Every command here is a FIXED
+        literal in this file -- an env test, a marker test, a touch, an rm --
+        and nothing the caller types reaches a shell. The verb is closed, the
+        way start/stop are closed.
+        """
+        name = request.path_params["agent"]
+        _known_agent(conn, p["user"], name)
+        if request.method == "GET":
+            return JSONResponse({"agent": name,
+                                 **await asyncio.to_thread(read_multi_driver,
+                                                           p["user"], name)})
+        d = await request.json()
+        out = await asyncio.to_thread(flip_multi_driver, p["user"], name,
+                                      (d.get("state") or "").strip(),
+                                      f"web:{p['user']}")
+        # THE READ-BACK, the same discipline the config PUT keeps: answer with
+        # what the container holds AFTER the act, not with the value we sent.
+        observed = await asyncio.to_thread(read_multi_driver, p["user"], name)
+        return JSONResponse({"agent": name, "requested": out["state"],
+                             "scope": out["scope"], **observed})
+
+    @guarded
     async def agent_grants(request, p, conn):
         name = request.path_params["agent"]
         if request.method == "GET":
@@ -4056,6 +4144,8 @@ def build_api(auth_url):
         Route("/agents/{agent}/grants/{gid}", agent_grant, methods=["DELETE"]),
         Route("/agents/{agent}/profile", agent_profile, methods=["PUT"]),
         Route("/agents/{agent}/config", agent_config, methods=["GET", "PUT"]),
+        Route("/agents/{agent}/multi-driver", agent_multi_driver,
+              methods=["GET", "POST"]),
         Route("/agents/{agent}/boot-report", agent_boot_report),
         # READ verbs, before the lifecycle catch-all: that route takes any verb
         # on POST, and a read must never be reachable by a method that also
