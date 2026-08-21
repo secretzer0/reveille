@@ -3126,26 +3126,46 @@ def _ui_read(name):
 def fetch_with_boot_grace(url, *, opener=urllib.request.urlopen,
                           clock=time.monotonic, snooze=time.sleep):
     """One GET with a BOUNDED grace for the attach boot race (13407, ruled
-    13408): a ConnectionRefusedError from a RUNNING container means ttyd has
-    not bound its port yet -- press-play-then-connect loses that race by a
-    couple of seconds, and the operator's close-tab-and-reopen was the retry
-    this loop now performs. Refusals are retried at 250ms steps for ~3s, then
-    the refusal propagates; ANY other failure -- timeout, resolution, HTTP
-    error -- propagates on the FIRST throw, because retrying those turns a
-    fault into a hang. The injectable opener/clock/snooze exist so the
-    give-up half is testable without wall time."""
-    deadline = clock() + 3.0
+    13408, re-ruled 13433 on the OPERATOR'S numbers): a
+    ConnectionRefusedError from a RUNNING container means ttyd has not bound
+    its port yet -- press-play-then-connect loses that race, and the
+    operator's close-tab-and-reopen was the retry this loop now performs.
+
+    THE LADDER: one early probe 0.25s after the first refusal (the common
+    bind is ~hundreds of ms and must stay fast), then 1.5s steps to a 15.0s
+    deadline. 15 came from the operator who watched the field case; the
+    original 3 was a number that felt like a boot and had nothing behind it.
+    15 is MODELLED, same discipline as the launcher.db 30 (13348): the wait
+    lines below are the observations that let it retire to a measured number
+    -- or be found WRONG, at which point the COLD START is the problem, not
+    the wait. Printed values are OBSERVED, never a success word.
+
+    ANY other failure -- timeout, resolution, HTTP error -- propagates on
+    the FIRST throw: retrying those turns a fault into a hang. The
+    injectable opener/clock/snooze exist so the give-up half is testable
+    without wall time."""
+    t0 = clock()
+    deadline = t0 + 15.0
+    dials = 0
     while True:
         req = urllib.request.Request(url, method="GET")
+        dials += 1
         try:
             with opener(req, timeout=10) as r:
+                if dials > 1:
+                    print(f"attach boot grace: ttyd answered after "
+                          f"{clock() - t0:.1f}s ({dials} dials)",
+                          file=sys.stderr)
                 return r.status, r.read(), r.headers.get("Content-Type", "")
         except urllib.error.URLError as e:
             if not isinstance(e.reason, ConnectionRefusedError):
                 raise
             if clock() >= deadline:
+                print(f"attach boot grace: exhausted after "
+                      f"{clock() - t0:.1f}s ({dials} dials, all refused)",
+                      file=sys.stderr)
                 raise
-            snooze(0.25)
+            snooze(0.25 if dials == 1 else 1.5)
 
 
 def build_api(auth_url):
