@@ -107,7 +107,8 @@ def test_busy_is_skipped_and_listed_never_killed(tmp_path, monkeypatch):
     done = []
     monkeypatch.setattr(rl, "upgrade_agent",
                         lambda c, u, a, img, **k: done.append((u, a)) or
-                        {"from": "old:1", "to": img, "was_running": True})
+                        {"from": "old:1", "to": img, "was_running": True,
+                         "final": "running"})
     said = []
     rolled, busy = rl.roll_idle(conn, "new:2", out=said.append)
     assert rolled == [("tmel", "quiet")] and done == [("tmel", "quiet")]

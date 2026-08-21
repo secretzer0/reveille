@@ -80,7 +80,7 @@ def test_db_holds_no_token_bytes(tmp_path):
     cols = {r[1] for r in sqlite3.connect(str(db)).execute(
         "PRAGMA table_info(containers)")}
     assert cols == {"user", "agent", "repo_url", "container", "image",
-                    "broker_url", "created_ns", "role_name"}, (
+                    "broker_url", "created_ns", "role_name", "roll_desired_running"}, (
         "the record is the non-secret config and nothing else -- role_name is "
         "the role the agent was provisioned with (r3), never a credential")
 
