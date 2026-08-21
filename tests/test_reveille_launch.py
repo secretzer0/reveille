@@ -8,6 +8,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import hashlib
 import pathlib
 import re
 import shutil
@@ -1753,7 +1754,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.28", (
+    assert tag == "reveille-agent:0.2.29", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.23 CARRIES THE R1 ENTRYPOINT (ruling 12851): reveille-waked is spawned
     # BEFORE `reveille init`, and no step in front of it may exit. 0.2.22 and
@@ -1769,6 +1770,63 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     # also carries the degraded-boot entrypoint (init DEGRADED on a missing
     # binary instead of a set -e crash-loop) and the status-file bridge moved
     # onto the mounted ~/.claude.
+
+
+# THE IMAGE INPUTS, PINNED BY CONTENT -- because the tag assertion above pins a
+# LITERAL and therefore cannot see its own subject move. It goes red when
+# somebody edits THIS FILE, which means every bump so far happened because a
+# reviewer read the diff: #202 bumped that way, and #207 (which edited
+# docker/attach-gate's refusal text) would have merged unbumped for the same
+# reason. Same shape as the URL-interpolation set gate: pin the whole set by
+# content, and a change anywhere in it forces the arithmetic into the open.
+IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
+                "docker/entrypoint.sh", "docker/tmux.conf",
+                "src/reveille/agent-stop-hook")
+IMAGE_INPUT_SHA = "fbcb309ef0aa388ac4fe1af9aca7d29dd9b5b88ce92b2dd4303675cf55fa6a5d"
+
+
+def _image_input_sha(root):
+    h = hashlib.sha256()
+    for rel in IMAGE_INPUTS:                 # order is the tuple's, not the disk's
+        h.update(rel.encode())
+        h.update(b"\0")
+        h.update((root / rel).read_bytes())
+    return h.hexdigest()
+
+
+def test_an_image_input_moving_forces_the_tag_and_the_pin():
+    """RED means: you changed what the image is made of. Bump the tag in all
+    three places, re-run this to get the new digest, and paste it here -- the
+    same two-line ritual the URL-sink count already asks for. It is not a
+    chore, it is the arithmetic being made visible."""
+    root = pathlib.Path(rl.__file__).parent.parent
+    assert _image_input_sha(root) == IMAGE_INPUT_SHA, (
+        "an image input changed -- bump reveille-agent's tag in Makefile, "
+        "rl.DEFAULT_IMAGE and the literal above, then re-pin this digest")
+
+
+def test_the_pinned_set_is_every_file_the_dockerfile_copies():
+    """A CHOKE-POINT, so the list cannot silently fall behind: a new COPY of a
+    new file makes this red and forces the question 'is that an image input?'
+    -- rather than leaving the fingerprint quietly measuring a subset. src/,
+    pyproject.toml, uv.lock and README.md are deliberately OUT: they are
+    PACKAGE inputs, versioned by the package's own number, and folding them in
+    here would make every source edit demand an image tag bump."""
+    root = pathlib.Path(rl.__file__).parent.parent
+    copied = set()
+    for ln in (root / "docker" / "Dockerfile").read_text().splitlines():
+        if not ln.startswith("COPY "):
+            continue
+        parts = [w for w in ln.split()[1:] if not w.startswith("--")]
+        copied.update(parts[:-1])            # every source but the destination
+    package = {"src", "pyproject.toml", "uv.lock", "README.md"}
+    # The Dockerfile is in the fingerprint but not in this set, and the
+    # difference is real rather than an oversight: it is the RECIPE, not an
+    # ingredient it copies -- a RUN line moving changes the image with no COPY
+    # line moving at all, so it is pinned by content and excluded here.
+    assert copied - package == set(IMAGE_INPUTS) - {"docker/Dockerfile"}, (
+        "the Dockerfile copies something the fingerprint does not cover "
+        "(or vice versa) -- decide whether it is an image input and say so here")
 
 
 def test_the_wheel_scrolls_the_view_not_the_prompt_history():

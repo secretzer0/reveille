@@ -108,7 +108,7 @@ attach() {
     holder="$(tmux list-sessions -F '#{session_name}' 2>/dev/null \
                 | grep '^d-' | grep -vx "d-${id}" | head -n1 || true)"
     [ -z "$holder" ] || die \
-      "driver attach refused: grant ${holder#d-} holds the keyboard (owner: reveille-launch flip <user> <agent> on)"
+      "driver attach refused: grant ${holder#d-} holds the keyboard (owner: the multi-driver button on this agent's tab, or reveille-launch flip <user> <agent> on)"
   fi
   tmux new-session -d -t agent -s "d-${id}" 2>/dev/null || true
   # 4.6.1: the pre-check alone is check-then-create -- two racing writable
@@ -126,7 +126,7 @@ attach() {
       read -r rc rn <<<"$rival"
       if [ "$rc" -lt "$own" ] || { [ "$rc" -eq "$own" ] && [[ "$rn" < "d-${id}" ]]; }; then
         tmux kill-session -t "d-${id}" 2>/dev/null || true
-        die "driver attach refused: grant ${rn#d-} holds the keyboard (owner: reveille-launch flip <user> <agent> on)"
+        die "driver attach refused: grant ${rn#d-} holds the keyboard (owner: the multi-driver button on this agent's tab, or reveille-launch flip <user> <agent> on)"
       fi
     fi
   fi
