@@ -71,7 +71,8 @@ def test_the_direct_upgrade_path_asks_the_gate(monkeypatch):
     upgraded = []
     monkeypatch.setattr(rl, "upgrade_agent",
                         lambda *a, **k: upgraded.append(a) or
-                        {"from": "x", "to": "y", "was_running": True})
+                        {"from": "x", "to": "y", "was_running": True,
+                         "final": "running"})
     args = types.SimpleNamespace(all=False, idle=False, user="u", agent="a",
                                  image="img:2", health_url="h", timeout=1,
                                  force=False)
