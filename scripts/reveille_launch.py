@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.27")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.28")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -717,13 +717,26 @@ def merge_profile(prof, updates, agent=None):
     if updates.get("claude_mode") and updates["claude_mode"] not in CLAUDE_MODES:
         raise LaunchError(f"claude_mode must be one of {CLAUDE_MODES}, "
                           f"not {updates['claude_mode']!r}")
-    for k in ("claude_token", "github_token", "repo_url", "claude_mode"):
+    if updates.get("multi_driver") and updates["multi_driver"] not in ("on", "off"):
+        raise LaunchError(f"multi_driver must be \"on\" or \"off\", "
+                          f"not {updates['multi_driver']!r}")
+    for k in ("claude_token", "github_token", "repo_url", "claude_mode",
+              "multi_driver"):
         if k in updates:
             if updates[k]:
                 target[k] = updates[k]
             else:
                 target.pop(k, None)
     return prof
+
+
+def resolve_multi_driver(prof, agent):
+    """Per-agent override > user global, the resolve_credentials shape.
+    THE PROFILE IS THE DECLARATION (ruled 13448): provision copies it into
+    the container as the ~/.multi-driver marker; `flip` mutates only the
+    runtime copy. -> "on" | "off" | ""."""
+    a = (prof.get("agents") or {}).get(agent) or {}
+    return a.get("multi_driver") or prof.get("multi_driver") or ""
 
 
 def resolve_credentials(prof, agent, repo_url_req=""):
@@ -1061,6 +1074,8 @@ def masked_profile(prof):
             out["repo_url"] = d["repo_url"]
         if d.get("claude_mode"):   # a choice, not a secret
             out["claude_mode"] = d["claude_mode"]
+        if d.get("multi_driver"):   # also a choice, never a secret
+            out["multi_driver"] = d["multi_driver"]
         return out
     body = mask(prof)
     body["agents"] = {name: mask(o) for name, o in
@@ -1245,7 +1260,8 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
         raise LaunchError("no token given")
 
     # P2: the user's stored credentials, override > global > request repo_url.
-    creds = resolve_credentials(load_profile(user), agent, repo_url)
+    prof = load_profile(user)
+    creds = resolve_credentials(prof, agent, repo_url)
     cred_names, cred_env, kind = credential_env(creds)
     # No claude credential + the default boot (claude itself) = an agent that
     # will hang at a login prompt nobody is watching -- or worse, find some
@@ -1305,6 +1321,20 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                            boot_cmd=boot_cmd, extra_env=extra_env,
                            auth_mount=auth_mount)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
+    if resolve_multi_driver(prof, agent) == "on":
+        # THE MARKER IS THE STATE (13443/13444, measured 13446): the writable
+        # layer keeps it across stop/start, and the rm THIS function performs
+        # on --replace is what loses it -- so the declaration is re-copied
+        # here, on every path that creates a container. ONE SPELLING with the
+        # gate and flip: "$HOME/.multi-driver", never a hardcoded home.
+        r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
+                    check=False, capture=True)
+        if r.returncode != 0:
+            # Never fail the provision over it, never keep quiet about it
+            # (13450): a silent revert is the defect this slice exists for.
+            print(f"multi-driver declaration did NOT land on {user}/{agent} "
+                  f"(exec rc={r.returncode}) -- flip it by hand: "
+                  f"reveille-launch flip {user} {agent} on", file=sys.stderr)
     _record(conn, user, agent, creds["repo_url"], image, broker,
             role_name=split_role_prompt(role_prompt or "", ROLE_PROMPTS)[0])
     owner = claim_agent_name(conn, user, agent)
@@ -1479,7 +1509,8 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         raise LaunchError(f"not upgrading {user}/{agent}: {why}")
     broker = old["env"].get("REVEILLE_URL") or DEFAULT_BROKER
     repo_url = old["env"].get("REVEILLE_REPO_URL", "")
-    creds = resolve_credentials(load_profile(user), agent, repo_url)
+    prof = load_profile(user)
+    creds = resolve_credentials(prof, agent, repo_url)
     cred_names, cred_env, kind = credential_env(creds)
     boot_cmd = boot_cmd_of(old["cmd"], _image_cmd(old["image"]))
     if kind == "none" and not boot_cmd:
@@ -1522,6 +1553,16 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, OSError) as e:
         rollback(f"docker run refused ({e})")
+    if resolve_multi_driver(prof, agent) == "on":
+        # Same re-copy as provision: the upgrade's rm is a path that loses
+        # the marker, and the idle auto-roll reaches HERE with no human
+        # present to notice a silent revert (13448).
+        r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
+                    check=False, capture=True)
+        if r.returncode != 0:
+            print(f"multi-driver declaration did NOT land on {user}/{agent} "
+                  f"(exec rc={r.returncode}) -- flip it by hand: "
+                  f"reveille-launch flip {user} {agent} on", file=sys.stderr)
     # HEALTH BEFORE DESTROY (11600 s3): running, boot report written, presence shows it.
     if not wait_healthy(health_url, agent, token, timeout):
         rollback(f"not present on the broker within {timeout}s")
@@ -2180,6 +2221,19 @@ def cmd_flip(a):
     finally:
         conn.close()
     name = container_name(a.user, a.agent)
+    if a.state == "off":
+        # A TOGGLE NEVER REPORTS A CHANGE IT DID NOT MAKE (13443/13444): the
+        # gate is env OR marker, and rm-ing the marker under a hand-set env
+        # would print "off" while the gate still says on. We never set the
+        # env; if someone did, refuse and name it.
+        r = _docker("exec", name, "sh", "-c",
+                    '[ "${REVEILLE_MULTI_DRIVER:-0}" = 1 ]',
+                    check=False, capture=True)
+        if r.returncode == 0:
+            die(f"flip off refused: {name} was created with "
+                f"REVEILLE_MULTI_DRIVER=1 in its environment -- the gate's "
+                f"env door stays open no matter what this toggle removes; "
+                f"recreate the container without the variable")
     # Runtime toggle rides a marker file the gate checks per-attach: ttyd's
     # children only ever see create-time env, so env alone cannot flip live.
     shell = ("touch ~/.multi-driver" if a.state == "on"
@@ -2189,7 +2243,16 @@ def cmd_flip(a):
         die(f"flip failed in {name} -- is it running?")
     _audit("FLIP", user=a.user, agent=a.agent, multi_driver=a.state,
            actor="launcher-cli")
-    print(f"{a.user}/{a.agent}: multi-driver {a.state}")
+    # A FLIP STATES ITS OWN LIFETIME (13448): the profile is the declaration
+    # and this is a live override of the runtime copy -- real until the next
+    # re-provision copies the declaration back. One act, one scope; flip
+    # never writes the profile (two writers of one boolean is the defect).
+    declared = resolve_multi_driver(load_profile(a.user), a.agent)
+    scope = ""
+    if declared and declared != a.state:
+        scope = (f" on this container until it is re-provisioned; "
+                 f"the profile still says {declared}")
+    print(f"{a.user}/{a.agent}: multi-driver {a.state}{scope}")
     return 0
 
 
