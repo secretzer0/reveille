@@ -1,0 +1,351 @@
+#!/usr/bin/env -S uv run --quiet --with playwright python
+"""ui-drive: DRIVE the page's newest surfaces in a real browser, and take PICTURES.
+
+    make ui-drive                # -> shots/ui/<scene>.png, exit 1 on a red check
+    scripts/ui-drive out/dir     # any directory
+
+The instrument 8756 had and never committed (lesson a-harness-that-lived-in-a-
+session-dies-with-it), plus the one the caveat on #205/#207/#209 said did not
+exist (lesson name-the-command-that-proved-the-absence -- it did; chromium is
+in ~/.cache/ms-playwright).
+
+WHAT IT DRIVES, one scene per surface shipped unseen:
+  MEDIA MODAL  (#205, 13413)  a message with three image attachments: open a
+                              tile, walk the carousel, wrap, Esc, focus back
+  MULTI-DRIVER (#207, 13443)  the agent tab's toggle: read the label, press it,
+                              read the label again -- the flip is a POST the
+                              stub launcher answers, so the label is the page's
+                              own read-back and never a local guess
+  AGENT MANAGER(#209, DES-025) Settings > Agents: a row per agent, the acts,
+                              and the phone layout's labelled cards
+Desktop 1280x900 AND iPhone 14, because the phone half of all three was written
+against one breakpoint and nobody has looked at either half.
+
+THE LAUNCHER IS A STUB, IN THE BROWSER, AND THAT IS A REAL LIMIT: there is no
+launcher in this container, so every AGBASE call is fulfilled by page.route()
+with a fixture. That drives the PAGE honestly -- its own fetch, its own
+render, its own read-back -- and proves NOTHING about the launcher's replies.
+The live flip still needs a real container and a second driver attach.
+
+Every check prints ok/RED with what it saw; any red exits 1. Pictures land
+whether or not the checks pass -- the operator's eyes are the point.
+"""
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from uilab import PW, USER, broker  # noqa: E402
+
+AGBASE = "/agents"                      # what REVEILLE_AGENTS_PATH declares below
+AGENTS = [
+    {"agent": "roc-api-dev", "status": "running", "state": "running",
+     "image": "reveille-agent:0.2.29", "role_name": "dev", "room_id": "r1"},
+    {"agent": "roc-ui-dev", "status": "stopped", "state": "stopped",
+     "image": "reveille-agent:0.2.28", "role_name": "ui-ux", "room_id": "r1"},
+    {"agent": "old-scout", "status": "absent", "state": "stopped",
+     "image": "reveille-agent:0.2.21", "role_name": "scout", "room_id": "r1"},
+    # A CROSS-OWNER IDENTITY (DES-011 s2 alias, <owner>-<name>) is the longest
+    # thing this table ever holds, and it is what the phone card has to wrap.
+    {"agent": "tmelhiser-native-reveille-devops", "status": "stopped", "state": "stopped",
+     "image": "reveille-agent:0.2.29", "role_name": "devops", "room_id": "r1"},
+]
+FAILED, MISSES = [], []
+
+
+def note(name, saw):
+    """An OBSERVATION, not a verdict: something the operator should rule on. It
+    prints and does not fail the gate -- a harness that reds on a design question
+    stops being run, and then it stops finding anything at all."""
+    print(f"  note {name}: {saw}")
+
+
+def check(name, ok, saw):
+    (FAILED.append(name) if not ok else None)
+    print(f"  {'ok  ' if ok else 'RED '} {name}: {saw}")
+
+
+# ---- the stub launcher ------------------------------------------------------
+# One dict of state so a POST can change what the next GET says: a toggle whose
+# read-back is a constant would pass while the page invented its own label.
+MULTI = {a["agent"]: {"here": True, "on": False, "declared": "off"} for a in AGENTS}
+
+
+def launcher(route, request):
+    path, method = request.url.split(AGBASE, 1)[1].split("?")[0], request.method
+    body, status = None, 200
+    if path == "/agents" and method == "GET":
+        body = {"default_image": "reveille-agent:0.2.29", "agents": AGENTS}
+    elif path == "/rooms-mine":
+        body = {"rooms": [{"id": "r1", "name": "phone-lab"}], "roles": ["dev", "ui-ux"],
+                "role_prompts": {}}
+    elif path == "/profile":
+        body = {"claude_login": {}, "github_token": ""}
+    elif path == "/login/status":
+        body = {"state": "none"}
+    elif path.endswith("/multi-driver"):
+        name = path.split("/")[2]
+        if method == "POST":
+            MULTI[name]["on"] = not MULTI[name]["on"]
+        body = dict(MULTI[name], scope=" (this container, until it is re-provisioned)")
+    elif path.endswith("/grants") and method == "GET":
+        body = {"grants": []}
+    elif path.endswith("/grants") and method == "POST":
+        body = {"id": "g-stub", "attach_url": "/attach/g-stub"}
+    elif path.startswith("/attach/"):
+        return route.fulfill(status=200, content_type="text/html",
+                             body="<body style='background:#0b0d10;color:#c8d0d8;"
+                                  "font:13px ui-monospace'>a container's terminal would be here"
+                                  "</body>")
+    elif path.endswith("/boot-report"):
+        body = {"problems": [], "report": ""}
+    else:
+        # A route the page needs and this stub does not answer is a FINDING about
+        # the stub, so it is printed rather than silently 404'd into a soft-fail.
+        MISSES.append(f"{method} {path}")
+        body, status = {"error": "no such stub route"}, 404
+    route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+
+# ---- the page ---------------------------------------------------------------
+def open_page(ctx, url):
+    p = ctx.new_page()
+    p.route(f"**{AGBASE}/**", launcher)
+    p.goto(url + "/ui", wait_until="networkidle")
+    p.fill("#liName", USER)
+    p.fill("#liPass", PW)
+    p.click("#liGo")
+    p.wait_for_selector("#feed .row", timeout=10000)
+    p.wait_for_timeout(600)
+    return p
+
+
+def shoot(p, out, name):
+    path = out / f"{name}.png"
+    p.screenshot(path=str(path))
+    print(f"  -> {path}")
+
+
+def settings(p, phone):
+    """Settings is reached by two different controls; the phone's is the header bar."""
+    if phone:
+        p.locator("#meBtn").tap()
+        p.wait_for_timeout(200)
+        p.locator("#phSettings").tap()
+    else:
+        p.locator("#meCard").click()
+        p.wait_for_timeout(200)
+        p.locator("#miSettings").click()
+    p.wait_for_timeout(600)
+
+
+# ---- scene 1: the media modal (#205) ----------------------------------------
+def scene_modal(ctx, url, out, tag, phone):
+    print(f"MEDIA MODAL ({tag})")
+    p = open_page(ctx, url)
+    tile = p.locator("[data-mmi]").first
+    tile.scroll_into_view_if_needed()
+    tile.click()
+    p.wait_for_timeout(400)
+    d = p.locator("#mediaModal")
+    check("modal opens", d.evaluate("d => d.open"), "dialog[open]")
+    check("position reads 1 of 3", p.locator("#mmPos").inner_text().strip() == "1 of 3",
+          p.locator("#mmPos").inner_text().strip())
+    check("stage holds an image", p.locator("#mmStage img").count() == 1,
+          f"{p.locator('#mmStage img').count()} img in #mmStage")
+    only = p.evaluate("() => document.querySelectorAll('#mmStage [src]').length")
+    check("only the current stop has a src", only == 1, f"{only} element(s) with src")
+    # CENTRED, and the reason this check exists: *{margin:0} silently removes the
+    # UA's margin:auto from <dialog>, which is invisible to every source-level gate
+    # and obvious the moment anything drives it.
+    box = p.evaluate("""() => { const d = document.getElementById('mediaModal');
+      const r = d.getBoundingClientRect();
+      return {l: r.x, r: innerWidth - r.right, t: r.y, b: innerHeight - r.bottom}; }""")
+    check("the dialog is centred in the glass",
+          abs(box["l"] - box["r"]) <= 2 and abs(box["t"] - box["b"]) <= 2,
+          f"gaps l{box['l']:.0f} r{box['r']:.0f} t{box['t']:.0f} b{box['b']:.0f}")
+    shoot(p, out, f"{tag}-modal-open")
+    p.locator("#mmNext").click()
+    p.wait_for_timeout(300)
+    check("next advances", p.locator("#mmPos").inner_text().strip() == "2 of 3",
+          p.locator("#mmPos").inner_text().strip())
+    shoot(p, out, f"{tag}-modal-second")
+    p.locator("#mmPrev").click()
+    p.wait_for_timeout(200)
+    p.locator("#mmPrev").click()      # 1 -> wraps to 3
+    p.wait_for_timeout(300)
+    check("prev wraps at the first stop", p.locator("#mmPos").inner_text().strip() == "3 of 3",
+          p.locator("#mmPos").inner_text().strip())
+    name = p.locator("#mmName").inner_text().strip()
+    check("the stop names its file", name.endswith(".png"), name or "(empty)")
+    p.keyboard.press("Escape")
+    p.wait_for_timeout(300)
+    check("Esc closes", not d.evaluate("d => d.open"), "dialog closed")
+    back = p.evaluate("() => document.activeElement && document.activeElement.dataset.mmi")
+    check("focus returns to the opener", back is not None, f"activeElement data-mmi={back}")
+    p.close()
+
+
+# ---- scene 2: the multi-driver toggle (#207) --------------------------------
+def scene_multidriver(ctx, url, out, tag, phone):
+    print(f"MULTI-DRIVER ({tag})")
+    for st in MULTI.values():          # each scene starts from the declared state
+        st["on"] = False
+    p = open_page(ctx, url)
+    if phone:
+        p.locator("#roomBtn").tap()    # the rail is a sheet at this width
+        p.wait_for_timeout(300)
+    p.locator("#agentsNav").click()
+    p.wait_for_timeout(500)
+    # THE STOPPED ROW FIRST, while the rail is still reachable: a stopped body has
+    # no runtime state, so a toggle drawn over it would be inventing one.
+    p.locator('[data-rost="roc-ui-dev"]').click()
+    p.wait_for_timeout(600)
+    stopped = p.locator('[data-agact="multidriver"][data-agent="roc-ui-dev"]').count()
+    check("a stopped agent has no toggle", stopped == 0, f"{stopped} control(s)")
+    p.locator('[data-rost="roc-api-dev"]').click()      # RUNNING: the toggle lives here
+    p.wait_for_timeout(800)
+    if phone:
+        # WHAT COVERS THE CONTROL, measured before anything is dismissed: selecting
+        # an agent does not close the sheet, so the tab's own actions sit UNDER the
+        # rail. The dismiss that keeps you in the well is an unlabelled tap on the
+        # brand; the labelled control says "Back to chat" and leaves the well.
+        note("phone: the selected agent's controls, with the sheet still open", p.evaluate("""() => {
+          const b = document.querySelector('[data-agact="multidriver"]'); if (!b) return 'no control';
+          const r = b.getBoundingClientRect();
+          const el = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          if (!el) return 'nothing at its centre (off-screen)';
+          return el === b || b.contains(el) ? 'reachable' :
+            'covered by ' + el.tagName.toLowerCase() + (el.id ? '#' + el.id : ''); }"""))
+        p.locator("#brand").tap()
+        p.wait_for_timeout(400)
+    btn = p.locator('[data-agact="multidriver"][data-agent="roc-api-dev"]')
+    check("the toggle is on the running tab", btn.count() == 1, f"{btn.count()} control(s)")
+    if btn.count() != 1:
+        shoot(p, out, f"{tag}-multidriver-missing")
+        p.close()
+        return
+    lab = btn.get_attribute("aria-label")
+    check("the label carries state AND act", "multi-driver is OFF" in lab and "turn it on" in lab, lab)
+    shoot(p, out, f"{tag}-multidriver-off")
+    btn.click()
+    p.wait_for_timeout(700)
+    lab2 = btn.get_attribute("aria-label")
+    check("pressing it flips the read-back", "multi-driver is ON" in lab2 and "turn it off" in lab2, lab2)
+    check("the flip says the profile still declares off", "the profile declares off" in lab2, lab2)
+    shoot(p, out, f"{tag}-multidriver-on")
+    p.close()
+
+
+# ---- scene 3: the agent manager (#209) --------------------------------------
+def scene_manager(ctx, url, out, tag, phone):
+    print(f"AGENT MANAGER ({tag})")
+    p = open_page(ctx, url)
+    settings(p, phone)
+    tab = p.locator('#panTabs .tab[data-tab="manage"]')
+    check("the Agents tab is offered where a launcher is declared", tab.count() == 1,
+          f"{tab.count()} tab(s)")
+    if tab.count() != 1:
+        shoot(p, out, f"{tag}-manager-missing")
+        p.close()
+        return
+    tab.click()
+    p.wait_for_timeout(800)
+    rows = p.locator("table.mgr tbody tr")
+    check("one row per agent", rows.count() == len(AGENTS), f"{rows.count()} rows")
+    names = p.locator("table.mgr .mgrName").all_inner_texts()
+    check("rows are sorted by agent", names == sorted(names), ", ".join(names))
+    acts = p.locator('table.mgr tr:has-text("roc-api-dev") .mgrAct').all_inner_texts()
+    check("a running agent offers terminal/edit/stop/destroy",
+          [a.strip("… ") for a in acts] == ["terminal", "edit", "stop", "destroy"],
+          " | ".join(a.strip() for a in acts))
+    diff = p.locator("table.mgr .mgrDiff").first
+    check("a differing image says what it differs from", "0.2.29" in diff.inner_text(),
+          diff.inner_text().strip())
+    if not phone:
+        fit = p.evaluate("""() => { const w = document.querySelector('.mgrWrap'),
+            t = w.querySelector('table.mgr'), n = w.querySelector('.mgrName');
+          // An INLINE box reports one client rect per line it occupies -- no
+          // line-height arithmetic, which reads "normal" and lies.
+          return {over: t.scrollWidth - w.clientWidth,
+                  lines: n.querySelector('b').getClientRects().length}; }""")
+    # `n` is the FIRST row's name (old-scout, 9 chars): an ordinary name must
+    # hold its line. A cross-owner alias may wrap -- what it may not do is push
+    # the acts column out, which the check above measures.
+        check("the table fits the panel, acts and all", fit["over"] <= 0,
+              f"{fit['over']}px past the panel")
+        check("an agent name holds one line", fit["lines"] <= 1, f"{fit['lines']} lines")
+    well = p.evaluate("() => document.querySelectorAll('#agentsWell table.mgr').length")
+    check("the manager never leaks into the terminal well", well == 0, f"{well} in #agentsWell")
+    shoot(p, out, f"{tag}-manager")
+    if phone:
+        fit = p.evaluate("""() => { const w = document.querySelector('.mgrWrap');
+          return w.scrollWidth - w.clientWidth; }""")
+        check("no sideways scroll in a card layout", fit <= 0, f"{fit}px past the card")
+        # WRAPPING IS NOT THE ASSERTION -- STAYING INSIDE THE CARD IS. A name
+        # that happens to fit needs no wrap; one that does not must not spill.
+        spill = p.evaluate("""() => { let worst = 0;
+          for (const b of document.querySelectorAll('.mgrName b')) {
+            const card = b.closest('tr').getBoundingClientRect();
+            worst = Math.max(worst, Math.round(b.getBoundingClientRect().right - card.right)); }
+          return worst; }""")
+        check("the longest identity stays inside its card", spill <= 0, f"{spill}px past the card")
+        lbl = p.evaluate("""() => {
+          const c = document.querySelector('table.mgr tbody td');
+          return getComputedStyle(c, '::before').content; }""")
+        check("phone cells carry their own field name", lbl not in ("none", "normal", ""), lbl)
+    # DESTROY STILL ASKS: the manager reuses the real confirm, never a generic one.
+    p.locator('table.mgr tr:has-text("roc-api-dev") .mgrAct.danger').click()
+    p.wait_for_timeout(500)
+    body = p.locator("#panBody").inner_text() + p.inner_text("body")
+    check("destroy asks for the name", "roc-api-dev" in body and
+          ("type" in body.lower() and "erase" in body.lower() or "retire" in body.lower()),
+          "confirm names the agent and its two outcomes")
+    shoot(p, out, f"{tag}-manager-destroy")
+    p.close()
+
+
+def main():
+    out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "shots/ui")
+    out.mkdir(parents=True, exist_ok=True)
+    proc, url, tmp = broker(media=True, env_extra={"REVEILLE_AGENTS_PATH": AGBASE},
+                            extra_agents=[a["agent"] for a in AGENTS[1:]])
+    t0 = time.time()
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(channel="chrome", headless=True)
+            except Exception:
+                browser = pw.chromium.launch(headless=True)
+            for tag, opts, phone in (
+                    ("desktop", {"viewport": {"width": 1280, "height": 900}}, False),
+                    ("iphone14", dict(pw.devices["iPhone 14"]), True)):
+                for scene in (scene_modal, scene_multidriver, scene_manager):
+                    ctx = browser.new_context(**opts)
+                    try:
+                        scene(ctx, url, out, tag, phone)
+                    except Exception as e:                    # a scene that DIES is a red, named
+                        FAILED.append(f"{tag}-{scene.__name__}")
+                        print(f"  RED  {scene.__name__} raised: {type(e).__name__}: {e}")
+                    ctx.close()
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    print(f"done in {time.time() - t0:.1f}s -> {out}/  (broker db kept at {tmp})")
+    if MISSES:
+        print(f"STUB GAPS (the page asked, the fixture had no answer): {', '.join(sorted(set(MISSES)))}")
+    if FAILED:
+        print(f"GATE RED: {len(FAILED)} check(s): {', '.join(FAILED)}")
+        sys.exit(1)
+    print("GATE GREEN: every check passed -- now LOOK at the pictures")
+
+
+if __name__ == "__main__":
+    main()

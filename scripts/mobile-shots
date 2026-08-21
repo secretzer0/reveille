@@ -25,78 +25,15 @@ gallery. Each line also names the widest element when something sticks out.
 Needs Google Chrome or a Playwright chromium on this machine
 (`uv run --with playwright playwright install chromium` once). Nothing else.
 """
-import json
-import os
 import pathlib
-import socket
 import subprocess
 import sys
-import tempfile
 import time
-import urllib.request
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-from reveille import store  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from uilab import PW, USER, broker  # noqa: E402
 
 DEVICES = ("iPhone 14", "Pixel 7")
-USER, PW = "shot", "shot-pw-not-a-secret"
-
-
-def seed(db):
-    conn = store.connect(db)
-    store.migrate(conn, db)
-    u = store.create_user(conn, USER, PW)
-    room = store.create_room(conn, u["id"], "phone-lab")
-    tok = store.create_token(conn, u["id"], "dev", agent_name="roc-api-dev", create=True)
-    store.assign_room(conn, tok["id"], room["id"], u["id"])
-    rid = room["id"]
-    store.send(conn, "roc-api-dev", "*", "Deployed 0.2.130 to reveille.mythos.org: writer at "
-               "192.168.85.101:18080, ear take cap 8 MiB / 60 s, GPU 0 at 11.26 of 12.29 GB, "
-               "PR #65 merged.", subject="smoke 0.2.130", room=rid)
-    store.send(conn, USER, "*", "slice four: this was sent by the spoken word", room=rid)
-    store.send(conn, "roc-api-dev", "*", "NEED: your GO on #78 -- drawer, wrap, 16 px; "
-               "measured <= 393. Reply GO or what is wrong.", subject="#78 review", room=rid)
-    store.send(conn, USER, "*", "pause to send test", room=rid)
-    store.send(conn, USER, "*", "sentence one sentence two", room=rid)
-    store.send(conn, "roc-api-dev", "*", "an unbroken token: " + "x" * 200 + " and `audio_make_http` "
-               "answers ready whenever tts-<mid>.webm exists -- /home/vyzon/reveille/files/tts-11476.webm.part",
-               room=rid)
-    store.send(conn, "roc-api-dev", "*", "Where the defect lives, from the code as merged: on-demand "
-               "(`POST /audio/<mid>`, 0.2.117) already goes through the writer's queue -- BUT "
-               "`audio_make_http` answers \"ready\" whenever tts-<mid>.webm exists.",
-               subject="RULING (operator 11475, DES-013 s5/s7 amended): A TERSE RENDITION OF A "
-               "SCRIPTABLE MESSAGE IS NEVER DURABLE. Invariant: tts-<mid>.webm/.m4a is kept only if "
-               "(a) the message is not scriptable or (b) it was made from a script.", room=rid)
-    store.send(conn, "roc-api-dev", "*", "code block:\n```\nREVEILLE_TTS_URL=http://192.168.90.136:18004 "
-               "REVEILLE_LAN_PLAINTEXT=1 REVEILLE_SCRIPT_URL=http://192.168.85.101:18080 make "
-               "SERVER_DATA=/home/vyzon/reveille PROXY_SITE=reveille.mythos.org up\n```", room=rid)
-    conn.close()
-
-
-def free_port():
-    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
-
-
-def broker():
-    tmp = tempfile.mkdtemp(prefix="mobile-shots-")
-    db = os.path.join(tmp, "broker.db")
-    seed(db)
-    port = free_port()
-    env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port), REVEILLE_HOST="127.0.0.1",
-               REVEILLE_STT_URL="http://127.0.0.1:1")     # loopback = the ear is ON, unreachable is fine
-    for k in ("REVEILLE_TTS_URL", "REVEILLE_SCRIPT_URL"):
-        env.pop(k, None)
-    proc = subprocess.Popen([sys.executable, "-m", "reveille.daemon"], env=env,
-                            stdout=open(os.path.join(tmp, "broker.log"), "w"), stderr=subprocess.STDOUT)
-    url = f"http://127.0.0.1:{port}"
-    for _ in range(100):
-        try:
-            if urllib.request.urlopen(url + "/health", timeout=1).read() == b"ok":
-                return proc, url, tmp
-        except OSError:
-            time.sleep(0.1)
-    proc.kill()
-    raise SystemExit(f"scratch broker did not come up; log: {tmp}/broker.log")
 
 
 FAILED = []
