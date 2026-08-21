@@ -402,6 +402,12 @@ def _add_roll_desired(conn):
     if "roll_desired_running" not in cols:
         conn.execute("ALTER TABLE containers ADD COLUMN roll_desired_running INTEGER")
         conn.commit()
+    if "roll_deadline_ns" not in cols:
+        # 13460: the deadline is what lets the sweep thread and the roller
+        # PROCESS share one db without a lock -- a record younger than its
+        # own deadline is a LIVE roll, not an orphan.
+        conn.execute("ALTER TABLE containers ADD COLUMN roll_deadline_ns INTEGER")
+        conn.commit()
 
 
 def _launcher_tables(conn):
@@ -1484,15 +1490,22 @@ def image_id_of(tag):
     return (res.stdout or "").strip() if res.returncode == 0 else ""
 
 
-def record_found_state(conn, user, agent, running):
+def record_found_state(conn, user, agent, running, timeout):
     """Property 1 (13457): what the roll FOUND, written durably BEFORE the
     first mutation. A MAINTENANCE ACTION RETURNS THE SYSTEM TO THE STATE IT
     FOUND -- and a crash between the start and the restore must leave a row
     that knows the body should be down, never a lost local variable (the
-    thirteen-body field case rode exactly that gap)."""
-    conn.execute("UPDATE containers SET roll_desired_running=? "
-                 "WHERE user=? AND agent=?",
-                 (1 if running else 0, user, agent))
+    thirteen-body field case rode exactly that gap).
+
+    The DEADLINE rides with it (13460): the sweep is a thread in serve, the
+    roller is a separate process, and during a roll of a stopped body the
+    new container is DELIBERATELY running for wait_healthy -- a tick landing
+    in that window must see a live roll, not an orphan. 2x the roller's own
+    timeout: no shared constant, nothing has to agree with anything."""
+    conn.execute("UPDATE containers SET roll_desired_running=?, "
+                 "roll_deadline_ns=? WHERE user=? AND agent=?",
+                 (1 if running else 0,
+                  time.time_ns() + 2 * int(timeout) * 10**9, user, agent))
     conn.commit()
 
 
@@ -1503,8 +1516,8 @@ def restore_found_state(conn, user, agent, was_running):
     the log line: the line names the outcome, not the transition."""
     if not was_running:
         _docker("stop", container_name(user, agent), check=False, capture=True)
-    conn.execute("UPDATE containers SET roll_desired_running=NULL "
-                 "WHERE user=? AND agent=?", (user, agent))
+    conn.execute("UPDATE containers SET roll_desired_running=NULL, "
+                 "roll_deadline_ns=NULL WHERE user=? AND agent=?", (user, agent))
     conn.commit()
     return "running" if was_running else "stopped as found"
 
@@ -1570,7 +1583,7 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
     quotas = _quotas_for(conn, user)
     argv = docker_run_argv(user, agent, image, old["network"] or DEFAULT_NETWORK, quotas,
                            boot_cmd=boot_cmd, extra_env=extra_env, auth_mount=auth_mount)
-    record_found_state(conn, user, agent, old["running"])
+    record_found_state(conn, user, agent, old["running"], timeout)
     prev = f"{name}.prev"
     _docker("rm", "-f", prev, check=False, capture=True)      # a leftover from a crashed upgrade
     leave_roll_record(user, agent, to_image=image, why="upgrade (image roll)")
@@ -1585,8 +1598,9 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
             _docker("start", name, check=False, capture=True)
         # The old world is back exactly as found -- the in-flight record is
         # satisfied, not orphaned (13457 property 1).
-        conn.execute("UPDATE containers SET roll_desired_running=NULL "
-                     "WHERE user=? AND agent=?", (user, agent))
+        conn.execute("UPDATE containers SET roll_desired_running=NULL, "
+                     "roll_deadline_ns=NULL WHERE user=? AND agent=?",
+                     (user, agent))
         conn.commit()
         _audit("UPGRADE-ROLLBACK", user=user, agent=agent, image=image, reason=reason)
         raise LaunchError(f"upgrade of {user}/{agent} to {image} failed: {reason} -- "
@@ -2468,14 +2482,21 @@ def _sweep_once(conn, idle_window_ns=0):
     # transaction at the end of the tick.
     record = []
     reconciled = []
-    for c in conn.execute("SELECT user, agent, roll_desired_running "
-                          "FROM containers").fetchall():
+    for c in conn.execute("SELECT user, agent, roll_desired_running, "
+                          "roll_deadline_ns FROM containers").fetchall():
         user, agent = c["user"], c["agent"]
         if c["roll_desired_running"] is not None:
-            # AN ORPHANED IN-FLIGHT RECORD (13457 property 3): a roll died
-            # between the start and the per-body restore. Desired-stopped
-            # but running gets stopped, with its why; the other polarity
+            # AN IN-FLIGHT RECORD. Younger than its own deadline = a LIVE
+            # roll in another process -- during a roll of a stopped body the
+            # new container is deliberately running for wait_healthy, and a
+            # tick that stopped it would fail the roll at random wearing an
+            # unhealthy-image mask (13460). Only a record PAST its deadline
+            # is an orphan (13457 property 3): desired-stopped but running
+            # gets stopped, with the staleness named; the other polarity
             # just clears -- a WIP row must not live forever.
+            deadline = c["roll_deadline_ns"] or 0
+            if now <= deadline:
+                continue
             if c["roll_desired_running"] == 0:
                 st = (_docker("inspect", "-f", "{{.State.Running}}",
                               container_name(user, agent),
@@ -2484,9 +2505,10 @@ def _sweep_once(conn, idle_window_ns=0):
                     _docker("stop", container_name(user, agent),
                             check=False, capture=True)
                     _audit("ROLLRECONCILE", user=user, agent=agent,
-                           reason="a roll died between the start and the "
-                                  "restore -- stopped as the record says "
-                                  "it was found")
+                           reason=f"a roll died between the start and the "
+                                  f"restore (deadline passed "
+                                  f"{(now - deadline) // 10**9}s ago) -- "
+                                  f"stopped as the record says it was found")
             reconciled.append((user, agent))
         # Expired grant ROWS are kept on purpose. The row is the only thing that
         # answers "whose session was that" for an audit line, and the gate's
@@ -2552,8 +2574,9 @@ def _sweep_once(conn, idle_window_ns=0):
     # WRITE PHASE: everything above observed; only now does the transaction
     # open, and it holds nothing but these rows.
     for user, agent in reconciled:
-        conn.execute("UPDATE containers SET roll_desired_running=NULL "
-                     "WHERE user=? AND agent=?", (user, agent))
+        conn.execute("UPDATE containers SET roll_desired_running=NULL, "
+                     "roll_deadline_ns=NULL WHERE user=? AND agent=?",
+                     (user, agent))
     for user, agent, sessions in record:
         conn.execute("DELETE FROM sessions_seen WHERE user=? AND agent=?",
                      (user, agent))

@@ -53,8 +53,12 @@ def test_the_record_is_durable_and_the_restore_clears_it(tmp_path, monkeypatch):
     monkeypatch.setattr(rl, "_docker",
                         lambda *a, **k: stops.append(a) or
                         types.SimpleNamespace(returncode=0, stdout="", stderr=""))
-    rl.record_found_state(conn, "u", "a", running=False)
+    rl.record_found_state(conn, "u", "a", running=False, timeout=120)
     assert _wip(conn) == 0, "the found state must be IN THE DB before the start"
+    dl = conn.execute("SELECT roll_deadline_ns FROM containers "
+                      "WHERE user='u' AND agent='a'").fetchone()[0]
+    import time as _t
+    assert dl > _t.time_ns(), "the deadline must be in the roller's future"
     final = rl.restore_found_state(conn, "u", "a", was_running=False)
     assert final == "stopped as found"
     assert any("stop" in a for call in stops for a in call), (
@@ -62,7 +66,7 @@ def test_the_record_is_durable_and_the_restore_clears_it(tmp_path, monkeypatch):
     assert _wip(conn) is None, "the restore must clear the in-flight record"
     # the found-running body: no stop, same clearing, final names the state
     stops.clear()
-    rl.record_found_state(conn, "u", "a", running=True)
+    rl.record_found_state(conn, "u", "a", running=True, timeout=120)
     assert _wip(conn) == 1
     assert rl.restore_found_state(conn, "u", "a", was_running=True) == "running"
     assert stops == [], "a body found running must not be stopped"
@@ -101,8 +105,8 @@ def test_the_next_tick_reconciles_an_orphaned_record(tmp_path, monkeypatch):
     stops it, says why, and clears the row. Without this, property 1 is a
     variable with extra steps."""
     conn = _seeded(tmp_path)
-    conn.execute("UPDATE containers SET roll_desired_running=0 "
-                 "WHERE user='u' AND agent='a'")
+    conn.execute("UPDATE containers SET roll_desired_running=0, "
+                 "roll_deadline_ns=1 WHERE user='u' AND agent='a'")
     conn.commit()
     monkeypatch.setattr(rl, "_harvest_gate_audit", lambda u, a, g: None)
     monkeypatch.setattr(rl, "sweep_actions", lambda g, live, s, n: ([], []))
@@ -120,15 +124,48 @@ def test_the_next_tick_reconciles_an_orphaned_record(tmp_path, monkeypatch):
     assert any("stop" in a for call in calls for a in call), (
         "the orphaned desired-stopped body was left running")
     assert _wip(conn) is None, "the reconcile must clear the record it acted on"
-    assert any("ROLLRECONCILE" == evt for evt, kw in audits)
+    assert any("ROLLRECONCILE" == evt and "deadline passed" in kw.get("reason", "")
+               for evt, kw in audits), (
+        "the reason must name the staleness -- an orphan is distinguishable "
+        "from a tick that guessed")
+
+
+def test_a_live_roll_survives_the_tick_untouched(tmp_path, monkeypatch):
+    """13460's negative, the one that would have caught the race: the sweep
+    is a thread in serve, roll_idle is a separate process, and during a roll
+    of a STOPPED body the row says desired-stopped while the new container
+    is DELIBERATELY running for wait_healthy. A record whose deadline is
+    still in the future is a LIVE roll -- the tick must not stop the body
+    and must not clear the row, or a roll of a stopped body fails at random
+    by tick timing wearing an unhealthy-image mask."""
+    import time as _t
+    conn = _seeded(tmp_path)
+    conn.execute("UPDATE containers SET roll_desired_running=0, "
+                 "roll_deadline_ns=? WHERE user='u' AND agent='a'",
+                 (_t.time_ns() + 240 * 10**9,))
+    conn.commit()
+    monkeypatch.setattr(rl, "_harvest_gate_audit", lambda u, a, g: None)
+    monkeypatch.setattr(rl, "sweep_actions", lambda g, live, s, n: ([], []))
+    monkeypatch.setattr(rl, "_stop_superseded", lambda c: [])
+    monkeypatch.setattr(rl, "_live_grant_sessions", lambda u, a: {})
+    monkeypatch.setattr(rl, "_audit", lambda evt, **kw: None)
+    stops = []
+    def fake_docker(*args, check=True, capture=True):
+        if "stop" in args:
+            stops.append(args)
+        return types.SimpleNamespace(returncode=0, stdout="true", stderr="")
+    monkeypatch.setattr(rl, "_docker", fake_docker)
+    rl._sweep_once(conn)
+    assert stops == [], "the tick stopped a roll still inside its own deadline"
+    assert _wip(conn) == 0, "the tick cleared a live roll's record"
 
 
 def test_an_orphaned_wanted_running_record_is_cleared_without_a_stop(tmp_path, monkeypatch):
     """The other polarity: desired running, body running -- nothing to act
     on, but a WIP row must not live forever."""
     conn = _seeded(tmp_path)
-    conn.execute("UPDATE containers SET roll_desired_running=1 "
-                 "WHERE user='u' AND agent='a'")
+    conn.execute("UPDATE containers SET roll_desired_running=1, "
+                 "roll_deadline_ns=1 WHERE user='u' AND agent='a'")
     conn.commit()
     monkeypatch.setattr(rl, "_harvest_gate_audit", lambda u, a, g: None)
     monkeypatch.setattr(rl, "sweep_actions", lambda g, live, s, n: ([], []))
