@@ -61,19 +61,22 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_$
     && install -m 0755 /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh \
     && rm -rf /tmp/gh_*
 
-# THE IMAGE PIN IS THE CLAUDE PIN (ruling 12401 D1). Container bodies converge
-# by re-provision against a pinned image -- self-update inside an ephemeral FS
-# buys nothing and bricks plenty: the updater's rename-unpack-swap, interrupted
-# by ANY stop (an operator's, or the launcher's own idle sweep -- both measured
-# 2026-08-19), leaves no binary and a boot that cannot come back. The update
-# STATE also rides the shared ~/.claude bind mount, so one body's half-update
-# is every future body's boot. Updates are therefore OFF in the image; a new
-# claude ships as a new image tag, exactly like every other build input.
-# IMAGE AND DATA-ROOT ONLY: nothing may ever write this switch onto a human's
-# native install (same rule as laptop-awake.conf, 0.2.182).
-# /opt/npm stays a dedicated agent-owned prefix -- not for the updater any
-# more, but because a root-owned global tree made claude warn on every /status
-# (operator screenshot, 2026-08-13).
+# CLAUDE IS THE ONE BUILD INPUT THAT IS DELIBERATELY NOT PINNED (operator rule
+# 2026-08-22, superseding 12401 D1's image-pin doctrine): the ENTRYPOINT pulls
+# @latest at every container START, and the copy baked here is only the
+# fallback for a boot where npm is unreachable. Pinning at build froze the
+# fleet at whatever npm served on rebuild day -- the 2.1.240 bus-deaf incident
+# was found because of exactly that snapshot drift. What makes any version safe
+# is the entrypoint's converged zero-prompt contract, not a frozen number.
+# DISABLE_AUTOUPDATER stays ON: the boot-time install is the ONLY updater. The
+# MID-SESSION rename-unpack-swap is what bricked binaries twice on 2026-08-19
+# when interrupted by a stop; a boot-time install into the container's own
+# layer just retries on the next boot. IMAGE AND DATA-ROOT ONLY: nothing may
+# ever write this switch onto a human's native install (same rule as
+# laptop-awake.conf, 0.2.182).
+# /opt/npm stays a dedicated agent-owned prefix -- it is what lets the
+# entrypoint (uid 1000) install at boot, and a root-owned global tree made
+# claude warn on every /status (operator screenshot, 2026-08-13).
 ENV DISABLE_AUTOUPDATER=1
 ENV NPM_CONFIG_PREFIX=/opt/npm
 ENV PATH=/opt/npm/bin:$PATH
