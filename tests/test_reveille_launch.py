@@ -1937,8 +1937,13 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.34", (
+    assert tag == "reveille-agent:0.2.35", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.35 UNSTICKS THE DEAF ROW (architect, 13799): busdeaf-probe became a
+    # supervisor that lives as long as the container -- a body that joins late
+    # gets its row RESTORED to what the boot wrote, and a body that goes deaf
+    # hours in gets marked. The row mirrors presence instead of remembering one
+    # bad window.
     # 0.2.34 PULLS CLAUDE LATEST AT BOOT (operator rule, superseding the
     # image-pin doctrine): the baked copy is only the npm-unreachable fallback,
     # so two 0.2.34 bodies may legitimately run different claudes -- the
@@ -1982,7 +1987,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/busdeaf-probe", "docker/entrypoint.sh",
                 "docker/tmux.conf", "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "e219fc7be02dec4d8d2555454894f05d725b3c242e99b081c5d173fe14a2f891"
+IMAGE_INPUT_SHA = "d79fd5cc001c708703a303b7e8ec1b709d8e32a36f01bbb3dee4db7335dce03f"
 
 
 def _image_input_sha(root):

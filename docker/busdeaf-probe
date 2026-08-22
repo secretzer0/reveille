@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Say so, where a human looks, when this body cannot reach the bus.
+"""Say so, where a human looks, when this body cannot reach the bus -- and
+UNSAY it the moment that stops being true.
 
 The worst failure a container has is the quiet one: UP, healthy to docker,
 running a real claude session, and silently unreachable. red-shirt sat exactly
@@ -8,17 +9,24 @@ screenshot found it. The trust converge in entrypoint.sh fixes the 2.1.240
 cause; this fixes the CLASS, because the next upstream change can break the MCP
 connect again in a way no seeded key anticipates.
 
-So this checks the END STATE rather than any one cause: after claude has had
-time to boot and run its startup join(), it asks the broker whether THIS body
-holds a live, connected session. Absent or disconnected -> the body is deaf, and
-that fact is written where the Agents list reads the row (.reveille-repo-status,
-the same file a degraded boot writes) instead of the row showing "running". A
-dead credential, a broker outage, and a client that connected without auth all
-land here the same way -- the probe never has to know which.
+It checks the END STATE rather than any one cause: it asks the broker whether
+THIS body holds a live, connected session, and mirrors the answer into the row
+the Agents list reads (.reveille-repo-status, the same file a degraded boot
+writes). A dead credential, a broker outage, and a client that connected
+without auth all land there the same way -- the probe never has to know which.
 
-The credential the probe queries with is this body's own, so a refusal (HTTP
-401/403) is itself proof the credential is dead -- one call resolves both "is my
-token good" and "did claude actually join".
+THE ROW IS NEVER STICKY (architect, msg 13799): a one-shot probe that writes
+BUS-DEAF and exits leaves a body that joins at 200 seconds marked deaf forever,
+and a diagnostic that contradicts presence is worse than none. So this is a
+supervisor, not a shot: it lives as long as the container, keeps checking, and
+on recovery RESTORES the row to exactly what the boot wrote (saved before the
+first deaf mark). The same loop also catches a body that goes deaf LATER -- a
+broker outage or dropped session hours in -- which a boot-window probe never
+could. Cost: one authenticated GET per interval per body.
+
+The credential it queries with is this body's own, so a refusal (HTTP 401/403)
+is itself proof the credential is dead -- one call resolves both "is my token
+good" and "did claude actually join".
 """
 import json
 import os
@@ -82,20 +90,43 @@ def presence(url, name, token):
     return classify(agents, name), None
 
 
-def say_deaf(kind, info):
-    line = "BUS-DEAF: " + REASONS.get(kind, "bus unreachable ({info})").format(
-        info=info)
+def _read_row():
+    try:
+        return open(STATUS).read()
+    except OSError:
+        return ""
+
+
+def _write_row(text):
     try:
         with open(STATUS, "w") as f:
-            f.write(line + "\n")
+            f.write(text)
     except OSError:
         pass
+
+
+def _report(line):
     try:
         with open(REPORT, "a") as f:
-            f.write("\n- bus: **" + line + "**\n")
+            f.write("\n- bus: " + line + "\n")
     except OSError:
         pass
     print("reveille: " + line, file=sys.stderr)
+
+
+def mark_deaf(kind, info):
+    line = "BUS-DEAF: " + REASONS.get(kind, "bus unreachable ({info})").format(
+        info=info)
+    _write_row(line + "\n")
+    _report("**" + line + "**")
+
+
+def mark_recovered(saved_row):
+    # Restore what the BOOT wrote -- never invent "ok": the row may have been
+    # carrying a real repo failure that deafness temporarily outranked.
+    _write_row(saved_row)
+    _report("recovered -- this body holds a live connected session again; "
+            "the status row is restored")
 
 
 def main():
@@ -106,17 +137,33 @@ def main():
         return 0  # no creds to check against; the init report already said so
 
     time.sleep(int(os.environ.get("REVEILLE_BUSDEAF_INITIAL", "45")))
-    tries = int(os.environ.get("REVEILLE_BUSDEAF_TRIES", "8"))
-    gap = int(os.environ.get("REVEILLE_BUSDEAF_GAP", "15"))
+    confirm = int(os.environ.get("REVEILLE_BUSDEAF_TRIES", "8"))
+    fail_gap = int(os.environ.get("REVEILLE_BUSDEAF_GAP", "15"))
+    ok_gap = int(os.environ.get("REVEILLE_BUSDEAF_OK_GAP", "60"))
+
+    deaf = False
+    saved_row = None      # the row as the boot wrote it, taken pre-deaf-mark
+    fails = 0
     last = ("unreachable", "no attempt made")
-    for _ in range(max(1, tries)):
+    while True:
         kind, info = presence(url, name, token)
-        last = (kind, info)
         if kind == "ok":
-            return 0  # joined and connected -- leave the row as init wrote it
-        time.sleep(gap)
-    say_deaf(*last)  # still not connected after the whole window
-    return 0
+            if deaf:
+                mark_recovered(saved_row)
+                deaf = False
+            fails = 0
+            time.sleep(ok_gap)
+            continue
+        last = (kind, info)
+        fails += 1
+        # `confirm` consecutive failures before marking: a single dropped poll
+        # during a broker restart must not flap the row.
+        if fails >= confirm and not deaf:
+            if saved_row is None:
+                saved_row = _read_row()
+            mark_deaf(*last, saved_row)
+            deaf = True
+        time.sleep(fail_gap)
 
 
 def selfcheck():
@@ -124,6 +171,9 @@ def selfcheck():
     assert classify([{"name": "a", "connected": False}], "a") == "disconnected"
     assert classify([{"name": "b", "connected": True}], "a") == "absent"
     assert classify([], "a") == "absent"
+    for kind in ("refused", "unreachable", "absent", "disconnected"):
+        assert "BUS-DEAF" not in REASONS[kind]  # the prefix is added once
+        REASONS[kind].format(info="x")          # every template must format
     print("busdeaf-probe selfcheck ok")
 
 
