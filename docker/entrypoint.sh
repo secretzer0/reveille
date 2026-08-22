@@ -218,6 +218,31 @@ mcp_force_note() {
 # may mark DEGRADED, and none of them may exit.
 
 BOOT_DEGRADED=""
+# CLAUDE IS PULLED LATEST AT EVERY BOOT -- operator rule, 2026-08-22: "when the
+# container starts, allow latest to be what is pulled." The image bakes a copy
+# only as the FALLBACK for the boot where npm is unreachable. Baking the
+# version was the defect: a rebuild froze the whole fleet at whatever npm
+# served that day, and two bodies on one tag ran two different claudes. What
+# makes ANY version safe to pull is the converged zero-prompt contract below --
+# trust, permission mode, and every known modal dismissal are forced before
+# claude launches, so a new claude boots working or the busdeaf-probe says it
+# did not. DISABLE_AUTOUPDATER stays ON: this boot-time install is the ONLY
+# updater; the mid-session rename-swap (interrupted twice on 2026-08-19,
+# bricked the binary both times) remains off. Install lands in /opt/npm, the
+# container's own layer -- never the volume, so a half-install dies with the
+# container instead of poisoning the next boot. Runs BEFORE reveille init so a
+# boot heals a bricked or stale binary before init's degraded check reads it.
+say ""
+say "## claude"
+say ""
+claude_was="$(claude --version 2>/dev/null | head -1 || true)"
+if npm install -g @anthropic-ai/claude-code@latest >/tmp/claude-boot-update.log 2>&1; then
+  say "- claude: $(claude --version 2>/dev/null | head -1) -- pulled latest at boot (image carried: ${claude_was:-none})"
+else
+  note "- claude: pull of latest **FAILED** -- running the image-baked ${claude_was:-none}. npm said:"
+  tail -5 /tmp/claude-boot-update.log 2>/dev/null | sed 's/^/      /' >> "$BOOT_REPORT" || true
+fi
+
 # Its own heading: these lines are the REGISTRATION story, and they used to
 # print under "## plugins" while "## repo" stood empty two sections up --
 # an empty heading reads as MISSING to exactly the reader the preamble

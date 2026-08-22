@@ -508,6 +508,12 @@ def test_entrypoint_converges_the_zero_prompt_contract_and_probes_the_bus():
     assert "busdeaf-probe &" in text, "the bus-deaf probe is not forked"
     assert text.index("busdeaf-probe &") < text.index("tmux new-session"), (
         "the probe must fork before the launch, or the interactive exec eats it")
+    # Operator rule: claude is pulled LATEST at boot; the image copy is only
+    # the fallback. The pull must precede the launch, or the session runs the
+    # rebuild-day snapshot forever.
+    pull = "npm install -g @anthropic-ai/claude-code@latest"
+    assert pull in text, "the boot-time claude pull is gone"
+    assert text.index(pull) < text.index("tmux new-session")
 
 
 def test_claude_env_name_by_prefix():
@@ -1931,8 +1937,13 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.33", (
+    assert tag == "reveille-agent:0.2.34", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.34 PULLS CLAUDE LATEST AT BOOT (operator rule, superseding the
+    # image-pin doctrine): the baked copy is only the npm-unreachable fallback,
+    # so two 0.2.34 bodies may legitimately run different claudes -- the
+    # converged zero-prompt contract, not a frozen version, is what keeps a
+    # new claude safe.
     # 0.2.33 SILENCES THE AUTO-DEFAULT NUDGE: 2.1.237+ shows a modal offering
     # auto mode as the default even after the old dismissal keys were seeded --
     # the client reset them to re-ask. hasSeenAutoDefaultNudge converges, found
@@ -1971,7 +1982,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/busdeaf-probe", "docker/entrypoint.sh",
                 "docker/tmux.conf", "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "651a4e90e4848706bc4bfaa6a221cf7c792606aaf2214ad7e50787b32143843b"
+IMAGE_INPUT_SHA = "e219fc7be02dec4d8d2555454894f05d725b3c242e99b081c5d173fe14a2f891"
 
 
 def _image_input_sha(root):
