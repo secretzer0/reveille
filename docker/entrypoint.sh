@@ -112,8 +112,8 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
 else
   say "- github token: absent (private clones and pushes will not authenticate)"
 fi
-if [ -f /run/reveille-auth/.credentials.json ]; then
-  say "- claude login: copied from the user's shared login home"
+if [ -n "${REVEILLE_CRED_REPORT:-}" ]; then
+  say "$REVEILLE_CRED_REPORT"
 elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   say "- claude credential: from the environment"
 else
@@ -526,19 +526,11 @@ patch(home / ".claude" / "settings.json",
                                     "command": "/usr/local/bin/agent-stop-hook"}]}]}})
 PY
 
-# home-login mode (launcher mounts the user's login home read-only at
-# /run/reveille-auth): COPY the credentials file into this agent's own home,
-# OVERWRITING, on every boot. Overwrite is the point -- the user's login home
-# is the authority for WHICH account pays, and the operator's account-rotation
-# workflow is "re-login once, restart the agents"; a setdefault here would pin
-# every agent to whichever account it first booted under. Everything else in
-# ~/.claude stays this agent's own: the login is the ONLY shared thing, by
-# copy, never by shared mount -- agents sharing a home have been observed
-# bleeding identity into each other, which the hive exists to prevent.
-if [ -f /run/reveille-auth/.credentials.json ]; then
-  install -m 600 /run/reveille-auth/.credentials.json \
-    /home/agent/.claude/.credentials.json
-fi
+# home-login credential: the LAUNCHER places it into this agent's own home
+# host-side before the container runs (sync_agent_credential), choosing the
+# better of the agent's own credential and the shared login seed so a restart
+# or roll never overwrites a freshly-rotated one with a stale seed. There is no
+# boot-time copy and no shared mount here any more.
 
 # Git identity and credentials are wired ABOVE the clone -- see that block for
 # why the order IS the fix. Nothing git-related belongs down here any more.

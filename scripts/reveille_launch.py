@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.29")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.30")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -211,7 +211,7 @@ def user_auth_root(user, base=None):
     return os.path.join(base or DEFAULT_DATA, user, "claude-auth")
 
 
-def no_login_refusal(user):
+def no_login_refusal(user, expired_at=None):
     """THE REFUSAL NAMES THE REACHABLE DOOR, AND ONLY THAT DOOR. This text
     renders verbatim in the web UI's create-agent dialog, whose reader is a
     REMOTE user: the Account tab is one click away and the launcher host is
@@ -225,24 +225,29 @@ def no_login_refusal(user):
     screenshot): it began "claude_mode=home-login but ..." -- an internal config
     key naming a state the reader never set, standing in front of the only two
     sentences that tell them what to do. The audience is a remote human in a
-    dialog, not the person who wrote the launcher."""
-    return (f"{user} has no Claude login on file. Log in once -- open the "
-            f"Account tab at the top of this page and use its Claude login -- "
-            f"and every agent copies it at boot.")
+    dialog, not the person who wrote the launcher.
+
+    TWO STATES, TWO SENTENCES (architect note on the expiry predicate): with no
+    login on file the reader is told they have none; with a login that EXPIRED,
+    telling them they have none is wrong -- expired_at (a UTC string) names the
+    expiry instead. Same door, different diagnosis, one function."""
+    door = ("Log in once -- open the Account tab at the top of this page and "
+            "use its Claude login -- and every agent copies it at boot.")
+    if expired_at:
+        return f"{user}'s Claude login expired at {expired_at}. {door}"
+    return f"{user} has no Claude login on file. {door}"
 
 
 def docker_run_argv(user, agent, image, network, quotas,
-                    boot_cmd=None, data_base=None, extra_env=(),
-                    auth_mount=None):
+                    boot_cmd=None, data_base=None, extra_env=()):
     """The docker-run command as argv. `-e NAME` entries pass values BY NAME from the
     child's env, so no secret is ever a token in this list -- the test asserts exactly
     that. quotas is a resolved QUOTA_DEFAULTS-shaped dict. `--restart no` is explicit
     although it is docker's default: reboot and crash both leave the container down,
-    so 'running' always means somebody meant it (sec 7.1). auth_mount (home-login
-    mode) is the user's login home, mounted READ-ONLY at /run/reveille-auth; the
-    entrypoint copies the credentials file into the agent's own home at every
-    boot, so a restart picks up whatever account the user last logged in. Pure:
-    no env read, no side effects."""
+    so 'running' always means somebody meant it (sec 7.1). The home-login credential
+    is placed into the agent's own home host-side before the container runs
+    (sync_agent_credential) -- there is no shared-login mount and no boot-time copy.
+    Pure: no env read, no side effects."""
     root = data_root(user, agent, base=data_base)
     argv = [
         "docker", "run", "-d",
@@ -260,8 +265,6 @@ def docker_run_argv(user, agent, image, network, quotas,
         "-e", "REVEILLE_URL",
         "-e", "REVEILLE_REPO_URL",
     ]
-    if auth_mount:
-        argv += ["-v", f"{auth_mount}:/run/reveille-auth:ro"]
     for name in ENV_PASSTHROUGH_SECRET:
         argv += ["-e", name]
     # There is deliberately NO ambient-Anthropic fallback here. This function
@@ -1209,6 +1212,185 @@ def _own_agent_dirs(root, image, subdirs=("claude", "repos")):
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
+# ---- Credential placement (home-login). The LAUNCHER, not the entrypoint,
+# decides which .credentials.json an agent boots with. The decision is a PURE
+# function; the file IO is a throwaway ROOT container, because the credential
+# files are 0600 owned by AGENT_UID and the launcher's own uid can neither read
+# nor write them. This REPLACES the entrypoint's unconditional boot-time copy,
+# whose hazard was that restarting or rolling a healthy agent overwrote its
+# freshly-rotated credential with a stale shared seed -- the auto-roll was held
+# off for exactly that. expiresAt is the 8h access token; refreshTokenExpiresAt
+# is the chain's own life. Both are proxies for liveness, never liveness
+# itself: a spent refresh token still looks alive in this JSON. ----
+
+def choose_credential(volume, shared, now_ms):
+    """PURE. `volume` and `shared` are each None (file absent or unreadable) or
+    a dict {"expiresAt": int_ms, "refreshTokenExpiresAt": int_ms}. Returns
+    {action, effective, usable, needs_login}:
+      action       place_shared | keep_volume | none -- what to do to the
+                   agent's own .credentials.json.
+      effective    the credential that will be in force, or None.
+      usable       the effective access token has not yet expired.
+      needs_login  no usable credential can be produced without a human: the
+                   effective is absent, or its refresh-token chain is itself
+                   dead (a refresh cannot revive it).
+    NEVER downgrades a live credential: a tie or a newer volume KEEPS the
+    volume, so a roll can never replace a good local credential with a worse
+    shared one. place_shared happens ONLY when the shared access token outlives
+    the volume's -- the one direction the account-rotation workflow (re-login,
+    restart) relies on."""
+    def _exp(m):
+        return m["expiresAt"] if m else -1
+    if volume is None and shared is None:
+        return {"action": "none", "effective": None,
+                "usable": False, "needs_login": True}
+    if shared is not None and _exp(shared) > _exp(volume):
+        action, effective = "place_shared", shared
+    else:
+        action, effective = "keep_volume", volume
+    usable = effective is not None and now_ms < effective["expiresAt"]
+    rte = (effective or {}).get("refreshTokenExpiresAt")
+    chain_dead = bool(rte) and now_ms >= rte
+    needs_login = effective is None or chain_dead
+    return {"action": action, "effective": effective,
+            "usable": usable, "needs_login": needs_login}
+
+
+# Prints two integers per file (access expiry, refresh-token expiry) or `absent`
+# -- never any secret value. Runs inside the throwaway root container.
+_CRED_READ_PY = (
+    "import json\n"
+    "def m(p):\n"
+    " try:\n"
+    "  d=json.load(open(p))['claudeAiOauth']\n"
+    "  print(int(d['expiresAt']), int(d.get('refreshTokenExpiresAt') or 0))\n"
+    " except Exception:\n"
+    "  print('absent')\n"
+    "m('/vol/.credentials.json')\n"
+    "m('/shared/.credentials.json')\n"
+)
+
+
+def cred_read_argv(vol_dir, shared_dir, image):
+    """A throwaway ROOT container that prints the expiry metadata of the agent's
+    own credential (line 1) and the shared seed (line 2) WITHOUT emitting any
+    secret value. Root because the files are 0600/AGENT_UID; read-only mounts
+    because it only reads; only existing dirs are mounted so docker never
+    auto-creates a stray root-owned directory. Pure argv."""
+    argv = ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "python3"]
+    if vol_dir is not None:
+        argv += ["-v", f"{vol_dir}:/vol:ro"]
+    if shared_dir is not None:
+        argv += ["-v", f"{shared_dir}:/shared:ro"]
+    argv += [image, "-c", _CRED_READ_PY]
+    return argv
+
+
+def cred_place_argv(shared_dir, vol_dir, image):
+    """A throwaway ROOT container that copies the shared seed into the agent's
+    own home as 0600 owned by AGENT_UID -- the placement the entrypoint used to
+    do, moved host-side so a live local credential is never overwritten blind.
+    Root so it can chown to the image uid; cp && chmod && chown rather than
+    install(1) so it does not depend on which coreutils the image ships. Pure
+    argv; the secret is a file->file copy inside the container, never in this
+    list."""
+    return ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "sh",
+            "-v", f"{shared_dir}:/src:ro", "-v", f"{vol_dir}:/dst", image,
+            "-c",
+            "cp /src/.credentials.json /dst/.credentials.json && "
+            "chmod 600 /dst/.credentials.json && "
+            f"chown {AGENT_UID}:{AGENT_GID} /dst/.credentials.json"]
+
+
+def _parse_cred_meta(line):
+    """One line of cred_read_argv output -> meta dict or None. Pure."""
+    line = (line or "").strip()
+    if not line or line == "absent":
+        return None
+    try:
+        exp, rte = line.split()
+        return {"expiresAt": int(exp), "refreshTokenExpiresAt": int(rte)}
+    except ValueError:
+        return None
+
+
+def read_credential_metas(user, agent, image):
+    """(volume_meta, shared_meta) for this agent, each None when the file is
+    absent or unreadable. Runs cred_read_argv in a root container -- the IO
+    half; the decision half (choose_credential) is the pure one. Short-circuits
+    with no container when neither directory exists."""
+    vol_dir = os.path.join(data_root(user, agent), "claude")
+    shared_dir = user_auth_root(user)
+    have_vol = os.path.isdir(vol_dir)
+    have_shared = os.path.isdir(shared_dir)
+    if not have_vol and not have_shared:
+        return None, None
+    out = subprocess.run(
+        cred_read_argv(vol_dir if have_vol else None,
+                       shared_dir if have_shared else None, image),
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True).stdout.splitlines()
+    vol = _parse_cred_meta(out[0]) if len(out) > 0 else None
+    shared = _parse_cred_meta(out[1]) if len(out) > 1 else None
+    return vol, shared
+
+
+def credential_report_line(decision):
+    """The boot-report line for a choose_credential() result, named by the
+    EXPIRY so the report diagnoses rather than merely records. Pure."""
+    eff = decision["effective"]
+    if eff is None:
+        return "- claude credential: **MISSING** -- claude will stop at a login prompt"
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(eff["expiresAt"] / 1000))
+    if decision["usable"]:
+        return f"- claude credential: in force, expires {when}"
+    if decision["needs_login"]:
+        return (f"- claude credential: EXPIRED at {when}, refresh chain dead -- "
+                f"needs a human login")
+    return f"- claude credential: expired at {when}, heals on the next turn"
+
+
+def sync_agent_credential(user, agent, image, *, creating):
+    """Place the BETTER of (the agent's own credential, the shared login seed)
+    into the agent's home, host-side, before the container runs -- the single
+    expiry-aware place in the system, called at every container->running
+    transition for a home-login agent. `creating` gates the REFUSAL: at
+    provision an unusable effective credential raises no_login_refusal (the
+    operator is standing in the create dialog and can act); at a start or a
+    roll it NEVER refuses -- a healthy body must come up on its own live
+    credential even when the shared seed is nine hours dead. Returns the
+    boot-report line. Raises LaunchError only when creating."""
+    volume, shared = read_credential_metas(user, agent, image)
+    decision = choose_credential(volume, shared, int(time.time() * 1000))
+    if creating and (decision["effective"] is None or not decision["usable"]):
+        eff = decision["effective"]
+        when = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(eff["expiresAt"] / 1000))
+                if eff else None)
+        raise LaunchError(no_login_refusal(user, expired_at=when))
+    if decision["action"] == "place_shared":
+        subprocess.run(
+            cred_place_argv(user_auth_root(user),
+                            os.path.join(data_root(user, agent), "claude"), image),
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return credential_report_line(decision)
+
+
+def sync_before_start(user, agent):
+    """Place the better-of-two credential before a plain container start, so a
+    restarted home-login agent picks up a newer shared login without a
+    re-provision -- the behaviour the entrypoint copy used to provide on every
+    boot. Never refuses (the container already exists); a no-op for a
+    non-home-login agent or one with no container to inspect."""
+    info = _inspect_container(container_name(user, agent))
+    if info is None:
+        return
+    prof = load_profile(user)
+    creds = resolve_credentials(prof, agent, info["env"].get("REVEILLE_REPO_URL", ""))
+    _, _, kind = credential_env(creds)
+    if kind == "home-login":
+        sync_agent_credential(user, agent, info["image"], creating=False)
+
+
 def _ensure_network(net, broker_url):
     """Create the shared network if missing and pull the broker onto it, so the agent
     can resolve it by DNS. Both are idempotent -- create/connect on an existing
@@ -1288,20 +1470,12 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     prof = load_profile(user)
     creds = resolve_credentials(prof, agent, repo_url)
     cred_names, cred_env, kind = credential_env(creds)
-    # No claude credential + the default boot (claude itself) = an agent that
-    # will hang at a login prompt nobody is watching -- or worse, find some
-    # ambient credential and bill it. REFUSE and name the fix. A custom
-    # boot_cmd (agent-probe, gates) runs no claude and needs no credential:
-    # the requirement follows the thing that consumes it. home-login mode has
-    # the same requirement one level up: its credential is the file in the
-    # USER's login home, checkable right here -- refuse-not-create, with the
-    # one command that fixes it named.
-    auth_mount = None
-    if kind == "home-login":
-        auth_mount = user_auth_root(user)
-        if not os.path.isfile(os.path.join(auth_mount, ".credentials.json")) \
-                and not boot_cmd:
-            raise LaunchError(no_login_refusal(user))
+    # home-login's credential is the file in the agent's OWN home; the launcher
+    # places the better of it and the shared login seed and REFUSES when neither
+    # is usable -- both done by sync_agent_credential(creating=True) below, after
+    # the data root is laid, because the placement writes into it. A custom
+    # boot_cmd (agent-probe, gates) runs no claude and needs no credential, so it
+    # neither places nor refuses.
     env = dict(
         os.environ,
         REVEILLE_AGENT_ROLE=agent,
@@ -1336,6 +1510,13 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     for sub in ("claude", "repos"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
     _own_agent_dirs(root, image)
+    if kind == "home-login" and not boot_cmd:
+        # THE single expiry-aware credential place. creating=True so an unusable
+        # effective credential refuses HERE, in the create dialog, rather than
+        # booting an agent to a login prompt nobody watches.
+        env["REVEILLE_CRED_REPORT"] = sync_agent_credential(
+            user, agent, image, creating=True)
+        extra_env.append("REVEILLE_CRED_REPORT")
 
     _ensure_network(network, broker)
     if replace:
@@ -1343,8 +1524,7 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
                           why="re-provision (--replace)")
         _docker("rm", "-f", name, check=False, capture=True)
     argv = docker_run_argv(user, agent, image, network, quotas,
-                           boot_cmd=boot_cmd, extra_env=extra_env,
-                           auth_mount=auth_mount)
+                           boot_cmd=boot_cmd, extra_env=extra_env)
     subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
     if resolve_multi_driver(prof, agent) == "on":
         # THE MARKER IS THE STATE (13443/13444, measured 13446): the writable
@@ -1574,7 +1754,6 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         raise LaunchError(
             f"no claude credential for {user}/{agent} in the profile -- the upgraded "
             f"container would boot to a login prompt nobody is watching; save one first")
-    auth_mount = user_auth_root(user) if kind == "home-login" else None
     env = dict(os.environ, REVEILLE_AGENT_ROLE=agent, REVEILLE_URL=broker,
                REVEILLE_REPO_URL=repo_url, REVEILLE_TOKEN=token,
                REVEILLE_GATE_SECRET=old["env"].get("REVEILLE_GATE_SECRET") or secrets.token_hex(32),
@@ -1587,8 +1766,15 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
     root = data_root(user, agent)
     ino_before = os.stat(root).st_ino if os.path.isdir(root) else None
     quotas = _quotas_for(conn, user)
+    if kind == "home-login" and not boot_cmd:
+        # A ROLL must NEVER downgrade a live credential: place the better of the
+        # agent's own and the shared seed, keep the agent's when it is newer.
+        # creating=False -- a healthy body comes up even if the shared seed is dead.
+        env["REVEILLE_CRED_REPORT"] = sync_agent_credential(
+            user, agent, image, creating=False)
+        extra_env.append("REVEILLE_CRED_REPORT")
     argv = docker_run_argv(user, agent, image, old["network"] or DEFAULT_NETWORK, quotas,
-                           boot_cmd=boot_cmd, extra_env=extra_env, auth_mount=auth_mount)
+                           boot_cmd=boot_cmd, extra_env=extra_env)
     record_found_state(conn, user, agent, old["running"], timeout)
     prev = f"{name}.prev"
     _docker("rm", "-f", prev, check=False, capture=True)      # a leftover from a crashed upgrade
@@ -2102,6 +2288,7 @@ def cmd_stop(a):
 
 
 def cmd_start(a):
+    sync_before_start(a.user, a.agent)
     _docker("start", container_name(a.user, a.agent))
     return 0
 
@@ -3586,6 +3773,8 @@ def build_api(auth_url):
         if verb not in ("start", "stop"):
             raise LaunchError(f"unknown verb {verb!r}")
         _known_agent(conn, p["user"], name)
+        if verb == "start":
+            sync_before_start(p["user"], name)
         _docker(verb, container_name(p["user"], name), check=False, capture=True)
         return JSONResponse({verb: name})
 
