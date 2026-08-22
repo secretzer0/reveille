@@ -497,7 +497,17 @@ patch(home / ".claude.json", {
       # (mcp.md "Trust a folder before its headersHelper runs"), so the helper
       # stopped running and the reveille MCP connect carried no auth header.
       converge={"projects": {p: {"hasTrustDialogAccepted": True}
-                             for p in ("/home/agent/repos", "/home/agent")}})
+                             for p in ("/home/agent/repos", "/home/agent")},
+                # The auto-mode-as-default OFFER (claude 2.1.237+): a modal that
+                # proposes switching bypass to auto, shown even with autoMode and
+                # autoModeOptInDismissed present -- the client RESET the old
+                # dismissal (hasResetAutoModeOptInForDefaultOffer) to re-ask.
+                # Found live on red-shirt 2026-08-22: answered "No, keep bypass
+                # permissions" once and diffed the home; this is the key the
+                # client wrote. Converged for the same reason as trust: any
+                # modal is a hang on a terminal nobody watches, and upstream
+                # has now twice invalidated a present value.
+                "hasSeenAutoDefaultNudge": True})
 # settings.json lives in the PERSISTED home. The permission MODE, the
 # bypass-prompt skip, and the Stop hook all CONVERGE -- forced on every boot,
 # never setdefault -- because each is a contract the operator sets for the

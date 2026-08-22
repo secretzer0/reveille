@@ -499,7 +499,7 @@ def test_entrypoint_converges_the_zero_prompt_contract_and_probes_the_bus():
     # (setdefault) is exactly the regression this pins. LAST occurrence: the
     # keys also appear in prose comments far above any call.
     for key in ("hasTrustDialogAccepted", "bypassPermissions",
-                "skipDangerousModePermissionPrompt"):
+                "skipDangerousModePermissionPrompt", "hasSeenAutoDefaultNudge"):
         assert key in text, f"entrypoint lost {key}"
         call = text[text.rindex("patch(", 0, text.rindex(key)):text.rindex(key)]
         assert "converge={" in call, (
@@ -1931,8 +1931,12 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.32", (
+    assert tag == "reveille-agent:0.2.33", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.33 SILENCES THE AUTO-DEFAULT NUDGE: 2.1.237+ shows a modal offering
+    # auto mode as the default even after the old dismissal keys were seeded --
+    # the client reset them to re-ask. hasSeenAutoDefaultNudge converges, found
+    # by answering the modal once on red-shirt and diffing the home.
     # 0.2.32 CONVERGES THE ZERO-PROMPT CONTRACT AND DETECTS BUS-DEAFNESS: the
     # entrypoint forces workspace trust, bypassPermissions and the bypass-prompt
     # skip on every boot (claude 2.1.238 stopped honoring a trusted PARENT for a
@@ -1967,7 +1971,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/busdeaf-probe", "docker/entrypoint.sh",
                 "docker/tmux.conf", "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "b7a06c2fedc43b76a3e6c88b681ff1a4b5c8c9a043cc00cd586d16186091b770"
+IMAGE_INPUT_SHA = "651a4e90e4848706bc4bfaa6a221cf7c792606aaf2214ad7e50787b32143843b"
 
 
 def _image_input_sha(root):
