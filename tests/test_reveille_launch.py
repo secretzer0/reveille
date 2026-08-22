@@ -216,12 +216,110 @@ def test_credential_env_home_login_passes_no_claude_env():
                               "claude_mode": "token"})[2] == "none"
 
 
-def test_auth_mount_rides_read_only_and_only_when_given():
-    argv = rl.docker_run_argv("acme", "dev", "img", "net", Q, data_base="/d",
-                              auth_mount="/d/acme/claude-auth")
-    assert "/d/acme/claude-auth:/run/reveille-auth:ro" in " ".join(argv)
-    assert ":ro" not in " ".join(
-        rl.docker_run_argv("acme", "dev", "img", "net", Q, data_base="/d"))
+def test_choose_credential_never_downgrades_a_live_local():
+    # THE live configuration on every running body today: the agent holds a
+    # good credential and the shared seed is dead. Must KEEP the local one and
+    # stay usable -- a refusal here would be strictly worse than the hazard.
+    now = 1_000_000
+    live = {"expiresAt": now + 10_000, "refreshTokenExpiresAt": now + 10**9}
+    dead = {"expiresAt": now - 10_000, "refreshTokenExpiresAt": now + 10**9}
+    d = rl.choose_credential(live, dead, now)
+    assert d["action"] == "keep_volume"
+    assert d["effective"] is live
+    assert d["usable"] is True
+    assert d["needs_login"] is False
+
+
+def test_choose_credential_places_a_newer_shared():
+    now = 1_000_000
+    older = {"expiresAt": now + 1_000, "refreshTokenExpiresAt": now + 10**9}
+    newer = {"expiresAt": now + 9_000, "refreshTokenExpiresAt": now + 10**9}
+    d = rl.choose_credential(older, newer, now)
+    assert d["action"] == "place_shared"
+    assert d["effective"] is newer
+
+
+def test_choose_credential_tie_keeps_the_volume():
+    now = 1_000_000
+    m = {"expiresAt": now + 5_000, "refreshTokenExpiresAt": now + 10**9}
+    assert rl.choose_credential(dict(m), dict(m), now)["action"] == "keep_volume"
+
+
+def test_choose_credential_missing_needs_login():
+    d = rl.choose_credential(None, None, 1_000_000)
+    assert d["action"] == "none"
+    assert d["effective"] is None
+    assert d["usable"] is False
+    assert d["needs_login"] is True
+
+
+def test_choose_credential_expired_shared_is_unusable():
+    # The before-case (the middle fixture): a present-but-expired shared
+    # credential with nothing better locally is UNUSABLE -> provision refuses.
+    # The unfixed launcher checked existence only and had no such concept.
+    now = 2_000_000
+    dead = {"expiresAt": now - 1, "refreshTokenExpiresAt": now + 10**9}
+    d = rl.choose_credential(None, dead, now)
+    assert d["action"] == "place_shared"
+    assert d["usable"] is False
+    assert d["needs_login"] is False        # chain alive -> heals if refreshable
+
+
+def test_choose_credential_dead_chain_needs_a_human():
+    now = 3_000_000
+    dead_chain = {"expiresAt": now - 1, "refreshTokenExpiresAt": now - 1}
+    d = rl.choose_credential(None, dead_chain, now)
+    assert d["usable"] is False
+    assert d["needs_login"] is True
+
+
+def test_sync_refuses_only_when_creating(monkeypatch):
+    monkeypatch.setattr(rl.time, "time", lambda: 5_000_000.0)   # now_ms = 5e9
+    now_ms = 5_000_000_000
+    dead = {"expiresAt": now_ms - 1, "refreshTokenExpiresAt": now_ms + 10**12}
+    ran = []
+    monkeypatch.setattr(rl.subprocess, "run", lambda *a, **k: ran.append(a))
+    # present-and-expired, nothing better locally -> REFUSE at create.
+    monkeypatch.setattr(rl, "read_credential_metas", lambda u, a, i: (None, dead))
+    with pytest.raises(rl.LaunchError) as e:
+        rl.sync_agent_credential("acme", "dev", "img", creating=True)
+    assert "expired at" in str(e.value)     # the login exists but expired
+    assert ran == []                        # refusal runs no place container
+    # volume good + shared dead -> START, keep local, no refusal and no place
+    # container (creating=False is the start/roll path).
+    live = {"expiresAt": now_ms + 10**9, "refreshTokenExpiresAt": now_ms + 10**12}
+    monkeypatch.setattr(rl, "read_credential_metas", lambda u, a, i: (live, dead))
+    line = rl.sync_agent_credential("acme", "dev", "img", creating=False)
+    assert ran == []                        # keep_volume ran no container
+    assert "in force" in line
+
+
+def test_cred_place_argv_is_root_and_owns_the_placed_file():
+    argv = rl.cred_place_argv("/d/acme/claude-auth", "/d/acme/dev/claude", "img:1")
+    s = " ".join(argv)
+    assert "--user 0:0" in s                        # root, to chown to image uid
+    assert "/d/acme/claude-auth:/src:ro" in s       # shared read-only
+    assert "/d/acme/dev/claude:/dst" in s
+    assert "chmod 600 /dst/.credentials.json" in s
+    assert f"chown {rl.AGENT_UID}:{rl.AGENT_GID} /dst/.credentials.json" in s
+    assert not any("sk-ant" in a for a in argv)     # no secret in argv
+
+
+def test_cred_read_argv_reads_root_and_mounts_only_what_exists():
+    both = " ".join(rl.cred_read_argv("/vol", "/shared", "img:1"))
+    assert "--user 0:0" in both and "python3" in both
+    assert "/vol:/vol:ro" in both and "/shared:/shared:ro" in both
+    only = " ".join(rl.cred_read_argv(None, "/shared", "img:1"))
+    assert "/vol:ro" not in only and "/shared:/shared:ro" in only
+
+
+def test_credential_report_line_names_the_expiry():
+    now = 1_000_000_000
+    live = rl.choose_credential(
+        {"expiresAt": now + 10**9, "refreshTokenExpiresAt": now + 10**12}, None, now)
+    assert "in force" in rl.credential_report_line(live)
+    assert "MISSING" in rl.credential_report_line(
+        rl.choose_credential(None, None, now))
 
 
 def test_login_argv_is_per_user_and_credential_free():
@@ -269,6 +367,16 @@ def test_the_no_login_refusal_names_the_reachable_door():
     assert "Account tab" in said, "the web reader's door went missing"
     assert "reveille-launch" not in said, \
         "the unreachable CLI door is being prescribed to a remote reader again"
+
+
+def test_no_login_refusal_expired_names_the_expiry_not_absence():
+    # The expiry predicate (B) also refuses when a login EXISTS but is expired;
+    # telling that reader they have no login is wrong -- name the expiry instead,
+    # same reachable door.
+    said = rl.no_login_refusal("tmelhiser", expired_at="2026-08-22T06:41:48Z")
+    assert "expired at 2026-08-22T06:41:48Z" in said
+    assert "has no Claude login" not in said
+    assert "Account tab" in said
 
 
 def test_claude_login_state_is_a_reading(tmp_path):
@@ -338,17 +446,15 @@ def test_login_bg_argv_is_scoped_and_credential_free():
     assert "Select login method" in boot and "send-keys -t login 1 Enter" in boot
 
 
-def test_entrypoint_copies_login_at_every_boot():
-    # The shipped entrypoint must copy the user's login into the agent home
-    # OVERWRITING (the account-rotation workflow is re-login + restart; a
-    # setdefault would pin agents to their first account) and must copy ONLY
-    # the credentials file -- the rest of ~/.claude stays agent-unique.
+def test_entrypoint_no_longer_copies_the_shared_login():
+    # The boot-time copy is GONE: the launcher places the credential host-side
+    # (sync_agent_credential), so the entrypoint must not copy the shared seed
+    # and must not mount it -- a re-added copy would restore the
+    # roll-overwrites-a-live-credential hazard. Grep gate, the cheap regression.
     text = (pathlib.Path(__file__).resolve().parent.parent
             / "docker" / "entrypoint.sh").read_text()
-    assert "if [ -f /run/reveille-auth/.credentials.json ]; then" in text
-    # install(1) on the ONE file: overwrite semantics, 600, never a dir copy
-    assert "install -m 600 /run/reveille-auth/.credentials.json" in text
-    assert "/home/agent/.claude/.credentials.json" in text
+    assert "install -m 600 /run/reveille-auth/.credentials.json" not in text
+    assert "/run/reveille-auth" not in text        # the mount is gone too
 
 
 def test_claude_env_name_by_prefix():
@@ -1754,7 +1860,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.29", (
+    assert tag == "reveille-agent:0.2.30", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.23 CARRIES THE R1 ENTRYPOINT (ruling 12851): reveille-waked is spawned
     # BEFORE `reveille init`, and no step in front of it may exit. 0.2.22 and
@@ -1782,7 +1888,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/entrypoint.sh", "docker/tmux.conf",
                 "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "fbcb309ef0aa388ac4fe1af9aca7d29dd9b5b88ce92b2dd4303675cf55fa6a5d"
+IMAGE_INPUT_SHA = "24d011ebf395c6c4c296acf62adf120a04344580172cc7a2e540d74dfb85f117"
 
 
 def _image_input_sha(root):

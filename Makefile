@@ -6,7 +6,7 @@ PID  := $(REPO)/reveille.pid
 # Tag-per-image-change (architect ruling, msg 8433): any Dockerfile change bumps
 # this tag in the same commit -- a fixed tag over drifting content makes
 # launcher.db image records ambiguous.
-AGENT_IMAGE ?= reveille-agent:0.2.29
+AGENT_IMAGE ?= reveille-agent:0.2.30
 
 .PHONY: help sync build test smoke daemon start stop restart status logs register unregister lint clean agent-image agent-container agent-spike server-image tts-image up down branch-orphans shots ui-drive
 
