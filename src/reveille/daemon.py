@@ -355,6 +355,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words\nof the day it changed; USAGE above is what is true now. An entry that disagrees\nwith USAGE is history, and USAGE wins -- never work a released entry backwards\ninto a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.230",
+     "0.2.230 A REFUSAL STAYS WHERE THE USER WAS LOOKING (operator GO 13727). Every\nSUCCESS state in these dialogs writes a line into its own status region; the one\nstate a user must ACT on WIPED that region and handed the sentence to a 5-second\ntoast -- 470px from the dialog on desktop, ON TOP of the form on a phone, gone\nbefore it was read, form still filled. Six handlers (agent edit, send-back,\nask-a-host, move-it-here create, create, visit-provision) now route through one\n`failIn(el,msg)`: the words stay for the eye that comes back, the toast still\nfires for the ear that is away, a retry clears the colour. The refusal's opening\nclause, `claude_mode=home-login but ...`, is gone -- an internal config key\nnaming a state the reader never set.\n\nTHE FIRST GATE PROPOSED FOR THIS WAS AN INSTANCE OF THE CLASS IT WAS GATING. A\ngrep on one spelling of the clear-then-toast line matched THREE of the six --\nmissing the edit path, whose clear and toast sit on separate lines, and two more\nusing different status variables. It would have gone GREEN over half the class\nwhile pointing at the sites named as proof. The gate that shipped is keyed on\nthe PROPERTY and ENUMERATES the class itself, printing the six line numbers when\nred; the driven scene asserts the sentence is STILL THERE at 6 seconds, which is\nthe defect rather than the string.\n\nDECLARED: EDIT FAILURES NOW BONK. That path passed info=true to toast(), which\nsuppressed the earcon -- an inconsistency, not a ruling; 11577 says a refused\ntoast bonks.\nONE DOOR DRIVEN, SIX FIXED: the browser scene exercises CREATE only; the other\nfive are held by the property test and by reading that `.pDim.err` applies to\nall six status elements. No human has seen the other five refuse.\n"),
     ("0.2.229",
      "0.2.229 THE UI DRIVER IS COMMITTED, AND IT FOUND THREE DEFECTS ON THE WAY IN\n(lesson a-harness-that-lived-in-a-session-dies-with-it). Three surfaces shipped\nlast night proven by gates and seen by nobody; the instrument that looks at them\nnow lives in the repo with make targets -- `make ui-drive` and `make shots` -- not\nin the directory it was born in. Driving it found what no gate had: the media\nmodal opened PINNED TOP-LEFT, because *{margin:0} strips the margin:auto that\ncentres a <dialog> (measured [0,0,1152,828] in a 1280x900 glass); the manager's\nagent names broke MID-WORD onto three lines; and that squeeze pushed `destroy`\n24px past the panel. All three seen red in one run on the unfixed head.\n\nTHE NAME COLUMN, TWICE. The first fix said white-space:nowrap and re-created the\noverflow the moment a real cross-owner identity hit it -- 11px past the panel,\n`destroy` clipped again -- which is why the fix that shipped DELETES a property\ninstead of adding one: the enemy was never wrapping, it was word-break:break-word\nbreaking mid-word, and an identity already carries break opportunities in its own\nhyphens. The long identity went into the FIXTURE, so the next guess costs one run\ninstead of one argument.\n\nAND scripts/mobile-shots WAS DEAD ON MAIN: run bare it raised `BusError: no such\nidentity` before a row landed, because its seed passed bare names while store.send\nhas taken principals since DES-011 s6.1(b). A committed instrument with no make\ntarget rots exactly like an uncommitted one; a browserless test now fails in CI\nwhen the corpus rots again.\n\nSTILL NOT VERIFIED BY ANY HUMAN: the pictures are the driver's, not a person's,\nand the launcher is a page.route stub in the browser -- every launcher-shaped\nassertion is about the PAGE's fetch and render, never about the launcher's\nreplies. The multi-driver LIVE FLIP still needs a real container and a second\ndriver attaching. Printed rather than gated, for the operator: on a phone,\nselecting an agent leaves the rail sheet OVER the terminal and the tab's own\ncontrols measure as covered -- the only labelled way out leaves the well.\n"),
     ("0.2.228",
@@ -3077,7 +3079,16 @@ def _usage_text(since="", budget=24000):
     # unified by budget: a big budget gets the whole titled tail, a small one
     # gets labels -- no third policy).
     best = None
-    for clip in (0, 40):
+    # THE LADDER MUST DEGRADE, AND THE LAST RUNG IS THE TIGHTEST -- not a
+    # looser one. At 153 entries the reference plus a tail clipped at 40
+    # measured 24,021 wire chars against the 24,000 default: nothing fit, and
+    # the old fallback answered with clip=45, a composition LONGER than the
+    # one that had just failed (24,774). A fallback that overshoots the rung
+    # below it is not a fallback. Each rung clips harder than the last, and
+    # only when the tightest still will not fit do we serve it anyway --
+    # marked, never silent, because the reference is never cut and no entry
+    # is ever hidden (13213).
+    for clip in (0, 40, 35):
         shown = 0
         while shown <= len(CHANGES_ENTRIES) \
                 and wire(compose(shown, clip)) <= budget:
@@ -3085,10 +3096,7 @@ def _usage_text(since="", budget=24000):
             shown += 1
         if best is not None:
             return best
-    # Even the reference + clipped tail is over budget: the reference is
-    # never cut, so serve it with the tail and let the caller's cap decide --
-    # marked, never silent.
-    return compose(0, 45)
+    return compose(0, 35)
 
 
 @mcp.tool()
