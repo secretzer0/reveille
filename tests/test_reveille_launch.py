@@ -285,24 +285,46 @@ def test_sync_refuses_only_when_creating(monkeypatch):
         rl.sync_agent_credential("acme", "dev", "img", creating=True)
     assert "expired at" in str(e.value)     # the login exists but expired
     assert ran == []                        # refusal runs no place container
-    # volume good + shared dead -> START, keep local, no refusal and no place
-    # container (creating=False is the start/roll path).
+    # volume good + shared dead -> START, keep local, no refusal. The report
+    # sidecar is still written (one container); the credential is NOT placed.
     live = {"expiresAt": now_ms + 10**9, "refreshTokenExpiresAt": now_ms + 10**12}
     monkeypatch.setattr(rl, "read_credential_metas", lambda u, a, i: (live, dead))
     line = rl.sync_agent_credential("acme", "dev", "img", creating=False)
-    assert ran == []                        # keep_volume ran no container
+    assert len(ran) == 1                     # the report sidecar is written on keep
     assert "in force" in line
 
 
-def test_cred_place_argv_is_root_and_owns_the_placed_file():
-    argv = rl.cred_place_argv("/d/acme/claude-auth", "/d/acme/dev/claude", "img:1")
-    s = " ".join(argv)
-    assert "--user 0:0" in s                        # root, to chown to image uid
-    assert "/d/acme/claude-auth:/src:ro" in s       # shared read-only
+def test_cred_apply_argv_writes_the_report_and_places_only_when_asked():
+    rpt = "- claude credential: in force, expires 2026-08-22T22:16:48Z"
+    # place=True: mounts shared, copies the credential 0600, chowns both files
+    a = rl.cred_apply_argv("/d/acme/claude-auth", "/d/acme/dev/claude", "img:1", rpt, place=True)
+    s = " ".join(a)
+    assert "--user 0:0" in s                                  # root
+    assert "/d/acme/claude-auth:/src:ro" in s                 # shared mounted to place
     assert "/d/acme/dev/claude:/dst" in s
+    assert ".reveille-cred-report" in s                       # the report FILE, never an env var
     assert "chmod 600 /dst/.credentials.json" in s
     assert f"chown {rl.AGENT_UID}:{rl.AGENT_GID} /dst/.credentials.json" in s
-    assert not any("sk-ant" in a for a in argv)     # no secret in argv
+    assert a[-1] == rpt and a[-2] == "sh"                     # report rides as $1
+    assert rpt not in " ".join(a[:-1])                        # ...not baked into the cmd
+    # place=False: writes the report only -- no shared mount, no credential copy
+    b = rl.cred_apply_argv("/d/acme/claude-auth", "/d/acme/dev/claude", "img:1", rpt, place=False)
+    sb = " ".join(b)
+    assert ".reveille-cred-report" in sb
+    assert "/src:ro" not in sb                                # no shared mount when keeping
+    assert "/dst/.credentials.json" not in sb                 # no credential copy
+
+
+def test_carried_env_diff_ignores_the_cred_report_var():
+    # THE tombstone-incident regression: a boot-report var in the REVEILLE_
+    # namespace must NOT count as carried identity, or every home-login roll
+    # fails the same-agent check and rolls back onto the old boot-time copy.
+    old = {"REVEILLE_TOKEN": "t", "REVEILLE_AGENT_ROLE": "dev"}
+    new = dict(old, REVEILLE_CRED_REPORT="- claude credential: in force, expires X")
+    assert rl.carried_env_diff(old, new) == []                # the report is not carried
+    # a real identity change is still caught
+    assert rl.carried_env_diff(old, {"REVEILLE_TOKEN": "t2",
+                                     "REVEILLE_AGENT_ROLE": "dev"}) == ["REVEILLE_TOKEN"]
 
 
 def test_cred_read_argv_reads_root_and_mounts_only_what_exists():
@@ -446,15 +468,16 @@ def test_login_bg_argv_is_scoped_and_credential_free():
     assert "Select login method" in boot and "send-keys -t login 1 Enter" in boot
 
 
-def test_entrypoint_no_longer_copies_the_shared_login():
-    # The boot-time copy is GONE: the launcher places the credential host-side
-    # (sync_agent_credential), so the entrypoint must not copy the shared seed
-    # and must not mount it -- a re-added copy would restore the
-    # roll-overwrites-a-live-credential hazard. Grep gate, the cheap regression.
+def test_entrypoint_reads_the_report_file_not_an_env_var():
+    # The boot-time copy is GONE and the boot report is a FILE, not a REVEILLE_
+    # env var -- a var there joins the carried-env contract and breaks every roll
+    # (the tombstone incident). The entrypoint cats ~/.claude/.reveille-cred-report.
     text = (pathlib.Path(__file__).resolve().parent.parent
             / "docker" / "entrypoint.sh").read_text()
     assert "install -m 600 /run/reveille-auth/.credentials.json" not in text
     assert "/run/reveille-auth" not in text        # the mount is gone too
+    assert "REVEILLE_CRED_REPORT" not in text      # never an env var again
+    assert ".reveille-cred-report" in text         # the report file is cat'd
 
 
 def test_claude_env_name_by_prefix():
@@ -1860,7 +1883,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.30", (
+    assert tag == "reveille-agent:0.2.31", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.23 CARRIES THE R1 ENTRYPOINT (ruling 12851): reveille-waked is spawned
     # BEFORE `reveille init`, and no step in front of it may exit. 0.2.22 and
@@ -1888,7 +1911,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/entrypoint.sh", "docker/tmux.conf",
                 "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "24d011ebf395c6c4c296acf62adf120a04344580172cc7a2e540d74dfb85f117"
+IMAGE_INPUT_SHA = "e18b1fa246bd8754adfa386769e50520a79ad80d9b8a81f24ed45c7d517de154"
 
 
 def _image_input_sha(root):
