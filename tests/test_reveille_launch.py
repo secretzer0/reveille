@@ -480,6 +480,36 @@ def test_entrypoint_reads_the_report_file_not_an_env_var():
     assert ".reveille-cred-report" in text         # the report file is cat'd
 
 
+def test_entrypoint_converges_the_zero_prompt_contract_and_probes_the_bus():
+    # THE 2.1.240 BUS-DEAF INCIDENT, ASSERTED AS SHAPE. reveille init writes
+    # projects["/home/agent/repos"] with hasTrustDialogAccepted already False, so
+    # a setdefault-seeded trust could never repair it; claude 2.1.238 stopped
+    # honoring a trusted PARENT for a local-scope headersHelper, so the reveille
+    # MCP connect carried no auth and join() said "missing token" on a body that
+    # was otherwise a live Max session. The operator's standing rule (2026-08-22):
+    # every container reboots wide open and prompt-free, checked and set right
+    # BEFORE claude launches. So the trust key, the permission mode and the
+    # bypass-prompt skip must all sit in a converge= block -- forced, never
+    # setdefault -- and the busdeaf-probe must be forked so a body that STILL
+    # cannot join says so instead of showing as running.
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "docker" / "entrypoint.sh").read_text()
+    # Every zero-prompt key appears after "converge={" in its patch() call --
+    # position in the CALL is the contract, and a drift back to the updates arg
+    # (setdefault) is exactly the regression this pins. LAST occurrence: the
+    # keys also appear in prose comments far above any call.
+    for key in ("hasTrustDialogAccepted", "bypassPermissions",
+                "skipDangerousModePermissionPrompt"):
+        assert key in text, f"entrypoint lost {key}"
+        call = text[text.rindex("patch(", 0, text.rindex(key)):text.rindex(key)]
+        assert "converge={" in call, (
+            f"{key} must be in a converge= block: present-but-wrong is the "
+            "silent-fatal case setdefault cannot repair")
+    assert "busdeaf-probe &" in text, "the bus-deaf probe is not forked"
+    assert text.index("busdeaf-probe &") < text.index("tmux new-session"), (
+        "the probe must fork before the launch, or the interactive exec eats it")
+
+
 def test_claude_env_name_by_prefix():
     # sec 3: one field, two credential kinds, told apart by prefix.
     assert rl.claude_env_name("sk-ant-api03-xyz") == "ANTHROPIC_API_KEY"
@@ -1077,6 +1107,24 @@ def test_lifecycle_state_names_all_four_and_erased_is_recoverable():
     assert rl.lifecycle_state("absent", False,
                               {"messages": 0, "memories": 0,
                                "lessons": 0}) == "unknown"
+
+
+def test_lifecycle_state_says_deaf_when_the_body_cannot_reach_the_bus():
+    # Architect req 13797: a body that is UP, healthy to docker, running a real
+    # claude session and unable to reach the bus must SAY SO where a human
+    # looks. red-shirt sat exactly like that for an hour on 2.1.240 -- every
+    # control green -- and only a screenshot found it. busdeaf-probe writes the
+    # BUS-DEAF row; this asserts the Agents list reads it as deaf, that deaf
+    # outranks a repo failure (both can be true; deaf is the one that costs the
+    # fleet), and that a stopped container is never called deaf -- stopped
+    # bodies are EXPECTED off the bus.
+    hive = {"messages": 1, "memories": 0, "lessons": 0}
+    deaf = "BUS-DEAF: claude booted but never joined the bus"
+    assert rl.lifecycle_state("running", True, hive, repo=deaf) == "deaf"
+    assert rl.lifecycle_state("running", True, hive,
+                              repo="failed: clone refused") == "degraded"
+    assert rl.lifecycle_state("running", True, hive, repo="ok") == "running"
+    assert rl.lifecycle_state("exited", True, hive, repo=deaf) == "stopped"
 
 
 # ---- reconfig 2: edit in place ------------------------------------------
@@ -1883,8 +1931,16 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.31", (
+    assert tag == "reveille-agent:0.2.32", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.32 CONVERGES THE ZERO-PROMPT CONTRACT AND DETECTS BUS-DEAFNESS: the
+    # entrypoint forces workspace trust, bypassPermissions and the bypass-prompt
+    # skip on every boot (claude 2.1.238 stopped honoring a trusted PARENT for a
+    # local-scope headersHelper, so 0.2.31 bodies connected the reveille MCP
+    # without auth and joined nothing), and ships busdeaf-probe, which writes
+    # BUS-DEAF into the status row when claude never reaches the bus. The two
+    # images differ in whether a rolled body can join at all -- exactly what a
+    # shared tag must never hide.
     # 0.2.23 CARRIES THE R1 ENTRYPOINT (ruling 12851): reveille-waked is spawned
     # BEFORE `reveille init`, and no step in front of it may exit. 0.2.22 and
     # earlier crash-loop on a superseded credential and never start the daemon
@@ -1909,9 +1965,9 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 # reason. Same shape as the URL-interpolation set gate: pin the whole set by
 # content, and a change anywhere in it forces the arithmetic into the open.
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
-                "docker/entrypoint.sh", "docker/tmux.conf",
-                "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "e18b1fa246bd8754adfa386769e50520a79ad80d9b8a81f24ed45c7d517de154"
+                "docker/busdeaf-probe", "docker/entrypoint.sh",
+                "docker/tmux.conf", "src/reveille/agent-stop-hook")
+IMAGE_INPUT_SHA = "b7a06c2fedc43b76a3e6c88b681ff1a4b5c8c9a043cc00cd586d16186091b770"
 
 
 def _image_input_sha(root):

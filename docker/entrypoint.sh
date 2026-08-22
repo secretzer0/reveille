@@ -487,42 +487,39 @@ patch(home / ".claude.json", {
     "theme": "dark",
     "autoMode": True,
     "autoModeOptInDismissed": True,
-    # The cwd's trust dialog is the same class of hang, one step later.
-    "projects": {p: {"hasTrustDialogAccepted": True}
-                 for p in ("/home/agent/repos", "/home/agent")},
-})
-# settings.json lives in the PERSISTED home, so this must never clobber: same
-# setdefault discipline, and the agent may edit it freely afterwards.
+},
+      # Workspace trust CONVERGES -- it is a bus-reachability contract, and
+      # present-but-False is the silent-fatal case converge exists for (red-shirt
+      # 2.1.240). reveille init writes projects["/home/agent/repos"] first with
+      # the key already False, so a setdefault refused to change it; through claude
+      # 2.1.237 the sibling /home/agent (a trusted parent) still ran the local
+      # headersHelper, but claude 2.1.238 counts only the exact started folder
+      # (mcp.md "Trust a folder before its headersHelper runs"), so the helper
+      # stopped running and the reveille MCP connect carried no auth header.
+      converge={"projects": {p: {"hasTrustDialogAccepted": True}
+                             for p in ("/home/agent/repos", "/home/agent")}})
+# settings.json lives in the PERSISTED home. The permission MODE, the
+# bypass-prompt skip, and the Stop hook all CONVERGE -- forced on every boot,
+# never setdefault -- because each is a contract the operator sets for the
+# containers they own and a present-but-wrong value is silently fatal. A body
+# that boots into a permission modal, or unarmed, is a body nobody is watching
+# that never reaches the bus (reveille-senior-ui-ux ended a turn unarmed during
+# a broker blackout and sat deaf for 21 HOURS with 44 rings in its spool, on a
+# bus healthy again after minutes -- msg 8573). What justifies forcing them is
+# the container itself: own fs, own data root, cpu/memory/pid caps, and NO
+# docker socket (that stays with the launcher), so the isolation the prompt asks
+# about is the thing the agent is already inside. The operator's standing rule
+# is that every container reboots wide open and prompt-free, checked and set
+# right BEFORE claude launches -- so the agent's own edits do not win here.
 #
-# skipDangerousModePermissionPrompt is Claude Code's OWN record of the bypass
-# acknowledgement -- it is what the CLI writes here when a human accepts the
-# warning, found by accepting it once and diffing the home. Seeding it is the
-# operator declaring that acceptance for containers they own, once, instead of
-# per agent: without it every new agent boots into a modal nobody is watching
-# and never reaches the bus. What justifies it is the container itself -- own
-# fs, own data root, cpu/memory/pid caps, and NO docker socket (that stays with
-# the launcher), so the sandbox the warning asks for is the thing the agent is
-# already inside.
-#
-# THE STOP HOOK IS THE WATCHER BACKSTOP, and containers were shipping without
-# it: the image seeded permissions and onboarding but never the hook, so nothing
-# ever blocked a containerised agent's stop to say "you are not armed". Host
-# agents had that backstop from `make register` / join-here; container agents had
-# only their own discipline, and discipline does not survive an outage --
-# reveille-senior-ui-ux ended a turn unarmed during a broker blackout and sat
-# deaf for 21 HOURS with 44 rings in its spool, on a bus that was healthy again
-# after the first few minutes (msg 8573). The hook needs no bus to run and is
-# most needed when there is none.
-#
-# The Stop hook CONVERGES while everything else setdefaults, and the asymmetry
-# is the design (ruling 9094): permissions and the bypass acknowledgement are
-# the agent's to change, so present wins; the Stop hook decides whether this
-# agent can be WOKEN, so present-but-wrong must lose. hooks.Stop is replaced
-# whole -- other hooks the agent added ride along untouched.
-patch(home / ".claude" / "settings.json",
-      {"permissions": {"defaultMode": "bypassPermissions"},
-       "skipDangerousModePermissionPrompt": True},
-      converge={"hooks": {"Stop": [{"hooks": [{"type": "command",
+# Only these keys are forced. permissions.allow is left to MERGE, so reveille
+# init and the agent keep adding tool rules; in this mode the allow list is moot
+# anyway. hooks.Stop is replaced whole -- other hooks the agent added ride along
+# untouched. This block is the watcher backstop the image once shipped without.
+patch(home / ".claude" / "settings.json", {},
+      converge={"permissions": {"defaultMode": "bypassPermissions"},
+                "skipDangerousModePermissionPrompt": True,
+                "hooks": {"Stop": [{"hooks": [{"type": "command",
                                     "command": "/usr/local/bin/agent-stop-hook"}]}]}})
 PY
 
@@ -604,6 +601,14 @@ umask 022
   done ) &
 
 echo "reveille: ${REVEILLE_AGENT_ROLE} -> ${REVEILLE_URL} (tmux: agent, ttyd: ${REVEILLE_TTYD_PORT:-7681})"
+
+# BUS-DEAF DETECTION (architect req 13797): a body can be UP and claude-alive yet
+# never reach the bus -- red-shirt sat deaf for an hour and only a screenshot
+# found it. This backgrounded probe waits for claude's startup join(), then asks
+# the broker whether this body holds a live session; if not, it writes BUS-DEAF
+# into .reveille-repo-status so the Agents row reads deaf instead of running.
+# Forked HERE, before the launch, so it survives the interactive `exec tmux`.
+busdeaf-probe &
 
 if [ -t 0 ]; then
   # Interactive run: the operator lands straight in the session (created if

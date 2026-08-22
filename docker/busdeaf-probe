@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Say so, where a human looks, when this body cannot reach the bus.
+
+The worst failure a container has is the quiet one: UP, healthy to docker,
+running a real claude session, and silently unreachable. red-shirt sat exactly
+like that for an hour on 2.1.240 -- claude-alive, bus-deaf -- and only a
+screenshot found it. The trust converge in entrypoint.sh fixes the 2.1.240
+cause; this fixes the CLASS, because the next upstream change can break the MCP
+connect again in a way no seeded key anticipates.
+
+So this checks the END STATE rather than any one cause: after claude has had
+time to boot and run its startup join(), it asks the broker whether THIS body
+holds a live, connected session. Absent or disconnected -> the body is deaf, and
+that fact is written where the Agents list reads the row (.reveille-repo-status,
+the same file a degraded boot writes) instead of the row showing "running". A
+dead credential, a broker outage, and a client that connected without auth all
+land here the same way -- the probe never has to know which.
+
+The credential the probe queries with is this body's own, so a refusal (HTTP
+401/403) is itself proof the credential is dead -- one call resolves both "is my
+token good" and "did claude actually join".
+"""
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+STATUS = os.path.expanduser("~/.claude/.reveille-repo-status")
+REPORT = os.path.expanduser("~/.claude/boot-report.md")
+
+
+def classify(agents, name):
+    """Pure: what the /presence roster says about THIS body. 'ok' only when the
+    body has a live, connected session; everything else is a way of being deaf.
+    """
+    me = next((a for a in agents if a.get("name") == name), None)
+    if me is None:
+        return "absent"
+    return "ok" if me.get("connected") else "disconnected"
+
+
+REASONS = {
+    "refused": "broker refused this body's credential (HTTP {info}) -- it is "
+               "superseded or revoked; re-provision this container",
+    "unreachable": "broker did not answer ({info}) -- the body cannot reach "
+                   "the bus",
+    "absent": "claude booted but never joined the bus -- no session for this "
+              "body; see boot-report.md",
+    "disconnected": "claude booted but its bus session is not connected -- the "
+                    "MCP client reached the broker without auth, or dropped",
+}
+
+
+def read_token():
+    """The token claude authenticates with. Env at a fresh boot; fall back to
+    the settings.local.json the headersHelper reads, in case they drift."""
+    tok = os.environ.get("REVEILLE_TOKEN") or ""
+    if tok:
+        return tok
+    try:
+        d = json.loads(open(os.path.expanduser(
+            "~/repos/.claude/settings.local.json")).read())
+        return (d.get("env") or {}).get("REVEILLE_TOKEN") or ""
+    except (OSError, ValueError):
+        return ""
+
+
+def presence(url, name, token):
+    """('ok'|'absent'|'disconnected'|'refused'|'unreachable', info)."""
+    req = urllib.request.Request(
+        url.rstrip("/") + "/presence",
+        headers={"Authorization": "Bearer " + token, "X-Agent": name})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            agents = json.loads(r.read().decode()).get("agents", [])
+    except urllib.error.HTTPError as e:
+        return "refused", e.code
+    except Exception as e:  # noqa: BLE001 -- any reach failure is 'unreachable'
+        return "unreachable", str(e)
+    return classify(agents, name), None
+
+
+def say_deaf(kind, info):
+    line = "BUS-DEAF: " + REASONS.get(kind, "bus unreachable ({info})").format(
+        info=info)
+    try:
+        with open(STATUS, "w") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    try:
+        with open(REPORT, "a") as f:
+            f.write("\n- bus: **" + line + "**\n")
+    except OSError:
+        pass
+    print("reveille: " + line, file=sys.stderr)
+
+
+def main():
+    url = os.environ.get("REVEILLE_URL") or ""
+    name = os.environ.get("REVEILLE_AGENT_ROLE") or ""
+    token = read_token()
+    if not (url and name and token):
+        return 0  # no creds to check against; the init report already said so
+
+    time.sleep(int(os.environ.get("REVEILLE_BUSDEAF_INITIAL", "45")))
+    tries = int(os.environ.get("REVEILLE_BUSDEAF_TRIES", "8"))
+    gap = int(os.environ.get("REVEILLE_BUSDEAF_GAP", "15"))
+    last = ("unreachable", "no attempt made")
+    for _ in range(max(1, tries)):
+        kind, info = presence(url, name, token)
+        last = (kind, info)
+        if kind == "ok":
+            return 0  # joined and connected -- leave the row as init wrote it
+        time.sleep(gap)
+    say_deaf(*last)  # still not connected after the whole window
+    return 0
+
+
+def selfcheck():
+    assert classify([{"name": "a", "connected": True}], "a") == "ok"
+    assert classify([{"name": "a", "connected": False}], "a") == "disconnected"
+    assert classify([{"name": "b", "connected": True}], "a") == "absent"
+    assert classify([], "a") == "absent"
+    print("busdeaf-probe selfcheck ok")
+
+
+if __name__ == "__main__":
+    if "--selfcheck" in sys.argv:
+        selfcheck()
+    else:
+        sys.exit(main())
