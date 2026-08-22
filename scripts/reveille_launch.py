@@ -219,10 +219,16 @@ def no_login_refusal(user):
     that does not exist for the person reading (operator ruling, 2026-08-13 --
     the first fix named both and the second half was noise). A function rather
     than an inline f-string so the gate asserts over the SENTENCE THE USER
-    READS, not over source bytes a line wrap can split mid-phrase."""
-    return (f"claude_mode=home-login but {user} has no login on file. Log in "
-            f"once -- open the Account tab at the top of this page and use "
-            f"its Claude login -- and every agent copies it at boot.")
+    READS, not over source bytes a line wrap can split mid-phrase.
+
+    THE OPENING CLAUSE WAS JARGON AND IS GONE (architect 13715, from a driven
+    screenshot): it began "claude_mode=home-login but ..." -- an internal config
+    key naming a state the reader never set, standing in front of the only two
+    sentences that tell them what to do. The audience is a remote human in a
+    dialog, not the person who wrote the launcher."""
+    return (f"{user} has no Claude login on file. Log in once -- open the "
+            f"Account tab at the top of this page and use its Claude login -- "
+            f"and every agent copies it at boot.")
 
 
 def docker_run_argv(user, agent, image, network, quotas,

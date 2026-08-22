@@ -1207,6 +1207,21 @@ function toast(msg,info){
  $('toasts').appendChild(t);
  setTimeout(()=>t.remove(),5000);
 }
+// A REFUSAL STAYS WHERE THE USER WAS LOOKING (operator GO 13727; driven evidence
+// 13709). Every SUCCESS state in these dialogs writes a line into its status
+// region -- "provisioning...", "LIVE: <name> is on the bus." -- and the one state
+// the user must ACT on used to WIPE that region and hand the sentence to a 5 s
+// toast: 470 px from the dialog on desktop, ON TOP of the form on a phone, and
+// gone before it is read. The toast STAYS, because its BONK earcon is a ratified
+// contract (11577) and an ear elsewhere still needs it; the region keeps the
+// words for the eye that comes back. Six handlers route through here so the
+// class cannot drift back one dialog at a time.
+function failIn(el,msg){
+ const t=(msg&&msg.message)||String(msg||'something went wrong');
+ if(el){el.textContent=t;el.classList.add('err');}
+ toast(t);
+ return t;
+}
 function showDialog(title,msg,readers){
  $('dlgTitle').textContent=title;
  $('dlgBody').innerHTML='';
@@ -3338,6 +3353,7 @@ function renderEdit(){
  box.querySelector('[data-agedno]').onclick=closeAgDlg;
  box.querySelector('[data-agedapply]').onclick=async function(){
   const b=this,st=box.querySelector('[data-agedstatus]');
+  if(st)st.classList.remove('err');       // a retry must not stay red
   const q=s=>box.querySelector(s);
   const body={
    repo_url:q('[data-agedrepo]').value.trim(),
@@ -3362,8 +3378,7 @@ function renderEdit(){
    refreshAgents();
   }catch(e){
    b.disabled=false;
-   st.textContent='';
-   toast('edit failed: '+(e.message||e),true);
+   failIn(st,'edit failed: '+(e.message||e));
   }
  };
 }
@@ -3620,7 +3635,7 @@ async function openSendBack(name,knock){
    toast(name+' may come back for the next 5 minutes -- it lands when that '+
     'machine takes a turn and joins',true);
    refreshAgents();
-  }catch(e){$('sbStatus').textContent='';toast(e.message);}
+  }catch(e){failIn($('sbStatus'),e);}
  };
 }
 
@@ -3662,7 +3677,7 @@ async function openSendTo(name){
     host_machine:$('stMachine').value.trim(),coordinate:$('stCoord').value.trim()})});
    closeAgDlg();
    toast('asked '+host+' -- nothing is minted until they accept; watch the Visits tab',true);
-  }catch(e){$('stStatus').textContent='';toast(e.message);}
+  }catch(e){failIn($('stStatus'),e);}
  };
 }
 
@@ -3785,6 +3800,7 @@ async function openMaterialize(name){
    await lapi('/agents',{method:'POST',body:JSON.stringify({
     agent:name,rooms:picked,role:$('agmRole').value||hadRole,
     repo_url:$('agmRepo').value.trim()})});
+   st.classList.remove('err');
    st.textContent='container up; waiting for it to reach the bus...';
    for(let i=0;i<60;i++){
     await new Promise(r=>setTimeout(r,2000));
@@ -3794,7 +3810,7 @@ async function openMaterialize(name){
    }
    st.textContent='container is up but not live yet -- check its logs.';
    refreshAgents();
-  }catch(e){st.textContent='';toast(e.message);}
+  }catch(e){failIn(st,e);}
  };
 }
 // Creation is a page-level action and it has ONE entry point: the rail's
@@ -3845,7 +3861,7 @@ async function openCreate(name){
    .map(c=>c.value);
   const n=$('agName').value.trim();
   try{
-   st.textContent='provisioning...';
+   st.classList.remove('err');st.textContent='provisioning...';
    await lapi('/agents',{method:'POST',body:JSON.stringify({
     agent:n,rooms:picked,create:true,role:$('agRole').value,
     append:$('agAppend').value.trim(),
@@ -3860,7 +3876,7 @@ async function openCreate(name){
    }
    st.textContent='container is up but not live yet -- check its logs.';
    refreshAgents();
-  }catch(e){st.textContent='';toast(e.message);}
+  }catch(e){failIn(st,e);}
  };
 }
 // start/stop from the tab. The tab was showing a state that just changed, so
@@ -4669,13 +4685,13 @@ async function openVisits(){
  const prov=$('vProv');
  if(prov)prov.onclick=async()=>{
   const v=visitMinted, st=$('vProvSt');
-  st.textContent='provisioning...';
+  st.classList.remove('err');st.textContent='provisioning...';
   try{await lapi('/agents',{method:'POST',body:JSON.stringify({
     agent:v.owner+'-'+v.agent,token:v.secret,repo_url:''})});
    visitMinted=null;
    toast('container up -- the visit stamps ARRIVED when the agent reaches the bus',true);
    openVisits();
-  }catch(e){st.textContent='';toast(e.message);}
+  }catch(e){failIn(st,e);}
  };
  $('vAsk').onclick=async()=>{
   const picked=[...document.querySelectorAll('#vRooms input:checked')]
