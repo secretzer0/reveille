@@ -1,5 +1,9 @@
-"""The entrypoint's Stop hook converges on correctness; everything else keeps
-the agent's choice (ruling 9094, the install.py lesson one boot path over).
+"""The entrypoint's reachability contracts converge on correctness; everything
+else keeps the agent's choice (ruling 9094, the install.py lesson one boot path
+over). The contract set GREW on 2026-08-22: the operator ruled that every
+container reboots wide open and prompt-free -- permission mode and the
+bypass-prompt skip joined the Stop hook in the converge= block after the
+2.1.240 bus-deaf incident, where a present-but-wrong value cost a body the bus.
 
 The defect: patch() setdefault-merged the whole file, and hooks -> Stop is a
 LIST, so a persisted ~/.claude/settings.json carrying a wrong-but-present Stop
@@ -68,15 +72,26 @@ def test_fresh_home_gets_the_hook(tmp_path):
     assert _stop_command(out) == HOOK
 
 
-def test_the_agents_own_choices_survive(tmp_path):
-    # The asymmetry is the design: permissions are the agent's to change, so
-    # present WINS there while the Stop hook converges in the same boot.
-    _seed(tmp_path, {"permissions": {"defaultMode": "plan"},
+def test_the_zero_prompt_contract_is_forced_and_other_choices_survive(tmp_path):
+    # Operator rule 2026-08-22: the permission MODE is not the agent's to keep
+    # any more -- a body that boots into any prompt is a body nobody is watching
+    # that never reaches the bus. An agent that switched itself to plan mode is
+    # put back on every boot. Its OTHER keys -- allow rules it accumulated, a
+    # model choice -- are still its own: converge recurses dicts, so siblings
+    # of the forced keys ride along untouched.
+    _seed(tmp_path, {"permissions": {"defaultMode": "plan",
+                                     "allow": ["Bash(make test)"]},
+                     "model": "opus",
                      "hooks": {"Stop": [{"hooks": [
                          {"type": "command", "command": STALE}]}]}})
     out = boot(tmp_path)
-    assert out["permissions"]["defaultMode"] == "plan", (
-        "converge leaked past hooks.Stop and clobbered an agent choice")
+    assert out["permissions"]["defaultMode"] == "bypassPermissions", (
+        "the zero-prompt contract did not converge -- a body that kept plan "
+        "mode boots into a prompt nobody answers")
+    assert out["skipDangerousModePermissionPrompt"] is True
+    assert out["permissions"]["allow"] == ["Bash(make test)"], (
+        "converge clobbered a sibling key -- allow rules are the agent's own")
+    assert out["model"] == "opus"
     assert _stop_command(out) == HOOK
 
 

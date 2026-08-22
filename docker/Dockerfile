@@ -172,6 +172,9 @@ VOLUME /home/agent/repos
 COPY --chown=${UID}:${GID} docker/tmux.conf /home/agent/.tmux.conf
 COPY docker/attach-gate /usr/local/bin/attach-gate
 COPY docker/agent-probe /usr/local/bin/agent-probe
+# Bus-deaf detection (see entrypoint): a body that cannot reach the bus must
+# say so where the Agents list looks, instead of showing as running.
+COPY --chmod=0755 docker/busdeaf-probe /usr/local/bin/busdeaf-probe
 # The Stop hook, from THIS repo's copy -- one source, so the container's backstop
 # cannot drift from the host's. The entrypoint points settings.json at this path.
 # Its waked block is a harmless no-op here (the entrypoint's own supervisor holds
