@@ -9,6 +9,8 @@ import http.server
 import pathlib
 import subprocess
 import threading
+import time
+import urllib.request
 
 SCRIPT = str(pathlib.Path(__file__).resolve().parent.parent / "scripts" / "deploy-launcher")
 MAKEFILE = pathlib.Path(__file__).resolve().parent.parent / "Makefile"
@@ -28,11 +30,33 @@ class Health(http.server.BaseHTTPRequestHandler):
 
 
 def serve(body=None):
+    """A health stub that is ANSWERING before the test uses it.
+
+    It used to return the moment the thread was started, so under full-suite
+    contention the script's `curl --max-time 3` could beat the stub to the
+    socket -- and the script's honest "launcher: not answering" branch then
+    looked exactly like the assertion failing. Same class as the scratch
+    broker's: a probe whose silence is read as a verdict. Threading so one slow
+    request cannot block the next, and a pre-flight so the stub's own failure
+    is named as the stub's rather than the script's.
+    """
     if body is not None:
         Health.body = body
-    srv = http.server.HTTPServer(("127.0.0.1", 0), Health)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    return srv, f"http://127.0.0.1:{srv.server_port}/health"
+    url = f"http://127.0.0.1:{srv.server_port}/health"
+    deadline, last = time.time() + 30, None
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(url, timeout=2).read()
+            return srv, url
+        except OSError as e:                       # not up yet
+            last = e
+            time.sleep(0.05)
+    srv.shutdown()
+    raise AssertionError(
+        f"the TEST'S OWN health stub never answered at {url} within 30s "
+        f"(last error {last!r}) -- this is the fixture failing, not the script")
 
 
 def run(env_extra, timeout=30):
