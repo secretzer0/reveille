@@ -112,8 +112,8 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
 else
   say "- github token: absent (private clones and pushes will not authenticate)"
 fi
-if [ -n "${REVEILLE_CRED_REPORT:-}" ]; then
-  say "$REVEILLE_CRED_REPORT"
+if [ -f "$HOME/.claude/.reveille-cred-report" ]; then
+  say "$(cat "$HOME/.claude/.reveille-cred-report")"
 elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   say "- claude credential: from the environment"
 else

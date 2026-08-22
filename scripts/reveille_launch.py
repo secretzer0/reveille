@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.30")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.31")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -1286,20 +1286,28 @@ def cred_read_argv(vol_dir, shared_dir, image):
     return argv
 
 
-def cred_place_argv(shared_dir, vol_dir, image):
-    """A throwaway ROOT container that copies the shared seed into the agent's
-    own home as 0600 owned by AGENT_UID -- the placement the entrypoint used to
-    do, moved host-side so a live local credential is never overwritten blind.
-    Root so it can chown to the image uid; cp && chmod && chown rather than
-    install(1) so it does not depend on which coreutils the image ships. Pure
-    argv; the secret is a file->file copy inside the container, never in this
-    list."""
-    return ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "sh",
-            "-v", f"{shared_dir}:/src:ro", "-v", f"{vol_dir}:/dst", image,
-            "-c",
-            "cp /src/.credentials.json /dst/.credentials.json && "
-            "chmod 600 /dst/.credentials.json && "
-            f"chown {AGENT_UID}:{AGENT_GID} /dst/.credentials.json"]
+def cred_apply_argv(shared_dir, vol_dir, image, report_line, *, place):
+    """A throwaway ROOT container that writes the boot-report line into the
+    agent's own home (~/.claude/.reveille-cred-report, which the entrypoint
+    cats) and, when `place`, copies the shared seed over the agent's credential
+    as 0600. The report is a FILE, never a REVEILLE_ env var: such a var is a
+    member of the carried-env contract, so injecting one made every home-login
+    roll fail carried_env_diff and fall back onto the old boot-time copy, which
+    tombstoned a live credential. Root so it can chown to the image uid; the
+    report line rides as `$1` (a human sentence, never a secret); the credential
+    is a file->file copy inside the container, never in argv. Pure argv."""
+    cmd = ('printf "%s\\n" "$1" > /dst/.reveille-cred-report && '
+           'chmod 644 /dst/.reveille-cred-report && '
+           f'chown {AGENT_UID}:{AGENT_GID} /dst/.reveille-cred-report')
+    if place:
+        cmd += (' && cp /src/.credentials.json /dst/.credentials.json && '
+                'chmod 600 /dst/.credentials.json && '
+                f'chown {AGENT_UID}:{AGENT_GID} /dst/.credentials.json')
+    argv = ["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "sh"]
+    if place:
+        argv += ["-v", f"{shared_dir}:/src:ro"]
+    argv += ["-v", f"{vol_dir}:/dst", image, "-c", cmd, "sh", report_line]
+    return argv
 
 
 def _parse_cred_meta(line):
@@ -1367,12 +1375,17 @@ def sync_agent_credential(user, agent, image, *, creating):
         when = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(eff["expiresAt"] / 1000))
                 if eff else None)
         raise LaunchError(no_login_refusal(user, expired_at=when))
-    if decision["action"] == "place_shared":
-        subprocess.run(
-            cred_place_argv(user_auth_root(user),
-                            os.path.join(data_root(user, agent), "claude"), image),
-            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return credential_report_line(decision)
+    report = credential_report_line(decision)
+    # ONE root container writes the boot-report line into the agent's home (a
+    # FILE the entrypoint cats -- never a REVEILLE_ env var, which would join the
+    # carried-env contract and break the roll) and places the shared seed when it
+    # is the newer one.
+    subprocess.run(
+        cred_apply_argv(user_auth_root(user),
+                        os.path.join(data_root(user, agent), "claude"),
+                        image, report, place=(decision["action"] == "place_shared")),
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return report
 
 
 def sync_before_start(user, agent):
@@ -1513,10 +1526,10 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     if kind == "home-login" and not boot_cmd:
         # THE single expiry-aware credential place. creating=True so an unusable
         # effective credential refuses HERE, in the create dialog, rather than
-        # booting an agent to a login prompt nobody watches.
-        env["REVEILLE_CRED_REPORT"] = sync_agent_credential(
-            user, agent, image, creating=True)
-        extra_env.append("REVEILLE_CRED_REPORT")
+        # booting an agent to a login prompt nobody watches. The boot report is
+        # written into the agent's home as a FILE (never a REVEILLE_ env var --
+        # that joins the carried-env contract and breaks every roll).
+        sync_agent_credential(user, agent, image, creating=True)
 
     _ensure_network(network, broker)
     if replace:
@@ -1602,7 +1615,12 @@ def carried_env_diff(old_env, new_env):
     Image-derived variables (PATH, HOME, the image's own) are not compared: they
     are what an upgrade is allowed to change. Pure; empty list = carried."""
     def keep(k):
-        return k.startswith(CARRIED_PREFIXES) or k in CARRIED_NAMES
+        # REVEILLE_CRED_REPORT was a boot-report line, never identity -- it sat
+        # in the REVEILLE_ namespace by accident (0.2.30) and made every
+        # home-login roll fail this check. It is a FILE now; exclude it so a body
+        # still carrying that stray var can also roll.
+        return ((k.startswith(CARRIED_PREFIXES) or k in CARRIED_NAMES)
+                and k != "REVEILLE_CRED_REPORT")
     a = {k: v for k, v in (old_env or {}).items() if keep(k)}
     b = {k: v for k, v in (new_env or {}).items() if keep(k)}
     return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
@@ -1769,10 +1787,10 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
     if kind == "home-login" and not boot_cmd:
         # A ROLL must NEVER downgrade a live credential: place the better of the
         # agent's own and the shared seed, keep the agent's when it is newer.
-        # creating=False -- a healthy body comes up even if the shared seed is dead.
-        env["REVEILLE_CRED_REPORT"] = sync_agent_credential(
-            user, agent, image, creating=False)
-        extra_env.append("REVEILLE_CRED_REPORT")
+        # creating=False -- a healthy body comes up even if the shared seed is
+        # dead. The report is a FILE, not a REVEILLE_ env var: an env var here
+        # joins the carried-env contract and makes carried_env_diff fail the roll.
+        sync_agent_credential(user, agent, image, creating=False)
     argv = docker_run_argv(user, agent, image, old["network"] or DEFAULT_NETWORK, quotas,
                            boot_cmd=boot_cmd, extra_env=extra_env)
     record_found_state(conn, user, agent, old["running"], timeout)
