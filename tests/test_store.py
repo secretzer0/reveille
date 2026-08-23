@@ -2821,3 +2821,37 @@ def test_leave_listed_reduces_access_without_needing_it():
     assert _listed(c, room["id"]) == ["ranger", "scout"]
     store.leave_listed(c, P(c, "scout"), b["id"], room["id"])
     assert _listed(c, room["id"]) == ["ranger"]
+
+
+def test_join_catchup_never_marks_mail_read(tmp_path):
+    """Ruling 14046: A CATCH-UP WINDOW MAY DROP AMBIENT TRAFFIC AND MUST NEVER
+    DROP MAIL. Field case, measured on the live bus: the architect's body,
+    dead for hours, re-joined and its three aged directs -- including the
+    operator's 'architect is dead because of YOU!' -- were marked read by
+    join()'s catch-up and vanished from inbox(). A unicast has one identity
+    and no other handler; its age is irrelevant. A broadcast of the same age
+    is exactly what the window exists to drop."""
+    db = str(tmp_path / "b9.db")
+    c = store.connect(db)
+    store.migrate(c, db)
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    room = store.create_room(c, admin["id"], "r")
+    join(c, "arch", room["id"])
+    store.send(c, store.user_principal(admin["id"]), "arch",
+               "you dead?", room=room["id"])
+    store.send(c, store.user_principal(admin["id"]), "*",
+               "ambient chatter", room=room["id"])
+    c.execute("UPDATE messages SET ts_ns = ts_ns - ?", (store.CATCHUP_NS * 2,))
+    join(c, "arch", room["id"])          # the recovered body's bare join()
+    bodies = [m["body"] for m in store.inbox(c, P(c, "arch"), [room["id"]])]
+    assert "you dead?" in bodies, "aged MAIL must survive the catch-up"
+    assert "ambient chatter" not in bodies, \
+        "aged broadcast is ambient traffic -- the window drops it"
+    # unbound/user principals keep the old behaviour: everything old marked read
+    dm = store.create_user(c, "dmorse", "hunter2hunter2")
+    store.invite_member(c, room["id"], admin["id"], "dmorse", "web:travis")
+    store.join(c, "dmorse", "web:dmorse", room["id"], None)
+    assert c.execute(
+        "SELECT count(*) FROM reads WHERE principal=?",
+        (store.user_principal(dm["id"]),)).fetchone()[0] >= 2
+    c.close()
