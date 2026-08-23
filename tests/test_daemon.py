@@ -918,12 +918,13 @@ def test_cancel_is_not_gated_on_the_state_it_recovers_from():
     for gated in ("st.pending", "L.present", "st.relayed"):
         assert gated not in stmt, \
             f"cancel renders on {gated} -- that is the state it recovers from"
-    # 2. Every branch that paints the section offers it. Four paints: logged in,
-    #    awaiting-code, pending/failed, no login. A branch that omits it is a
-    #    state where the container can exist and the way out cannot be reached.
+    # 2. Every branch that paints the section offers it. Five paints: logged in,
+    #    awaiting-code, pending/failed, container-no-stage (the just-started
+    #    flow, operator 14028), no login. A branch that omits it is a state
+    #    where the container can exist and the way out cannot be reached.
     paints = re.findall(r"paint\(el,", sec)
-    assert len(paints) == 4, f"{len(paints)} paints -- update this gate deliberately"
-    assert sec.count("lgCancel") >= 5, \
+    assert len(paints) == 5, f"{len(paints)} paints -- update this gate deliberately"
+    assert sec.count("lgCancel") >= 6, \
         "some paint branch does not include the cancel control"
     # 3. The status call that reads the container must not sit inside the
     #    credential-absent branch, or the logged-in state cannot see it -- which
