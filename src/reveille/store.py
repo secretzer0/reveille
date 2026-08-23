@@ -5113,11 +5113,19 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
         (room_id, principal, rname, tag, url, token_id, now, now))
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
+    # EXCEPT THIS IDENTITY'S OWN MAIL (ruling 14046): a catch-up window may drop
+    # ambient traffic and must never drop mail -- a unicast has one identity and
+    # no other handler, and a body recovered hours dead is exactly the joiner
+    # whose backlog matters. readmit()'s docstring already said this; the rule
+    # now holds where the receipts are actually written. An unbound or user
+    # principal has no agent id and keeps the old behaviour unchanged.
     cutoff = now if fresh else now - CATCHUP_NS
+    aid = agent_of(principal)
     conn.execute(
         "INSERT OR IGNORE INTO reads(message_id, principal, read_ns) "
-        "SELECT id, ?, ? FROM messages WHERE ts_ns < ? AND room = ?",
-        (principal, now, cutoff, room_id))
+        "SELECT id, ?, ? FROM messages WHERE ts_ns < ? AND room = ?"
+        + (" AND COALESCE(recipient_agent_id, '') != ?" if aid else ""),
+        (principal, now, cutoff, room_id) + ((aid,) if aid else ()))
     # DES-012 s11.1: a visit ARRIVES when its body reaches the bus, not when
     # the credential was handed over -- so the stamp lives here, on the first
     # join the visiting token makes. Every other join passes straight through.
