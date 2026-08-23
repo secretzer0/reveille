@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -129,7 +129,16 @@ CREATE TABLE IF NOT EXISTS users (
     -- username stays TAKEN -- reusing it would re-attribute someone else's
     -- history to a new person. Credentials are wiped at deletion; this row is
     -- the referent, not the account.
-    deleted_ns INTEGER
+    deleted_ns INTEGER,
+    -- How this person asked to be ADDRESSED (rulings 14032/14048): free-text
+    -- nickname and persona nickname, plus the preference ORDER the UI lets
+    -- them reorder (JSON list over MONIKER_KINDS; NULL = the default order).
+    -- Resolution is walked ONCE, broker-side, in moniker_of(); "operator" is
+    -- the last resort and reads as a failure to know who spoke, never as an
+    -- address anybody chose.
+    nickname      TEXT,
+    persona       TEXT,
+    moniker_order TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions (
     id_hash    TEXT PRIMARY KEY,
@@ -2053,6 +2062,19 @@ def _upgrade_v41(conn, db_path):
         conn.execute("PRAGMA user_version=42")
 
 
+def _upgrade_v42(conn, db_path):
+    """v42 -> v43 (rulings 14032/14048): how a person asked to be addressed --
+    users.nickname, users.persona, users.moniker_order. Additive; NULL is
+    correct for every existing row (no preference stated resolves to the
+    username, which is what everyone was called before this existed)."""
+    with tx(conn):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+        for col in ("nickname", "persona", "moniker_order"):
+            if col not in have:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        conn.execute("PRAGMA user_version=43")
+
+
 def _upgrade_v37(conn, db_path):
     """v37 -> v38 (ruling 12532): tokens.last_inbox_ns -- when this credential
     last READ its mail. Additive; NULL is correct for every existing row (no
@@ -2291,7 +2313,7 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41)}
+              37, 38, 39, 40, 41, 42)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -5491,6 +5513,103 @@ def claim_unresolved_names(conn, owner_id, now=None):
     return claimed
 
 
+# ---- monikers: how a person asked to be addressed (rulings 14032/14048) ----------
+# secretzer0, in the message that ruled this: "quit calling me 'operator' ...
+# operator is a complete fail to know who it was". The broker walks the
+# preference ONCE, here, and every surface that names a human serves the
+# resolved string -- agents and pages render it, they never re-derive it.
+
+MONIKER_KINDS = ("nickname", "persona", "username", "operator")
+
+
+def moniker_of(row):
+    """PURE. Walk the person's preference order; first non-empty wins.
+    `row` is any mapping with name/nickname/persona/moniker_order keys.
+    No preference stated -> nickname > persona > username > "operator",
+    which bottoms out at the username for every pre-existing account."""
+    try:
+        order = json.loads(row["moniker_order"] or "null") or MONIKER_KINDS
+    except (ValueError, TypeError):
+        order = MONIKER_KINDS
+    values = {"nickname": row["nickname"], "persona": row["persona"],
+              "username": row["name"], "operator": "operator"}
+    for kind in order:
+        v = (values.get(kind) or "").strip()
+        if v:
+            return v
+    return row["name"]
+
+
+_MONIKER_COLS = "name, nickname, persona, moniker_order"
+
+
+def user_moniker(conn, user_id):
+    """The resolved address for one person, or None for no such account."""
+    r = conn.execute(f"SELECT {_MONIKER_COLS} FROM users WHERE id=? "
+                     f"AND deleted_ns IS NULL", (user_id,)).fetchone()
+    return moniker_of(r) if r else None
+
+
+def moniker_fields(conn, user_id):
+    """The raw fields the settings form edits, plus the resolved result --
+    what GET /me serves so the UI slice can render without re-deriving."""
+    r = conn.execute(f"SELECT {_MONIKER_COLS} FROM users WHERE id=? "
+                     f"AND deleted_ns IS NULL", (user_id,)).fetchone()
+    if not r:
+        return None
+    try:
+        order = json.loads(r["moniker_order"] or "null") or list(MONIKER_KINDS)
+    except ValueError:
+        order = list(MONIKER_KINDS)
+    return {"nickname": r["nickname"] or "", "persona": r["persona"] or "",
+            "moniker_order": order, "moniker": moniker_of(r)}
+
+
+def set_moniker(conn, user_id, nickname=None, persona=None, order=None):
+    """Update how this person is addressed. None = leave that field alone;
+    empty string clears it. `order` is a list over MONIKER_KINDS (each at most
+    once); empty list restores the default. Returns the resolved moniker."""
+    sets, args = [], []
+    for col, val in (("nickname", nickname), ("persona", persona)):
+        if val is None:
+            continue
+        val = str(val).strip()
+        if len(val) > 64:
+            raise BusError(f"{col} too long (64 chars max)")
+        sets.append(f"{col}=?")
+        args.append(val or None)
+    if order is not None:
+        if not isinstance(order, list):
+            raise BusError("moniker_order must be a list")
+        bad = [k for k in order if k not in MONIKER_KINDS]
+        if bad or len(set(order)) != len(order):
+            raise BusError(f"moniker_order takes each of {list(MONIKER_KINDS)} "
+                           f"at most once")
+        sets.append("moniker_order=?")
+        args.append(json.dumps(order) if order else None)
+    if sets:
+        cur = conn.execute(f"UPDATE users SET {', '.join(sets)} "
+                           f"WHERE id=? AND deleted_ns IS NULL",
+                           args + [user_id])
+        if cur.rowcount == 0:
+            raise BusError("no such user")
+    resolved = user_moniker(conn, user_id)
+    if resolved is None:
+        raise BusError("no such user")
+    return resolved
+
+
+def agent_owner_moniker(conn, agent_id):
+    """(owner_username, resolved_moniker) for the person behind an agent --
+    what the agent should call the human it works for. None when the agent
+    or its owner is gone."""
+    r = conn.execute(
+        f"SELECT u.{_MONIKER_COLS.replace(', ', ', u.')} FROM agents a "
+        f"JOIN users u ON u.id = a.owner_id WHERE a.id=?",
+        (agent_id,)).fetchone()
+    return (r["name"], moniker_of(r)) if r else None
+
+
 def presence(conn, rooms):
     """Everyone across the caller's rooms. Each entry carries its room: names are
     per-room now, so a flat list would be ambiguous."""
@@ -5506,10 +5625,21 @@ def presence(conn, rooms):
          "room_name": r["room_name"], "token_id": r["token_id"],
          "principal": r["principal"], "owner": r["owner"],
          "live": _is_live(r["seen_ns"], now),
-         "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"]}
+         "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"],
+         # 14048: the resolved address rides presence, walked once broker-side.
+         # A human row carries their own; an agent row carries its OWNER's --
+         # either way it answers "what do I call the person here".
+         "moniker": moniker_of({"name": r["m_name"], "nickname": r["m_nick"],
+                                "persona": r["m_pers"],
+                                "moniker_order": r["m_order"]})
+                    if r["m_name"] else None}
         for r in conn.execute(
             f"SELECT m.*, ro.name AS room_name, "
-            f"COALESCE(uo.name, up.name) AS owner "
+            f"COALESCE(uo.name, up.name) AS owner, "
+            f"COALESCE(uo.name, up.name) AS m_name, "
+            f"COALESCE(uo.nickname, up.nickname) AS m_nick, "
+            f"COALESCE(uo.persona, up.persona) AS m_pers, "
+            f"COALESCE(uo.moniker_order, up.moniker_order) AS m_order "
             f"FROM members m JOIN rooms ro ON ro.id=m.room_id "
             f"LEFT JOIN agents a ON m.principal = 'agent:' || a.id "
             f"LEFT JOIN users uo ON uo.id = a.owner_id "
@@ -6895,13 +7025,28 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
         (agent_scope(conn, token_id, agent_id), time.time_ns())).fetchall()
     if srows:
         section("state", srows, lambda r, _: f"- {r['fact']}", 0.15)
-    # 6. presence digest
+    # 6. presence digest. A live HUMAN whose resolved moniker differs from
+    # their member name is shown as "name (address as: moniker)" -- the brief
+    # is the knowledge floor, and 14032 made addressing a floor fact.
     emit("== presence ==")
     for rid, rname in rooms.items():
-        live = [r["name"] for r in conn.execute(
-            "SELECT name, seen_ns FROM members WHERE room_id=? AND left_ns IS NULL "
-            "ORDER BY seen_ns DESC",
-            (rid,)) if _is_live(r["seen_ns"], time.time_ns())]
+        live = []
+        for r in conn.execute(
+                "SELECT m.name, m.seen_ns, u.name AS u_name, u.nickname, "
+                "u.persona, u.moniker_order FROM members m "
+                "LEFT JOIN users u ON m.principal = 'user:' || u.id "
+                "WHERE m.room_id=? AND m.left_ns IS NULL ORDER BY m.seen_ns DESC",
+                (rid,)):
+            if not _is_live(r["seen_ns"], time.time_ns()):
+                continue
+            label = r["name"]
+            if r["u_name"]:
+                mon = moniker_of({"name": r["u_name"], "nickname": r["nickname"],
+                                  "persona": r["persona"],
+                                  "moniker_order": r["moniker_order"]})
+                if mon != r["name"]:
+                    label = f"{r['name']} (address as: {mon})"
+            live.append(label)
         emit(f"- {rname}: {', '.join(live) if live else '(nobody live)'}")
 
     # No [:budget] slice: that was a RAW-text cut against a wire-counted
