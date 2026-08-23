@@ -640,16 +640,27 @@ def test_a_terse_rendition_of_a_scriptable_message_is_heard_and_not_kept(monkeyp
     with the writer up makes the script and then the durable file. Kept
     renditions (human verbatim, no persona, scripted) rename as before."""
     mid = _seed_message(monkeypatch, tmp_path)
-    monkeypatch.setattr(daemon, "TERSE_LINGER_S", 0.3)
+    # THE LINGER CLOCK MUST NOT RACE THE NEXT JOB (field red, 14061/14063:
+    # both agent bodies failed line "lingering, not durable" on a loaded
+    # cloud host while CI stayed green). The old shape ran the terse job
+    # FIRST with a 0.3s linger, so the timer raced the kept job's TWO ffmpeg
+    # passes plus the join -- on a loaded 2-cpu container that is seconds,
+    # and the reaper ate the .part before the assert ever looked (proven:
+    # linger 30.0 under the same load kept the file). The terse job now runs
+    # LAST, so the window the clock must cover is the assert itself, and the
+    # linger is sized for a loaded host, not a fast one. Same assertions,
+    # same property: heard, lingering, never durable.
+    LINGER = 2.0
+    monkeypatch.setattr(daemon, "TERSE_LINGER_S", LINGER)
     speak = lambda *a, **k: iter([_wav_header() + _pcm(0.5), _pcm(0.5)])  # noqa: E731
     pushed, t = _run_worker(monkeypatch, tmp_path, speak,
-                            [(mid, "r1", "alice", "hello", None, False),
-                             (mid + 100, "r1", "bob", "next", None, True)])
-    t.join(10)
+                            [(mid + 100, "r1", "bob", "next", None, True),
+                             (mid, "r1", "alice", "hello", None, False)])
+    t.join(30)
     assert not t.is_alive()
     frames = [m for m in pushed if m["event"] == "audio"]
-    assert frames[0] == {"event": "audio", "id": mid, "terse": True}, "the page keeps the icon hollow"
-    assert frames[1] == {"event": "audio", "id": mid + 100}, "a kept rendition carries no flag"
+    assert frames[0] == {"event": "audio", "id": mid + 100}, "a kept rendition carries no flag"
+    assert frames[1] == {"event": "audio", "id": mid, "terse": True}, "the page keeps the icon hollow"
     part = tmp_path / f"tts-{mid}.webm.part"
     assert part.is_file() and not (tmp_path / f"tts-{mid}.webm").exists(), "lingering, not durable"
 
@@ -657,7 +668,7 @@ def test_a_terse_rendition_of_a_scriptable_message_is_heard_and_not_kept(monkeyp
         resp = await daemon.audio_http(_request(mid))
         return resp.status_code, resp.media_type
     assert asyncio.run(late()) == (200, "audio/webm"), "a listener's fetch inside the linger is served"
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + LINGER + 10
     while time.monotonic() < deadline and part.exists():
         time.sleep(0.05)
     assert not any(tmp_path.glob(f"tts-{mid}.*")), "after the linger, nothing of the terse rendition remains"
