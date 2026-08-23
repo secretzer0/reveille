@@ -320,18 +320,33 @@ def scene_manager(ctx, url, out, tag, phone):
 
 
 # ---- scene 4: the refusal reaches the human (13727 piece C) ------------------
-def scene_refusal(ctx, url, out, tag, phone):
+def scene_refusal(ctx, url, out, tag, phone, expired_at=None):
     """A refusal must stay where the user is standing. Driven, because the defect
     was invisible to every source-level gate: the words arrived and then removed
-    themselves after 5 s, 470 px away on desktop and on top of the form on a phone."""
-    print(f"CREATE-AGENT REFUSAL ({tag})")
+    themselves after 5 s, 470 px away on desktop and on top of the form on a phone.
+
+    TWO DIAGNOSES, ONE DOOR, AND BOTH ARE NOW DRIVEN. no_login_refusal() writes a
+    different first sentence when a login EXPIRED than when there was never one,
+    and the wrong half of that branch is not a typo -- it tells a user who logged
+    in that they never did, which sends them to the wrong remedy. The expired case
+    passes expired_at and asserts the sentence the reader gets: the FULL ISO
+    instant, and NOT the no-login wording."""
+    kind = "expired" if expired_at else "no-login"
+    print(f"CREATE-AGENT REFUSAL ({tag}, {kind})")
     import importlib.util
     spec = importlib.util.spec_from_file_location(
         "rl", pathlib.Path(__file__).resolve().parent / "reveille_launch.py")
     rl = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rl)
-    REFUSE[:] = [rl.no_login_refusal("shot")]
+    REFUSE[:] = [rl.no_login_refusal("shot", expired_at=expired_at)]
     check("the refusal names no config key", "claude_mode" not in REFUSE[0], REFUSE[0])
+    if expired_at:
+        # THE DIAGNOSIS IS THE ASSERTION, NOT THE SENTENCE'S LENGTH: an expired
+        # login told "you have none" is a wrong instruction, not a wording nit.
+        check("the expired refusal carries the full ISO instant",
+              expired_at in REFUSE[0], REFUSE[0])
+        check("the expired refusal does NOT say the login is missing",
+              "has no Claude login on file" not in REFUSE[0], REFUSE[0])
     p = open_page(ctx, url)
     if phone:
         p.locator("#roomBtn").tap()
@@ -344,16 +359,23 @@ def scene_refusal(ctx, url, out, tag, phone):
     p.locator("#agCreate").click()
     p.wait_for_timeout(1200)
     st = p.locator("#agStatus")
-    check("the refusal lands IN the dialog, not only in a toast",
+    check(f"the {kind} refusal lands IN the dialog, not only in a toast",
           REFUSE[0] in st.inner_text(), st.inner_text()[:90] or "(empty)")
     check("it reads as an error", "err" in (st.get_attribute("class") or ""),
           st.get_attribute("class"))
-    shoot(p, out, f"{tag}-refusal")
+    if expired_at:
+        # Asserted at the SINK the human reads, not only over the function's
+        # return: the page is where a truncation or a re-render would drop it.
+        check("the dialog shows the expiry instant, not the no-login diagnosis",
+              expired_at in st.inner_text()
+              and "has no Claude login on file" not in st.inner_text(),
+              st.inner_text()[:90] or "(empty)")
+    shoot(p, out, f"{tag}-refusal-{kind}")
     # THE ASSERTION THAT TESTS THE DEFECT RATHER THAN THE STRING: the toast is gone
     # at 5 s by design, so anything that only checked "present" passed before this
     # slice and would pass after a regression.
     p.wait_for_timeout(6000)
-    check("it is STILL THERE at 6 s, after the toast has removed itself",
+    check(f"the {kind} refusal is STILL THERE at 6 s, after the toast has removed itself",
           REFUSE[0] in st.inner_text(), st.inner_text()[:90] or "(empty)")
     if phone:
         over = p.evaluate("""() => { const s = document.getElementById('agStatus'),
@@ -370,8 +392,15 @@ def scene_refusal(ctx, url, out, tag, phone):
     p.wait_for_timeout(900)
     check("a retry drops the error colour", "err" not in (st.get_attribute("class") or ""),
           st.get_attribute("class"))
-    shoot(p, out, f"{tag}-refusal-cleared")
+    shoot(p, out, f"{tag}-refusal-{kind}-cleared")
     p.close()
+
+
+def scene_refusal_expired(ctx, url, out, tag, phone):
+    """The EXPIRED half of the same door. A separate entry point rather than a
+    partial, so a scene that raises still reports a name in FAILED. The instant is
+    the one the field actually produced (the 06:41:48Z shared-credential expiry)."""
+    scene_refusal(ctx, url, out, tag, phone, expired_at="2026-08-22T06:41:48Z")
 
 
 def main():
@@ -391,7 +420,7 @@ def main():
                     ("desktop", {"viewport": {"width": 1280, "height": 900}}, False),
                     ("iphone14", dict(pw.devices["iPhone 14"]), True)):
                 for scene in (scene_modal, scene_multidriver, scene_manager,
-                              scene_refusal):
+                              scene_refusal, scene_refusal_expired):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)
