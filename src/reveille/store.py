@@ -5559,7 +5559,7 @@ def moniker_fields(conn, user_id):
         return None
     try:
         order = json.loads(r["moniker_order"] or "null") or list(MONIKER_KINDS)
-    except ValueError:
+    except (ValueError, TypeError):    # same net as moniker_of (14056 nit)
         order = list(MONIKER_KINDS)
     return {"nickname": r["nickname"] or "", "persona": r["persona"] or "",
             "moniker_order": order, "moniker": moniker_of(r)}
@@ -5604,8 +5604,8 @@ def agent_owner_moniker(conn, agent_id):
     what the agent should call the human it works for. None when the agent
     or its owner is gone."""
     r = conn.execute(
-        f"SELECT u.{_MONIKER_COLS.replace(', ', ', u.')} FROM agents a "
-        f"JOIN users u ON u.id = a.owner_id WHERE a.id=?",
+        "SELECT u.name, u.nickname, u.persona, u.moniker_order FROM agents a "
+        "JOIN users u ON u.id = a.owner_id WHERE a.id=?",
         (agent_id,)).fetchone()
     return (r["name"], moniker_of(r)) if r else None
 
@@ -5872,8 +5872,13 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
                          (mid, a["url"], a.get("name"), a.get("bytes"),
                           1 if a.get("clip") else 0, a.get("duration_s")))
     targets = _wake_targets(conn, principal, recipient, room)
+    uid = user_of(principal)
     return {"id": mid, "thread_id": thread_id, "parents": parents, "sender": sender,
             "owner": _owner_name(conn, principal),
+            # 14056: A MESSAGE CARRIES ITS SENDER'S RESOLVED MONIKER AT
+            # DELIVERY -- walked here, once, for the rings this send fires.
+            # Agent-sent messages have no human sender and carry None.
+            "sender_moniker": user_moniker(conn, uid) if uid else None,
             "wake": [n for n, _p in targets], "wake_principals": [p for _n, p in targets]}
 
 
@@ -5883,10 +5888,28 @@ def _msg(r):
          "body": r["body"], "room": r["room"], "ts_ns": r["ts_ns"]}
     with contextlib.suppress(IndexError, KeyError):
         m["room_name"] = r["room_name"]
+    # 14056: a message carries its sender's resolved moniker at delivery --
+    # `from` stays the identity (ids exact is bus doctrine), `from_moniker`
+    # is what the reader ADDRESSES. Human senders only; an agent-sent
+    # message has no human sender and carries nothing new.
+    with contextlib.suppress(IndexError, KeyError):
+        if r["s_uname"]:
+            m["from_moniker"] = moniker_of(
+                {"name": r["s_uname"], "nickname": r["s_nick"],
+                 "persona": r["s_pers"], "moniker_order": r["s_mord"]})
     return m
 
 
-_SEL = "SELECT m.*, ro.name AS room_name FROM messages m JOIN rooms ro ON ro.id=m.room"
+# The users join resolves a HUMAN sender's moniker fields in the same read
+# (sender_agent_id NULL = the sender was a person, written under their
+# username). Every message surface an agent reads renders through this, which
+# is what makes 14056 one seam instead of five.
+_SEL = ("SELECT m.*, ro.name AS room_name, "
+        "us.name AS s_uname, us.nickname AS s_nick, "
+        "us.persona AS s_pers, us.moniker_order AS s_mord "
+        "FROM messages m JOIN rooms ro ON ro.id=m.room "
+        "LEFT JOIN users us ON m.sender_agent_id IS NULL "
+        "AND us.name = m.sender AND us.deleted_ns IS NULL")
 
 
 def _with_attachments(conn, msgs):
