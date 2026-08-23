@@ -763,7 +763,9 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
         return out
     fact = {"id": res["id"], "from": res["sender"], "owner": res["owner"],
             "subject": subject, "room": room_id,
-            "why": "thread-reply", "thread": res["thread_id"]}
+            "why": "thread-reply", "thread": res["thread_id"],
+            **({"from_moniker": res["sender_moniker"]}
+               if res.get("sender_moniker") else {})}
     now = time.time_ns()
     for name, principal in targets:
         for tid in store.wake_tokens(_conn, room_id, [principal]):
@@ -845,7 +847,8 @@ mcp = FastMCP("reveille", stateless_http=True, json_response=True,
                   enable_dns_rebinding_protection=False))
 
 
-def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=None):
+def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=None,
+            moniker=None):
     """Ring the waiters of the tokens behind these identities that hold this room
     (store.wake_tokens: the token_rooms lookup is what makes a revoke instant --
     a revoked token stops ringing without reconnecting).
@@ -855,7 +858,11 @@ def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=Non
     that says only "something happened" makes inbox() mandatory before an agent
     can even decide silence is correct. `from` is the ROOM-NAME the sender wears
     in that room and `owner` the account behind it (6.1(c)): what a human reads."""
-    fact = ({"id": msg_id, "from": sender, "owner": owner, "subject": subject, "room": room_id}
+    # 14056: `from` stays the identity, `from_moniker` is what the woken agent
+    # ADDRESSES -- present only when a human sent it, resolved at send time.
+    fact = ({"id": msg_id, "from": sender, "owner": owner, "subject": subject,
+             "room": room_id,
+             **({"from_moniker": moniker} if moniker else {})}
             if msg_id else None)
     for t in store.wake_tokens(_conn, room_id, principals):
         for q in list(_waiters.get(t, ())):
@@ -3206,7 +3213,8 @@ async def send(to: str, body: str, subject: str = "",
     # asked to hear it, and that guard is unchanged.
     me = res["sender"]          # the ROOM-NAME the store wrote (alias if in force)
     if to != store.BROADCAST:
-        _notify(rid, res["wake_principals"], res["id"], me, subject, owner=res["owner"])
+        _notify(rid, res["wake_principals"], res["id"], me, subject, owner=res["owner"],
+                moniker=res["sender_moniker"])
         rung, pended = list(res["wake"]), []
     else:
         tw = _thread_wake(rid, res, speaker_key(p), subject)
@@ -3664,6 +3672,10 @@ async def wake_ws(ws: WebSocket):
                                 "id": fact.get("id"), "from": fact.get("from"),
                                 "owner": fact.get("owner"), "room": fact.get("room"),
                                 **({"thread": fact["thread"]} if fact.get("thread") else {}),
+                                # 14056: what the woken agent ADDRESSES; only
+                                # a human sender carries one
+                                **({"from_moniker": fact["from_moniker"]}
+                                   if fact.get("from_moniker") else {}),
                                 "subject": fact.get("subject", "")})
             log.info("%s wake ring (%s direct of %s unread)", name, direct, n)
     except WebSocketDisconnect:
@@ -3849,7 +3861,8 @@ async def send_http(request):
     # concluded the bus does not wake on broadcast. A capability nobody can
     # reach is indistinguishable from one that does not exist.
     woke = res["wake_principals"]
-    _notify(rid, woke, res["id"], sender, d.get("subject") or "", owner=res["owner"])
+    _notify(rid, woke, res["id"], sender, d.get("subject") or "", owner=res["owner"],
+            moniker=res["sender_moniker"])
     _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
                           # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],

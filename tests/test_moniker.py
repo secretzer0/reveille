@@ -119,3 +119,69 @@ def test_me_serves_and_patches_the_moniker(broker):
     assert broker.get("/me").json()["moniker"] == "secretzer0"
     r = broker.patch("/me", json={"moniker_order": ["boss"]})
     assert r.status_code >= 400
+
+
+# ---- delivery carries the address (ruling 14056) -------------------------------
+
+def test_delivery_carries_the_senders_address(tmp_path):
+    """A MESSAGE CARRIES ITS SENDER'S RESOLVED MONIKER AT DELIVERY. `from`
+    stays the identity (ids exact is bus doctrine); `from_moniker` is what
+    the reading agent ADDRESSES. Walked broker-side by the same moniker_of
+    -- the lookup 14048 forbade relocating onto the agent."""
+    c = _mk(tmp_path)
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    room = store.create_room(c, admin["id"], "r")
+    store.join(c, "travis", "web:travis", room["id"], None)
+    join(c, "arch", room["id"])
+    store.set_moniker(c, admin["id"], nickname="secretzer0")
+    res = store.send(c, store.user_principal(admin["id"]), "arch",
+                     "fix it", room=room["id"])
+    assert res["sender_moniker"] == "secretzer0"
+    got = store.inbox(c, P(c, "arch"), [room["id"]])
+    assert got[-1]["from"] == "travis"
+    assert got[-1]["from_moniker"] == "secretzer0"
+    # history/search rows ride the same seam
+    hit = store.search(c, keywords=["fix"], rooms=[room["id"]])[-1]
+    assert hit["from_moniker"] == "secretzer0"
+    # thread/trace (the _subgraph render) too
+    g = store.graph(c, res["thread_id"], [room["id"]])
+    assert g["messages"][0]["from_moniker"] == "secretzer0"
+    c.close()
+
+
+def test_agent_sent_messages_carry_nothing_new(tmp_path):
+    """An agent-sent message has no human sender: no from_moniker key at all,
+    and send() reports sender_moniker None -- ruled, not an omission."""
+    c = _mk(tmp_path)
+    admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
+    room = store.create_room(c, admin["id"], "r")
+    store.join(c, "travis", "web:travis", room["id"], None)
+    join(c, "arch", room["id"])
+    res = store.send(c, P(c, "arch"), "*", "status: green", room=room["id"])
+    assert res["sender_moniker"] is None
+    rows = [m for m in store.tail(c, rooms=[room["id"]]) if m["id"] == res["id"]]
+    assert "from_moniker" not in rows[0]
+    c.close()
+
+
+def test_the_ring_carries_the_address(broker):
+    """Door (a) of 14059: the real wake_ws composer, a real received frame.
+    14031 verbatim: 'this prompt sent back should 100% be my chosen
+    NickName' -- the prompt sent back IS the ring, so this asserts on the
+    frame a woken agent actually gets, not on the store fields feeding it."""
+    u = sit(broker, "travis")
+    room = store.create_room(broker.conn, u["id"], "r")
+    store.join(broker.conn, "travis", "web:travis", room["id"], None)
+    tok = store.create_token(broker.conn, u["id"], "arch", agent_name="arch",
+                             create=True, rooms=[room["id"]])
+    store.join(broker.conn, "arch", "arch", room["id"], tok["id"])
+    store.set_moniker(broker.conn, u["id"], nickname="secretzer0")
+    with broker.websocket_connect(
+            "/wake?name=arch",
+            headers={"Authorization": "Bearer " + tok["secret"]}) as ws:
+        r = broker.post("/send?room=" + room["id"],
+                        json={"to": "arch", "body": "fix it", "subject": "s"})
+        assert r.status_code == 200, r.text
+        frame = ws.receive_json()
+        assert frame["wake"] is True and frame["from"] == "travis"
+        assert frame["from_moniker"] == "secretzer0"
