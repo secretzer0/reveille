@@ -1404,6 +1404,158 @@ def sync_before_start(user, agent):
         sync_agent_credential(user, agent, info["image"], creating=False)
 
 
+# ---- login-watch: the deaf-claude detector + heal (operator 14028) -----------------
+# The shape is the operator's, verbatim: sample the last lines of EVERY running
+# agent's pane via tmux, 1-by-1 from the launcher (the native side of the
+# socket); a login prompt marks the agent, stops further probing of it, and
+# alerts its owner ONCE with the way to the login modal; when a usable shared
+# login appears -- browser door or terminal door, this thread cannot tell and
+# must not care -- the credential is placed into EVERY running home-login
+# agent's bind-mounted home and the marked panes are nudged so claude re-reads
+# it. No restart of a live body, no new store: marks live in this dict and die
+# with the process, which is correct because the pane is re-readable truth.
+
+_LOGIN_NEED_RE = re.compile(
+    r"Select login method|Paste code here|OAuth token[^\n]{0,20}expired|"
+    r"Please run /login|Invalid API key|API Error: 401", re.IGNORECASE)
+
+_needs_login = {}    # (user, agent) -> ns first seen stuck
+_login_alerted = {}  # user -> ns of last alert sent
+
+
+def pane_needs_login(text):
+    """Pure: does the TAIL of an agent pane show claude stopped at a login?
+    Last 5 non-empty lines only -- history further up may legitimately
+    mention logins; a prompt is only a prompt while it is at the bottom."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    return bool(_LOGIN_NEED_RE.search("\n".join(lines[-5:])))
+
+
+def _agent_pane_tail(name):
+    """The agent pane's text, or None when unreadable (no tmux yet, exec
+    refused) -- a probe that could not read must not judge (8866)."""
+    r = _docker("exec", name, "tmux", "capture-pane", "-t", "agent", "-p",
+                check=False, capture=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def _shared_login_usable(user):
+    """The user's shared login seed holds an UNEXPIRED access token. One
+    root-container read; called only while some agent is marked stuck."""
+    root = user_auth_root(user)
+    if not os.path.isdir(root):
+        return False
+    out = subprocess.run(cred_read_argv(None, root, DEFAULT_IMAGE),
+                         check=False, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True).stdout.splitlines()
+    meta = _parse_cred_meta(out[1]) if len(out) > 1 else None
+    return bool(meta) and int(time.time() * 1000) < meta["expiresAt"]
+
+
+def _alert_needs_login(user, stuck, broker_url):
+    """One bus unicast to the OWNER, sent AS the stuck agent with the token
+    already in its container env -- the launcher holds no standing broker
+    credential (G4) and must not grow one for an alert. Best-effort: an
+    unreachable broker means the next tick retries."""
+    info = _inspect_container(container_name(user, stuck[0]))
+    token = (info or {}).get("env", {}).get("REVEILLE_TOKEN", "")
+    if not token:
+        return False
+    body = json.dumps({
+        "to": user, "subject": "claude login needed",
+        "body": ("claude credential dead on: " + ", ".join(stuck) + ". "
+                 "Bus page -> Settings -> Account -> log in via browser, "
+                 "paste the code. The launcher then heals every running "
+                 "agent by itself -- no restarts, nothing else to do.")},
+    ).encode()
+    req = urllib.request.Request(
+        broker_url.rstrip("/") + "/send", data=body, method="POST",
+        headers={"Authorization": "Bearer " + token, "X-Agent": stuck[0],
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5):
+            return True
+    except Exception:  # noqa: BLE001 -- alerting must never take the tick down
+        return False
+
+
+def _login_watch_once(conn, broker_url):
+    now = time.time_ns()
+    rows = conn.execute("SELECT user, agent FROM containers").fetchall()
+    running = {}
+    for user, agent in rows:
+        info = _inspect_container(container_name(user, agent))
+        if info is None:
+            _needs_login.pop((user, agent), None)
+            continue
+        if not info["running"]:
+            # A body that DIED while marked stuck (claude exits the login
+            # picker on some nudges) comes back by the launcher's own start
+            # path, which places the credential first. Only bodies THIS
+            # watch marked are eligible -- never one a human stopped.
+            if (user, agent) in _needs_login and _shared_login_usable(user):
+                sync_before_start(user, agent)
+                _docker("start", container_name(user, agent), check=False,
+                        capture=True)
+                _needs_login.pop((user, agent), None)
+                _audit("LOGIN_HEAL_RESTART", user=user, agent=agent)
+            continue
+        running.setdefault(user, []).append(agent)
+        if (user, agent) in _needs_login:
+            continue                    # found once: no further probing
+        tail = _agent_pane_tail(container_name(user, agent))
+        if tail is not None and pane_needs_login(tail):
+            _needs_login[(user, agent)] = now
+            _audit("LOGIN_NEEDED", user=user, agent=agent)
+    for user, agents in running.items():
+        stuck = [a for a in agents if (user, a) in _needs_login]
+        if not stuck:
+            _login_alerted.pop(user, None)
+            continue
+        if _shared_login_usable(user):
+            for agent in agents:
+                # EVERY running agent gets the better credential (a no-op for
+                # non-home-login agents and for a newer local one).
+                try:
+                    sync_before_start(user, agent)
+                except Exception as e:  # noqa: BLE001 -- one agent must not block the rest
+                    print(f"reveille-launch: login heal sync {user}/{agent} "
+                          f"failed: {e}", file=sys.stderr, flush=True)
+            for agent in stuck:
+                name = container_name(user, agent)
+                # the nudge: leave whatever prompt claude is holding, then a
+                # bare Enter -- enough for a REPL-side 401 to retry on the
+                # fresh file; a picker that exits instead is caught above and
+                # restarted onto the new credential.
+                _docker("exec", name, "tmux", "send-keys", "-t", "agent",
+                        "Escape", check=False, capture=True)
+                _docker("exec", name, "tmux", "send-keys", "-t", "agent",
+                        "Enter", check=False, capture=True)
+                _needs_login.pop((user, agent), None)
+                _audit("LOGIN_HEALED", user=user, agent=agent)
+            _login_alerted.pop(user, None)
+        elif now - _login_alerted.get(user, 0) > 30 * 60 * 10**9:
+            if _alert_needs_login(user, stuck, broker_url):
+                _login_alerted[user] = now
+                _audit("LOGIN_ALERT", user=user, agent=",".join(stuck))
+
+
+def _login_watch_forever(interval_s, broker_url, stop):
+    """Scheduler twin of _sweep_forever, same reasons line for line: lives in
+    serve because a periodic task with a separate deployment step never runs;
+    own sqlite connection; a bad tick must not end the loop."""
+    conn = _db()
+    while True:
+        try:
+            _login_watch_once(conn, broker_url)
+        except Exception as e:  # noqa: BLE001 -- a bad tick must not end the loop
+            print(f"reveille-launch: login-watch tick failed "
+                  f"({e.__class__.__name__}: {e}) -- retrying in "
+                  f"{interval_s}s", file=sys.stderr, flush=True)
+        if stop.wait(interval_s):
+            return
+
+
 def _ensure_network(net, broker_url):
     """Create the shared network if missing and pull the broker onto it, so the agent
     can resolve it by DNS. Both are idempotent -- create/connect on an existing
@@ -4421,6 +4573,11 @@ def cmd_serve(a):
     stop = threading.Event()
     threading.Thread(target=_sweep_forever, name="sweep",
                      args=(a.sweep_seconds, idle_ns, stop), daemon=True).start()
+    # login-watch (operator 14028): the deaf-claude detector + heal. The
+    # broker it alerts through is the auth one -- the address this host is
+    # already proven to reach, not the container-DNS name agents use.
+    threading.Thread(target=_login_watch_forever, name="login-watch",
+                     args=(60, a.auth_url, stop), daemon=True).start()
     try:
         uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
     finally:

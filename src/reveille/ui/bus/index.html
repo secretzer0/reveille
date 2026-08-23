@@ -6033,6 +6033,16 @@ async function refreshLoginSection(){
      'terminal path meanwhile. '
     :'starting the login flow... ')+lgCancel);
    loginPoll=setTimeout(refreshLoginSection,2000);
+  }else if(st.container){
+   // THE CLICK MUST SHOW ITS OWN FLOW (operator 14028: "no indication the
+   // button was clicked", then a second click hit the already-pending
+   // refusal). Right after /login/start the container exists but its tmux
+   // session does not yet, so `pending` is absent -- this used to fall
+   // through to the logged-in branch, repaint the same button, and never
+   // poll again: a flow started and invisible. A container with no pending
+   // stage IS a starting flow; say so and keep asking.
+   paint(el,seen+'login flow starting...'+lgCancel);
+   loginPoll=setTimeout(refreshLoginSection,1500);
   }else if(L.present){
    paint(el,seen+'<button id="lgStart">re-login (switch account)</button>'+
     lgCancel+
@@ -6048,9 +6058,14 @@ async function refreshLoginSection(){
     '<button id="lgStart">log in via browser</button>'+lgCancel+
     '<span class="pDim"> or in a terminal: '+cmd+'</span>');
   }
-  if($('lgStart'))$('lgStart').onclick=async()=>{
-   try{await lapi('/login/start',{method:'POST',body:'{}'});
-    refreshLoginSection();}catch(e){toast(e.message);}};
+  if($('lgStart'))$('lgStart').onclick=async ev=>{
+   // instant feedback, and a button that cannot double-fire: the second
+   // click used to reach the launcher's already-pending refusal (14028)
+   ev.target.disabled=true;
+   el.dataset.sig='';el.textContent='starting the login flow...';
+   try{await lapi('/login/start',{method:'POST',body:'{}'});}
+   catch(e){toast(e.message);}
+   refreshLoginSection();};
   if($('lgSend'))$('lgSend').onclick=async()=>{
    const code=$('lgCode').value.trim();if(!code)return;
    try{await lapi('/login/code',{method:'POST',
