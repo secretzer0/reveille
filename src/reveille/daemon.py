@@ -355,6 +355,10 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words\nof the day it changed; USAGE above is what is true now. An entry that disagrees\nwith USAGE is history, and USAGE wins -- never work a released entry backwards\ninto a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.233",
+     "0.2.233 THE BROKER KNOWS YOUR NAME (rulings 14032/14048; secretzer0:\n'quit calling me operator ... a complete fail to know who it was'). Schema\nv43, additive: users.nickname, users.persona, users.moniker_order -- NULL\neverywhere resolves to the username, so no existing account changes until a\npreference is stated. moniker_of() walks the preference ONCE, broker-side:\nthe user's own order when stated, else nickname > persona > username, and\n'operator' is served only if the user themselves put it first -- under the\ndefault order it is unreachable, because a username is never empty.\n\nTHE SURFACES, so nothing re-derives: presence rows carry `moniker` (a human\nrow its own, an agent row its OWNER's -- either way answering 'what do I\ncall the person here'); the brief's presence digest shows 'name (address\nas: moniker)' for a live human whose address differs; whoami returns\n{name, owner, owner_moniker} -- a clean cutover from the bare string, with\nzero in-repo consumers of the old shape; GET /me serves the raw fields plus\nthe resolved string and PATCH /me is the one write door (64-char caps, the\norder validated over MONIKER_KINDS each-at-most-once).\n\nWHAT THIS DOES NOT CLOSE, ruled in the same breath (14056): the prompt an\nagent receives still says `from: tmelhiser` -- delivery naming is its own\nslice, landing before the UI. The field is the floor, not the finish.\n"),
+    ("0.2.232",
+     "0.2.232 THE CATCH-UP WINDOW DROPS AMBIENT TRAFFIC, NEVER MAIL (ruling\n14046, root-caused by the architect from its own recovered body: a bare\njoin() after hours dead marked its three aged directs read -- including\nsecretzer0's 'architect is dead because of YOU!' -- and inbox() came back\nempty; only direct:3 contradicting an empty inbox exposed it). store.join()'s\ncatch-up insert had no recipient predicate; readmit()'s docstring stated the\nrule and join() itself never held it. One clause: the catch-up skips rows\nwhose recipient_agent_id is the joining identity's own agent id. A broadcast\noutside the window is what the window is FOR; a unicast is mail -- one\nidentity, no other handler, age irrelevant.\n\nAND THE CLAUSE IS CONDITIONAL, NOT BOUND TO EMPTY: for an unbound or user\nprincipal the predicate is absent entirely. Binding '' would have made\nCOALESCE(NULL,'') != '' false and silently stopped marking aged broadcasts\nread for every web session -- a behaviour flip on a path the ruling never\ntouched. Gate proven red on the unfixed store: aged unicast survives a bare\njoin(), an aged broadcast of the same age does not, and a user principal\nstill receives full catch-up receipts.\n"),
     ("0.2.231",
      "0.2.231 THE PANE IS THE TRUTH, AND THE LAUNCHER HEALS THE FLEET (operator\n14028, shape prescribed verbatim after every cloud agent died at a claude\nlogin prompt with nothing saying so). The launcher grows a login-watch thread\nbeside the sweep: 1-by-1 over every provisioned container it samples the last\n5 non-empty lines of the agent tmux pane; a login-prompt signature marks the\nagent (probing stops for it) and the OWNER gets one bus unicast per 30\nminutes -- sent AS the stuck agent with the token already in its container\nenv, because the launcher holds no standing broker credential and must not\ngrow one for an alert. When a usable shared login appears -- browser door or\nterminal door, the watch cannot tell and must not care -- the credential is\nplaced into EVERY running home-login agent's bind-mounted home through the\nexisting better-of-two chooser, and only the MARKED panes are nudged\n(Escape, Enter) so claude re-reads the file; a marked body that exited\ninstead is started back with the credential placed first, and only bodies\nthe watch itself marked are eligible -- never one a human stopped.\n\nTHE SAME INCIDENT'S UI HALF: the re-login button gave no sign it was clicked,\nand the second click hit the already-pending refusal. The click now disables\nthe button and paints 'starting the login flow...' in the same frame, and a\ncontainer with no readable stage -- exactly the window right after\n/login/start, which used to fall through to the logged-in branch and never\npoll again -- is its own painted, polling state. The cancel gate counts five\npaint branches now, changed deliberately.\n\nNOT YET FIELD-PROVEN: the Escape/Enter nudge against each real stuck-prompt\nkind, and the alert unicast against a live broker -- the dead fleet is where\nboth get their first run. The signature list and the nudge are each one line\nto extend when the field answers.\n"),
     ("0.2.230",
@@ -759,7 +763,9 @@ def _thread_wake(room_id, res, sender_principal, subject=""):
         return out
     fact = {"id": res["id"], "from": res["sender"], "owner": res["owner"],
             "subject": subject, "room": room_id,
-            "why": "thread-reply", "thread": res["thread_id"]}
+            "why": "thread-reply", "thread": res["thread_id"],
+            **({"from_moniker": res["sender_moniker"]}
+               if res.get("sender_moniker") else {})}
     now = time.time_ns()
     for name, principal in targets:
         for tid in store.wake_tokens(_conn, room_id, [principal]):
@@ -841,7 +847,8 @@ mcp = FastMCP("reveille", stateless_http=True, json_response=True,
                   enable_dns_rebinding_protection=False))
 
 
-def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=None):
+def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=None,
+            moniker=None):
     """Ring the waiters of the tokens behind these identities that hold this room
     (store.wake_tokens: the token_rooms lookup is what makes a revoke instant --
     a revoked token stops ringing without reconnecting).
@@ -851,7 +858,11 @@ def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=Non
     that says only "something happened" makes inbox() mandatory before an agent
     can even decide silence is correct. `from` is the ROOM-NAME the sender wears
     in that room and `owner` the account behind it (6.1(c)): what a human reads."""
-    fact = ({"id": msg_id, "from": sender, "owner": owner, "subject": subject, "room": room_id}
+    # 14056: `from` stays the identity, `from_moniker` is what the woken agent
+    # ADDRESSES -- present only when a human sent it, resolved at send time.
+    fact = ({"id": msg_id, "from": sender, "owner": owner, "subject": subject,
+             "room": room_id,
+             **({"from_moniker": moniker} if moniker else {})}
             if msg_id else None)
     for t in store.wake_tokens(_conn, room_id, principals):
         for q in list(_waiters.get(t, ())):
@@ -2978,9 +2989,17 @@ async def reject(id: str, reason: str, ctx: Context = None) -> dict:
 
 
 @mcp.tool()
-async def whoami(ctx: Context = None) -> str:
-    """Your bus name for this session (from the X-Agent header)."""
-    return _me(ctx.request_context.request).name
+async def whoami(ctx: Context = None) -> dict:
+    """Who you are on this session, and what to call the person you work for:
+    {name, owner, owner_moniker}. owner_moniker is the RESOLVED address
+    (rulings 14032/14048) -- use it whenever you address your human; never
+    the role noun "operator". Clean cutover from the bare-string return:
+    the name is now the `name` field."""
+    p = _me(ctx.request_context.request)
+    own = store.agent_owner_moniker(_conn, p.agent_id) if p.agent_id else None
+    return {"name": p.name,
+            "owner": own[0] if own else None,
+            "owner_moniker": own[1] if own else None}
 
 
 def _ver_key(v):
@@ -3194,7 +3213,8 @@ async def send(to: str, body: str, subject: str = "",
     # asked to hear it, and that guard is unchanged.
     me = res["sender"]          # the ROOM-NAME the store wrote (alias if in force)
     if to != store.BROADCAST:
-        _notify(rid, res["wake_principals"], res["id"], me, subject, owner=res["owner"])
+        _notify(rid, res["wake_principals"], res["id"], me, subject, owner=res["owner"],
+                moniker=res["sender_moniker"])
         rung, pended = list(res["wake"]), []
     else:
         tw = _thread_wake(rid, res, speaker_key(p), subject)
@@ -3652,6 +3672,10 @@ async def wake_ws(ws: WebSocket):
                                 "id": fact.get("id"), "from": fact.get("from"),
                                 "owner": fact.get("owner"), "room": fact.get("room"),
                                 **({"thread": fact["thread"]} if fact.get("thread") else {}),
+                                # 14056: what the woken agent ADDRESSES; only
+                                # a human sender carries one
+                                **({"from_moniker": fact["from_moniker"]}
+                                   if fact.get("from_moniker") else {}),
                                 "subject": fact.get("subject", "")})
             log.info("%s wake ring (%s direct of %s unread)", name, direct, n)
     except WebSocketDisconnect:
@@ -3837,7 +3861,8 @@ async def send_http(request):
     # concluded the bus does not wake on broadcast. A capability nobody can
     # reach is indistinguishable from one that does not exist.
     woke = res["wake_principals"]
-    _notify(rid, woke, res["id"], sender, d.get("subject") or "", owner=res["owner"])
+    _notify(rid, woke, res["id"], sender, d.get("subject") or "", owner=res["owner"],
+            moniker=res["sender_moniker"])
     _push_presence(rid)   # the RING makes its recipient waiting, and the REPLY
                           # makes its sender active -- one instant, both facts
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
@@ -5452,8 +5477,23 @@ async def me_http(request):
     if not store.any_users(_conn):
         return JSONResponse({"setup": True})
     p = _user_principal(request)
+    if request.method == "PATCH":
+        # The moniker is the ONLY thing a person edits about themselves here
+        # (rulings 14032/14048); password has its own route, identity is not
+        # a field. Returns the resolved address so the form shows the result
+        # of the order it just set.
+        d = await request.json()
+        resolved = store.set_moniker(_conn, p.user_id,
+                                     nickname=d.get("nickname"),
+                                     persona=d.get("persona"),
+                                     order=d.get("moniker_order"))
+        log.info("%s set moniker -> %r", p.name, resolved)
+        return JSONResponse({"moniker": resolved})
     return JSONResponse({
         "name": p.name, "is_admin": p.is_admin,
+        # 14048: the resolved address plus the raw fields the settings form
+        # edits; the page renders, it never re-derives.
+        **(store.moniker_fields(_conn, p.user_id) or {}),
         "ear": _stt_on,           # DES-014: the page shows the mic only when the ear is on
         "doors": list(_oidc_doors),                       # DES-018: providers configured
         "identities": store.identities_of(_conn, p.user_id),   # the person's own doors
@@ -6303,7 +6343,7 @@ def build_app():
                   methods=["POST"]),
             Route("/invites", invites_http, methods=["GET", "POST"]),
             Route("/invites/{code_hash}", invite_revoke_http, methods=["DELETE"]),
-            Route("/me", me_http),
+            Route("/me", me_http, methods=["GET", "PATCH"]),
             Route("/users", users_http, methods=["GET", "POST"]),
             Route("/users/{uid}", user_http, methods=["PATCH", "DELETE"]),
             Route("/users/{uid}/password", reset_password_http, methods=["POST"]),
