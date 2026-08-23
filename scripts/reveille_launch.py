@@ -1421,6 +1421,7 @@ _LOGIN_NEED_RE = re.compile(
 
 _needs_login = {}    # (user, agent) -> ns first seen stuck
 _login_alerted = {}  # user -> ns of last alert sent
+_nudged = set()      # (user, agent) already nudged once for this stint
 
 
 def pane_needs_login(text):
@@ -1487,6 +1488,7 @@ def _login_watch_once(conn, broker_url):
         info = _inspect_container(container_name(user, agent))
         if info is None:
             _needs_login.pop((user, agent), None)
+            _nudged.discard((user, agent))
             continue
         if not info["running"]:
             # A body that DIED while marked stuck (claude exits the login
@@ -1498,15 +1500,20 @@ def _login_watch_once(conn, broker_url):
                 _docker("start", container_name(user, agent), check=False,
                         capture=True)
                 _needs_login.pop((user, agent), None)
+                _nudged.discard((user, agent))
                 _audit("LOGIN_HEAL_RESTART", user=user, agent=agent)
             continue
         running.setdefault(user, []).append(agent)
         if (user, agent) in _needs_login:
             continue                    # found once: no further probing
         tail = _agent_pane_tail(container_name(user, agent))
-        if tail is not None and pane_needs_login(tail):
+        if tail is None:
+            continue
+        if pane_needs_login(tail):
             _needs_login[(user, agent)] = now
             _audit("LOGIN_NEEDED", user=user, agent=agent)
+        else:
+            _nudged.discard((user, agent))   # recovered: the stint is over
     for user, agents in running.items():
         stuck = [a for a in agents if (user, a) in _needs_login]
         if not stuck:
@@ -1523,16 +1530,29 @@ def _login_watch_once(conn, broker_url):
                           f"failed: {e}", file=sys.stderr, flush=True)
             for agent in stuck:
                 name = container_name(user, agent)
-                # the nudge: leave whatever prompt claude is holding, then a
-                # bare Enter -- enough for a REPL-side 401 to retry on the
-                # fresh file; a picker that exits instead is caught above and
-                # restarted onto the new credential.
-                _docker("exec", name, "tmux", "send-keys", "-t", "agent",
-                        "Escape", check=False, capture=True)
-                _docker("exec", name, "tmux", "send-keys", "-t", "agent",
-                        "Enter", check=False, capture=True)
+                if (user, agent) in _nudged:
+                    # NUDGE ONCE, THEN RESTART (operator 14036: "is a nudge
+                    # really enough?" -- unproven, so it does not get to be
+                    # the only door). Still at a prompt one tick after a
+                    # nudge means the running claude will not re-read the
+                    # file; a claude STARTED after the file landed always
+                    # does. The credential is already placed above; the body
+                    # was dead at a prompt, so there is no session to lose.
+                    _nudged.discard((user, agent))
+                    _docker("restart", name, check=False, capture=True)
+                    _audit("LOGIN_HEAL_RESTART", user=user, agent=agent)
+                else:
+                    # the nudge: leave whatever prompt claude is holding,
+                    # then a bare Enter -- enough for a REPL-side 401 to
+                    # retry on the fresh file; a picker that exits instead
+                    # is caught above and restarted onto the new credential.
+                    _nudged.add((user, agent))
+                    _docker("exec", name, "tmux", "send-keys", "-t", "agent",
+                            "Escape", check=False, capture=True)
+                    _docker("exec", name, "tmux", "send-keys", "-t", "agent",
+                            "Enter", check=False, capture=True)
+                    _audit("LOGIN_HEALED", user=user, agent=agent)
                 _needs_login.pop((user, agent), None)
-                _audit("LOGIN_HEALED", user=user, agent=agent)
             _login_alerted.pop(user, None)
         elif now - _login_alerted.get(user, 0) > 30 * 60 * 10**9:
             if _alert_needs_login(user, stuck, broker_url):
