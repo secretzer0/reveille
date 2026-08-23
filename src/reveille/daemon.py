@@ -2980,9 +2980,17 @@ async def reject(id: str, reason: str, ctx: Context = None) -> dict:
 
 
 @mcp.tool()
-async def whoami(ctx: Context = None) -> str:
-    """Your bus name for this session (from the X-Agent header)."""
-    return _me(ctx.request_context.request).name
+async def whoami(ctx: Context = None) -> dict:
+    """Who you are on this session, and what to call the person you work for:
+    {name, owner, owner_moniker}. owner_moniker is the RESOLVED address
+    (rulings 14032/14048) -- use it whenever you address your human; never
+    the role noun "operator". Clean cutover from the bare-string return:
+    the name is now the `name` field."""
+    p = _me(ctx.request_context.request)
+    own = store.agent_owner_moniker(_conn, p.agent_id) if p.agent_id else None
+    return {"name": p.name,
+            "owner": own[0] if own else None,
+            "owner_moniker": own[1] if own else None}
 
 
 def _ver_key(v):
@@ -5454,8 +5462,23 @@ async def me_http(request):
     if not store.any_users(_conn):
         return JSONResponse({"setup": True})
     p = _user_principal(request)
+    if request.method == "PATCH":
+        # The moniker is the ONLY thing a person edits about themselves here
+        # (rulings 14032/14048); password has its own route, identity is not
+        # a field. Returns the resolved address so the form shows the result
+        # of the order it just set.
+        d = await request.json()
+        resolved = store.set_moniker(_conn, p.user_id,
+                                     nickname=d.get("nickname"),
+                                     persona=d.get("persona"),
+                                     order=d.get("moniker_order"))
+        log.info("%s set moniker -> %r", p.name, resolved)
+        return JSONResponse({"moniker": resolved})
     return JSONResponse({
         "name": p.name, "is_admin": p.is_admin,
+        # 14048: the resolved address plus the raw fields the settings form
+        # edits; the page renders, it never re-derives.
+        **(store.moniker_fields(_conn, p.user_id) or {}),
         "ear": _stt_on,           # DES-014: the page shows the mic only when the ear is on
         "doors": list(_oidc_doors),                       # DES-018: providers configured
         "identities": store.identities_of(_conn, p.user_id),   # the person's own doors
@@ -6305,7 +6328,7 @@ def build_app():
                   methods=["POST"]),
             Route("/invites", invites_http, methods=["GET", "POST"]),
             Route("/invites/{code_hash}", invite_revoke_http, methods=["DELETE"]),
-            Route("/me", me_http),
+            Route("/me", me_http, methods=["GET", "PATCH"]),
             Route("/users", users_http, methods=["GET", "POST"]),
             Route("/users/{uid}", user_http, methods=["PATCH", "DELETE"]),
             Route("/users/{uid}/password", reset_password_http, methods=["POST"]),
