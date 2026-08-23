@@ -162,3 +162,26 @@ def test_agent_sent_messages_carry_nothing_new(tmp_path):
     rows = [m for m in store.tail(c, rooms=[room["id"]]) if m["id"] == res["id"]]
     assert "from_moniker" not in rows[0]
     c.close()
+
+
+def test_the_ring_carries_the_address(broker):
+    """Door (a) of 14059: the real wake_ws composer, a real received frame.
+    14031 verbatim: 'this prompt sent back should 100% be my chosen
+    NickName' -- the prompt sent back IS the ring, so this asserts on the
+    frame a woken agent actually gets, not on the store fields feeding it."""
+    u = sit(broker, "travis")
+    room = store.create_room(broker.conn, u["id"], "r")
+    store.join(broker.conn, "travis", "web:travis", room["id"], None)
+    tok = store.create_token(broker.conn, u["id"], "arch", agent_name="arch",
+                             create=True, rooms=[room["id"]])
+    store.join(broker.conn, "arch", "arch", room["id"], tok["id"])
+    store.set_moniker(broker.conn, u["id"], nickname="secretzer0")
+    with broker.websocket_connect(
+            "/wake?name=arch",
+            headers={"Authorization": "Bearer " + tok["secret"]}) as ws:
+        r = broker.post("/send?room=" + room["id"],
+                        json={"to": "arch", "body": "fix it", "subject": "s"})
+        assert r.status_code == 200, r.text
+        frame = ws.receive_json()
+        assert frame["wake"] is True and frame["from"] == "travis"
+        assert frame["from_moniker"] == "secretzer0"
