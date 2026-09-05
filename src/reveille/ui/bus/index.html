@@ -807,6 +807,20 @@
   animation:blastPulse 1.1s ease-in-out infinite}
  @keyframes blastPulse{50%{filter:brightness(.72)}}
  #send.blasting{background:#e8555a;color:#fff}
+ /* Inline @/# type-ahead (ruling 14523): a small list above the composer.
+    Selection binds; text never does. */
+ #taPanel{display:none;position:absolute;bottom:calc(100% + .4rem);left:4rem;width:18rem;
+  max-height:14rem;overflow-y:auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:.25rem;z-index:30;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+ #taPanel.on{display:block}
+ #taPanel .ti{display:block;width:100%;text-align:left;padding:.3rem .55rem;border:0;
+  background:none;color:var(--fg);border-radius:6px;cursor:pointer;font:inherit}
+ #taPanel .ti.sel,#taPanel .ti:hover{background:var(--hover)}
+ #taPanel .ti .kind{opacity:.55;font-size:.85em;margin-left:.4rem}
+ #taChips{display:inline-flex;gap:.3rem;flex-wrap:wrap}
+ #taChips .tc{display:inline-flex;align-items:center;gap:.3rem;padding:.1rem .5rem;
+  border:1px solid var(--line);border-radius:999px;font-size:.85em;cursor:pointer}
+ #taChips .tc:hover{background:var(--hover)}
  #toPanel{display:none;position:absolute;bottom:calc(100% + .4rem);left:0;width:16rem;
   max-height:19rem;overflow-y:auto;background:var(--card);border:1px solid var(--line);
   border-radius:10px;padding:.4rem;z-index:10;box-shadow:0 8px 30px rgba(0,0,0,.45)}
@@ -1044,6 +1058,8 @@
      <div id="toPanel"></div>
     </div>
     <span id="replyChip" title="clear reply"></span>
+    <span id="taChips"></span>
+    <div id="taPanel"></div>
     <button type="button" id="blast" hidden></button>
     <input id="subject" placeholder="Subject (optional)">
     <input id="fileInput" type="file" multiple hidden>
@@ -1779,22 +1795,23 @@ async function toggleScript(row,m){
 }
 function render(m){
  const frag=document.createDocumentFragment();
- // ONE ROW PER SUBMIT (ruling 14434): copies of one composer submit share
- // send_group, and the feed shows the SET once -- body printed once, each
- // recipient a chip carrying its OWN message id and opening its OWN thread.
- // The guard is the recorded group, never text or timing: NULL groups (agent
- // sends, single sends, all history) can never merge, and a broadcast never
- // joins a group row. Rows arrive in id order, so copies are adjacent.
- if(m.send_group&&m.to!=='*'&&prevMsg&&prevMsg.send_group===m.send_group
-    &&prevMsg.from===m.from){
-  const gr=$('inner').querySelector('.row[data-group="'+m.send_group+'"]');
-  if(gr){
-   gr.querySelector('.grpto')?.insertAdjacentHTML('beforeend',
-    ', <span class="toname mid" data-thread="'+m.thread_id+'" style="color:'
-    +color(m.to)+'" title="thread of this copy">'+esc(m.to)+' (#'+m.id+')</span>');
-   prevMsg=m;
-   return frag;                       // registered, rendered as a chip
-  }
+ // ONE ROW PER SUBMIT (ruling 14434, simplified per 14583): copies of one
+ // composer submit share send_group, and the feed shows the SET once -- body
+ // printed once, each recipient a chip carrying its OWN message id and
+ // opening its OWN thread. The guard is the recorded group, never text or
+ // timing: NULL groups (agent sends, single sends, all history) can never
+ // merge, and a broadcast never joins a group row. The lookup is ALWAYS by
+ // data-group -- no adjacency assumption, so another sender landing between
+ // two copies under load cannot split the set or misplace a chip.
+ if(m.send_group&&m.to!=='*'&&m.from===((
+    $('inner').querySelector('.row[data-group="'+CSS.escape(m.send_group)+'"] .who')
+    ||{}).textContent||null)){
+  const gr=$('inner').querySelector('.row[data-group="'+CSS.escape(m.send_group)+'"]');
+  gr.querySelector('.grpto')?.insertAdjacentHTML('beforeend',
+   ', <span class="toname mid" data-thread="'+m.thread_id+'" style="color:'
+   +color(m.to)+'" title="thread of this copy">'+esc(m.to)+' (#'+m.id+')</span>');
+  prevMsg=m;
+  return frag;                        // registered, rendered as a chip
  }
  if(!prevMsg||dayOf(prevMsg.ts_ns)!==dayOf(m.ts_ns)){
   const d=document.createElement('div');d.className='day';d.textContent=dayOf(m.ts_ns);
@@ -2562,33 +2579,183 @@ $('body').addEventListener('paste',e=>{
  const files=[...(e.clipboardData?.files||[])];
  if(files.length){e.preventDefault();files.forEach(uploadFile);}
 });
+// ---- Inline @/# addressing (ruling 14523) -----------------------------------
+// A TARGET EXISTS ONLY WHERE THE TYPE-AHEAD WAS ACCEPTED. The text is display;
+// the bound ids are the message. Typed-and-never-selected text -- including a
+// paste that happens to contain '#OverSiteAI' or '@core' -- is a literal even
+// on an exact match: nothing below ever re-parses the body at submit. Names
+// are per-room (DES-011 s2), so an accepted member binds the ROOM ID it was
+// offered from, never the string. `#Room` posts a NEW ROOT there -- replies
+// never cross rooms and this composer does not offer to. Permission stays the
+// broker's: the menu lists only held rooms as a convenience; the refusal is
+// the boundary.
+// TA-PURE-BEGIN  (extracted verbatim by tests/test_inline_addressing.py and
+// run under node: the tokenizer and the send-builder are the two halves whose
+// wrongness would mis-address a message, so they are pure and gated.)
+function taToken(text,caret){
+ // The active token under the caret: from the last whitespace boundary to the
+ // caret. Matching stops at whitespace, so '#Some Comment From A Paste' can
+ // never resolve past 'Some'. Returns null when the caret is not inside a
+ // # / @ token. '#Room@q' (no space, @ touching) is the compound form: member
+ // type-ahead for THAT room, open from the bare '@' with no extra character.
+ const head=text.slice(0,caret);
+ const m=/(^|\s)([#@])(\S*)$/.exec(head);
+ if(!m)return null;
+ const start=caret-m[2].length-m[3].length;
+ if(m[2]==='#'){
+  const at=m[3].indexOf('@');
+  if(at>=0)return {kind:'#@',start,roomText:m[3].slice(0,at),q:m[3].slice(at+1)};
+  return {kind:'#',start,q:m[3]};
+ }
+ return {kind:'@',start,q:m[3]};
+}
+function buildSends(o){
+ // o = {room, rooms, recip:[names], inline:[{roomId,agent|null}]}.
+ // Zero RESOLVED targets = broadcast, exactly today. With any resolved
+ // target -- picker or accepted inline -- nothing implicit is added.
+ // A cross-room send is a NEW ROOT (newRoot strips reply_to at the caller).
+ const out=[];
+ const base=o.recip.length?o.recip:(o.inline.length?[]:['*']);
+ for(const rid of o.rooms)for(const to of base)out.push({rid,to,newRoot:false});
+ for(const t of o.inline)
+  out.push({rid:t.roomId,to:t.agent||'*',newRoot:t.roomId!==o.room});
+ const seen=new Set();
+ return out.filter(s=>{const k=s.rid+'\u0000'+s.to;
+  if(seen.has(k))return false;seen.add(k);return true;});
+}
+// TA-PURE-END
+const inlineTargets=[];   // accepted bindings: {roomId,roomName,agent|null}
+let taState=null;         // open type-ahead: {tok,items,sel}
+const taMembers={};       // roomId -> [names], fetched once per room per load
+function taRooms(q){
+ return (me.rooms||[]).filter(r=>r.name.toLowerCase().startsWith(q.toLowerCase()))
+  .map(r=>({label:'#'+r.name,kind:'room',roomId:r.id,roomName:r.name}));
+}
+async function taMembersOf(rid){
+ if(taMembers[rid])return taMembers[rid];
+ try{const pr=await api('/presence'+qsFor(rid));
+  taMembers[rid]=(pr.agents||[]).map(a=>a.name);}catch(e){taMembers[rid]=[];}
+ return taMembers[rid];
+}
+async function taItems(tok){
+ if(tok.kind==='#')return taRooms(tok.q);
+ if(tok.kind==='@'){
+  const names=(await taMembersOf(room)).filter(n=>n!==myName
+   &&n.toLowerCase().startsWith(tok.q.toLowerCase()));
+  return names.map(n=>({label:'@'+n,kind:'member',roomId:room,
+   roomName:(me.rooms||[]).find(r=>r.id===room)?.name||'',agent:n}));
+ }
+ // '#Room@': the room must match a HELD room exactly by name; then its
+ // members, immediately, no extra character needed.
+ const r=(me.rooms||[]).find(x=>x.name.toLowerCase()===tok.roomText.toLowerCase());
+ if(!r)return [];
+ const names=(await taMembersOf(r.id)).filter(n=>
+  n.toLowerCase().startsWith(tok.q.toLowerCase()));
+ return names.map(n=>({label:'#'+r.name+'@'+n,kind:'member',roomId:r.id,
+  roomName:r.name,agent:n}));
+}
+function taClose(){taState=null;$('taPanel').classList.remove('on');}
+function taRender(){
+ const p=$('taPanel');p.innerHTML='';
+ if(!taState||!taState.items.length){taClose();return;}
+ taState.items.forEach((it,i)=>{
+  const b=document.createElement('button');
+  b.type='button';b.className='ti'+(i===taState.sel?' sel':'');
+  b.innerHTML=esc(it.label)+'<span class="kind">'+(it.kind==='room'?'room':'in '+esc(it.roomName))+'</span>';
+  b.onclick=()=>taAccept(it);
+  p.appendChild(b);
+ });
+ p.classList.add('on');
+}
+function taAccept(it){
+ // THE ACCEPT IS THE BINDING -- the one keystroke that turns text into a
+ // target. Room accepts rewrite the token so '#Room@' can continue; member
+ // accepts bind {roomId, agent} and chip up.
+ const el=$('body');const tok=taState.tok;
+ if(it.kind==='room'){
+  el.value=el.value.slice(0,tok.start)+'#'+it.roomName+el.value.slice(el.selectionStart);
+  const pos=tok.start+1+it.roomName.length;
+  el.setSelectionRange(pos,pos);
+  inlineTargets.push({roomId:it.roomId,roomName:it.roomName,agent:null});
+ }else{
+  const label=(it.roomId===room?'@':'#'+it.roomName+'@')+it.agent;
+  el.value=el.value.slice(0,tok.start)+label+el.value.slice(el.selectionStart);
+  const pos=tok.start+label.length;
+  el.setSelectionRange(pos,pos);
+  // A member accept inside '#Room@' supersedes the bare-room binding of the
+  // same accept chain: the human narrowed the target, keep the narrow one.
+  if(it.kind==='member'&&tok.kind==='#@'){
+   const i=inlineTargets.findIndex(t=>t.roomId===it.roomId&&!t.agent);
+   if(i>=0)inlineTargets.splice(i,1);
+  }
+  inlineTargets.push({roomId:it.roomId,roomName:it.roomName,agent:it.agent});
+ }
+ taClose();renderTaChips();el.focus();
+}
+function renderTaChips(){
+ const c=$('taChips');c.innerHTML='';
+ inlineTargets.forEach((t,i)=>{
+  const s=document.createElement('span');
+  s.className='tc';s.title='remove target';
+  s.textContent=(t.agent?(t.roomId===room?'@'+t.agent:'#'+t.roomName+'@'+t.agent)
+                 :'#'+t.roomName)+' ×';
+  s.onclick=()=>{inlineTargets.splice(i,1);renderTaChips();};
+  c.appendChild(s);
+ });
+}
+let taSeq=0;
+$('body').addEventListener('input',async()=>{
+ const el=$('body');
+ const tok=taToken(el.value,el.selectionStart);
+ if(!tok||(tok.kind!=='#@'&&tok.q.length<1)){taClose();return;}
+ const seq=++taSeq;
+ const items=await taItems(tok);
+ if(seq!==taSeq)return;               // a newer keystroke owns the panel
+ taState={tok,items:items.slice(0,8),sel:0};
+ taRender();
+});
+$('body').addEventListener('keydown',e=>{
+ if(!taState)return;
+ if(e.key==='ArrowDown'){e.preventDefault();taState.sel=(taState.sel+1)%taState.items.length;taRender();}
+ else if(e.key==='ArrowUp'){e.preventDefault();taState.sel=(taState.sel+taState.items.length-1)%taState.items.length;taRender();}
+ else if(e.key==='Tab'||e.key==='Enter'){
+  if(taState.items.length){e.preventDefault();taAccept(taState.items[taState.sel]);}
+ }
+ else if(e.key==='Escape'){taClose();}
+});
+
 $('composer').addEventListener('submit',async e=>{
  e.preventDefault();
  let body=$('body').value.trim();
  if(!body&&attachments.length)body=attachments.map(a=>a.name).join(', ');
  if(!body)return;
- const targets=recip.size?[...recip]:['*'];   // subgroup = one gated unicast per member
  // A blast is N separate posts, one per room, each scoped by its own ?room=. It is NOT a
  // cross-room message: rooms stay isolated, so trace()/graph() still cannot walk between
  // them and an agent only ever sees the copy that landed in its own room.
- const rooms=blast?(me.rooms||[]).map(r=>r.id):[room];
+ // The TARGETS are the picker set plus the ACCEPTED inline bindings (14523):
+ // buildSends is pure and never reads the body text -- a pasted name is words.
+ const sends=buildSends({room,rooms:blast?(me.rooms||[]).map(r=>r.id):[room],
+                         recip:[...recip],inline:inlineTargets.slice()});
  // ONE SUBMIT, ONE GROUP (ruling 14434): the set of recipients exists only
  // here, so it is recorded here -- every copy of this submit carries the same
  // minted id, and the feed collapses copies sharing (room, sender, group)
  // into one row. The server stores it as advisory render data; N rows, N
  // receipts, N rings stay exactly as they are.
  const sendGroup=crypto.randomUUID();
- for(const rid of rooms) for(const to of targets){
+ for(const s of sends){
   // No page-all flag any more: a broadcast from this composer IS a person
   // paging the room and always wakes it. The control this replaced could not
   // be kept on -- it hid whenever a recipient was selected and reset on send.
-  const payload={to,subject:$('subject').value.trim(),body,send_group:sendGroup};
+  const payload={to:s.to,subject:$('subject').value.trim(),body,send_group:sendGroup};
   if(attachments.length)payload.attachments=attachments.slice();
-  if(replyTo)payload.reply_to=replyTo;
-  const r=await fetch('/send'+qsFor(rid),{method:'POST',headers:{'content-type':'application/json'},
+  // A CROSS-ROOM SEND IS A NEW ROOT, never a reply (14523 rule 3): replies
+  // never cross rooms, and this composer does not offer to.
+  if(replyTo&&!s.newRoot)payload.reply_to=replyTo;
+  const r=await fetch('/send'+qsFor(s.rid),{method:'POST',headers:{'content-type':'application/json'},
    body:JSON.stringify(payload)});
-  if(!r.ok){toast('send to '+to+' failed: '+(await r.text()));return;}
+  if(!r.ok){toast('send to '+s.to+' failed: '+(await r.text()));return;}
  }
+ inlineTargets.length=0;renderTaChips();taClose();
  earcon('whoosh');
  if(blast)toast('blasted '+rooms.length+' rooms',true);
  blast=false;updateBlast();
