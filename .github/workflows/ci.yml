@@ -36,7 +36,7 @@ jobs:
         run: |
           mkdir -p ~/ffmpeg
           curl -fsSL -o /tmp/ffmpeg.tar.xz https://github.com/secretzer0/reveille/releases/download/ci-ffmpeg-n8.1.2-50/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz
-          echo "eb95195a525ee3160c169b98f941368e7f6f38719a2fd8554f2aa529fe2a3079  /tmp/ffmpeg.tar.xz" | sha256sum -c
+          echo "fb95195a525ee3160c169b98f941368e7f6f38719a2fd8554f2aa529fe2a3079  /tmp/ffmpeg.tar.xz" | sha256sum -c
           tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' -f /tmp/ffmpeg.tar.xz
           echo "$HOME/ffmpeg" >> "$GITHUB_PATH"
           ~/ffmpeg/ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
