@@ -345,3 +345,21 @@ def test_uv_is_resolved_never_assumed(monkeypatch, tmp_path):
     src = pathlib.Path(rl.__file__).read_text()
     assert '(["uv"' not in src, (
         "a bare uv spawn survives -- it dies on every detached session")
+
+
+def test_make_resolves_uv_like_the_launcher_does():
+    """The 0.2.241 deploy proved the property lives in every host-side spawn,
+    not just the script: the broker was live and healthy when make's own roll
+    step (Makefile `up`) died at `/bin/sh: 1: uv: not found` -- make's shell
+    is never a login shell. Recipe lines must spawn $(UV), the resolved path;
+    a bare `uv` at a recipe's command position is the same death deferred.
+    (The one `uv` inside the agent container's -c string is the container's
+    own PATH and exempt by shape: it is never at command position.)"""
+    mk = (pathlib.Path(__file__).resolve().parent.parent / "Makefile")
+    assert "UV := $(shell command -v uv" in mk.read_text()
+    import re
+    bare = [ln for ln in mk.read_text().splitlines()
+            if re.match(r"\t@?(\w+=\S+\s+)*uv\s", ln)]
+    assert bare == [], (
+        "recipe lines spawning bare uv (dies detached, no login PATH): "
+        + repr(bare))
