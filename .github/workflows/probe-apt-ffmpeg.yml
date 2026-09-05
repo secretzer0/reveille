@@ -1,0 +1,29 @@
+# THROWAWAY PROBE (14451): measure the apt path for the gate's ffmpeg on a
+# hosted runner, three fresh runners for variance. Decision rule written
+# before the numbers: apt <45s on all three AND libopus+aac present ->
+# switch the gate to apt; slow or flaky -> keep the sha-pinned mirror;
+# ffmpeg preinstalled with the encoders -> delete the step entirely.
+# Never merge; the branch dies once the numbers are quoted.
+name: probe-apt-ffmpeg
+on:
+  pull_request:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2, 3]
+    steps:
+      - run: |
+          echo "== preinstalled?"
+          which ffmpeg || echo "ffmpeg absent from PATH"
+          ffmpeg -version 2>/dev/null | head -1 || true
+          echo "== apt-get update"
+          time sudo apt-get update
+          echo "== apt-get install ffmpeg"
+          time sudo apt-get install -y ffmpeg
+          echo "== version + encoders"
+          ffmpeg -version | head -1
+          ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
