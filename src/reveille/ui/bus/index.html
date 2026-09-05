@@ -4951,7 +4951,10 @@ async function openRooms(){
 // The second line is a NAME ON PATH rather than a url, which is also what a human
 // types on the re-run -- when the tool is already installed and the url is the
 // part they no longer remember.
-const INIT_CMD = 'uv tool install --force --from git+https://github.com/secretzer0/reveille reveille\n' +
+// No --force (ruled 14716): --force unlinks every console script before it
+// builds, stripping a live install under its own daemons; a fresh machine
+// needs no force, and an existing install upgrades itself (waked converges).
+const INIT_CMD = 'uv tool install --from git+https://github.com/secretzer0/reveille reveille\n' +
                  'reveille init';
 function installCmds(t, base){
  // The ONLY place this command is built. One site, so the gate can enumerate it

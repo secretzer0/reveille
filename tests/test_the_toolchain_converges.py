@@ -146,3 +146,51 @@ def test_a_missing_uv_that_cannot_be_installed_skips_rather_than_raises(monkeypa
     monkeypatch.setattr(waked, "_broker_version", lambda url: "0.2.999")
     monkeypatch.setattr(waked, "_uv_or_bootstrap", lambda: "")
     waked._converge("ws://x/wake", {})   # returns quietly
+
+
+def test_the_upgrade_happens_inside_the_venv_never_unlink_first(monkeypatch):
+    """THE 12/12 ROLLBACK NIGHT (ruled 14716; measured 14714/14718). `uv tool
+    install --force` unlinks every ~/.local/bin console script BEFORE it
+    builds: on a cold container that window measured 108 seconds with no
+    `reveille` on PATH -- the entrypoint's own init died inside it, no waiter
+    ever attached, and the launcher's presence gate rolled back every 0.2.36
+    upgrade of the day. The ~/.local/bin entries are symlinks into the tool
+    venv; an in-venv reinstall (0/16 shim-missing polls vs 13/26) never
+    touches them. sys.executable IS the tool venv python when waked runs from
+    the shim, so no path is assumed."""
+    import sys
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        class R:
+            returncode = 1
+            stderr = "stopped by the test"
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(waked, "_broker_version", lambda url: "0.2.999")
+    monkeypatch.setattr(waked, "_uv_or_bootstrap", lambda: "/usr/bin/uv")
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    waked._converge("ws://x/wake", {})
+    assert calls == [["/usr/bin/uv", "pip", "install",
+                      "--python", sys.executable,
+                      "--reinstall-package", "reveille", waked.GIT_SOURCE]], calls
+
+
+def test_no_unlink_first_install_survives_anywhere_in_src():
+    """The source gate the ruling names: `tool install --force` is the
+    unlink-first form and it is banned from src/ entirely -- waked's converge,
+    the cli's persist step, and the panel's taught command included. A new
+    call site is the same 108-second stripped window waiting for its cold
+    container. Banned in its two EXECUTABLE shapes -- the argv list and the
+    shell/teach line; prose that names the convicted form to warn about it
+    (comments, the changelog) is the record, not a call site."""
+    import pathlib
+    src = pathlib.Path(waked.__file__).resolve().parent
+    forms = ('"tool", "install", "--force"', "tool install --force --from")
+    hits = [(p.relative_to(src), f) for p in src.rglob("*")
+            if p.is_file() and p.suffix in (".py", ".html", ".sh", ".js")
+            for f in forms if f in p.read_text(errors="ignore")]
+    assert hits == [], f"unlink-first install returned to src/: {hits}"
