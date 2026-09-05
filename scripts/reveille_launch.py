@@ -1490,11 +1490,12 @@ def _shared_login_usable(user):
     return bool(meta) and int(time.time() * 1000) < meta["expiresAt"]
 
 
-def _alert_needs_login(user, stuck, broker_url):
+def _alert_needs_login(user, stuck, broker_url, extra=""):
     """One bus unicast to the OWNER, sent AS the stuck agent with the token
     already in its container env -- the launcher holds no standing broker
     credential (G4) and must not grow one for an alert. Best-effort: an
-    unreachable broker means the next tick retries."""
+    unreachable broker means the next tick retries. `extra` appends the
+    stopped-body sentence (the watch alerts, it never starts -- 14527)."""
     info = _inspect_container(container_name(user, stuck[0]))
     token = (info or {}).get("env", {}).get("REVEILLE_TOKEN", "")
     if not token:
@@ -1504,7 +1505,8 @@ def _alert_needs_login(user, stuck, broker_url):
         "body": ("claude credential dead on: " + ", ".join(stuck) + ". "
                  "Bus page -> Settings -> Account -> log in via browser, "
                  "paste the code. The launcher then heals every running "
-                 "agent by itself -- no restarts, nothing else to do.")},
+                 "agent by itself -- no restarts, nothing else to do."
+                 + extra)},
     ).encode()
     req = urllib.request.Request(
         broker_url.rstrip("/") + "/send", data=body, method="POST",
@@ -1528,17 +1530,28 @@ def _login_watch_once(conn, broker_url):
             _nudged.discard((user, agent))
             continue
         if not info["running"]:
-            # A body that DIED while marked stuck (claude exits the login
-            # picker on some nudges) comes back by the launcher's own start
-            # path, which places the credential first. Only bodies THIS
-            # watch marked are eligible -- never one a human stopped.
-            if (user, agent) in _needs_login and _shared_login_usable(user):
-                sync_before_start(user, agent)
-                _docker("start", container_name(user, agent), check=False,
-                        capture=True)
-                _needs_login.pop((user, agent), None)
-                _nudged.discard((user, agent))
-                _audit("LOGIN_HEAL_RESTART", user=user, agent=agent)
+            # THE WATCH NEVER STARTS A STOPPED BODY (ruled 14527; doctrine
+            # 19bdbfcf: only the OWNER starts a body, nothing autostarts).
+            # The branch that lived here started one, and its guard comment
+            # -- "only bodies THIS watch marked, never one a human stopped"
+            # -- was FALSE: the watch marks a RUNNING body, a human stops
+            # it, and the mark survives the stop, so the next tick undid
+            # the human's act with no record of whose act it was undoing.
+            # Field case: the 0.2.36 gate body restarted itself out of a
+            # deliberate stopped-as-found. A body that died at a login
+            # prompt gets an ALERT to the one person who can start it; the
+            # mark clears with the alert (retried next tick if the send
+            # fails), because the pane is gone and there is nothing left
+            # to watch.
+            if (user, agent) in _needs_login:
+                if _alert_needs_login(
+                        user, [agent], broker_url,
+                        extra=" That body is STOPPED: log in first, then "
+                              "start it yourself -- the launcher will not "
+                              "start a body for you."):
+                    _needs_login.pop((user, agent), None)
+                    _nudged.discard((user, agent))
+                    _audit("LOGIN_DEAD_ALERT", user=user, agent=agent)
             continue
         running.setdefault(user, []).append(agent)
         if (user, agent) in _needs_login:

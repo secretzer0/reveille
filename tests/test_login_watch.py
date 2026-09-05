@@ -118,3 +118,48 @@ def test_recovery_ends_the_stint(monkeypatch):
     assert [c for c in calls if "send-keys" in c] and \
         not [c for c in calls if c[0] == "restart"], \
         "a fresh stint must start with a nudge"
+
+
+def test_a_stopped_marked_body_stays_stopped_and_the_owner_is_alerted(monkeypatch):
+    """Ruled 14527 (doctrine 19bdbfcf: only the owner starts a body). The old
+    branch here docker-started a stopped body whose mark survived a human's
+    stop -- the guard comment claimed otherwise and was false; the 0.2.36
+    gate body restarted itself out of a deliberate stopped-as-found. Now: a
+    stopped marked body gets an ALERT and NEVER a start, and the mark clears
+    only when the alert lands."""
+    rl._needs_login.clear(); rl._nudged.clear(); rl._login_alerted.clear()
+    calls = []
+    # The state under test, seeded directly: the watch marked the body while
+    # it ran (a live tick's nudge path clears marks it heals, so driving a
+    # full tick first would erase the very state a human's stop preserves).
+    rl._needs_login[("u", "a")] = 1
+    alerts = []
+    monkeypatch.setattr(rl, "_alert_needs_login",
+                        lambda user, stuck, url, extra="":
+                            alerts.append((user, tuple(stuck), extra)) or True)
+    _tick(monkeypatch, "irrelevant", calls, running=False)   # human stopped it
+    assert not [c for c in calls if c[0] in ("start", "restart")], \
+        "the watch started a stopped body -- the deleted branch is back"
+    assert alerts and alerts[0][1] == ("a",) and "STOPPED" in alerts[0][2]
+    assert ("u", "a") not in rl._needs_login, "mark must clear with the alert"
+
+    # Failed alert: the mark survives so the next tick retries -- and still
+    # nothing starts.
+    rl._needs_login[("u", "a")] = 1
+    monkeypatch.setattr(rl, "_alert_needs_login",
+                        lambda user, stuck, url, extra="": False)
+    calls.clear()
+    _tick(monkeypatch, "irrelevant", calls, running=False)
+    assert not [c for c in calls if c[0] in ("start", "restart")]
+    assert ("u", "a") in rl._needs_login, "a lost alert must retry, not vanish"
+
+
+def test_a_stopped_unmarked_body_is_none_of_the_watchs_business(monkeypatch):
+    """A body stopped without ever being marked gets neither start nor alert:
+    the watch's whole jurisdiction is login prompts it observed."""
+    rl._needs_login.clear(); rl._nudged.clear(); rl._login_alerted.clear()
+    calls, alerts = [], []
+    monkeypatch.setattr(rl, "_alert_needs_login",
+                        lambda *a, **k: alerts.append(a) or True)
+    _tick(monkeypatch, "irrelevant", calls, running=False)
+    assert not [c for c in calls if c[0] in ("start", "restart")] and not alerts
