@@ -505,8 +505,12 @@
 
  /* ---- composer ---- */
  #composerWrap{border-top:1px solid var(--line);background:var(--bg);padding:.8rem 1.1rem 1rem}
+ /* position:relative is load-bearing: #taPanel is bottom-anchored absolute and
+    this form is its containing block -- without it the panel resolves against
+    #main and opens above the top of the page, invisible (field defect, 14653). */
  #composer{max-width:none;margin:0 1.1rem;background:var(--card);border:1px solid var(--line);
-  border-radius:12px;padding:.55rem .9rem .6rem;display:flex;flex-direction:column;gap:.15rem}
+  border-radius:12px;padding:.55rem .9rem .6rem;display:flex;flex-direction:column;gap:.15rem;
+  position:relative}
  /* Both rows WRAP at every width (DES-016 s2): a 664-wide phone in landscape is
     above the phone breakpoint and gets this layout with 432 px of well -- Send
     must fold under, never off the glass. Nothing wraps where there is room. */
