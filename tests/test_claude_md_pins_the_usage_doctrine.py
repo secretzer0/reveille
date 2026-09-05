@@ -25,7 +25,7 @@ CLAUDE_MD = REPO / "CLAUDE.md"
 # carries a second-person copy of the same rules in its numbered init block,
 # and this anchor must not select that one.
 OPEN = "Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop"
-CLOSE = "rings nobody."
+CLOSE = "skipped one costs every ring."
 
 
 def usage_text():
