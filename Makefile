@@ -8,6 +8,11 @@ PID  := $(REPO)/reveille.pid
 # launcher.db image records ambiguous.
 AGENT_IMAGE ?= reveille-agent:0.2.36
 
+# uv resolved the way the launcher's _uv_bin resolves it (ruled 14605): make's
+# /bin/sh is not a login shell, so a detached deploy has no ~/.local/bin on
+# PATH -- the 0.2.241 trip died at the roll step on exactly this.
+UV := $(shell command -v uv 2>/dev/null || echo $(HOME)/.local/bin/uv)
+
 .PHONY: help sync build test smoke daemon start stop restart status logs register unregister lint clean agent-image agent-container agent-spike server-image tts-image up down branch-orphans shots ui-drive
 
 help:
@@ -33,16 +38,16 @@ help:
 	@echo "make agent-spike    prove a container keeps its knowledge: join from inside it"
 
 sync:
-	uv sync
+	$(UV) sync
 
 # build == prove it works: locked env, unit suite, real HTTP+WS smoke.
 build: sync test smoke
 
 test:
-	uv run pytest -q
+	$(UV) run pytest -q
 
 smoke:
-	uv run python tests/smoke_ws.py
+	$(UV) run python tests/smoke_ws.py
 
 # THE INSTRUMENT IS PART OF THE WORK (lesson a-harness-that-lived-in-a-session-
 # dies-with-it): both harnesses drive a scratch broker in headless chromium and
@@ -63,7 +68,7 @@ ui-drive:
 # REVEILLE_PORT to change the port (default 8765); REVEILLE_DB to move the database.
 # Auth is no longer an env var: users and tokens live in the database (see /ui).
 daemon:
-	uv run reveille-daemon
+	$(UV) run reveille-daemon
 
 # Background lifecycle. Logs go to reveille.log next to this Makefile; PID in
 # reveille.pid. Pass env through make, e.g.:  REVEILLE_PORT=9000 make start
@@ -111,7 +116,7 @@ register:
 	claude mcp add --transport http --scope user reveille "$(or $(URL),http://127.0.0.1:8765)/mcp" \
 	  --header 'Authorization: Bearer $${REVEILLE_TOKEN:-}' \
 	  --header 'X-Agent: $${REVEILLE_AGENT_ROLE:-unset-agent}'
-	uv run python -m reveille.install
+	$(UV) run python -m reveille.install
 	@echo "registered. per agent directory: run 'reveille init' there, then plain 'claude'."
 
 unregister:
@@ -290,7 +295,7 @@ up:
 	@# THIS IS THE SCHEDULER for the roll: an image bump that reaches no running
 	@# container is the defect the lesson image-fix-never-reaches-a-running-
 	@# container is about, and a verb nobody invokes is how it happens again.
-	@REVEILLE_AGENT_IMAGE=$(AGENT_IMAGE) uv run --quiet python scripts/reveille_launch.py \
+	@REVEILLE_AGENT_IMAGE=$(AGENT_IMAGE) $(UV) run --quiet python scripts/reveille_launch.py \
 		upgrade --all --idle --image $(AGENT_IMAGE)
 	@echo "reveille up: proxy $(PROXY_SITE) (/ = bus, /agents = launcher), broker :8765, data=$(SERVER_DATA), network=$(SERVER_NETWORK)"
 	@# WHERE THOSE TWO CAME FROM. A deploy that silently used a default for
@@ -360,62 +365,62 @@ agent-spike:
 # The ONLY thing that touches docker; a normal bus client for its health check. Runs
 # from the repo env so it stays lockstep with the broker it reads.
 launch:
-	@uv run python scripts/reveille_launch.py $(ARGS)
+	@$(UV) run python scripts/reveille_launch.py $(ARGS)
 
 # End-to-end gate: real broker on a scratch db, provision one container through the
 # launcher (agent-probe stands in for claude, no Anthropic login needed), assert the
 # launcher sees it live+connected, then destroy. Proves provision + health-by-presence
 # + destroy against a real broker, and that launcher.db holds no token bytes.
 launch-smoke: agent-image
-	uv run python tests/launch_smoke.py
+	$(UV) run python tests/launch_smoke.py
 
 # T3 gate: grants end to end -- mirror, -r server-side, revoke <1s, exclusivity
 # race named, expiry sweep, audit lines, kill-and-reprovision (section 5).
 grant-smoke: agent-image
-	uv run python tests/grant_smoke.py
+	$(UV) run python tests/grant_smoke.py
 
 # DES-003 W1 gate: waked + spool + wake-watch end to end against a real broker --
 # attach+ring, supersede (old holder exits 2), kill -9 reclaim, broker restart
 # absorbed with zero agent re-arms.
 waiter-smoke: sync
-	uv run python tests/waiter_smoke.py
+	$(UV) run python tests/waiter_smoke.py
 
 # DES-005 P0 gate: tenancy against real docker -- namespaced names, per-agent
 # homes (cross-user AND same-user), pid cap with the host unaffected, restart=no,
 # per-user container cap, destroy+recreate keeps data, idle sweep stops.
 tenancy-smoke: agent-image
-	uv run python tests/tenancy_smoke.py
+	$(UV) run python tests/tenancy_smoke.py
 
 # DES-005 P1 gate: full lifecycle over the launcher HTTP API behind a real
 # broker session -- 401 without cookie, cross-user unreachable, attach URL in
 # exactly one response, provision token in no response and no file.
 launcher-api-smoke: agent-image
-	uv run python tests/launcher_api_smoke.py
+	$(UV) run python tests/launcher_api_smoke.py
 
 # DES-006 U2 gate: the launcher refuses to serve without the docker socket,
 # says where its state lives, is one-per-data-root by flock, binds 127.0.0.1
 # only, and a blind respawn after kill -9 brings it back.
 launcher-supervision-smoke: sync
-	uv run python tests/launcher_supervision_smoke.py
+	$(UV) run python tests/launcher_supervision_smoke.py
 
 # DES-003 W2 gate: join-here from a clean shell (scratch HOME + scratch broker):
 # checklist walked, token in exactly one file (0600 fragment), MCP config carries
 # the env template not the value, live+connected from the bootstrap alone.
 joinhere-smoke: sync
-	uv run python tests/joinhere_smoke.py
+	$(UV) run python tests/joinhere_smoke.py
 
 # Attachment gate: a file on the bus comes back byte-identical over the raw-body
 # route and the MCP upload() tool, a multipart form is refused rather than stored
 # as an envelope, and /files/* serves nothing the browser will render on our own
 # origin. Headers asserted off the wire, not read out of the source.
 upload-gate: sync
-	uv run python tests/upload_gate.py
+	$(UV) run python tests/upload_gate.py
 
 # Offline-recovery gate: an agent that ends a turn while the broker is DOWN still
 # recovers by itself when it comes back -- no keystroke. The hook must do its
 # LOCAL work (spawn the waiter, demand the watcher) without probing the bus.
 offline-recovery-smoke: sync
-	uv run python tests/offline_recovery_smoke.py
+	$(UV) run python tests/offline_recovery_smoke.py
 
 # Readmit gate: an agent whose membership was REAPED comes back on its next
 # ordinary call (visible, addressable, pre-outage mail still unread), while an
@@ -423,26 +428,26 @@ offline-recovery-smoke: sync
 # must not be the same absence -- when they were, re-admission voided
 # DIRECTIVE:LEAVE within one tool call.
 readmit-gate: sync
-	uv run python tests/readmit_gate.py
+	$(UV) run python tests/readmit_gate.py
 
 # Deafness gate: a silent agent with unread direct mail is VISIBLY deaf from
 # both presence surfaces, with the reason (no-waiter / not-draining), and one
 # ordinary call clears it. The verdict is computed at read time, never stored.
 deafness-gate: sync
-	uv run python tests/deafness_gate.py
+	$(UV) run python tests/deafness_gate.py
 
 # Deploy-both-halves gate: `make up` refuses when the LAUNCHER answers and is
 # running older code than the tree being deployed. The broker's version was
 # probed on every deploy; the launcher's was never checked, so a merged fix sat
 # un-run for six reviews and broke first-time login the whole time.
 launcher-pin-check-gate: sync
-	uv run python tests/launcher_pin_check.py
+	$(UV) run python tests/launcher_pin_check.py
 
 # Room-events gate: the room PUSHES its own events, so a browser learns that
 # someone arrived or left without asking. Every /feed frame names its event
 # type, and presence rides that channel carrying the whole list, not a diff.
 room-events-gate: sync
-	uv run python tests/room_events_gate.py
+	$(UV) run python tests/room_events_gate.py
 
 # Leave-sticks gate: a DIRECTIVE:LEAVE survives the boot ritual. join() used to
 # clear every leave mark unconditionally, and join() at startup is the standing
@@ -450,33 +455,33 @@ room-events-gate: sync
 # tool, because a store-level test that filters the rooms itself would pass on
 # the broken daemon: the daemon's fault was calling join at all.
 leave-sticks-gate: sync
-	uv run python tests/leave_sticks_gate.py
+	$(UV) run python tests/leave_sticks_gate.py
 
 # Feed-ghost gate: a CLOSED TAB IS NOT A WATCHER. 0.2.35 computes a person's
 # presence from the set of browsers holding a room's feed, so a socket that is
 # never read from -- and therefore never notices the close -- keeps someone
 # reading as live in a room they left. Found live at 26 entries for 2 browsers.
 feed-ghost-gate: sync
-	uv run python tests/feed_ghost_gate.py
+	$(UV) run python tests/feed_ghost_gate.py
 
 # The code-relay boundary, gated by its NEGATIVE cases (ruling 8644): scoped
 # to the caller's own pending login, one relay, opaque code, zero leakage.
 login-relay-smoke: sync
-	uv run python tests/login_relay_smoke.py
+	$(UV) run python tests/login_relay_smoke.py
 
 # SIGTERM gate: with a /feed socket held open by a client that never hangs up
 # (a browser tab -- the live incident's holder), SIGTERM still exits within the
 # bounded graceful timeout, courtesy frame first. On the unfixed daemon this
 # wedges: listeners closed, process alive, docker reporting Up.
 sigterm-gate: sync
-	uv run python tests/sigterm_gate.py
+	$(UV) run python tests/sigterm_gate.py
 
 # Compose gate: the platform comes up DECLARED on a scratch project (own name,
 # network, ports, data root -- the live stack untouched), broker healthy and
 # reachable by name, one front door; rebuilding an existing tag refuses;
 # preflight refuses an empty data root over a live db; down keeps the network.
 compose-gate: sync
-	uv run python tests/compose_gate.py
+	$(UV) run python tests/compose_gate.py
 
 # Single-origin gate (DES-006 U3/U4/U6): the front door, through the REAL shipped
 # Caddyfile with a REAL session cookie. One login covers both services, the bus
@@ -484,20 +489,20 @@ compose-gate: sync
 # Agents pane calls answers 200 JSON there, and the same paths unprefixed do not
 # answer at all. U6 shipped calling them unprefixed; its harness mocked fetch.
 single-origin-smoke: sync
-	uv run python tests/single_origin_smoke.py
+	$(UV) run python tests/single_origin_smoke.py
 
 # Pinned-source gate: the serving launcher does not live in a working tree.
 # pin clones to a declared path on main and refuses a dirty tree, the supervisor
 # spawns from THAT path (and refuses loudly when none is declared), and
 # rewriting the dev tree's launcher mid-flight changes nothing about what serves.
 launcher-pin-smoke: sync
-	uv run python tests/launcher_pin_smoke.py
+	$(UV) run python tests/launcher_pin_smoke.py
 
 # Sweep SCHEDULER gate: proves the 4.6 tick runs by itself. Starts serve, plants
 # an expired grant, and waits -- calling nothing. The gates that call _sweep_once
 # by hand all passed while the sweep had never run in production once.
 sweep-scheduler-smoke: sync
-	uv run python tests/sweep_scheduler_smoke.py
+	$(UV) run python tests/sweep_scheduler_smoke.py
 
 # NOT part of any deploy: most unapplied commits are a branch legitimately in
 # review, and a check that fires on every open branch is one nobody reads. Run
@@ -506,7 +511,7 @@ branch-orphans:
 	@bash scripts/branch-orphans
 
 lint:
-	uv run ruff check src tests scripts
+	$(UV) run ruff check src tests scripts
 
 clean:
 	rm -rf src/reveille/__pycache__ tests/__pycache__ .ruff_cache .mypy_cache .pytest_cache
