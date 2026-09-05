@@ -54,6 +54,113 @@ NO_ROOMS_WINDOW_S = 1800
 # SEPARATE 1800 with its own ruling (9119). Do not merge them.
 IDLE_NUDGE_S = 900
 
+# THE WEDGE HEALER (ruling 14445). A daemon can be alive, logging, retrying
+# and deaf: the 2026-09-05 field case retried opening handshakes for eleven
+# minutes -- and intermittently for five days, 4545 log lines -- while a
+# fresh client from the same host connected in 0.13s. Stale long-lived client
+# state, not a dead path. Death is supervised (Stop hook / entrypoint); this
+# is the mode supervision cannot see. After WEDGE_REEXEC_N consecutive
+# sessions in which the broker never SPOKE (no frame received -- registration
+# and refusal both speak; an opened socket alone proves nothing, and a
+# handshake that returned is not a registered waiter), the daemon re-execs
+# itself on the SAME code: fresh client state, same pid, same flock, the same
+# exec-in-place path convergence uses (13399). Plain constants by ruling: no
+# env var, and NOT a REVEILLE_TIMINGS member (12418 keeps independent knobs
+# out of the coupled set). Arithmetic: the retry ladder caps at 15s, so ten
+# silent sessions cover a window of at least ~2.5 minutes -- an order under
+# the observed 11-minute outage, well over any single transient.
+WEDGE_REEXEC_N = 10
+# Re-execing every ~2.5 minutes forever is a flap that hides its own cause
+# and looks like life. After WEDGE_REEXEC_MAX re-execs with the broker never
+# once speaking, STOP re-execing: the retry ladder keeps running, and the
+# failure is written where a human reads it (the busdeaf-probe's own status
+# surface). Prevention (retry) + healing (re-exec) + alert (this) is the
+# whole design -- the first two alone let a fleet sit quiet for hours.
+WEDGE_REEXEC_MAX = 5
+
+
+def _wedge_path(agent):
+    """The re-exec budget, beside the lock: process memory dies at execv, a
+    file in the spool directory does not, and it joins no env contract."""
+    return os.path.join(spool.ensure(agent), ".wedge-reexecs")
+
+
+def wedge_count(agent):
+    try:
+        return int(open(_wedge_path(agent)).read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def wedge_record(agent):
+    n = wedge_count(agent) + 1     # read BEFORE the "w" open truncates it
+    with open(_wedge_path(agent), "w") as f:
+        f.write(f"{n}\n")
+
+
+_WEDGE_STATUS = os.path.join(os.path.expanduser("~"), ".claude",
+                             ".reveille-repo-status")
+
+
+def _wedge_marker(agent):
+    """The loud artifact's opening words -- also how wedge_clear recognises
+    its OWN handwriting, so recovery never erases another writer's report."""
+    return f"BUS-DEAF: {agent} waked reconnect wedged"
+
+
+def wedge_clear(agent):
+    """The broker spoke: the streak is over. Clears the budget, and clears
+    the loud artifact ONLY when this healer wrote it -- the status file is
+    shared with the busdeaf-probe, and a self-heal must know its own
+    handwriting."""
+    try:
+        os.unlink(_wedge_path(agent))
+    except OSError:
+        pass
+    try:
+        with open(_WEDGE_STATUS) as f:
+            first = f.readline()
+        if first.startswith(_wedge_marker(agent)):
+            os.unlink(_WEDGE_STATUS)
+    except OSError:
+        pass
+
+
+def _wedge_loud(agent, cap):
+    line = (f"{_wedge_marker(agent)} -- {cap} re-execs without the broker "
+            f"speaking; the retry loop continues but a human must look (see "
+            f"waked.log; fix the path, and the next spoken frame clears "
+            f"this)")
+    try:
+        os.makedirs(os.path.dirname(_WEDGE_STATUS), exist_ok=True)
+        with open(_WEDGE_STATUS, "w") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass                       # the log line below still lands
+    print(f"reveille-waked: {line}", file=sys.stderr)
+
+
+def _wedge_heal(agent, fails, why, n=WEDGE_REEXEC_N, cap=WEDGE_REEXEC_MAX):
+    """Called after each session the broker never spoke in. Returns the
+    running count; re-execs (never returns) at the threshold while budget
+    remains; goes loud exactly once when the budget is spent."""
+    if fails < n:
+        return fails
+    k = wedge_count(agent)
+    if k >= cap:
+        if fails == n:             # first crossing in this process's life
+            _wedge_loud(agent, cap)
+        return fails
+    wedge_record(agent)            # written BEFORE the exec, or it never is
+    # NOT the converge marker: 13399 reads waked.log by arithmetic (N profile
+    # lines = N-1 deaths unless a converge line accounts for one), and this
+    # line is the term that keeps that arithmetic true for re-execs too.
+    print(f"reveille-waked: reconnect wedged after {fails} handshake "
+          f"failures (last: {why}) -- re-exec {k + 1}/{cap} on the same "
+          f"code", file=sys.stderr)
+    me = shutil.which("reveille-waked") or sys.argv[0]
+    os.execv(me, [me, *sys.argv[1:]])
+
 
 def no_rooms_exit_due(first_s, now_s, window_s):
     """The whole bound decision, pure. ELAPSED TIME since the FIRST refusal,
@@ -98,6 +205,16 @@ async def _session(uri, agent, state):
         hb = asyncio.create_task(_heartbeat(ws))
         try:
             async for frame in ws:
+                # THE BROKER SPOKE. Registration and refusal both arrive as
+                # frames; a wedged client gets neither. The streak resets HERE,
+                # on the first frame -- never on the opened socket, and never
+                # deferred to session end: a healthy held session must shed its
+                # budget file while it holds, or a broken reset murders a
+                # healthy daemon every N sessions forever (14445, held 14472).
+                if not state.get("spoke"):
+                    state["spoke"] = True
+                    state["wedge_fails"] = 0
+                    wedge_clear(agent)
                 try:
                     obj = json.loads(frame)
                 except (ValueError, TypeError):
@@ -685,7 +802,7 @@ def _converge_inner(url, state):
 
 
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
-               write_env=None, read_env=None):
+               write_env=None, read_env=None, wedge_n=WEDGE_REEXEC_N):
     sep = "&" if "?" in url else "?"
     token = os.environ.get("REVEILLE_TOKEN", "")
     uri = f"{url}{sep}name={agent}" + (f"&token={token}" if token else "")
@@ -704,6 +821,10 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     # itself. A claimed credential lands in the same file, so without this the
     # daemon re-adopts its own dead secret forever and never claims again.
     tried = {token} if token else set()
+    # CONSECUTIVE SESSIONS THE BROKER NEVER SPOKE IN (14445). _session zeroes
+    # it on the first received frame -- never on a socket that merely opened;
+    # the budget file carries the re-exec count across execv.
+    state["wedge_fails"] = 0
     try:
         while True:
             # Before dialling, not after: a body that is behind should reach the
@@ -711,6 +832,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
             # and fail-open inside, so this is a no-op on all but one pass an
             # hour and never delays a reconnect that matters.
             _converge(url, state)
+            state["spoke"] = False
             try:
                 code = await _session(uri, agent, state)
                 if code == NO_ROOMS:
@@ -841,6 +963,23 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                 # hour -- the one line you need readable is the one that said
                 # nothing. Fall back to the class name, and to the close code
                 # when there is one.
+                if not state.get("spoke"):
+                    if isinstance(e, ConnectionRefusedError):
+                        # A PROMPT REFUSAL IS A WORKING SOCKET LAYER: the
+                        # broker is absent, the client is fine, and a re-exec
+                        # cannot conjure a broker (14472 option a). The streak
+                        # neither grows nor resets -- a planned `make up`
+                        # restart must not end in a BUS-DEAF report.
+                        pass
+                    else:
+                        # The broker never spoke this session: a handshake
+                        # that timed out, or a socket that opened and died
+                        # silent. _why(e) carries the close code and errno
+                        # into the marker so the NEXT wedge is diagnosable
+                        # (14445 heals; it does not explain).
+                        state["wedge_fails"] = _wedge_heal(
+                            agent, state["wedge_fails"] + 1, _why(e),
+                            n=wedge_n)
                 print(f"reveille-waked: {_why(e)} -- retrying in {delay}s",
                       file=sys.stderr)
             await asyncio.sleep(delay)
@@ -902,6 +1041,16 @@ def main():
                          "bound (ruling 9119). The freed lock lets the Stop "
                          "hook respawn from fresh session env at the next "
                          "turn boundary.")
+    ap.add_argument("--wedge-n", type=int, default=WEDGE_REEXEC_N,
+                    metavar="SESSIONS",
+                    help="re-exec in place after this many consecutive "
+                         f"sessions in which the broker never sent a frame "
+                         f"(default {WEDGE_REEXEC_N}; ruling 14445). The "
+                         "re-exec budget is WEDGE_REEXEC_MAX per silence "
+                         "streak, then the daemon stays on the retry ladder "
+                         "and reports itself deaf. Disclosed for the gate, "
+                         "like --no-rooms-window -- the constant itself is "
+                         "not tunable in production.")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args()
     lock = open(spool.lock_path(a.name), "w")
@@ -947,7 +1096,8 @@ def main():
 
     return asyncio.run(_run(a.url, a.name, a.idle_nudge,
                             no_rooms_window_s=a.no_rooms_window,
-                            write_env=write_env, read_env=read_env))
+                            write_env=write_env, read_env=read_env,
+                            wedge_n=a.wedge_n))
 
 
 if __name__ == "__main__":
