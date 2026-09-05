@@ -3548,6 +3548,19 @@ function drawTabs(){
   if(!agTabs.some(t=>t.gid===el.dataset.frame))el.remove();
  for(const t of agTabs){
   let el=frames.querySelector('[data-frame="'+CSS.escape(t.gid)+'"]');
+  // A FRAME IS KEYED BY (gid, KIND), NOT BY gid ALONE. Before the boot wait no
+  // tab ever changed `url` or `err` after it was pushed -- a stopped tab got its
+  // own `s-`/`e-`/`held-` gid -- so a gid-only lookup was sound and nobody could
+  // see the assumption. The wait mutates BOTH on the SAME gid, and a gid-only
+  // reconciler then finds the waiting panel again and never builds the iframe:
+  // the terminal never appears on the success path, and the failure sentence
+  // never appears either. Found in a real browser, not by the source pins,
+  // which all passed while the feature did nothing (5dfd01e9).
+  // The "an iframe never repaints" rule survives untouched: an iframe's kind
+  // cannot change, so this only ever removes a panel that is about to be
+  // replaced by a different kind.
+  const kind=t.err?'frErr':(!t.url?'frState':'fr');
+  if(el&&el.className!==kind){el.remove();el=null;}
   if(!el){
    if(t.err){el=document.createElement('div');el.className='frErr';
     el.textContent=t.err;}

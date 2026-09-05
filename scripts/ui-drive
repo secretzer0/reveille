@@ -54,6 +54,10 @@ AGENTS = [
      "image": "reveille-agent:0.2.29", "role_name": "devops", "room_id": "r1"},
 ]
 FAILED, MISSES = [], []
+# The boot wait's fixture: how many 502s /attach/<agent>/token serves before it
+# answers, or a status it serves forever. TOKEN_CALLS counts every ask, which is
+# what proves the page STOPS asking after an answer it must not retry.
+TOKEN_502, TOKEN_STATUS, TOKEN_CALLS = [0], [None], []
 
 
 def note(name, saw):
@@ -105,6 +109,23 @@ def launcher(route, request):
         body = {"grants": []}
     elif path.endswith("/grants") and method == "POST":
         body = {"id": "g-stub", "attach_url": "/attach/g-stub"}
+    elif path.startswith("/attach/") and path.endswith("/token"):
+        # BEFORE the generic /attach/ branch, and JSON, because that is what a
+        # real ttyd answers. Serving this stub's HTML here makes api() throw
+        # with NO status, which the page reads as "launcher not reachable" -- a
+        # different path from the one under test, and a fixture that tests the
+        # wrong branch is worse than no fixture.
+        TOKEN_CALLS.append(path)
+        if TOKEN_STATUS[0]:
+            return route.fulfill(status=TOKEN_STATUS[0], content_type="text/plain",
+                                 body="refused")
+        if TOKEN_502[0] > 0:
+            TOKEN_502[0] -= 1
+            return route.fulfill(status=502, content_type="text/plain",
+                                 body="terminal not listening yet -- container "
+                                      "running since 2026-09-05T22:00:00Z; try again")
+        return route.fulfill(status=200, content_type="application/json",
+                             body=json.dumps({"token": "x"}))
     elif path.startswith("/attach/"):
         return route.fulfill(status=200, content_type="text/html",
                              body="<body style='background:#0b0d10;color:#c8d0d8;"
@@ -403,6 +424,91 @@ def scene_refusal_expired(ctx, url, out, tag, phone):
     scene_refusal(ctx, url, out, tag, phone, expired_at="2026-08-22T06:41:48Z")
 
 
+# ---- scene 6: press play then connect (13407 second half) -------------------
+def scene_boot_wait(ctx, url, out, tag, phone):
+    """The terminal must ARRIVE without anyone touching the tab.
+
+    The server already retries a refused attach to a 15s deadline and then
+    answers 502 naming the state; the page used to point the frame at the
+    terminal straight away, so that 502 landed in the iframe with nothing left
+    to retry it and the human closed and reopened the tab by hand.
+
+    This is the half no source pin can reach: every assertion about the shape
+    passed while the terminal never appeared at all (5dfd01e9). It is driven,
+    or it is not gated.
+    """
+    print(f"PRESS PLAY THEN CONNECT ({tag})")
+    TOKEN_502[0], TOKEN_STATUS[0] = 2, None
+    TOKEN_CALLS.clear()
+    p = open_page(ctx, url)
+    if phone:
+        p.locator("#roomBtn").tap()
+        p.wait_for_timeout(300)
+    p.locator("#agentsNav").click()
+    p.wait_for_timeout(500)
+    p.locator('[data-rost="roc-api-dev"]').click()      # RUNNING: mints a grant
+    p.wait_for_timeout(700)
+
+    # 1. IT SAYS IT IS STILL ASKING, and says which try -- a spinner that cannot
+    #    say where it is teaches nothing to the person watching it.
+    waiting = p.locator("#agFrames .frState").inner_text() if \
+        p.locator("#agFrames .frState").count() else "(no panel)"
+    check("the tab opens on a waiting panel that names the attempt",
+          "still asking (1/6)" in waiting, waiting.replace("\n", " ")[:110])
+    check("the waiting panel does NOT claim the agent is stopped",
+          "there is no session to attach to" not in waiting,
+          waiting.replace("\n", " ")[:110])
+    shoot(p, out, f"{tag}-bootwait-asking")
+
+    # 2. AND THEN THE TERMINAL ARRIVES, with nothing touched. Two 502s at 5s
+    #    apart, so the third ask lands around 10s.
+    p.wait_for_selector("#agFrames iframe.fr", timeout=25000)
+    src = p.locator("#agFrames iframe.fr").get_attribute("src")
+    check("the frame becomes the terminal on its own", "/attach/g-stub" in (src or ""),
+          f"src={src}")
+    gone = p.locator("#agFrames .frState").count()
+    check("the waiting panel is replaced, not left underneath", gone == 0,
+          f"{gone} panel(s) left")
+    check("it took more than one ask to get there", len(TOKEN_CALLS) >= 3,
+          f"{len(TOKEN_CALLS)} /token call(s)")
+    shoot(p, out, f"{tag}-bootwait-arrived")
+    p.close()
+
+
+# ---- scene 7: an answer is never retried ------------------------------------
+def scene_boot_refused(ctx, url, out, tag, phone):
+    """403 is an ownership refusal, not a wait. Asking again turns a refusal
+    into a hang -- the same line fetch_with_boot_grace draws on the server.
+
+    ITS OWN SCENE, and that is not tidiness: `open_page` logs in, and a second
+    call inside one context finds no login form because the session cookie is
+    already there. Folding this case into the scene above cost a 30s
+    `Page.fill` timeout that read exactly like a product failure.
+    """
+    print(f"AN ANSWER IS NOT RETRIED ({tag})")
+    TOKEN_502[0], TOKEN_STATUS[0] = 0, 403
+    TOKEN_CALLS.clear()
+    p = open_page(ctx, url)
+    if phone:
+        p.locator("#roomBtn").tap()
+        p.wait_for_timeout(300)
+    p.locator("#agentsNav").click()
+    p.wait_for_timeout(500)
+    p.locator('[data-rost="roc-api-dev"]').click()
+    p.wait_for_timeout(1500)
+    err = p.locator("#agFrames .frErr").inner_text() if \
+        p.locator("#agFrames .frErr").count() else "(no error panel)"
+    check("a 403 is rendered as a refusal, not a wait", "403" in err,
+          err.replace("\n", " ")[:110])
+    asked = len(TOKEN_CALLS)
+    p.wait_for_timeout(6000)          # a full retry step, to catch a second ask
+    check("a refusal is asked ONCE and never again", len(TOKEN_CALLS) == asked,
+          f"{asked} -> {len(TOKEN_CALLS)} /token call(s)")
+    shoot(p, out, f"{tag}-bootwait-refused")
+    p.close()
+    TOKEN_STATUS[0] = None
+
+
 def main():
     out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "shots/ui")
     out.mkdir(parents=True, exist_ok=True)
@@ -412,15 +518,23 @@ def main():
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
+            # THE IMAGE'S CHROMIUM, NAMED. python playwright 1.62 wants a
+            # different build than the image ships (chromium-1243), and the bare
+            # fallback dies on the version banner -- so the path is explicit and
+            # the failure, if it ever comes back, says which build was missing.
+            baked = pathlib.Path.home() / ".cache/ms-playwright/chromium-1243/chrome-linux64/chrome"
             try:
                 browser = pw.chromium.launch(channel="chrome", headless=True)
             except Exception:
-                browser = pw.chromium.launch(headless=True)
+                browser = pw.chromium.launch(
+                    headless=True,
+                    executable_path=str(baked) if baked.exists() else None)
             for tag, opts, phone in (
                     ("desktop", {"viewport": {"width": 1280, "height": 900}}, False),
                     ("iphone14", dict(pw.devices["iPhone 14"]), True)):
                 for scene in (scene_modal, scene_multidriver, scene_manager,
-                              scene_refusal, scene_refusal_expired):
+                              scene_refusal, scene_refusal_expired,
+                              scene_boot_wait, scene_boot_refused):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)
