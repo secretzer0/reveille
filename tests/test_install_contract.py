@@ -78,7 +78,9 @@ def test_the_panel_only_tells_people_to_run_commands_the_package_ships():
     # machine with a name that is now on PATH. The old one-line form ran the package
     # from a throwaway environment whose bin dir won PATH, which is how a Stop hook
     # came to point inside a cache.
-    m = re.search(r"const INIT_CMD = 'uv tool install --force --from "
+    # No --force (ruled 14716): the pin moved WITH the text when --force was
+    # convicted of stripping live installs under their own daemons.
+    m = re.search(r"const INIT_CMD = 'uv tool install --from "
                   r"(\S+) ([A-Za-z0-9_-]+)", page)
     assert m, "INIT_CMD is gone or reshaped -- the panel's contract moved"
     source, pkg = m.groups()

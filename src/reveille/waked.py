@@ -759,9 +759,16 @@ def _converge_inner(url, state):
         print("reveille-waked: uv is missing and could not be installed -- "
               f"staying on {__version__}", file=sys.stderr)
         return
+    # IN THE VENV, NEVER unlink-first (ruled 14716, measured 14714/14718):
+    # `uv tool install --force` strips every ~/.local/bin console script
+    # before it builds -- 108 seconds of no `reveille` on a cold container,
+    # under the entrypoint's own init and every Stop hook. The ~/.local/bin
+    # entries are symlinks into this tool venv, and an in-venv reinstall
+    # never touches them: 0/16 shim-missing polls vs 13/26 on the old form.
+    # sys.executable IS the tool venv's python when waked runs from the shim.
     try:
-        r = subprocess.run([uv, "tool", "install", "--force", "--from",
-                            GIT_SOURCE, "reveille"],
+        r = subprocess.run([uv, "pip", "install", "--python", sys.executable,
+                            "--reinstall-package", "reveille", GIT_SOURCE],
                            capture_output=True, text=True, timeout=600)
     except Exception as e:
         print(f"reveille-waked: convergence failed ({e!r}) -- staying on "
