@@ -3026,6 +3026,15 @@ def _ver_key(v):
         return (-1,)
 
 
+# THE TITLED WINDOW (ruled 14631): how many of the newest entries keep their
+# one-line titles in usage()'s default tail. Twelve = a week and a bit at the
+# cadence the ruling measured (eight releases in ten hours, 2026-09-05); the
+# rest collapse to one counted line, so the tail's wire size is CONSTANT and
+# a release costs the budget nothing. Plain constant by the same rule as the
+# wedge healer's: no env var, no knob.
+TAIL_TITLED = 12
+
+
 def _usage_text(since="", budget=24000):
     """Compose usage() inside the bytes that leave (13054/13063/13014).
 
@@ -3091,6 +3100,18 @@ def _usage_text(since="", budget=24000):
         rest = CHANGES_ENTRIES[shown:]
         tail = ""
         if rest:
+            # THE TAIL IS A WINDOW, NOT A LEDGER (ruled 14631, 2026-09-05, at
+            # 156 entries): the titled tail grew one ~37-wire-char line per
+            # release against a reference that never shrinks, and crossed the
+            # default by arithmetic. The newest TAIL_TITLED entries keep their
+            # titled one-liners -- twelve covers a week at the day the ruling
+            # measured (eight releases in ten hours) -- and everything older
+            # collapses to ONE line naming the count and the verb that serves
+            # any of them in full. Growth per release: zero, forever. The
+            # title[:35] identity floor (the companion gate's ruling) holds
+            # over the whole titled window.
+            titled, older = rest[:TAIL_TITLED], rest[TAIL_TITLED:]
+
             def label(v, t):
                 title = t.splitlines()[0]
                 return title if not clip or len(title) <= clip \
@@ -3101,14 +3122,17 @@ def _usage_text(since="", budget=24000):
             # shown == 0 -> nothing is older than nothing (13216 nit): the
             # honest word is just "entries", and this line is the whole map
             # at the default.
-            tail = (f"\n\n[{len(rest)}"
+            tail = (f"\n\n[{len(titled)}"
                     + (" older" if shown else "")
                     + " entries, titles only"
                     + (" (clipped -- a clipped label is not a hidden entry)"
                        if clip else "")
                     + " -- usage(since=\"<version>\") serves any of them "
                     "in full]\n"
-                    + "\n".join(label(v, t) for v, t in rest))
+                    + "\n".join(label(v, t) for v, t in titled)
+                    + (f"\n[{len(older)} older entries -- "
+                       f"usage(since=\"{titled[-1][0]}\") reaches back to "
+                       f"them]" if older else ""))
         body = "\n".join(t for _, t in CHANGES_ENTRIES[:shown])
         return USAGE + CHANGES_PREAMBLE + ("\n" + body if body else "") + tail
 

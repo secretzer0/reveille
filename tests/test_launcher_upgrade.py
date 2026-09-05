@@ -327,3 +327,21 @@ def test_the_heal_owns_existing_root_owned_sources(world, monkeypatch):
     owned.clear()                     # agent-owned now: nothing to heal
     rl._ensure_mount_dirs(root, "reveille-agent:0.2.17")
     assert owned == [], "an agent-owned source must not be re-chowned"
+
+
+def test_uv_is_resolved_never_assumed(monkeypatch, tmp_path):
+    """The 0.2.239 deploy's first attempt died at a bare ["uv", ...] under a
+    detached session with no login PATH (ruled 14605: the property lives in
+    the script). PATH hit wins; the install homes are the fallback; nowhere
+    dies with the paths named -- and no call site spawns a bare "uv"."""
+    monkeypatch.setattr(rl.shutil, "which", lambda n: "/somewhere/uv")
+    assert rl._uv_bin() == "/somewhere/uv"
+    fake = tmp_path / "uv"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(rl.shutil, "which", lambda n: None)
+    monkeypatch.setattr(rl.os.path, "expanduser", lambda p: str(fake))
+    assert rl._uv_bin() == str(fake)
+    src = pathlib.Path(rl.__file__).read_text()
+    assert '(["uv"' not in src, (
+        "a bare uv spawn survives -- it dies on every detached session")
