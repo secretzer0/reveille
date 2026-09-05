@@ -1937,8 +1937,14 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.35", (
+    assert tag == "reveille-agent:0.2.36", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.36 UNPINS EVERY NON-APT INSTALLER (operator 14461/14469, ruled
+    # 14471): vendor-recommended installers resolve at build; the tag now
+    # marks INTENT, not content, and the baked build manifest
+    # (~/.reveille-build-manifest, printed in the boot report) says what
+    # actually landed. Adds sdkman (verbatim installer), zip, and the
+    # {root}/sdkman -> ~/.sdkman/candidates mount so JDKs survive recreate.
     # 0.2.35 UNSTICKS THE DEAF ROW (architect, 13799): busdeaf-probe became a
     # supervisor that lives as long as the container -- a body that joins late
     # gets its row RESTORED to what the boot wrote, and a body that goes deaf
@@ -1987,7 +1993,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/busdeaf-probe", "docker/entrypoint.sh",
                 "docker/tmux.conf", "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "d79fd5cc001c708703a303b7e8ec1b709d8e32a36f01bbb3dee4db7335dce03f"
+IMAGE_INPUT_SHA = "fb16a1dd2201355e450f7591947a4d7e68fef62c9a3d28b1294f1ba7bbfda81d"
 
 
 def _image_input_sha(root):

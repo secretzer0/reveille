@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.35")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.36")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -261,6 +261,14 @@ def docker_run_argv(user, agent, image, network, quotas,
         "--pids-limit", str(quotas["pids"]),
         "-v", f"{os.path.join(root, 'claude')}:/home/agent/.claude",
         "-v", f"{os.path.join(root, 'repos')}:/home/agent/repos",
+        # The JDK store (ruled 14460/14468): without this every `sdk install`
+        # dies with the writable layer on recreate. CANDIDATES ONLY, not the
+        # whole ~/.sdkman -- a bind mount SHADOWS the image path, so mounting
+        # the root would erase the baked installer with an empty host dir;
+        # the store is the part worth keeping and the tool stays image-side.
+        # First mount that can grow without bound: meets the ZFS per-tenant
+        # quota backlog item -- named here, solved there.
+        "-v", f"{os.path.join(root, 'sdkman')}:/home/agent/.sdkman/candidates",
         "-e", "REVEILLE_AGENT_ROLE",
         "-e", "REVEILLE_URL",
         "-e", "REVEILLE_REPO_URL",
@@ -1692,7 +1700,7 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     root = data_root(user, agent)
     user_root = os.path.dirname(root)
     ensure_launcher_dir(user_root, image)
-    for sub in ("claude", "repos"):
+    for sub in ("claude", "repos", "sdkman"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
     _own_agent_dirs(root, image)
     if kind == "home-login" and not boot_cmd:

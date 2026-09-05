@@ -243,6 +243,21 @@ else
   tail -5 /tmp/claude-boot-update.log 2>/dev/null | sed 's/^/      /' >> "$BOOT_REPORT" || true
 fi
 
+# THE BUILD MANIFEST (ruled 14471): installers are unpinned, so the tag marks
+# intent and THIS is what says which versions actually landed in the image --
+# the line a 3am reader diffs against a known-good body. sdkman's line is the
+# live store's version (the mount can carry a self-updated one), beside the
+# baked claude the same way the pull line sits above.
+say ""
+say "## build manifest (resolved at image build; tag marks intent, not content)"
+say ""
+if [ -f /home/agent/.reveille-build-manifest ]; then
+  sed 's/^/- /' /home/agent/.reveille-build-manifest >> "$BOOT_REPORT" || true
+else
+  note "- no build manifest -- image predates 0.2.36"
+fi
+say "- sdkman-live $(cat /home/agent/.sdkman/var/version 2>/dev/null || echo absent)"
+
 # Its own heading: these lines are the REGISTRATION story, and they used to
 # print under "## plugins" while "## repo" stood empty two sections up --
 # an empty heading reads as MISSING to exactly the reader the preamble

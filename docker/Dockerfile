@@ -33,30 +33,41 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # the authoritative gate; this restores the local run.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates cmake curl ffmpeg git gnupg jq less \
-      openssl pkg-config ripgrep sudo tmux unzip xvfb \
+      openssl pkg-config ripgrep sudo tmux unzip xvfb zip \
     && rm -rf /var/lib/apt/lists/*
 
-# node (claude code ships via npm), go, uv (owns python). Versions are pinned: the tag is
-# the reproducibility claim, so two builds of one tag must be the same agent.
+# NON-APT TOOLS RUN THEIR VENDOR'S RECOMMENDED INSTALLER, UNPINNED (operator
+# 14461/14464/14469, ruled 14471): each resolves whatever the vendor serves on
+# build day. THE TAG THEREFORE MARKS INTENT, NOT CONTENT -- two builds of one
+# tag can differ; the doctrine that claimed otherwise is superseded, and what
+# replaces the pin is the BUILD MANIFEST below: every tool's resolved version,
+# recorded at build and printed in the boot report, so a broken agent is
+# datable from inside the running container. apt is the default for anything
+# NEW; this exception list is closed and gated (a twelfth installer is a
+# ruling, not a diff).
+# node: NodeSource ships no "latest" script -- the major IS the URL, which is
+# their recommended form; moving majors stays a deliberate edit.
 ARG NODE_MAJOR=24
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-ARG GO_VERSION=1.24.5
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
+RUN GO_VERSION=$(curl -fsSL "https://go.dev/VERSION?m=text" | head -1) \
+    && curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" \
       | tar -C /usr/local -xz
 ENV PATH=/usr/local/go/bin:/home/agent/.local/bin:$PATH
 
-# ttyd is not packaged in trixie; upstream ships a static binary, pinned like
-# everything else here.
-ARG TTYD_VERSION=1.7.7
-RUN curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
+# ttyd is not packaged in trixie; upstream ships a static binary.
+RUN curl -fsSL "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x86_64" \
       -o /usr/local/bin/ttyd \
     && chmod 0755 /usr/local/bin/ttyd
 
-ARG GH_VERSION=2.63.2
-RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+# gh's release assets carry the version in the filename, so "latest" is
+# resolved by asking the API which tag is current -- still their artifact,
+# still their recommended tarball, no version literal here.
+RUN GH_TAG=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | jq -r .tag_name) \
+    && GH_VERSION=${GH_TAG#v} \
+    && curl -fsSL "https://github.com/cli/cli/releases/download/${GH_TAG}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
       | tar -xz -C /tmp \
     && install -m 0755 /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh \
     && rm -rf /tmp/gh_*
@@ -89,8 +100,7 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} && npm cache clea
 # playwright's build, so a distro chromium would still trigger an unpinned
 # runtime download. Deps install here as root; the browser itself installs
 # below as the agent user so it lands in the agent's cache, not root's.
-ARG PLAYWRIGHT_VERSION=1.62.0
-RUN npm install -g playwright@${PLAYWRIGHT_VERSION} && npm cache clean --force \
+RUN npm install -g playwright && npm cache clean --force \
     && apt-get update && playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
@@ -115,8 +125,7 @@ WORKDIR /home/agent
 
 # uv installs per-user, so it lands in the image rather than in the state volume -- the
 # volume is for what the agent LEARNS, not for its toolchain.
-ARG UV_VERSION=0.9.28
-RUN curl -fsSL https://astral.sh/uv/${UV_VERSION}/install.sh | sh
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Chromium into the agent's browser cache -- image layer, not the state volume,
 # same reasoning as uv: toolchain lives in the image.
@@ -125,28 +134,32 @@ RUN playwright install chromium
 # Caveman comms plugin, baked into the image-side claude home so a FRESH volume is
 # seeded with it (docker copies the image path into an empty named volume). Ultra is
 # the fleet default for containerised agents -- env, so the launcher can override
-# per-container without an image fork. PINNED to a commit like everything else here:
-# the plugin CLI can only pin a marketplace by branch/tag, so we clone the source at
-# the exact SHA and add THAT as a local marketplace -- an unpinned third-party GitHub
-# source pulled at build time is a supply-chain hole. The clone stays in the image so
+# per-container without an image fork. Default branch, per the unpinned-installers
+# ruling (14471, superseding this block's old commit pin); the clone's HEAD sha is
+# recorded in the build manifest below. The clone stays in the image so
 # `claude plugin marketplace` can still resolve the source.
-ARG CAVEMAN_REF=c2ed24b3e5d412cd0c25197b2bc9af587621fd99
 RUN git clone https://github.com/JuliusBrussee/caveman /home/agent/caveman-marketplace \
-    && git -C /home/agent/caveman-marketplace checkout ${CAVEMAN_REF} \
     && claude plugin marketplace add /home/agent/caveman-marketplace \
     && claude plugin install caveman@caveman
 ENV CAVEMAN_DEFAULT_MODE=ultra
 
-# Ponytail (lazy-senior-dev mode), same discipline as caveman: clone at a pinned
-# commit, add the local checkout as a marketplace, install -- enabled at boot via
+# Ponytail (lazy-senior-dev mode), same shape as caveman: default branch, HEAD
+# recorded in the manifest, local checkout as marketplace -- enabled at boot via
 # the plugin's own SessionStart hook. Mode default is env, launcher-overridable
 # per container without an image fork.
-ARG PONYTAIL_REF=16f29800fd2681bdf24f3eb4ccffe38be3baec6b
 RUN git clone https://github.com/DietrichGebert/ponytail /home/agent/ponytail-marketplace \
-    && git -C /home/agent/ponytail-marketplace checkout ${PONYTAIL_REF} \
     && claude plugin marketplace add /home/agent/ponytail-marketplace \
     && claude plugin install ponytail@ponytail
 ENV PONYTAIL_DEFAULT_MODE=full
+
+# sdkman (operator 14456): the JVM-ecosystem switcher -- 82 candidates, one
+# `sdk install java <ver>-<vendor>` per JDK. The recommended installer runs
+# VERBATIM (operator 14464/14465: no assert, no hash, no mirror). Its store
+# lives at ~/.sdkman, which the launcher bind-mounts ({root}/sdkman) so
+# installed JDKs survive a container recreate -- without the mount every SDK
+# died with the writable layer.
+RUN curl -s "https://get.sdkman.io" | bash \
+    && echo "sdkman $(cat /home/agent/.sdkman/var/version 2>/dev/null)"
 
 # The wake client. Without it a containerised agent has no waiter, so unicast rings never
 # arrive and it is deaf between turns -- it would only ever see mail by polling inbox() on
@@ -156,6 +169,25 @@ ENV PONYTAIL_DEFAULT_MODE=full
 COPY --chown=${UID}:${GID} pyproject.toml uv.lock README.md /tmp/reveille/
 COPY --chown=${UID}:${GID} src /tmp/reveille/src
 RUN uv tool install /tmp/reveille && rm -rf /tmp/reveille
+
+# THE BUILD MANIFEST (ruled 14471): with installers unpinned, the tag marks
+# intent, not content -- this file is what says WHAT ACTUALLY LANDED, resolved
+# from the installed tools themselves at build and printed in the boot report.
+# "Which agent is this and what is in it" is answered from the running
+# container; a broken agent becomes datable by diffing manifests.
+RUN { echo "built $(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+      echo "node $(node --version)"; \
+      echo "go $(/usr/local/go/bin/go version | awk '{print $3}')"; \
+      echo "ttyd $(ttyd --version 2>&1 | head -1)"; \
+      echo "gh $(gh --version | head -1)"; \
+      echo "claude-baked $(claude --version 2>/dev/null | head -1)"; \
+      echo "playwright $(npm ls -g playwright --depth=0 2>/dev/null | grep -o 'playwright@.*')"; \
+      echo "uv $(uv --version)"; \
+      echo "sdkman $(cat /home/agent/.sdkman/var/version 2>/dev/null)"; \
+      echo "caveman $(git -C /home/agent/caveman-marketplace rev-parse --short HEAD)"; \
+      echo "ponytail $(git -C /home/agent/ponytail-marketplace rev-parse --short HEAD)"; \
+      echo "reveille $(uv tool list 2>/dev/null | grep -m1 reveille || echo from-source)"; \
+    } | tee /home/agent/.reveille-build-manifest
 
 # Two mounts, different lifecycles: what the agent knows vs what it is working on.
 # Conflating them means you cannot throw away a bad checkout without burning the memory.
