@@ -3023,7 +3023,8 @@ function closeAgentsWell(){
 //    handler, so capture phase is the only interception that works;
 //  - activation is on MOUSEDOWN/MOUSEUP (not click), and only
 //    stopImmediatePropagation at WINDOW capture stops it.
-// And because `window.open` after an `await` is popup-blocked, the gesture is
+// And because a tab asked for AFTER an `await` is refused by the popup blocker,
+// the gesture is
 // spent SYNCHRONOUSLY on a blank tab (architect 14676) and the tab is navigated
 // once tmux has answered. The cost is a blank tab for one round trip; the gain
 // is no cache, no polling, and one exec per actual click on a link.
@@ -3157,10 +3158,10 @@ function paneLinkFix(win,agent){
   swallow(e);
   const hit=armed;armed=null;
   const fallback=paneXtermUrl(win,hit);
-  // THE GESTURE IS SPENT NOW, on a blank tab: window.open after an await is
-  // popup-blocked, so the synchronous act is "open a window", not "decide
-  // which URL".
-  // NOT `noopener` HERE: with it, window.open returns NULL and there is no tab
+  // THE GESTURE IS SPENT NOW, on a blank tab: a tab asked for after an await is
+  // refused by the popup blocker, so the synchronous act is claiming the tab,
+  // not deciding which URL goes in it.
+  // NOT `noopener` HERE: with it, the call returns NULL and there is no tab
   // left to navigate -- measured, it landed every click on about:blank. The
   // blank tab is same-origin for one moment, which is long enough to drop the
   // opener by hand before it goes anywhere.

@@ -143,6 +143,39 @@ def test_the_gesture_is_spent_before_the_round_trip():
         "there is no tab left to navigate")
 
 
+def test_the_only_tab_this_page_opens_is_a_link_from_the_pane():
+    """U8's constraint is that TERMINALS live on one page (DES-006 6.4), and
+    ui_copy.BUS_PAGE_FORBIDDEN enforces it by banning the literal `window.open`
+    from the bus page. This change is the first thing in that page to open a tab
+    at all -- for a URL the user clicked, never for a terminal -- and it spells
+    the call `win.open` on the iframe's own window, which the literal ban does
+    not see.
+
+    THAT ASYMMETRY IS THE HAZARD: the ban would pass while the page gained a
+    tab-opening call, and the next one could be a terminal. So the constraint
+    gets an assertion that reads the CALL SITES rather than a spelling. Both
+    opens must live inside paneLinkFix, and both must carry a URL that came from
+    the pane read -- a terminal in a tab would fail this by not being here.
+
+    If the architect would rather widen BUS_PAGE_FORBIDDEN to catch `.open(`
+    generally and exempt this one site by name, this test is the thing to
+    delete; it exists so the gap is covered either way, not to argue for a
+    shape.
+    """
+    opens = [i for i, ln in enumerate(PAGE.splitlines(), 1)
+             if ".open(" in ln and not ln.strip().startswith("//")]
+    head = PAGE.index("function paneLinkFix")
+    body = PAGE[head:].split("\n}", 1)[0]
+    fix_start = PAGE[:head].count("\n") + 1
+    fix_end = fix_start + body.count("\n")
+    assert opens, "the link fix opens a tab; if that is gone, delete this test too"
+    for line in opens:
+        assert fix_start <= line <= fix_end, (
+            f"line {line} opens a browser tab OUTSIDE paneLinkFix -- U8 says "
+            f"terminals live on one page, and a new tab-opening call is how "
+            f"that gets broken")
+
+
 def test_a_failure_is_never_worse_than_today():
     """Every path that cannot answer falls back to what xterm itself would have
     opened: no pane text, a refused route, an unmapped row. The one case that
