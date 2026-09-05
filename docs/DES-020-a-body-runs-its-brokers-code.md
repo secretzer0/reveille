@@ -38,7 +38,10 @@ every host the same way. Nothing else decides, nothing else checks.
 - **main IS the release.** The operator's contract (12134): code on main has
   been tested and has a matching broker deployed live -- main and the broker
   move in lock step. So the body installs main HEAD, no tags, no pin:
-  `uv tool install --force --from <GIT_SOURCE> reveille`. Non-interactive by
+  `uv pip install --python <tool venv python> --reinstall-package reveille
+  <GIT_SOURCE>` (as built; ruled 14716 -- `uv tool install --force` unlinks
+  every shim before it builds, and that stripped window under a cold boot's
+  own init rolled back twelve upgrades in one night). Non-interactive by
   construction; uv and git are present natively (init required them) and in
   the image (Dockerfile installs via `uv tool install`).
 - **One line installs AND upgrades** (operator 12146, devops 12148, ruled
@@ -47,9 +50,11 @@ every host the same way. Nothing else decides, nothing else checks.
   /install.sh` (unauthenticated, beside /version) -- same origin as the bus,
   one host to trust; the raw.githubusercontent form is the same bytes and the
   fallback when no broker is up yet. The script: uv missing -> astral's
-  installer; `uv tool install --force --from <GIT_SOURCE> reveille` (github
-  main, never a per-broker pin -- main == broker by contract, converge closes
-  the lag); `reveille init "$@"`; print join line + versions. `sh`, not bash.
+  installer; `uv tool install --from <GIT_SOURCE> reveille` (github main,
+  never a per-broker pin -- main == broker by contract, converge closes the
+  lag; no `--force`, ruled 14716: a fresh machine needs none and an existing
+  install upgrades via converge, never by reinstalling over its own live
+  daemons); `reveille init "$@"`; print join line + versions. `sh`, not bash.
   Idempotent; run it again any time. Windows twin `install.ps1` (DES-021).
   Replaces the README's `uvx --from git+...` line. Slice 2.
 - Named and accepted: `curl | sh` plus auto-converge are two places code

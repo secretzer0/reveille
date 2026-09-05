@@ -1261,7 +1261,9 @@ def test_the_init_invocation_is_pinned_because_it_is_a_contract():
     machine where somebody is pasting it into a root shell."""
     # Pinned as the exact two-line statement, backslash-n and all: the shape is
     # the contract, not just the words in it.
-    assert ("const INIT_CMD = 'uv tool install --force --from "
+    # No --force (ruled 14716): the unlink-first form strips a live install
+    # under its own daemons; the pin moved WITH the ruled text.
+    assert ("const INIT_CMD = 'uv tool install --from "
             "git+https://github.com/secretzer0/reveille reveille\\n' +") in PAGE and \
         "'reveille init';" in PAGE, \
         "the init invocation moved -- confirm the new shape with senior-dev, then pin it"

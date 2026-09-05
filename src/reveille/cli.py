@@ -789,15 +789,23 @@ def ensure_on_path():
     w = shutil.which("reveille-waked")
     if w and install.is_durable(w):
         return None
-    uv = shutil.which("uv") or "uv"
-    r = subprocess.run([uv, "tool", "install", "--force", "--from", GIT_SOURCE,
-                        "reveille"], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"uv tool install failed: {(r.stderr or r.stdout).strip()}")
+    local_bin = os.path.expanduser("~/.local/bin")
+    if os.path.exists(os.path.join(local_bin, "reveille-waked")):
+        # A durable copy already exists -- PATH just cannot see it. Reinstalling
+        # over it with --force would strip the shims under any process running
+        # from them (ruled 14716, the 12/12 rollback night); the only thing
+        # missing here is the PATH entry, fixed below.
+        step = f"durable copy already at {local_bin} -- nothing installed"
+    else:
+        uv = shutil.which("uv") or "uv"
+        r = subprocess.run([uv, "tool", "install", "--from", GIT_SOURCE,
+                            "reveille"], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"uv tool install failed: {(r.stderr or r.stdout).strip()}")
+        step = f"persisted: uv tool install reveille -> {local_bin} (uvx runs are ephemeral)"
     # this process's PATH may predate ~/.local/bin; the hook installer resolves
     # commands with which(), so it must see the durable copies
-    local_bin = os.path.expanduser("~/.local/bin")
-    step = f"persisted: uv tool install reveille -> {local_bin} (uvx runs are ephemeral)"
     if local_bin not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
         # uv prints its own PATH warning, but capture_output above swallows it
