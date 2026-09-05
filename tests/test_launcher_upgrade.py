@@ -96,13 +96,13 @@ class _Docker:
         raise AssertionError(f"unexpected docker call {args!r}")
 
     def run(self, argv, env=None, check=True, stdout=None, stderr=None):
+        """docker run -d ... IMAGE [cmd]: the child's env carries the secrets."""
         # The ownership one-shot (_own_agent_dirs via own_dirs_argv): a --rm
         # chown container, not a provision. Reached from the roll path since
         # _ensure_mount_dirs (0.2.36-gate defect); record it and succeed.
         if "--rm" in argv:
             self.calls.append(("ownfix", tuple(argv)))
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
-        """docker run -d ... IMAGE [cmd]: the child's env carries the secrets."""
         assert argv[:3] == ["docker", "run", "-d"] and "--name" in argv
         name = argv[argv.index("--name") + 1]
         # -e NAME entries pass values from the child env: rebuild Config.Env as docker would
@@ -295,3 +295,35 @@ def test_already_on_means_same_image_id_not_same_tag_string(tmp_path, monkeypatc
                         raising=False)
     with pytest.raises(RuntimeError, match="PAST-THE-CHECK"):
         rl.upgrade_agent(conn, "tmel", "a", "reveille-agent:0.2.22")
+
+
+def test_the_heal_owns_existing_root_owned_sources(world, monkeypatch):
+    """0.2.36-gate defect two: the first heal owned only what it CREATED and
+    walked past existing root-owned damage -- proven live, once, on one body,
+    and a proof that is not a gate decays. A mount source that EXISTS and is
+    root-owned joins the chown set; one the agent already owns does not (the
+    negative is the half that matters -- a heal with a hair trigger re-chowns
+    every start)."""
+    root = rl.data_root("ana", "scout")
+    (pathlib.Path(root) / "sdkman").mkdir(parents=True, exist_ok=True)
+    owned = []
+    world.monkeypatch.setattr(
+        rl, "_own_agent_dirs",
+        lambda r, img, subdirs=("claude", "repos", "sdkman"):
+            owned.append(tuple(subdirs)))
+    real_stat = rl.os.stat
+
+    def root_owned_sdkman(p, *a, **k):
+        s = real_stat(p, *a, **k)
+        if str(p).rstrip("/").endswith("sdkman"):
+            return types.SimpleNamespace(st_uid=0, st_mode=s.st_mode)
+        return s
+    monkeypatch.setattr(rl.os, "stat", root_owned_sdkman)
+    rl._ensure_mount_dirs(root, "reveille-agent:0.2.17")
+    monkeypatch.setattr(rl.os, "stat", real_stat)
+    assert owned == [("sdkman",)], (
+        "an existing root-owned mount source must join the chown set")
+
+    owned.clear()                     # agent-owned now: nothing to heal
+    rl._ensure_mount_dirs(root, "reveille-agent:0.2.17")
+    assert owned == [], "an agent-owned source must not be re-chowned"
