@@ -1221,7 +1221,10 @@ function toast(msg,info){
  t.textContent=msg;
  t.onclick=()=>t.remove();
  $('toasts').appendChild(t);
- setTimeout(()=>t.remove(),5000);
+ // A REFUSAL STAYS UNTIL DISMISSED (ruled 14614, from the operator racing a
+ // 5s window): any timer on a refusal races the reader -- the same shape as
+ // tuning a timeout until one host passes. Info keeps its 5 s.
+ if(info)setTimeout(()=>t.remove(),5000);
 }
 // A REFUSAL STAYS WHERE THE USER WAS LOOKING (operator GO 13727; driven evidence
 // 13709). Every SUCCESS state in these dialogs writes a line into its status
@@ -2291,18 +2294,41 @@ function selectRow(row,m){
 }
 
 function toLabel(){
- if(recip.size===0)return 'ALL';
- if(recip.size===1)return [...recip][0];
- return recip.size+' agents';
+ // ONE "to:" AREA, TWO SOURCES (rule 6, 14621): the label names the UNION of
+ // the picker set and the inline @/# bindings, inline ones wearing their @.
+ const names=[...recip];
+ for(const t of (typeof inlineTargets!=='undefined'?inlineTargets:[]))
+  names.push(t.agent?(t.roomId===room?'@'+t.agent:'#'+t.roomName+'@'+t.agent)
+                    :'#'+t.roomName);
+ if(names.length===0)return 'ALL';
+ if(names.length<=2)return names.join(', ');
+ return names.length+' targets';
 }
 
 function renderPicker(){
  const p=$('toPanel');p.innerHTML='';
+ const inline=(typeof inlineTargets!=='undefined'?inlineTargets:[]);
+ const none=recip.size===0&&inline.length===0;
  const all=document.createElement('div');
- all.className='pick bcastRow'+(recip.size===0?' on':'');
+ all.className='pick bcastRow'+(none?' on':'');
  all.innerHTML='<span class="box"></span><span>ALL &mdash; broadcast</span>';
  all.onclick=e=>{e.stopPropagation();recip.clear();renderPicker();};
  p.appendChild(all);
+ // Inline bindings render IN the picker but the picker cannot uncheck them
+ // (rule 6): they leave only when their @token leaves the text or their chip
+ // is clicked away. The row says so instead of silently ignoring the click.
+ for(const t of inline){
+  const el=document.createElement('div');
+  el.className='pick on';
+  const label=t.agent?(t.roomId===room?'@'+t.agent:'#'+t.roomName+'@'+t.agent)
+                     :'#'+t.roomName;
+  el.innerHTML='<span class="box"></span><span style="color:'
+    +color(t.agent||t.roomName)+'">'+esc(label)+'</span>'
+    +'<span class="pDim" style="margin-left:auto">inline</span>';
+  el.title='bound by @/# in the message -- remove the token or its chip to unselect';
+  el.onclick=e=>{e.stopPropagation();};
+  p.appendChild(el);
+ }
  for(const a of agentList){
   if(a.name===myName)continue;
   const el=document.createElement('div');
@@ -2623,6 +2649,20 @@ function buildSends(o){
  return out.filter(s=>{const k=s.rid+'\u0000'+s.to;
   if(seen.has(k))return false;seen.add(k);return true;});
 }
+function taExact(tok,items){
+ // AMENDED RULE 1 (14621): while the popup is open, a token that EXACTLY
+ // matches ONE item binds the moment the token closes -- whitespace,
+ // punctuation, or end of input -- with no Tab. Partials still need an
+ // accept. Pure, and the popup-open requirement is the paste guard: a paste
+ // lands the caret past the token in one input event, the popup never opens,
+ // so there are no items and nothing here can bind.
+ if(!tok||!items||!items.length)return null;
+ const want=(tok.q||'').toLowerCase();
+ if(!want)return null;
+ const hits=items.filter(it=>
+  (tok.kind==='#'?it.roomName:it.agent||'').toLowerCase()===want);
+ return hits.length===1?hits[0]:null;
+}
 // TA-PURE-END
 const inlineTargets=[];   // accepted bindings: {roomId,roomName,agent|null}
 let taState=null;         // open type-ahead: {tok,items,sel}
@@ -2667,30 +2707,32 @@ function taRender(){
  });
  p.classList.add('on');
 }
-function taAccept(it){
- // THE ACCEPT IS THE BINDING -- the one keystroke that turns text into a
- // target. Room accepts rewrite the token so '#Room@' can continue; member
- // accepts bind {roomId, agent} and chip up.
- const el=$('body');const tok=taState.tok;
- if(it.kind==='room'){
-  el.value=el.value.slice(0,tok.start)+'#'+it.roomName+el.value.slice(el.selectionStart);
-  const pos=tok.start+1+it.roomName.length;
-  el.setSelectionRange(pos,pos);
-  inlineTargets.push({roomId:it.roomId,roomName:it.roomName,agent:null});
- }else{
-  const label=(it.roomId===room?'@':'#'+it.roomName+'@')+it.agent;
-  el.value=el.value.slice(0,tok.start)+label+el.value.slice(el.selectionStart);
-  const pos=tok.start+label.length;
-  el.setSelectionRange(pos,pos);
-  // A member accept inside '#Room@' supersedes the bare-room binding of the
-  // same accept chain: the human narrowed the target, keep the narrow one.
-  if(it.kind==='member'&&tok.kind==='#@'){
-   const i=inlineTargets.findIndex(t=>t.roomId===it.roomId&&!t.agent);
-   if(i>=0)inlineTargets.splice(i,1);
-  }
-  inlineTargets.push({roomId:it.roomId,roomName:it.roomName,agent:it.agent});
+function taBindItem(it,tok){
+ // THE BINDING, shared by explicit accept and exact-match-on-close (14621):
+ // records ids, chips up, and joins the unified "to:" area. The label is
+ // remembered so removing the token from the text unbinds (rule 6).
+ const label=it.kind==='room'?'#'+it.roomName
+  :(it.roomId===room?'@':'#'+it.roomName+'@')+it.agent;
+ if(it.kind==='member'&&tok&&tok.kind==='#@'){
+  // A member bound inside '#Room@' supersedes the bare-room binding of the
+  // same chain: the human narrowed the target, keep the narrow one.
+  const i=inlineTargets.findIndex(t=>t.roomId===it.roomId&&!t.agent);
+  if(i>=0)inlineTargets.splice(i,1);
  }
- taClose();renderTaChips();el.focus();
+ inlineTargets.push({roomId:it.roomId,roomName:it.roomName,
+                     agent:it.kind==='room'?null:it.agent,label});
+ renderTaChips();renderPicker();
+ return label;
+}
+function taAccept(it){
+ // An explicit accept (Tab/Enter/click) also rewrites the token to the full
+ // label and moves the caret past it.
+ const el=$('body');const tok=taState.tok;
+ const label=taBindItem(it,tok);
+ el.value=el.value.slice(0,tok.start)+label+el.value.slice(el.selectionStart);
+ const pos=tok.start+label.length;
+ el.setSelectionRange(pos,pos);
+ taClose();el.focus();
 }
 function renderTaChips(){
  const c=$('taChips');c.innerHTML='';
@@ -2699,14 +2741,35 @@ function renderTaChips(){
   s.className='tc';s.title='remove target';
   s.textContent=(t.agent?(t.roomId===room?'@'+t.agent:'#'+t.roomName+'@'+t.agent)
                  :'#'+t.roomName)+' ×';
-  s.onclick=()=>{inlineTargets.splice(i,1);renderTaChips();};
+  s.onclick=()=>{inlineTargets.splice(i,1);renderTaChips();renderPicker();};
   c.appendChild(s);
  });
+}
+function taSweepUnbound(text){
+ // Rule 6's other half: an inline binding leaves when its @token leaves the
+ // text. The label was recorded at bind; no re-parse, just presence.
+ let changed=false;
+ for(let i=inlineTargets.length-1;i>=0;i--){
+  if(inlineTargets[i].label&&!text.includes(inlineTargets[i].label)){
+   inlineTargets.splice(i,1);changed=true;
+  }
+ }
+ if(changed){renderTaChips();renderPicker();}
 }
 let taSeq=0;
 $('body').addEventListener('input',async()=>{
  const el=$('body');
  const tok=taToken(el.value,el.selectionStart);
+ // EXACT-MATCH-ON-CLOSE (amended rule 1, 14621): the previous keystroke's
+ // popup was open; this keystroke closed the token (whitespace, punctuation,
+ // moved on). If what was typed exactly matched one offered item, it binds
+ // with no Tab. A paste never opened a popup, so it can never land here.
+ if(taState&&(!tok||tok.start!==taState.tok.start)){
+  const hit=taExact(taState.tok,taState.items);
+  if(hit)taBindItem(hit,taState.tok);
+  taClose();
+ }
+ taSweepUnbound(el.value);
  if(!tok||(tok.kind!=='#@'&&tok.q.length<1)){taClose();return;}
  const seq=++taSeq;
  const items=await taItems(tok);
@@ -2732,8 +2795,14 @@ $('composer').addEventListener('submit',async e=>{
  // A blast is N separate posts, one per room, each scoped by its own ?room=. It is NOT a
  // cross-room message: rooms stay isolated, so trace()/graph() still cannot walk between
  // them and an agent only ever sees the copy that landed in its own room.
- // The TARGETS are the picker set plus the ACCEPTED inline bindings (14523):
- // buildSends is pure and never reads the body text -- a pasted name is words.
+ // END OF INPUT CLOSES THE TOKEN (amended rule 1): a full name typed and
+ // sent without a trailing space still binds -- the popup was open, the
+ // match is exact, the submit is the close.
+ if(taState){const hit=taExact(taState.tok,taState.items);
+  if(hit)taBindItem(hit,taState.tok);taClose();}
+ // The TARGETS are the picker set plus the BOUND inline targets (14523 as
+ // amended by 14621): buildSends is pure and never reads the body text -- a
+ // pasted name is words, because a paste never opened the popup that binds.
  const sends=buildSends({room,rooms:blast?(me.rooms||[]).map(r=>r.id):[room],
                          recip:[...recip],inline:inlineTargets.slice()});
  // ONE SUBMIT, ONE GROUP (ruling 14434): the set of recipients exists only
@@ -2755,7 +2824,7 @@ $('composer').addEventListener('submit',async e=>{
    body:JSON.stringify(payload)});
   if(!r.ok){toast('send to '+s.to+' failed: '+(await r.text()));return;}
  }
- inlineTargets.length=0;renderTaChips();taClose();
+ inlineTargets.length=0;renderTaChips();renderPicker();taClose();
  earcon('whoosh');
  if(blast)toast('blasted '+rooms.length+' rooms',true);
  blast=false;updateBlast();
@@ -3163,18 +3232,24 @@ function stateSentence(name){
   // strip -- sendback is already on it -- so what was owed is the two-step
   // said out loud, in the well where the terminal would be.
   :st==='stopped'&&a.hive&&a.hive.present
-   ? 'Stopped HERE, and alive on another machine -- both are true. This host has '+
-     'a container for it that is not running; the identity is working somewhere '+
-     'else, and nothing is wrong with it. To bring it back to THIS host it is two '+
-     'steps, in this order: start the container, then send it back '+
-     'within five minutes. The started container claims the return ticket '+
-     'with the credential '+
-     'it still holds -- nothing is pasted -- and the swap commits when a turn in '+
-     'the container calls join(). Its current body keeps working until then, and '+
-     'if nobody claims, the window closes and nothing changed.'
+   // VERDICT FIRST, ACT SECOND (ruled 14614/14611): a person in this pane
+   // needs "nothing is broken" before any mechanism. Recreate/re-provision
+   // advice is deliberately absent -- for a LIVE identity that path is the
+   // 409 the operator hit tonight.
+   ? esc(name)+' is RUNNING ON ANOTHER MACHINE. Nothing here needs fixing. '+
+     'To bring it back to THIS host, use the return ticket -- never recreate: '+
+     'start the container, then send the agent back within five minutes. The '+
+     'container claims the ticket with the credential it still holds (nothing '+
+     'is pasted), the swap commits when a turn inside calls join(), and until '+
+     'then the current body keeps working. If nobody claims, the window '+
+     'closes and nothing changed.'
    : 'Stopped -- there is no session to attach to. Start it from the tab above and this becomes its terminal.';
+ // A row action's refusal rides the tab it happened on (14614): the record
+ // lives here, where the eyes were; the toast is only the alert.
+ const tb=(typeof agTabs!=='undefined'&&agTabs.find(x=>x.agent===name))||{};
  return '<b>'+esc(name)+'</b> <span class="pDim">'+esc(st)+'</span>'+
-  '<div class="pAsk">'+say+'</div>';
+  '<div class="pAsk">'+say+'</div>'+
+  (tb.note?'<div class="pAsk" style="color:var(--bad,#e06c6c)">'+esc(tb.note)+'</div>':'');
 }
 function drawTabs(){
  const strip=$('agTabs'),frames=$('agFrames');
@@ -4119,7 +4194,13 @@ async function agLifecycle(name,verb){
  try{
   r=await lapi('/agents/'+encodeURIComponent(name)+'/'+verb,
    {method:'POST',body:'{}'});
- }catch(e){toast(e.message);return;}
+ }catch(e){
+  // THE REFUSAL LANDS WHERE THE EYES WERE (ruled 14614, extending 13727 to
+  // row actions): the sentence writes into the open tab's state pane and the
+  // sticky toast is the alert, not the record.
+  const t=agTabs.find(x=>x.agent===name);
+  if(t){t.note=verb+' refused: '+e.message;drawTabs();}
+  toast(e.message);return;}
  if(verb==='upgrade'&&r)toast('upgraded '+name+': '+(r.from||'?')+' -> '+(r.to||agDefaultImage),true);
  const t=agTabs.find(x=>x.agent===name);
  if(t)await closeTab(t.gid);

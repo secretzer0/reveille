@@ -66,6 +66,16 @@ s=buildSends({room:'r1',rooms:['r1'],recip:['scout'],
               inline:[{roomId:'r1',agent:'scout'}]});
 assert.deepStrictEqual(s,[{rid:'r1',to:'scout',newRoot:false}],
   'duplicate rid+to must collapse to one send');
+// -- exact-match-on-close (amended rule 1, 14621) -----------------------------
+// one exact hit binds; ambiguity or no-popup binds nothing
+const items=[{label:'@red-shirt-01',kind:'member',roomId:'r1',agent:'red-shirt-01'},
+             {label:'@reveille-architect',kind:'member',roomId:'r1',agent:'reveille-architect'}];
+assert.strictEqual(taExact({kind:'@',start:0,q:'red-shirt-01'},items).agent,'red-shirt-01');
+assert.strictEqual(taExact({kind:'@',start:0,q:'red'},items),null,'a partial must not bind on close');
+assert.strictEqual(taExact({kind:'@',start:0,q:'red-shirt-01'},[]),null,
+  'no popup items = no binding -- the paste guard is mechanical');
+const rooms=[{label:'#Reveille2.0',kind:'room',roomId:'r1',roomName:'Reveille2.0'}];
+assert.strictEqual(taExact({kind:'#',start:0,q:'Reveille2.0'},rooms).roomId,'r1');
 console.log('ok');
 """
 

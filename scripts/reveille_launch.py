@@ -1892,16 +1892,33 @@ def _image_cmd(image):
         return []
 
 
-def _token_alive(health_url, agent, token):
+def dead_token_advice(agent, code, live_elsewhere):
+    """PURE (ruled 14611/14614): the advice depends on where the identity IS.
+    'Re-provision' is only right when it is dead everywhere; said about a
+    LIVE identity it walks the reader straight into the duplicate-mint 409
+    the operator hit on 2026-09-05. Verdict first, act second."""
+    if live_elsewhere:
+        return (f"{agent} is RUNNING ON ANOTHER MACHINE -- nothing here needs "
+                f"fixing (this container's token is spent, broker said "
+                f"{code}). To bring it back to THIS host use the return "
+                f"ticket -- start the container and send the agent back -- "
+                f"never re-provision or recreate: a live identity refuses a "
+                f"duplicate mint")
+    return f"its bound token is dead (broker said {code}) -- re-provision it"
+
+
+def _token_alive(health_url, agent, token, live_elsewhere=False):
     """The carried token still opens the broker: presence answers. A 401/403 is
     a dead token (revoked, rotated) and must not be rolled forward; any other
-    failure is the broker not answering, which is also not a time to upgrade."""
+    failure is the broker not answering, which is also not a time to upgrade.
+    `live_elsewhere` (the caller's hive read, when it has one) picks the
+    advice a person can act on -- see dead_token_advice."""
     try:
         _presence(health_url, agent, token)
         return None
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            return f"its bound token is dead (broker said {e.code}) -- re-provision it"
+            return dead_token_advice(agent, e.code, live_elsewhere)
         return f"broker answered {e.code} on presence -- not upgrading"
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
         return f"broker unreachable at {health_url} ({e}) -- not upgrading"
@@ -1949,7 +1966,7 @@ def restore_found_state(conn, user, agent, was_running):
 
 
 def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH,
-                  timeout=120):
+                  timeout=120, live_elsewhere=False):
     """Re-provision an agent's container on `image`, carrying the bound token
     (and gate secret) from the container the launcher created. Same repo, boot
     command, network, role, model, quotas; same data root. The old container is
@@ -1981,7 +1998,7 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
     if old.get("image_id") and old["image_id"] == image_id_of(image):
         raise LaunchError(f"{user}/{agent} is already on {image}")
     token = old["env"]["REVEILLE_TOKEN"]
-    why = _token_alive(health_url, agent, token)
+    why = _token_alive(health_url, agent, token, live_elsewhere=live_elsewhere)
     if why:
         raise LaunchError(f"not upgrading {user}/{agent}: {why}")
     broker = old["env"].get("REVEILLE_URL") or DEFAULT_BROKER
@@ -4009,12 +4026,23 @@ def build_api(auth_url):
             # its OWN connection (sqlite is per-thread); the answer still waits.
             force = request.query_params.get("force") in ("1", "true")
 
+            # THE ADVICE CHECKS PRESENCE BEFORE ADVISING (ruled 14611): the
+            # hive half rides this request's own cookie, exactly as the
+            # listing does -- the launcher still learns no bus fact on its
+            # own authority. Unreadable presence degrades to the plain
+            # dead-token advice, never to a wrong one.
+            seen = _broker_json(auth_url, request.headers.get("cookie"),
+                                "GET", "/agents-seen") or {}
+            live = any(a.get("name") == name and a.get("present")
+                       for a in seen.get("agents") or [])
+
             def _upgrade_owned(user, agent):
                 c = _db()
                 try:
                     refuse_unless_forced(c, user, agent, force,
                                          doing="upgrading")
-                    return upgrade_agent(c, user, agent, DEFAULT_IMAGE)
+                    return upgrade_agent(c, user, agent, DEFAULT_IMAGE,
+                                         live_elsewhere=live)
                 finally:
                     c.close()
             out = await asyncio.to_thread(_upgrade_owned, p["user"], name)
