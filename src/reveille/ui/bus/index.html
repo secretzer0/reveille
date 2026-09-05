@@ -2990,6 +2990,200 @@ function closeAgentsWell(){
  if(nav){nav.textContent='Agents';nav.setAttribute('aria-pressed','false');}
  railMode(false);
 }
+// A WRAPPED URL IS ONE URL, AND ONLY TMUX STILL KNOWS THAT (ruled 14670/14676,
+// from the operator's report that a multi-line URL in the terminal does not
+// open properly).
+//
+// WHAT ACTUALLY REPRODUCES, measured in a real browser against the real ttyd
+// (red-shirt-01, headless chromium, 2026-09-05) -- and it is NOT the first
+// reading, which was retracted at 14677: where the pane and the client are the
+// SAME WIDTH the wrap is soft, xterm carries `isWrapped: true`, and a click on
+// either half already opens the whole URL correctly. Nothing is broken there.
+//
+// THE BREAK IS A PANE AND A CLIENT THAT DISAGREE ABOUT WIDTH, and tmux's
+// `window-size largest` guarantees they can: the pane is as wide as the WIDEST
+// attached client, so a narrower browser is shown only as much of each pane line
+// as fits, and the link regex reads a CUT line. entrypoint.sh's standing caveat
+// names the shape and leaves it deliberately unchanged.
+//
+// THE OPERATOR'S OWN GEOMETRY, measured both ways: client 86 cols, pane 175.
+//   today  -> the click opens `https://.../artifact/...?tab=preview&`
+//             CUT AT THE CLIENT'S RIGHT EDGE -- "it opened, but truncated url"
+//   fixed  -> the whole address
+// The mirror (a pane pinned NARROWER than its client) cuts at the pane edge
+// instead and glues the divider and its padding onto what opens:
+// `...&trace=narrow-p%E2%94%82%C2%B7%C2%B7%C2%B7...`. One cause, two edges.
+//
+// `tmux capture-pane -J` returns that line clean, in both cases. So we ASK, and
+// nothing here ever tests whether a row was full width -- that heuristic is
+// wrong at the margins forever.
+//
+// TWO MORE THINGS ARE MEASURED, NOT ASSUMED:
+//  - `term.options.linkHandler` DOES NOT FIRE: ttyd's addon holds its own
+//    handler, so capture phase is the only interception that works;
+//  - activation is on MOUSEDOWN/MOUSEUP (not click), and only
+//    stopImmediatePropagation at WINDOW capture stops it.
+// And because `window.open` after an `await` is popup-blocked, the gesture is
+// spent SYNCHRONOUSLY on a blank tab (architect 14676) and the tab is navigated
+// once tmux has answered. The cost is a blank tab for one round trip; the gain
+// is no cache, no polling, and one exec per actual click on a link.
+
+// PANE-PURE-BEGIN
+// WHERE THE LINE IS DRAWN, so nobody later reads the isWrapped test below as
+// the wrap-guessing heuristic creeping back in (architect 14682): xterm's
+// `isWrapped` is a FACT THE RENDERER RECORDED when it laid the row down, not a
+// width guess made after the fact. So -- ASK-OR-NOT comes from xterm's own
+// recorded state, WHAT TO OPEN comes from tmux, and the fallback is whatever
+// xterm would have done. This code may never derive the URL from xterm's rows.
+//
+// The rows the terminal shows, mapped onto the lines tmux joined, by LONGEST
+// PREFIX THAT CONTINUES THE JOINED LINE. Equality would do for a clean pane and
+// dies on a padded one, so the prefix is what derives the pane's width from
+// tmux's own text instead of assuming one.
+//
+// STRICTLY IN ORDER, and it never skips a row to find a later match (14679):
+// a skip is the width guess coming back through a side door. The walk STOPS at
+// the first row that does not continue, and keeps everything it mapped -- tmux's
+// own status row is the first thing that stops it, and discarding the map there
+// was a real bug in this function's first version: every click fell through and
+// nothing said why.
+function paneMapRows(rows,joined){
+ const lines=joined.split('\n');
+ const map=new Array(rows.length).fill(null);
+ let j=0,acc='';
+ for(let i=0;i<rows.length&&j<lines.length;i++){
+  const want=lines[j].replace(/\s+$/,'');
+  let k=0;
+  while(k<rows[i].length&&want.startsWith(acc+rows[i].slice(0,k+1)))k++;
+  if(k===0&&rows[i].length&&want.length){
+   if(acc===want){j++;acc='';i--;continue;}   // the line closed on the row before
+   break;                                     // does not continue: stop, keep the rest
+  }
+  map[i]={line:j,off:acc.length,span:k};
+  acc+=rows[i].slice(0,k);
+  if(acc===want){j++;acc='';}
+ }
+ return {map,lines};
+}
+
+const PANE_URL_RE=/https?:\/\/[^\s"'<>`]+/g;
+
+// THREE ANSWERS, and the difference between the last two is the whole point:
+//   a string -- the whole URL under (row, col), from tmux's own joined line
+//   ''       -- tmux MAPPED this spot and there is no URL at it. A definite no:
+//               the pane border and its padding land here, and today a click
+//               there opens the address with `│···` glued on
+//   null     -- we could not map it, so we know nothing and the caller must
+//               keep doing whatever the terminal would have done
+function paneUrlFromRows(rows,joined,row,col){
+ if(!joined)return null;
+ const m=paneMapRows(rows,joined),e=m.map[row];
+ if(!e)return null;
+ if(col>=e.span)return '';       // past the pane's own text: border, padding
+ const at=e.off+col,line=m.lines[e.line];
+ for(const hit of line.matchAll(PANE_URL_RE))
+  if(at>=hit.index&&at<hit.index+hit[0].length)return hit[0];
+ return '';
+}
+// PANE-PURE-END
+
+// The DOM half: what the pure function is asked ABOUT. Browser-only by nature --
+// a buffer, a bounding box and a live iframe are not gateable without a browser,
+// and there is none in CI (lesson 5dfd01e9).
+function paneRowsOf(term){
+ const buf=term.buffer.active,rows=[];
+ if(buf.viewportY!==buf.baseY)return null;   // scrolled back: not this pane
+ for(let i=0;i<term.rows;i++){
+  const l=buf.getLine(buf.baseY+i);
+  rows.push(l?l.translateToString(true).replace(/\s+$/,''):'');
+ }
+ return rows;
+}
+function paneClickAt(win,ev){
+ const el=ev.target&&ev.target.closest&&ev.target.closest('.xterm-rows > div');
+ if(!el||!win.term)return null;
+ const strip=win.document.querySelector('.xterm-rows');
+ const row=[].indexOf.call(strip.children,el);
+ const b=el.getBoundingClientRect();
+ return {row,col:Math.floor((ev.clientX-b.left)/(b.width/win.term.cols)),el};
+}
+// WHAT XTERM ITSELF WOULD OPEN, computed the way xterm computes it: over its
+// OWN logical line, which it marks with `isWrapped`. Two reasons this is not the
+// heuristic the ruling forbids -- it reads a flag xterm already set rather than
+// inferring one from row width, and its answer is only ever a FALLBACK and the
+// test for whether we take the click at all. The truth still comes from tmux.
+//
+// It is also what makes the CONTINUATION row work: that row holds no `https://`
+// of its own, so a row-only test would decline to act on exactly the click the
+// operator is complaining about, and xterm would open the polluted address.
+function paneXtermUrl(win,hit){
+ const buf=win.term.buffer.active,base=buf.baseY;
+ let first=hit.row;
+ while(first>0&&buf.getLine(base+first)&&buf.getLine(base+first).isWrapped)first--;
+ let text='',at=null,i=first;
+ for(;;){
+  const l=buf.getLine(base+i);
+  if(!l)break;
+  const s=l.translateToString(true).replace(/\s+$/,'');
+  if(i===hit.row)at=text.length+hit.col;
+  text+=s;
+  const nx=buf.getLine(base+i+1);
+  if(!nx||!nx.isWrapped)break;
+  i++;
+ }
+ if(at===null)return null;
+ for(const h of text.matchAll(PANE_URL_RE))
+  if(at>=h.index&&at<h.index+h[0].length)return h[0];
+ return null;
+}
+
+// Installed on the iframe's OWN window -- /attach/<agent>/ is a launcher route,
+// so it is same-origin and no byte of ttyd's 730KB bundle is patched and no
+// xterm internal is touched.
+function paneLinkFix(win,agent){
+ if(win.__reveilleLinkFix)return;
+ win.__reveilleLinkFix=true;
+ const swallow=e=>{e.preventDefault();e.stopImmediatePropagation();};
+ let armed=null;
+ win.addEventListener('mousedown',e=>{
+  armed=null;
+  if(e.button!==0)return;
+  const hit=paneClickAt(win,e);
+  if(!hit||!paneXtermUrl(win,hit))return;  // not on a link: leave the terminal alone
+  armed=hit;swallow(e);
+ },true);
+ win.addEventListener('mouseup',e=>{
+  if(!armed)return;
+  swallow(e);
+  const hit=armed;armed=null;
+  const fallback=paneXtermUrl(win,hit);
+  // THE GESTURE IS SPENT NOW, on a blank tab: window.open after an await is
+  // popup-blocked, so the synchronous act is "open a window", not "decide
+  // which URL".
+  // NOT `noopener` HERE: with it, window.open returns NULL and there is no tab
+  // left to navigate -- measured, it landed every click on about:blank. The
+  // blank tab is same-origin for one moment, which is long enough to drop the
+  // opener by hand before it goes anywhere.
+  // THE ASYMMETRY IS DELIBERATE AND IS NOT A BUG TO TIDY: the FALLBACK open
+  // below keeps `noopener`, because there we already have the URL and want no
+  // opener at all; here we need the handle, so we buy it and then throw the
+  // opener away ourselves. Making the two match either loses the tab or leaves
+  // the opener.
+  const tab=win.open('about:blank','_blank');
+  if(tab)try{tab.opener=null;}catch(err){}
+  const land=u=>{
+   if(!u){if(tab)tab.close();return;}   // a definite no: leave no blank tab behind
+   if(tab)tab.location=u;else win.open(u,'_blank','noopener');
+  };
+  lapi('/agents/'+encodeURIComponent(agent)+'/read/pane').then(r=>{
+   const rows=paneRowsOf(win.term);
+   const said=rows?paneUrlFromRows(rows,r.text,hit.row,hit.col):null;
+   // null = tmux told us nothing about this spot, so behave as today.
+   land(said===null?fallback:said);
+  }).catch(()=>land(fallback));
+ },true);
+}
+
 // ---- U8 terminal tabs, U9 actions on the tab ------------------------------
 // What you have OPEN. One entry per open, never derived from the roster: the
 // tell that this model has broken is a tab existing for an agent nobody
@@ -3290,7 +3484,17 @@ function drawTabs(){
    else if(!t.url){el=document.createElement('div');el.className='frState';}
    else{el=document.createElement('iframe');el.className='fr';
     el.src=frameSrc(t.url);
-    el.title='terminal for '+t.agent;}
+    el.title='terminal for '+t.agent;
+    // A WRAPPED URL IS ONE URL (see paneLinkFix). The handler goes on the
+    // frame's OWN window, which is same-origin, and only after it has loaded --
+    // contentWindow before that is a different document and the listeners
+    // would go on a page that is about to be replaced. Guarded inside, so a
+    // reconnecting frame does not stack a second set.
+    const agent=t.agent;
+    el.addEventListener('load',()=>{
+     try{paneLinkFix(el.contentWindow,agent);}
+     catch(e){/* a frame we cannot reach keeps the terminal's own behaviour */}
+    });}
    el.dataset.frame=t.gid;frames.appendChild(el);
   }
   // A state panel is a READING of something that changes underneath it, so it
