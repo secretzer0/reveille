@@ -124,7 +124,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 # port -- the same broker, a different route (reveille-server publishes 8765, 4.2).
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
-DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.35")
+DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE", "reveille-agent:0.2.36")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two
@@ -261,6 +261,14 @@ def docker_run_argv(user, agent, image, network, quotas,
         "--pids-limit", str(quotas["pids"]),
         "-v", f"{os.path.join(root, 'claude')}:/home/agent/.claude",
         "-v", f"{os.path.join(root, 'repos')}:/home/agent/repos",
+        # The JDK store (ruled 14460/14468): without this every `sdk install`
+        # dies with the writable layer on recreate. CANDIDATES ONLY, not the
+        # whole ~/.sdkman -- a bind mount SHADOWS the image path, so mounting
+        # the root would erase the baked installer with an empty host dir;
+        # the store is the part worth keeping and the tool stays image-side.
+        # First mount that can grow without bound: meets the ZFS per-tenant
+        # quota backlog item -- named here, solved there.
+        "-v", f"{os.path.join(root, 'sdkman')}:/home/agent/.sdkman/candidates",
         "-e", "REVEILLE_AGENT_ROLE",
         "-e", "REVEILLE_URL",
         "-e", "REVEILLE_REPO_URL",
@@ -1202,7 +1210,7 @@ def ensure_launcher_dir(path, image=None):
     return path
 
 
-def _own_agent_dirs(root, image, subdirs=("claude", "repos")):
+def _own_agent_dirs(root, image, subdirs=("claude", "repos", "sdkman")):
     """Hand the agent dirs to the image's uid (msg 8475). A plain os.chown
     needs CAP_CHOWN the launcher's own uid may not have; its actual privilege
     is the docker socket, so the chown rides a throwaway container of the very
@@ -1210,6 +1218,31 @@ def _own_agent_dirs(root, image, subdirs=("claude", "repos")):
     launcher that ran before this fix, not just fresh mkdirs."""
     subprocess.run(own_dirs_argv(root, image, subdirs), check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _ensure_mount_dirs(root, image):
+    """Every bind-mount source exists and belongs to the agent BEFORE any
+    docker run: docker creates an absent source ROOT-OWNED, a store the agent
+    cannot write. The 0.2.36-gate boot proved it on the sdkman mount -- the
+    provision path made the dirs but upgrade/start reused an older root, the
+    candidates dir was born root:root at docker run, and every `sdk install`
+    would have died on Permission denied. Called before the roll's docker run
+    and healed at every start, because a root that predates a new mount is
+    the normal case, not the odd one."""
+    fix = []
+    for sub in ("claude", "repos", "sdkman"):
+        p = os.path.join(root, sub)
+        if not os.path.isdir(p):
+            os.makedirs(p, exist_ok=True)
+            fix.append(sub)
+        elif os.stat(p).st_uid == 0:
+            # docker already made it, root-owned -- definitely wrong, the
+            # agent uid is never 0. Bind ownership is live; chown heals in
+            # place. (First shipped heal only owned dirs it CREATED and
+            # walked straight past the damage it existed to fix.)
+            fix.append(sub)
+    if fix:
+        _own_agent_dirs(root, image, subdirs=tuple(fix))
 
 
 # ---- Credential placement (home-login). The LAUNCHER, not the entrypoint,
@@ -1397,6 +1430,10 @@ def sync_before_start(user, agent):
     info = _inspect_container(container_name(user, agent))
     if info is None:
         return
+    # Heal mount-source ownership on every start: a bind mount's ownership is
+    # live, so a root-owned dir from an older run is fixed here without a
+    # recreate (the 0.2.36-gate defect's second half).
+    _ensure_mount_dirs(data_root(user, agent), info["image"])
     prof = load_profile(user)
     creds = resolve_credentials(prof, agent, info["env"].get("REVEILLE_REPO_URL", ""))
     _, _, kind = credential_env(creds)
@@ -1692,7 +1729,7 @@ def provision_agent(conn, user, agent, repo_url, token, *, image=DEFAULT_IMAGE,
     root = data_root(user, agent)
     user_root = os.path.dirname(root)
     ensure_launcher_dir(user_root, image)
-    for sub in ("claude", "repos"):
+    for sub in ("claude", "repos", "sdkman"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
     _own_agent_dirs(root, image)
     if kind == "home-login" and not boot_cmd:
@@ -1954,6 +1991,7 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
             extra_env.append(k)
             env[k] = old["env"][k]
     root = data_root(user, agent)
+    _ensure_mount_dirs(root, image)
     ino_before = os.stat(root).st_ino if os.path.isdir(root) else None
     quotas = _quotas_for(conn, user)
     if kind == "home-login" and not boot_cmd:
