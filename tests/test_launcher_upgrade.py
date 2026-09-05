@@ -95,7 +95,13 @@ class _Docker:
             return types.SimpleNamespace(returncode=0, stderr="", stdout="0\n")
         raise AssertionError(f"unexpected docker call {args!r}")
 
-    def run(self, argv, env=None, check=True, stdout=None):
+    def run(self, argv, env=None, check=True, stdout=None, stderr=None):
+        # The ownership one-shot (_own_agent_dirs via own_dirs_argv): a --rm
+        # chown container, not a provision. Reached from the roll path since
+        # _ensure_mount_dirs (0.2.36-gate defect); record it and succeed.
+        if "--rm" in argv:
+            self.calls.append(("ownfix", tuple(argv)))
+            return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         """docker run -d ... IMAGE [cmd]: the child's env carries the secrets."""
         assert argv[:3] == ["docker", "run", "-d"] and "--name" in argv
         name = argv[argv.index("--name") + 1]
