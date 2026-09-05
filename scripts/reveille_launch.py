@@ -1477,6 +1477,37 @@ def _agent_pane_tail(name):
     return r.stdout if r.returncode == 0 else None
 
 
+PANE_READ_MAX_SCROLLBACK = 2000
+
+
+def pane_read_argv(container, scrollback):
+    """The pane read's argv, FROZEN. The only thing a caller moves is one
+    integer, and it moves it into `-S`.
+
+    `-J` IS THE WHOLE POINT (architect 14670, from the operator's field case):
+    tmux is the layer that wrapped the line and the only one that still knows
+    where the wrap was, so the join is ASKED FOR rather than reconstructed. A
+    client that guessed "this row was full width, so it continues" would be
+    wrong at the margins forever. Without `-J` this route returns the same
+    broken rows the browser already has and the round trip buys nothing.
+
+    `-u` because the pane's cells are UTF-8 and a tmux client without it
+    substitutes an underscore for whatever it cannot represent -- and that
+    damage is invisible from inside the container, which cost three wrong
+    diagnoses once already (0.2.54).
+
+    `-S -<n> -E -` reads the visible pane when n is 0, and n lines of scrollback
+    above it otherwise.
+    """
+    if not isinstance(scrollback, int) or isinstance(scrollback, bool):
+        raise LaunchError(f"scrollback must be an int, got {scrollback!r}")
+    if not 0 <= scrollback <= PANE_READ_MAX_SCROLLBACK:
+        raise LaunchError(f"scrollback out of range: {scrollback} not in "
+                          f"0..{PANE_READ_MAX_SCROLLBACK}")
+    return ("exec", container, "tmux", "-u", "capture-pane", "-t", "agent",
+            "-p", "-J", "-S", f"-{scrollback}", "-E", "-")
+
+
 def _shared_login_usable(user):
     """The user's shared login seed holds an UNEXPIRED access token. One
     root-container read; called only while some agent is marked stuck."""
@@ -4291,6 +4322,27 @@ def build_api(auth_url):
         "just this once" is an argument for the socket-in-the-container design
         that r1 refused on the same day.
 
+        THE ONE EXEC THAT IS A READ, AND WHY IT IS NOT AN EXCEPTION (architect
+        14670). The test in the paragraph above is CAPABILITY, not the word
+        `exec`. So the line is drawn as an invariant, and a request that does
+        not meet BOTH halves cannot cite this one:
+
+            an exec is a read verb IFF (i) its argv is a compile-time constant
+            in the handler with at most a bounded integer parameter, AND (ii)
+            its output is information the caller ALREADY HOLDS by another route.
+
+        `pane` meets both. Its argv is frozen in pane_read_argv with one clamped
+        integer, and the caller is a session that may already `/attach` to this
+        agent -- the pane is on their screen, live, through ttyd. The verb hands
+        back the same characters with the wrap taken out. Zero new capability,
+        zero new reach into the host. `docker exec bash` meets neither, and that
+        is the difference rather than how the two feel.
+
+        PRECEDENT, NAMED SO IT IS NOT MISREAD: `_agent_pane_tail` already runs
+        this exec on the launcher's OWN clock for the login probe. The delta
+        here is the TRIGGER, and the invariant above is what makes an
+        HTTP-triggered one safe.
+
         A BODY ON ANOTHER HOST GETS AN ANSWER, NOT AN EMPTY ONE (ruled 12066).
         This launcher knows only its own docker. Returning "no logs" for an
         agent that is alive elsewhere would be the unreachable-control defect
@@ -4344,10 +4396,44 @@ def build_api(auth_url):
                                  "restarts": d.get("RestartCount") or 0,
                                  "image": row["image"],
                                  "health": (st.get("Health") or {}).get("Status") or ""})
+        if verb == "pane":
+            # THE PANE, UNWRAPPED -- a read under the invariant stated at the
+            # HARD LINE above (14670). Exactly one query parameter, because an
+            # ignored knob is how a caller comes to believe it controls
+            # something.
+            extra = set(request.query_params) - {"n"}
+            if extra:
+                return JSONResponse(
+                    {"error": "unknown query parameter",
+                     "detail": f"the pane read takes n only; got "
+                               f"{sorted(extra)}"}, status_code=400)
+            raw = request.query_params.get("n", "0")
+            try:
+                argv = pane_read_argv(cname, int(raw))
+            except ValueError:
+                return JSONResponse(
+                    {"error": "n must be an integer",
+                     "detail": f"got {raw!r}"}, status_code=400)
+            except LaunchError as e:
+                return JSONResponse({"error": "bad pane read",
+                                     "detail": str(e)}, status_code=400)
+            out = _docker(*argv, check=False, capture=True)
+            if out.returncode != 0:
+                # A PROBE THAT COULD NOT READ MUST NOT JUDGE (8866). No tmux
+                # yet, or no session by that name: that is a wait, not a fault,
+                # and answering with "" would read as an empty pane. The caller
+                # keeps whatever the terminal would have done.
+                return JSONResponse(
+                    {"agent": name, "verb": verb, "here": True, "text": None,
+                     "detail": (out.stderr or "").strip()[:200]
+                               or "no pane to read yet"}, status_code=409)
+            return JSONResponse({"agent": name, "verb": verb, "here": True,
+                                 "joined": True, "text": out.stdout or ""})
         return JSONResponse({"error": "unknown read verb",
                              "detail": f"{verb!r} is not a read verb. This launcher "
-                                       f"reads logs, version and inspect, and runs "
-                                       f"nothing on request."}, status_code=400)
+                                       f"reads logs, version, inspect and pane, and "
+                                       f"runs nothing else on request."},
+                            status_code=400)
 
     @guarded
     async def agent_config(request, p, conn):
