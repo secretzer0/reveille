@@ -22,15 +22,19 @@ jobs:
       # THE WIRE IS WEBM/OPUS (DES-009 section 2): the worker and audition gates
       # need an ffmpeg with libopus + aac; the runner has none. apt on a hosted
       # runner hangs on Azure's mirror (two gates lost 20+ min to it), so the
-      # binary is a pinned static build from GitHub's own CDN, cached by tag:
-      # a hit is a few seconds, a miss is one download, and no apt at all.
+      # binary is a pinned static build, cached by tag: a hit is a few seconds,
+      # a miss is one download, and no apt at all. The asset lives on THIS
+      # repo's ci-ffmpeg-* release, mirrored from BtbN/FFmpeg-Builds: BtbN
+      # prunes dated autobuild releases, and a pin to a URL someone else can
+      # delete 404'd the gate (run 33964261898) -- a mirror we own keeps the
+      # pin exact and deletion-proof.
       - uses: actions/cache@v4
         with:
           path: ~/ffmpeg
-          key: ffmpeg-autobuild-2026-08-17-13-05-linux64
+          key: ffmpeg-ci-mirror-n8.1.2-50-linux64
       - timeout-minutes: 3
         run: |
-          [ -x ~/ffmpeg/ffmpeg ] || { mkdir -p ~/ffmpeg && curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-17-13-05/ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1.tar.xz | tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'; }
+          [ -x ~/ffmpeg/ffmpeg ] || { mkdir -p ~/ffmpeg && curl -fsSL https://github.com/secretzer0/reveille/releases/download/ci-ffmpeg-n8.1.2-50/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz | tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'; }
           echo "$HOME/ffmpeg" >> "$GITHUB_PATH"
           ~/ffmpeg/ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
       - run: uv run pytest tests/ -q
