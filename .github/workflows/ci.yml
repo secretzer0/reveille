@@ -20,26 +20,21 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: uv sync
       # THE WIRE IS WEBM/OPUS (DES-009 section 2): the worker and audition gates
-      # need an ffmpeg with libopus + aac; the runner has none. apt on a hosted
-      # runner hangs on Azure's mirror (two gates lost 20+ min to it), so the
-      # binary is a pinned static build. The gate's ffmpeg MOVED n8.1.2-44 ->
-      # n8.1.2-50 (BtbN deleted -44); the asset is mirrored from BtbN
-      # autobuild-2026-09-04-14-01 onto THIS repo's ci-ffmpeg-* release,
-      # because BtbN prunes dated autobuilds (~14d) and a pin to a URL someone
-      # else can delete 404'd the gate (run 33964261898). THE PIN IS THE
-      # SHA256, not the URL: an asset on our own release is replaceable by
-      # anyone with write. NO CACHE AND NO GUARD, on purpose: a cache is a
-      # bypass around every check inside the miss branch -- the assert runs on
-      # every build or it protects nothing, and it buys back only ~8 measured
-      # seconds.
-      - timeout-minutes: 3
+      # need an ffmpeg with libopus + aac; the runner ships none. apt, measured
+      # 2026-09-05 on three fresh runners (probe run 33966135786): update ~5.5s
+      # + install 12-16s, libopus + native aac both present in 6.1.1 -- the
+      # 2026-08-18 mirror hang did not reproduce. The version floats with the
+      # runner image, accepted by ruling 14451: the encoder grep is the
+      # capability gate, and the version line makes drift visible in every
+      # log. The timeout bounds a mirror hang to minutes, not the 20+ it once
+      # cost. Rollback if apt flakes: the sha-pinned tarball on this repo's
+      # ci-ffmpeg-* release (pin eb95195a..., see 0.2.235 CHANGES).
+      - timeout-minutes: 5
         run: |
-          mkdir -p ~/ffmpeg
-          curl -fsSL -o /tmp/ffmpeg.tar.xz https://github.com/secretzer0/reveille/releases/download/ci-ffmpeg-n8.1.2-50/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz
-          echo "eb95195a525ee3160c169b98f941368e7f6f38719a2fd8554f2aa529fe2a3079  /tmp/ffmpeg.tar.xz" | sha256sum -c
-          tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' -f /tmp/ffmpeg.tar.xz
-          echo "$HOME/ffmpeg" >> "$GITHUB_PATH"
-          ~/ffmpeg/ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+          ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
       - run: uv run pytest tests/ -q
       - run: uv run ruff check src tests scripts
       # base...head over the whole PR range: a stacked slice whose parent
