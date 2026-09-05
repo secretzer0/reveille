@@ -138,7 +138,16 @@ def _run_boot_block(tmp_path, init_rc=1, force_rc=1):
         f'case "$*" in *--force*) exit {force_rc};; *) exit {init_rc};; esac\n')
     (bindir / "reveille-waked").write_text(
         f"#!/bin/sh\necho waked >> {order}\nsleep 30\n")
-    for f in ("reveille", "reveille-waked"):
+    # THE COST DRIVER THE 60s CLOCK KEPT LOSING TO (14483): the block under
+    # test carries `npm install -g @anthropic-ai/claude-code@latest`, and
+    # with no npm stub every run did a REAL network install of claude into
+    # the runner's live npm prefix -- 30-90s of registry weather against a
+    # fixed clock, red at 93.20s and green at 61.09s on the same commit.
+    # The stubs make the block instant and hermetic; the assertions are
+    # untouched, and the clock stays exactly where it was.
+    (bindir / "npm").write_text(f"#!/bin/sh\necho npm >> {order}\nexit 0\n")
+    (bindir / "claude").write_text('#!/bin/sh\necho "claude-stub 0.0.0"\n')
+    for f in ("reveille", "reveille-waked", "npm", "claude"):
         (bindir / f).chmod(0o755)
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
@@ -161,8 +170,19 @@ def _run_boot_block(tmp_path, init_rc=1, force_rc=1):
     # OWN SESSION, because the script ends in `kill 0`: without this the signal
     # goes to pytest's process group and takes the test runner down with the
     # supervisor it meant to reap.
-    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                       env=env, timeout=60, start_new_session=True)
+    try:
+        r = subprocess.run(["bash", "-c", script], capture_output=True,
+                           text=True, env=env, timeout=60,
+                           start_new_session=True)
+    except subprocess.TimeoutExpired as e:
+        # THE FAILURE NAMES WHAT IT WAITED FOR (14483 condition 3): a bare
+        # TimeoutExpired dumps the whole script and says nothing about which
+        # step never finished. The order log and the report ARE that answer.
+        raise AssertionError(
+            "boot block did not finish in 60s. steps reached: "
+            f"{order.read_text().split()} -- report so far: "
+            f"{report.read_text()[-400:]!r} -- stderr tail: "
+            f"{(e.stderr or '')[-400:]!r}") from e
     return r, order.read_text().split(), report.read_text()
 
 
