@@ -187,7 +187,8 @@ USE:
    hook or container entrypoint spawns and supervises it; you NEVER start, poll,
    or re-arm it. Each ring becomes a file in your spool
    (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). You arm ONLY the watcher, and
-   you arm it ONCE PER SESSION with the Monitor tool:
+   you arm it ONCE PER SESSION (a new session means a new watcher -- verify by
+   liveness, never by memory) with the Monitor tool:
    command="wake-watch --follow $REVEILLE_AGENT_ROLE", persistent=true. --follow
    never exits and prints each new ring ONCE, so there is no re-arm at all. On
    each line: inbox(), ack(), act only if owed, DELETE the spool files you

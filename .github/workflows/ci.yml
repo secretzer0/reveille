@@ -23,18 +23,25 @@ jobs:
       # need an ffmpeg with libopus + aac; the runner has none. apt on a hosted
       # runner hangs on Azure's mirror (two gates lost 20+ min to it), so the
       # binary is a pinned static build, cached by tag: a hit is a few seconds,
-      # a miss is one download, and no apt at all. The asset lives on THIS
-      # repo's ci-ffmpeg-* release, mirrored from BtbN/FFmpeg-Builds: BtbN
-      # prunes dated autobuild releases, and a pin to a URL someone else can
-      # delete 404'd the gate (run 33964261898) -- a mirror we own keeps the
-      # pin exact and deletion-proof.
+      # a miss is one download, and no apt at all. The gate's ffmpeg MOVED
+      # n8.1.2-44 -> n8.1.2-50 (BtbN deleted -44); the asset is mirrored from
+      # BtbN autobuild-2026-09-04-14-01 onto THIS repo's ci-ffmpeg-* release,
+      # because BtbN prunes dated autobuilds (~14d) and a pin to a URL someone
+      # else can delete 404'd the gate (run 33964261898). THE PIN IS THE
+      # SHA256 ASSERTED BELOW, not the URL: an asset on our own release is
+      # replaceable by anyone with write, and prose cannot fail a build.
       - uses: actions/cache@v4
         with:
           path: ~/ffmpeg
           key: ffmpeg-ci-mirror-n8.1.2-50-linux64
       - timeout-minutes: 3
         run: |
-          [ -x ~/ffmpeg/ffmpeg ] || { mkdir -p ~/ffmpeg && curl -fsSL https://github.com/secretzer0/reveille/releases/download/ci-ffmpeg-n8.1.2-50/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz | tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'; }
+          [ -x ~/ffmpeg/ffmpeg ] || {
+            mkdir -p ~/ffmpeg
+            curl -fsSL -o /tmp/ffmpeg.tar.xz https://github.com/secretzer0/reveille/releases/download/ci-ffmpeg-n8.1.2-50/ffmpeg-n8.1.2-50-g1a748fe2cd-linux64-gpl-8.1.tar.xz
+            echo "eb95195a525ee3160c169b98f941368e7f6f38719a2fd8554f2aa529fe2a3079  /tmp/ffmpeg.tar.xz" | sha256sum -c
+            tar -xJ --strip-components=2 -C ~/ffmpeg --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' -f /tmp/ffmpeg.tar.xz
+          }
           echo "$HOME/ffmpeg" >> "$GITHUB_PATH"
           ~/ffmpeg/ffmpeg -hide_banner -encoders | grep -E 'libopus|\baac\b'
       - run: uv run pytest tests/ -q
