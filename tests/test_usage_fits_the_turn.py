@@ -37,26 +37,45 @@ def test_the_default_fits_the_turn_with_the_reference_complete():
 
 
 def test_every_entry_is_present_full_or_labelled():
+    """Amended with ruling 14631 (the windowed tail): entries inside the
+    titled window keep the 13213 property -- full text or a label carrying
+    the title's head -- and everything older is one counted line whose
+    since= version reaches all of it. Existence is still never elided; the
+    ledger just stopped being one line per entry forever."""
     out = daemon._usage_text()
-    for version, text in daemon.CHANGES_ENTRIES:
+    shown_full = sum(1 for _, t in daemon.CHANGES_ENTRIES if t in out)
+    window = daemon.CHANGES_ENTRIES[:shown_full + daemon.TAIL_TITLED]
+    for version, text in window:
         title = text.splitlines()[0]
-        # clip-width agnostic: any label preserves the line's head, and the
-        # version prefix rides in it
         assert text in out or title[:35].rstrip() in out, (
-            f"entry {version} is neither served in full nor labelled -- a "
-            f"budget may elide text, never an entry's existence")
+            f"entry {version} is inside the titled window and is neither "
+            f"served in full nor labelled")
+    older = daemon.CHANGES_ENTRIES[shown_full + daemon.TAIL_TITLED:]
+    if older:
+        oldest_titled = window[-1][0]
+        assert f'usage(since="{oldest_titled}")' in out, (
+            "the collapse line must name the oldest titled version")
+        assert f"{len(older)} older entries" in out, (
+            "the collapse line must carry the exact count")
     assert "a clipped label is not a hidden entry" in out or \
         "titles only" in out
 
 
 def test_a_big_budget_serves_the_full_titled_tail():
-    """A on request (13213): budget >= 30000 gets every title unclipped,
-    automatically -- the shape degrades by budget, no third policy."""
+    """A on request (13213), amended by 14631: a big budget serves more
+    entries IN FULL and the titled window unclipped -- but the window stays
+    a window at every budget; history beyond it is the counted since= line,
+    or the tail's constant size was a lie at exactly one budget."""
     out = daemon._usage_text(budget=34000)
-    for version, text in daemon.CHANGES_ENTRIES:
+    shown_full = sum(1 for _, t in daemon.CHANGES_ENTRIES if t in out)
+    assert shown_full > 0, "a big budget must serve some entries in full"
+    window = daemon.CHANGES_ENTRIES[:shown_full + daemon.TAIL_TITLED]
+    for version, text in window:
         title = text.splitlines()[0]
         assert text in out or title in out, (
             f"entry {version}'s full title missing at a budget that holds it")
+    if len(daemon.CHANGES_ENTRIES) > len(window):
+        assert f'usage(since="{window[-1][0]}")' in out
     assert "clipped" not in out.split("older entries", 1)[-1][:80], (
         "a budget that fits full titles must not clip them")
 
@@ -117,3 +136,29 @@ def test_the_record_is_the_writers_and_reconstructs_the_log():
     # construction of the record, asserted loosely: the first entry is the
     # highest version
     assert keys[0] == max(keys)
+
+
+def test_the_tail_is_a_window_and_never_grows(monkeypatch):
+    """Ruled 14631: the titled tail is the newest TAIL_TITLED entries and its
+    wire size is CONSTANT -- at 12 entries and at 200, the same -- so a
+    release costs the default budget nothing. The 13th-newest title is
+    absent, and the collapse line names the oldest titled version so
+    usage(since=) reaches everything older."""
+    def fake(n):
+        return tuple((f"0.9.{n - i}",
+                      f"0.9.{n - i} ENTRY NUMBER {n - i} TITLE LINE\nbody\n")
+                     for i in range(n))
+    monkeypatch.setattr(daemon, "CHANGES_ENTRIES", fake(12))
+    twelve = daemon._usage_text(budget=1)   # the floor: tail only
+    tail12 = twelve[twelve.index("entries, titles only"):]
+    monkeypatch.setattr(daemon, "CHANGES_ENTRIES", fake(200))
+    two_hundred = daemon._usage_text(budget=1)
+    tail200 = two_hundred[two_hundred.index("entries, titles only"):]
+    assert "0.9.188 ENTRY" not in tail200, "the 13th-newest title must be absent"
+    assert 'usage(since="0.9.189")' in tail200, (
+        "the collapse line must name the oldest titled version")
+    assert "188 older entries" in tail200
+    # constant size: the only growth between 12 and 200 entries is the one
+    # collapse line, whatever the history's length
+    assert abs(len(tail200) - len(tail12)) < 120, (
+        f"tail grew with history: {len(tail12)} -> {len(tail200)}")
