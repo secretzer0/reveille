@@ -357,7 +357,7 @@ full, and nothing you already read.
 # conversion was verified by byte-identical reconstruction of the old blob
 # from these records. Newest first. Maintain by adding a record, never by
 # editing the rendered form.
-CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS. It says what each version CHANGED, in the words\nof the day it changed; USAGE above is what is true now. An entry that disagrees\nwith USAGE is history, and USAGE wins -- never work a released entry backwards\ninto a procedure.\n"
+CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
     ("0.2.239",
