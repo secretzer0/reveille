@@ -3149,6 +3149,23 @@ def source_stamp(path):
     return commit, branch, version
 
 
+def _uv_bin():
+    """uv, resolved the way deploy-launcher's bash half already does (ruled
+    14605): PATH first, then the two homes uv actually installs to. The
+    0.2.239 deploy's first attempt died at a bare ["uv", ...] under
+    setsid/nohup -- a detached session carries no login PATH, and the
+    property "runs from any session" belongs in this script, never in
+    whoever remembers bash -lc."""
+    found = shutil.which("uv")
+    if found:
+        return found
+    for c in (os.path.expanduser("~/.local/bin/uv"), "/usr/local/bin/uv"):
+        if os.access(c, os.X_OK):
+            return c
+    die("uv not found on PATH, ~/.local/bin/uv or /usr/local/bin/uv -- "
+        "nothing was touched; the launcher keeps serving what it serves")
+
+
 def cmd_pin(a):
     """Create or fast-forward the tree the launcher is SERVED from.
 
@@ -3180,7 +3197,7 @@ def cmd_pin(a):
     _git(path, "merge", "--ff-only", "--quiet", "origin/main")
     # The venv is part of the artifact: serve imports uvicorn and starlette, and
     # a pinned tree without them falls back to system python and dies at import.
-    r = subprocess.run(["uv", "sync", "--quiet"], cwd=path, capture_output=True,
+    r = subprocess.run([_uv_bin(), "sync", "--quiet"], cwd=path, capture_output=True,
                        text=True)
     if r.returncode != 0:
         die(f"uv sync in {path} failed: {r.stderr.strip()}")
