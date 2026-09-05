@@ -3236,10 +3236,11 @@ function stateSentence(name){
    // needs "nothing is broken" before any mechanism. Recreate/re-provision
    // advice is deliberately absent -- for a LIVE identity that path is the
    // 409 the operator hit tonight.
-   ? esc(name)+' is RUNNING ON ANOTHER MACHINE. Nothing here needs fixing. '+
-     'To bring it back to THIS host, use the return ticket -- never recreate: '+
-     'start the container, then send the agent back within five minutes. The '+
-     'container claims the ticket with the credential it still holds (nothing '+
+   ? esc(name)+' is alive on another machine. Nothing here needs fixing, and '+
+     'recreate/re-provision would be refused -- a live identity never mints a '+
+     'duplicate. To bring it back to THIS host, two steps in order: '+
+     'start the container, then send it back within five minutes. The '+
+     'container claims the return ticket with the credential it still holds (nothing '+
      'is pasted), the swap commits when a turn inside calls join(), and until '+
      'then the current body keeps working. If nobody claims, the window '+
      'closes and nothing changed.'
