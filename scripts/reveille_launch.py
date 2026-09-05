@@ -1229,14 +1229,20 @@ def _ensure_mount_dirs(root, image):
     would have died on Permission denied. Called before the roll's docker run
     and healed at every start, because a root that predates a new mount is
     the normal case, not the odd one."""
-    created = []
+    fix = []
     for sub in ("claude", "repos", "sdkman"):
         p = os.path.join(root, sub)
         if not os.path.isdir(p):
             os.makedirs(p, exist_ok=True)
-            created.append(sub)
-    if created:
-        _own_agent_dirs(root, image, subdirs=tuple(created))
+            fix.append(sub)
+        elif os.stat(p).st_uid == 0:
+            # docker already made it, root-owned -- definitely wrong, the
+            # agent uid is never 0. Bind ownership is live; chown heals in
+            # place. (First shipped heal only owned dirs it CREATED and
+            # walked straight past the damage it existed to fix.)
+            fix.append(sub)
+    if fix:
+        _own_agent_dirs(root, image, subdirs=tuple(fix))
 
 
 # ---- Credential placement (home-login). The LAUNCHER, not the entrypoint,
