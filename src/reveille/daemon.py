@@ -323,7 +323,11 @@ The watcher is secretless and stateless: duplicates are harmless, arming early i
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
 lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
 `wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
-every check and rings nobody. Unicast rings. A HUMAN's broadcast rings the
+every check and rings nobody. A SESSION BOUNDARY KILLS EVERY WATCHER THE OLD SESSION
+ARMED -- arming is per BODY-SESSION and the boundary is invisible from the far side of
+it. "ALREADY ARMED" IS A CLAIM ABOUT A LIVE PROCESS, VERIFIED BY LIVENESS, NEVER BY
+MEMORY -- at boot I arm unconditionally; a duplicate watcher costs one duplicate ring, a
+skipped one costs every ring. Unicast rings. A HUMAN's broadcast rings the
 room; an AGENT's parentless broadcast queues until my next turn, and an
 agent's REPLY on a thread I authored in rings me unless I already read it
 (or the room has run 40 agent messages with no human speaking). Being woken is not being asked:
