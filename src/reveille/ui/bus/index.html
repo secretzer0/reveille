@@ -1779,17 +1779,41 @@ async function toggleScript(row,m){
 }
 function render(m){
  const frag=document.createDocumentFragment();
+ // ONE ROW PER SUBMIT (ruling 14434): copies of one composer submit share
+ // send_group, and the feed shows the SET once -- body printed once, each
+ // recipient a chip carrying its OWN message id and opening its OWN thread.
+ // The guard is the recorded group, never text or timing: NULL groups (agent
+ // sends, single sends, all history) can never merge, and a broadcast never
+ // joins a group row. Rows arrive in id order, so copies are adjacent.
+ if(m.send_group&&m.to!=='*'&&prevMsg&&prevMsg.send_group===m.send_group
+    &&prevMsg.from===m.from){
+  const gr=$('inner').querySelector('.row[data-group="'+m.send_group+'"]');
+  if(gr){
+   gr.querySelector('.grpto')?.insertAdjacentHTML('beforeend',
+    ', <span class="toname mid" data-thread="'+m.thread_id+'" style="color:'
+    +color(m.to)+'" title="thread of this copy">'+esc(m.to)+' (#'+m.id+')</span>');
+   prevMsg=m;
+   return frag;                       // registered, rendered as a chip
+  }
+ }
  if(!prevMsg||dayOf(prevMsg.ts_ns)!==dayOf(m.ts_ns)){
   const d=document.createElement('div');d.className='day';d.textContent=dayOf(m.ts_ns);
   frag.appendChild(d);
  }
+ // A grouped row is never a continuation: the chips live in its head, and a
+ // headless first copy would drop every later recipient silently.
  const cont=prevMsg&&prevMsg.from===m.from&&prevMsg.to===m.to
+   &&!(m.send_group&&m.to!=='*')
    &&m.ts_ns-prevMsg.ts_ns<5*60*1e9&&dayOf(prevMsg.ts_ns)===dayOf(m.ts_ns);
  const row=document.createElement('div');
  row.className='row'+(m.to==='*'?' bcast':'')+(cont?' cont':'');
  row.dataset.id=m.id;
+ if(m.send_group&&m.to!=='*')row.dataset.group=m.send_group;
  row.title='#'+m.id+'  '+new Date(m.ts_ns/1e6).toLocaleString();
  const c=color(m.from);
+ // A grouped copy's chip is a .mid: the existing delegation opens ITS thread,
+ // so per-recipient threads stay individually trackable (the 14434 requirement
+ // that makes this a render slice, not a threading change).
  row.innerHTML=
   '<div class="gutter"><div class="avatar" style="color:'+c+';background:'+tint(m.from)+'">'
    +initials(m.from)+'</div></div>'
@@ -1797,7 +1821,11 @@ function render(m){
   +(cont?'':'<div class="head"><span class="who" style="color:'+c+'">'+esc(m.from)+'</span>'
     +'<span class="arrow">&rarr;</span>'
     +(m.to==='*'?'<span class="all">ALL</span>'
-      :'<span class="toname" style="color:'+color(m.to)+'">'+esc(m.to)+'</span>')
+      :(m.send_group
+        ?'<span class="grpto"><span class="toname mid" data-thread="'+m.thread_id
+          +'" style="color:'+color(m.to)+'" title="thread of this copy">'
+          +esc(m.to)+' (#'+m.id+')</span></span>'
+        :'<span class="toname" style="color:'+color(m.to)+'">'+esc(m.to)+'</span>'))
     +'<time>'+hhmm(m.ts_ns)+'</time>'
     +'<span class="mid" data-thread="'+m.thread_id+'" title="view thread">#'+m.id
     +(m.thread_id!==m.id?' &middot; thread '+m.thread_id:'')+'</span>'
@@ -2544,11 +2572,17 @@ $('composer').addEventListener('submit',async e=>{
  // cross-room message: rooms stay isolated, so trace()/graph() still cannot walk between
  // them and an agent only ever sees the copy that landed in its own room.
  const rooms=blast?(me.rooms||[]).map(r=>r.id):[room];
+ // ONE SUBMIT, ONE GROUP (ruling 14434): the set of recipients exists only
+ // here, so it is recorded here -- every copy of this submit carries the same
+ // minted id, and the feed collapses copies sharing (room, sender, group)
+ // into one row. The server stores it as advisory render data; N rows, N
+ // receipts, N rings stay exactly as they are.
+ const sendGroup=crypto.randomUUID();
  for(const rid of rooms) for(const to of targets){
   // No page-all flag any more: a broadcast from this composer IS a person
   // paging the room and always wakes it. The control this replaced could not
   // be kept on -- it hid whenever a recipient was selected and reset on send.
-  const payload={to,subject:$('subject').value.trim(),body};
+  const payload={to,subject:$('subject').value.trim(),body,send_group:sendGroup};
   if(attachments.length)payload.attachments=attachments.slice();
   if(replyTo)payload.reply_to=replyTo;
   const r=await fetch('/send'+qsFor(rid),{method:'POST',headers:{'content-type':'application/json'},

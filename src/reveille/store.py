@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -442,6 +442,15 @@ CREATE TABLE IF NOT EXISTS messages (
     -- by the migration, never silent). `recipient` stays: it is the only record
     -- of what a message was addressed to before the rename log existed.
     recipient_agent_id TEXT,
+    -- ONE COMPOSER SUBMIT, MANY UNICASTS (ruling 14434): the set of
+    -- recipients a human selected exists only at submit, so the composer
+    -- mints one id per submit and every copy carries it. The feed collapses
+    -- rows sharing (room, sender, send_group) into one rendered row;
+    -- everything else -- rows, receipts, threads, rings -- stays per-copy.
+    -- NULL = a single send, an agent send, or history: never grouped, never
+    -- backfilled (a group inferred after the fact asserts a set that may
+    -- never have existed).
+    send_group TEXT,
     ts_ns     INTEGER NOT NULL
 );
 -- Receipts key on the IDENTITY (DES-011 s6.1(b); DES-007 4.3 said why a name
@@ -2062,6 +2071,18 @@ def _upgrade_v41(conn, db_path):
         conn.execute("PRAGMA user_version=42")
 
 
+def _upgrade_v43(conn, db_path):
+    """v43 -> v44 (ruling 14434): messages.send_group -- the composer-minted
+    id tying one submit's N unicasts together for the feed's render. Additive;
+    NULL is correct for every existing row (no backfill by ruling: a group
+    inferred after the fact asserts a set the store cannot support)."""
+    with tx(conn):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+        if "send_group" not in have:
+            conn.execute("ALTER TABLE messages ADD COLUMN send_group TEXT")
+        conn.execute("PRAGMA user_version=44")
+
+
 def _upgrade_v42(conn, db_path):
     """v42 -> v43 (rulings 14032/14048): how a person asked to be addressed --
     users.nickname, users.persona, users.moniker_order. Additive; NULL is
@@ -2313,7 +2334,7 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42)}
+              37, 38, 39, 40, 41, 42, 43)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -5794,7 +5815,7 @@ def resolve_send_room(rooms, room=None, parent_room=None):
 
 
 def send(conn, principal, recipient, body, subject="", reply_to=None, attachments=None,
-         room=None):
+         room=None, send_group=None):
     """Insert a message from `principal` (agent:<id> | user:<id>, DES-011
     s6.1(b)); it is written under the ROOM-NAME the room calls that identity
     (its members row, else its own name). recipient='*' broadcasts; otherwise it
@@ -5843,9 +5864,9 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
     with tx(conn):
         cur = conn.execute(
             "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, "
-            "body, room, sender_agent_id, recipient_agent_id, ts_ns) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (thread_id, parent_id, sender, recipient, subject, body, room,
+            "body, room, send_group, sender_agent_id, recipient_agent_id, ts_ns) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (thread_id, parent_id, sender, recipient, subject, body, room, send_group,
              # BOTH IDENTITIES FROM THE STORE'S OWN KEYS: the sender's from the
              # principal the caller proved (the credential -- never agent_id_for
              # (name), ambiguous the day two owners run one name; the v18 lesson
@@ -5888,6 +5909,11 @@ def _msg(r):
          "body": r["body"], "room": r["room"], "ts_ns": r["ts_ns"]}
     with contextlib.suppress(IndexError, KeyError):
         m["room_name"] = r["room_name"]
+    # ADVISORY render data (14434): the composer-minted submit id, so any
+    # client MAY collapse one submit's copies into one row; none must. NULL
+    # rides as absent-or-None, and nothing downstream may invent one.
+    with contextlib.suppress(IndexError, KeyError):
+        m["send_group"] = r["send_group"]
     # 14056: a message carries its sender's resolved moniker at delivery --
     # `from` stays the identity (ids exact is bus doctrine), `from_moniker`
     # is what the reader ADDRESSES. Human senders only; an agent-sent

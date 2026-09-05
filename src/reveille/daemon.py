@@ -3860,9 +3860,14 @@ async def send_http(request):
                                   parent_room=_parent_room(d.get("reply_to")))
     if p.kind == "user" and not store.known(_conn, speaker_key(p), [rid]):
         store.join(_conn, p.name, tag=f"web:{p.name}", room_id=rid)
+    # The composer-minted submit id (ruling 14434): advisory render data, one
+    # per submit, shared by every copy of that submit. Bounded and stripped --
+    # it is client text headed for a column -- and never minted server-side:
+    # the composer KNOWS the set, nothing downstream may infer one.
+    sg = (d.get("send_group") or "").strip()[:64] or None
     res = store.send(_conn, speaker_key(p), to, body,
                      subject=d.get("subject") or "", reply_to=d.get("reply_to"),
-                     attachments=d.get("attachments"), room=rid)
+                     attachments=d.get("attachments"), room=rid, send_group=sg)
     sender = res["sender"]
     # A HUMAN BROADCAST WAKES THE ROOM; AN AGENT BROADCAST DOES NOT. This is
     # the web plane, so a broadcast here is a person paging the room and always
@@ -3879,7 +3884,7 @@ async def send_http(request):
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": sender, "to": to,
                 "subject": d.get("subject") or "", "body": body,
-                "room": rid, "room_name": p.rooms.get(rid),
+                "room": rid, "room_name": p.rooms.get(rid), "send_group": sg,
                 "attachments": d.get("attachments") or [], "ts_ns": time.time_ns()})
     _voice_of_send(res["id"], rid, sender, d.get("subject") or "", body, speaker_key(p),
                    d.get("attachments"))
