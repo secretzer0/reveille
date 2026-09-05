@@ -31,9 +31,16 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # `pytest tests/ -q` locally -- 20 failures on every 0.2.22/0.2.23 body,
 # measured in three of them. CI carries its own pinned static ffmpeg and stays
 # the authoritative gate; this restores the local run.
+# openssh-client: a body with devops duties reaches the server over ssh, and
+# the client was NOT in the image -- red-shirt-01 apt-installed it by hand at
+# runtime on 2026-09-05 to answer "can you ssh", which works and dies at the
+# next re-provision. The KEY survives (it lives under /home/agent/repos, a
+# volume); the client did not, so the capability was one rebuild from gone with
+# the human's imported key still sitting there. apt is the default for anything
+# new (14461), so this is a list entry and not a twelfth installer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential ca-certificates cmake curl ffmpeg git gnupg jq less \
-      openssl pkg-config ripgrep sudo tmux unzip xvfb zip \
+      openssh-client openssl pkg-config ripgrep sudo tmux unzip xvfb zip \
     && rm -rf /var/lib/apt/lists/*
 
 # NON-APT TOOLS RUN THEIR VENDOR'S RECOMMENDED INSTALLER, UNPINNED (operator

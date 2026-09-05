@@ -1937,8 +1937,15 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.36", (
+    assert tag == "reveille-agent:0.2.37", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.37 PUTS openssh-client IN THE IMAGE. A body holding devops duties
+    # reaches the server over ssh and the CLIENT was not baked in -- it was apt
+    # installed by hand at runtime to answer "can you ssh", which works and
+    # dies at the next re-provision. The key survives that (it lives on the
+    # /home/agent/repos volume); the client did not, so the capability was one
+    # rebuild away from gone with the human's imported key still sitting there.
+    # apt, so a list entry rather than a twelfth installer (14461).
     # 0.2.36 UNPINS EVERY NON-APT INSTALLER (operator 14461/14469, ruled
     # 14471): vendor-recommended installers resolve at build; the tag now
     # marks INTENT, not content, and the baked build manifest
@@ -1993,7 +2000,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/busdeaf-probe", "docker/entrypoint.sh",
                 "docker/tmux.conf", "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "13667a755ec7459e70a15cf828992952d4da60b5ee6b67c883505238ac1a249d"
+IMAGE_INPUT_SHA = "39566f162c43d376063548bcb895657dff68d8f082e0987826d450e62fc17643"
 
 
 def _image_input_sha(root):
