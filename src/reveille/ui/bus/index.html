@@ -3185,6 +3185,64 @@ function paneLinkFix(win,agent){
  },true);
 }
 
+// THE SERVER LEARNED TO WAIT AND THE PAGE DID NOT (13407, ruled 13408/13410).
+//
+// fetch_with_boot_grace already retries a REFUSED attach on a ladder to a 15s
+// deadline, and when that runs out it answers 502 with a sentence naming the
+// state and the container's start time. That was the whole fix for
+// press-play-then-connect, and it left half the loop undone: once the 502 is in
+// the iframe it STAYS there until a human closes the tab and opens it again.
+// The manual retry the ladder was built to replace is still being performed by
+// hand, which is the operator's original report.
+//
+// THE LAUNCHER'S WORDING IS DELIBERATELY NOT QUOTED ANYWHERE IN THIS FILE. The
+// gate below is a blunt "that sentence is absent from the page", and a comment
+// reciting it would pass the page while teaching the next reader to match on
+// it. Tonight already produced one of these: a banned literal that lived only
+// in a comment while the code spelled the call another way.
+//
+// NOT A WIDER GRACE. 15s came from the operator watching a real case, and
+// tuning a deadline until it passes is the shape 13760 refuses. What is missing
+// is that the page ASKS AGAIN.
+//
+// IT ASKS BY STATUS, NEVER BY READING THE SENTENCE. Classifying a failure by
+// its prose is its own lesson and that text is written for a person; api()
+// already carries `err.status` for exactly this. An iframe's load event fires
+// for a 502 exactly as it does for a terminal, so the parent cannot tell them
+// apart without reading the document -- hence a probe of ttyd's own /token,
+// which is small, same-origin and behind the SAME two gates as the terminal.
+const ATTACH_TRIES=6, ATTACH_STEP_MS=5000;
+
+// 502 is the launcher saying NOT UP YET, and it is the only status worth asking
+// again about. 403 is an ownership refusal and 401 is a dead session: both are
+// ANSWERS, and retrying an answer is how a refusal turns into a hang -- the
+// same distinction fetch_with_boot_grace draws on the server side, where only
+// ConnectionRefusedError is retried and everything else propagates on the first
+// throw.
+function attachNotUpYet(e){return !!e&&e.status===502;}
+
+async function attachWhenListening(t){
+ for(let i=1;i<=ATTACH_TRIES;i++){
+  try{
+   await lapi('/attach/'+encodeURIComponent(t.agent)+'/token');
+   t.wait='';t.url=t.pending;drawTabs();return;
+  }catch(e){
+   if(!attachNotUpYet(e)){t.wait='';t.err=attachFailure(e);drawTabs();return;}
+   // The launcher's OWN words, shown rather than invented: they name the
+   // container's start time, which is what a person needs to decide whether
+   // waiting is still reasonable.
+   t.wait=(e.message||'the terminal is not listening yet')+
+     ' -- still asking ('+i+'/'+ATTACH_TRIES+')';
+   drawTabs();
+  }
+  await new Promise(r=>setTimeout(r,ATTACH_STEP_MS));
+ }
+ t.wait='';
+ t.err='the terminal did not come up. The container is running -- open the tab '+
+       'again, or stop and start it from the tab above.';
+ drawTabs();
+}
+
 // ---- U8 terminal tabs, U9 actions on the tab ------------------------------
 // What you have OPEN. One entry per open, never derived from the roster: the
 // tell that this model has broken is a tab existing for an agent nobody
@@ -3271,8 +3329,15 @@ async function openAgent(name){
  try{
   const g=await lapi('/agents/'+encodeURIComponent(name)+'/grants',
    {method:'POST',body:JSON.stringify({grantee:'me',mode:'driver'})});
-  agTabs.push({agent:name,gid:g.id,url:AGBASE+g.attach_url,err:''});
+  // The frame is NOT pointed at the terminal until the terminal answers.
+  // Pointing it first is what put the 502 on screen with nothing left to
+  // retry it -- the tab opens on a sentence that says we are still asking,
+  // and becomes the terminal when one of those asks succeeds.
+  const t={agent:name,gid:g.id,url:'',pending:AGBASE+g.attach_url,err:'',
+           wait:'starting the terminal…'};
+  agTabs.push(t);
   agTabOn=g.id;
+  attachWhenListening(t);
  }catch(e){
   // A container that is not running fails HERE, at the mint, with a status --
   // so it is nameable before a frame ever opens.
@@ -3293,7 +3358,11 @@ async function closeTab(gid){
  // looks held, the agent looks driven, and nothing says otherwise. The
  // launcher's sweep is what covers the killed-browser case, because it
  // observes the session disappearing rather than being told.
- if(t&&!t.err&&t.url)try{
+ // `t.pending` is here for the tab closed WHILE STILL WAITING: the grant was
+ // minted the moment the tab opened, so releasing only on `t.url` leaked one
+ // every time someone gave up on a slow terminal -- and a leaked driver grant
+ // is what refuses the NEXT attach with "already holds the keyboard".
+ if(t&&!t.err&&(t.url||t.pending))try{
   await lapi('/agents/'+encodeURIComponent(t.agent)+'/grants/'+
    encodeURIComponent(gid),{method:'DELETE'});
  }catch(e){/* the sweep reclaims it; nothing here should block the close */}
@@ -3500,7 +3569,15 @@ function drawTabs(){
   }
   // A state panel is a READING of something that changes underneath it, so it
   // repaints every draw; an iframe never does, for the reason above.
-  if(el.className==='frState')el.innerHTML=stateSentence(t.agent);
+  // A WAITING tab is its own reading and must not borrow the stopped one:
+  // "Stopped -- there is no session to attach to" is false while we are
+  // holding a grant and asking a starting container for its terminal, and a
+  // sentence that is false is worse than a blank panel.
+  if(el.className==='frState')
+   el.innerHTML=t.wait
+    ? '<b>'+esc(t.agent)+'</b> <span class="pDim">starting</span>'+
+      '<div class="pAsk">'+esc(t.wait)+'</div>'
+    : stateSentence(t.agent);
   el.hidden=(t.gid!==agTabOn);
  }
  // The label button IS the tab, and the actions are now its SIBLINGS rather
