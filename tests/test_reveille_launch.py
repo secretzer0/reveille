@@ -2203,3 +2203,17 @@ def test_the_roll_step_waits_out_a_long_write_holder(tmp_path):
         conn.close()
     finally:
         t.join()
+
+
+def test_dead_token_advice_checks_where_the_identity_is():
+    """Ruled 14611/14614 from the 2026-09-05 field case: 're-provision it'
+    said about a LIVE identity walked the operator into the duplicate-mint
+    409. The advice is pure and picks by presence: live elsewhere leads with
+    the verdict (nothing here needs fixing) and forbids the recreate path;
+    dead everywhere keeps the original sentence."""
+    live = rl.dead_token_advice("native-reveille-devops", 401, True)
+    assert live.startswith("native-reveille-devops is RUNNING ON ANOTHER MACHINE")
+    assert "nothing here needs fixing" in live
+    assert "return ticket" in live and "never re-provision" in live
+    dead = rl.dead_token_advice("scout", 401, False)
+    assert dead == "its bound token is dead (broker said 401) -- re-provision it"
