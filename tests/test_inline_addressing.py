@@ -104,3 +104,17 @@ def test_submit_never_reparses_the_body():
         "the submit call passes body text into the target builder -- a "
         "pasted name would become an address: " + call)
     assert "inline:inlineTargets" in call and "recip:[...recip]" in call
+
+
+def test_the_popup_anchors_to_its_own_composer():
+    """Field defect (14652/14653): #taPanel is bottom-anchored absolute and
+    shipped with NO positioned ancestor nearer than #main -- the popup opened
+    with matches in it and drew above the top of the page, invisible. The
+    operator typed `@rev` on a live 0.2.240 tab and saw nothing. CI has no
+    browser, so the containment is pinned in the source: the panel's
+    containing block, #composer, carries position:relative."""
+    start = PAGE.index("#composer{")
+    rule = PAGE[start:PAGE.index("}", start)]
+    assert "position:relative" in rule, (
+        "#composer lost position:relative -- #taPanel's bottom anchor "
+        "resolves against #main and the popup opens off-screen: " + rule)
