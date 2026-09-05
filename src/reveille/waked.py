@@ -206,9 +206,15 @@ async def _session(uri, agent, state):
         try:
             async for frame in ws:
                 # THE BROKER SPOKE. Registration and refusal both arrive as
-                # frames; a wedged client gets neither. This flag -- never the
-                # opened socket -- is what resets the wedge streak (14445).
-                state["spoke"] = True
+                # frames; a wedged client gets neither. The streak resets HERE,
+                # on the first frame -- never on the opened socket, and never
+                # deferred to session end: a healthy held session must shed its
+                # budget file while it holds, or a broken reset murders a
+                # healthy daemon every N sessions forever (14445, held 14472).
+                if not state.get("spoke"):
+                    state["spoke"] = True
+                    state["wedge_fails"] = 0
+                    wedge_clear(agent)
                 try:
                     obj = json.loads(frame)
                 except (ValueError, TypeError):
@@ -815,10 +821,10 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     # itself. A claimed credential lands in the same file, so without this the
     # daemon re-adopts its own dead secret forever and never claims again.
     tried = {token} if token else set()
-    # CONSECUTIVE SESSIONS THE BROKER NEVER SPOKE IN (14445). Reset by a
-    # received frame, never by a socket that merely opened; the budget file
-    # carries the re-exec count across execv.
-    wedge_fails = 0
+    # CONSECUTIVE SESSIONS THE BROKER NEVER SPOKE IN (14445). _session zeroes
+    # it on the first received frame -- never on a socket that merely opened;
+    # the budget file carries the re-exec count across execv.
+    state["wedge_fails"] = 0
     try:
         while True:
             # Before dialling, not after: a body that is behind should reach the
@@ -829,9 +835,6 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
             state["spoke"] = False
             try:
                 code = await _session(uri, agent, state)
-                if state.get("spoke") and wedge_fails:
-                    wedge_fails = 0
-                    wedge_clear(agent)
                 if code == NO_ROOMS:
                     # Falls through to the same sleep as a connect error, so
                     # the existing ladder applies; only a session that ATTACHED
@@ -960,18 +963,23 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                 # hour -- the one line you need readable is the one that said
                 # nothing. Fall back to the class name, and to the close code
                 # when there is one.
-                if state.get("spoke"):
-                    # A registered session died; the path works. Not a wedge.
-                    wedge_fails = 0
-                    wedge_clear(agent)
-                else:
-                    # The broker never spoke this session: a handshake that
-                    # timed out, a refused TCP dial, or a socket that opened
-                    # and died silent. _why(e) carries the close code and
-                    # errno into the marker so the NEXT wedge is diagnosable
-                    # (14445 heals; it does not explain).
-                    wedge_fails = _wedge_heal(agent, wedge_fails + 1,
-                                              _why(e), n=wedge_n)
+                if not state.get("spoke"):
+                    if isinstance(e, ConnectionRefusedError):
+                        # A PROMPT REFUSAL IS A WORKING SOCKET LAYER: the
+                        # broker is absent, the client is fine, and a re-exec
+                        # cannot conjure a broker (14472 option a). The streak
+                        # neither grows nor resets -- a planned `make up`
+                        # restart must not end in a BUS-DEAF report.
+                        pass
+                    else:
+                        # The broker never spoke this session: a handshake
+                        # that timed out, or a socket that opened and died
+                        # silent. _why(e) carries the close code and errno
+                        # into the marker so the NEXT wedge is diagnosable
+                        # (14445 heals; it does not explain).
+                        state["wedge_fails"] = _wedge_heal(
+                            agent, state["wedge_fails"] + 1, _why(e),
+                            n=wedge_n)
                 print(f"reveille-waked: {_why(e)} -- retrying in {delay}s",
                       file=sys.stderr)
             await asyncio.sleep(delay)

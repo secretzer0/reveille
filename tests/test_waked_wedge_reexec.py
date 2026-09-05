@@ -154,24 +154,25 @@ def test_n_silent_sessions_reexec_in_place_and_the_pid_survives(tmp_path):
 
 
 def test_one_transient_failure_does_not_reexec(tmp_path):
-    """(b), the one that earns its keep: one refused dial, then a broker
-    that accepts and holds. The streak parks below the threshold and the
+    """(b), the one that earns its keep: ONE wedge-shaped failure (a socket
+    that accepted and died before any handshake), then a broker that accepts
+    and holds. The streak parks at 1, below the threshold of 2, and the
     healer must NOT fire -- a hair trigger is its own outage."""
     async def main():
-        # Grab a free port, release it: the first dial is refused (failure
-        # 1 of the 2 the flag would need), then a real server takes the port.
-        probe = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-        port = probe.sockets[0].getsockname()[1]
-        probe.close()
-        await probe.wait_closed()
+        async def slam(reader, writer):
+            writer.close()                     # counted: not a refusal
+        wedge = await asyncio.start_server(slam, "127.0.0.1", 0)
+        port = wedge.sockets[0].getsockname()[1]
         proc = await asyncio.create_subprocess_exec(
             *_argv(port, ("--wedge-n", "2")), env=_env(tmp_path),
             stderr=asyncio.subprocess.PIPE)
-        await asyncio.sleep(0.5)               # at least one refused dial
-        async def hold(ws):
-            await asyncio.sleep(30)            # attached, silent, healthy
-        server = await websockets.serve(hold, "127.0.0.1", port)
         hits = []
+        await _read_until(proc.stderr, ["retrying"], 10, hits)
+        wedge.close()                          # exactly one wedge failure
+        await wedge.wait_closed()
+        async def hold(ws):
+            await asyncio.sleep(30)            # attached; parks the streak
+        server = await websockets.serve(hold, "127.0.0.1", port)
         try:
             await _read_until(proc.stderr, ["re-exec"], 6, hits)
         finally:
@@ -179,9 +180,73 @@ def test_one_transient_failure_does_not_reexec(tmp_path):
             proc.kill()
             await proc.wait()
         text = "".join(hits)
+        assert "retrying" in text              # the failure was real, counted
         assert "re-exec" not in text, (
             "one transient failure tripped the healer:\n" + text)
-        assert "retrying" in text              # the failure was real, counted
+    asyncio.run(main())
+
+
+def test_refused_dials_never_join_the_streak(tmp_path):
+    """14472 option (a): ECONNREFUSED is a prompt answer from a working
+    socket layer -- the broker is absent, the client is fine, a re-exec
+    cannot conjure a broker. A planned `make up` restart, however long, must
+    never end in a re-exec or a BUS-DEAF report."""
+    async def main():
+        probe = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+        port = probe.sockets[0].getsockname()[1]
+        probe.close()
+        await probe.wait_closed()              # nothing listens: every dial refused
+        proc = await asyncio.create_subprocess_exec(
+            *_argv(port, ("--wedge-n", "2")), env=_env(tmp_path),
+            stderr=asyncio.subprocess.PIPE)
+        hits = []
+        try:
+            await _read_until(proc.stderr, ["re-exec"], 8, hits)
+        finally:
+            proc.kill()
+            await proc.wait()
+        text = "".join(hits)
+        assert text.count("retrying") >= 3, (
+            "the refusals never happened, the test proved nothing:\n" + text)
+        assert "re-exec" not in text, (
+            "a refused dial joined the wedge streak:\n" + text)
+        assert not (tmp_path / "w1" / ".wedge-reexecs").exists()
+    asyncio.run(main())
+
+
+def test_a_spoken_frame_resets_the_streak_and_sheds_the_budget(tmp_path):
+    """The HELD half (14472): every other test proves the healer FIRES; this
+    one proves it STOPS. A pre-spent budget plus a broker that SPEAKS one
+    frame and then holds: the reset fires on the frame, in-session -- the
+    budget file is gone while the session still holds, and no marker ever
+    appears. If the reset breaks, a perfectly healthy daemon re-execs itself
+    every N sessions forever, and the healer is the outage."""
+    async def main():
+        (tmp_path / "w1").mkdir(parents=True)
+        budget = tmp_path / "w1" / ".wedge-reexecs"
+        budget.write_text("3\n")
+        async def speak_then_hold(ws):
+            await ws.send('{"note": "the broker spoke"}')
+            await asyncio.sleep(30)
+        server = await websockets.serve(speak_then_hold, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        proc = await asyncio.create_subprocess_exec(
+            *_argv(port, ("--wedge-n", "2")), env=_env(tmp_path),
+            stderr=asyncio.subprocess.PIPE)
+        try:
+            t0 = time.monotonic()
+            while budget.exists() and time.monotonic() - t0 < 10:
+                await asyncio.sleep(0.2)
+            assert not budget.exists(), (
+                "the spoken frame never shed the budget file -- the reset "
+                "path is broken and the healer would murder this daemon")
+            hits = []
+            await _read_until(proc.stderr, ["re-exec"], 2, hits)
+            assert "re-exec" not in "".join(hits)
+        finally:
+            server.close()
+            proc.kill()
+            await proc.wait()
     asyncio.run(main())
 
 
