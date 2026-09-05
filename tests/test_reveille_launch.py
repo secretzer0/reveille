@@ -1993,7 +1993,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/busdeaf-probe", "docker/entrypoint.sh",
                 "docker/tmux.conf", "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "fb16a1dd2201355e450f7591947a4d7e68fef62c9a3d28b1294f1ba7bbfda81d"
+IMAGE_INPUT_SHA = "13667a755ec7459e70a15cf828992952d4da60b5ee6b67c883505238ac1a249d"
 
 
 def _image_input_sha(root):

@@ -66,6 +66,8 @@ RUN curl -fsSL "https://github.com/tsl0922/ttyd/releases/latest/download/ttyd.x8
 # resolved by asking the API which tag is current -- still their artifact,
 # still their recommended tarball, no version literal here.
 RUN GH_TAG=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | jq -r .tag_name) \
+    && { [ -n "$GH_TAG" ] && [ "$GH_TAG" != null ]; } \
+      || { echo "gh release lookup failed (API rate limit? 60/hour/IP unauthenticated)" >&2; exit 1; } \
     && GH_VERSION=${GH_TAG#v} \
     && curl -fsSL "https://github.com/cli/cli/releases/download/${GH_TAG}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
       | tar -xz -C /tmp \
