@@ -36,8 +36,14 @@ def rooms_of(c, tok):
     return store.rooms_for_token(c, tok["id"])
 
 
-def _age(conn, room_id, name, seconds_ago):
-    past = time.time_ns() - int(seconds_ago * 1e9)
+def _age(conn, room_id, name, seconds_ago, now=None):
+    # `now` exists so a caller can derive TWO rows from ONE clock read. Deafness
+    # compares a message's ts_ns against a member's seen_ns, so when the mail and
+    # the member age are each computed from their own `time.time_ns()` the whole
+    # margin is the gap between two sqlite writes -- one second, on a box that
+    # may be at load 10. That is an instrument race, not a product defect, and it
+    # is fixed by removing the second clock read rather than by widening a bound.
+    past = (time.time_ns() if now is None else now) - int(seconds_ago * 1e9)
     conn.execute("UPDATE members SET seen_ns=? WHERE room_id=? AND name=?",
                  (past, room_id, name))
 
@@ -2424,10 +2430,10 @@ def test_a_departed_agent_does_not_hold_its_name():
     assert store.presence(c, [room["id"]])[0]["tag"] == "TAG_b"
 
 
-def _mail(c, room, to, age_s, sender="architect"):
+def _mail(c, room, to, age_s, sender="architect", now=None):
     mid = store.send(c, P(c, sender), to, "b", subject="s", room=room)["id"]
     c.execute("UPDATE messages SET ts_ns=? WHERE id=?",
-              (time.time_ns() - age_s * 10**9, mid))
+              ((time.time_ns() if now is None else now) - age_s * 10**9, mid))
     return mid
 
 
@@ -2440,8 +2446,11 @@ def test_deafness_definition_table():
     rid = room["id"]
 
     # old direct mail, no life since -> DEAF
-    _mail(c, rid, "dev", age_s=1000)
-    _age(c, rid, "dev", 1001)
+    # ONE CLOCK READ FOR BOTH ROWS. Read separately, this row asserts that two
+    # consecutive sqlite writes land inside one second.
+    t = time.time_ns()
+    _mail(c, rid, "dev", age_s=1000, now=t)
+    _age(c, rid, "dev", 1001, now=t)
     assert (rid, "dev") in store.deafness(c, [rid])
 
     # the agent WORKED after the mail landed (silence is a valid turn) -> clear
