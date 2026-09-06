@@ -99,23 +99,54 @@ def test_nudge_due_is_pure_and_zero_disables():
         {"wake": True, "reason": "idle-nudge", "idle_seconds": 1800}
 
 
+def _wait_for_entries(tmp_path, n, timeout_s, what):
+    """Poll until the spool holds n entries, or fail NAMING THE STEP that never
+    finished rather than the whole test."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        entries = spool.entries("a1", base=str(tmp_path))
+        if len(entries) >= n:
+            return entries
+        assert time.monotonic() < deadline, what
+        time.sleep(0.05)
+
+
 def test_idle_nudge_one_per_interval_never_a_burst(tmp_path):
-    # W3 gate: no rings -> exactly one nudge per interval. 3.5s at interval 1
-    # (checker granularity 1s) admits 2-3 entries; a burst would show many.
+    # W3 gate: no rings -> one nudge per interval, never a burst.
+    #
+    # THE CLOCK COVERS THE ASSERT WINDOW ONLY. It used to start at Popen and run
+    # a flat 3.5s, so python's start-up and imports came out of the measuring
+    # budget -- the daemon sets its own `last` at waked.py:816, AFTER that, and
+    # the checker ticks at 1s granularity. On a loaded box the first tick landed
+    # past the window and the test read zero. Manufactured on demand with 24
+    # `yes` hogs on 8 cores: `AssertionError: 0 nudges in 3.5s at interval 1`.
+    #
+    # So this is an INSTRUMENT race, not a product defect, and the repair is to
+    # remove the race rather than widen the sleep (145fa749, 13760): wait for the
+    # FIRST nudge, then measure the interval from IT. The assertion is the same
+    # statement it always was -- one per interval, no burst -- now anchored on an
+    # event instead of on when Popen happened to return.
     p = _waked_nudging(tmp_path, 1)
     try:
-        time.sleep(3.5)
+        _wait_for_entries(tmp_path, 1, 10.0, "no first nudge within 10s")
+        entries = _wait_for_entries(
+            tmp_path, 2, 5.0, "no second nudge within 5s of the first")
     finally:
         p.terminate()
         p.wait(timeout=5)
-    entries = spool.entries("a1", base=str(tmp_path))
-    assert 2 <= len(entries) <= 3, f"{len(entries)} nudges in 3.5s at interval 1"
     stamps = []
     for e in entries:
         with open(e) as f:
             obj = json.loads(f.read())
         assert obj["reason"] == "idle-nudge" and obj["idle_seconds"] == 1
         stamps.append(int(os.path.basename(e).split(".")[0]))
+    stamps.sort()
+    # NO BURST, measured over the span the nudges themselves define: at one per
+    # second, the count can never exceed the elapsed seconds plus the one at the
+    # start of the window.
+    span_s = (stamps[-1] - stamps[0]) / 10**9
+    assert len(stamps) <= span_s + 1 + 1e-6, (
+        f"{len(stamps)} nudges across {span_s:.2f}s at interval 1: a burst")
     for a, b in zip(stamps, stamps[1:]):
         assert b - a >= 0.9 * 10**9, "nudges closer than the interval: a burst"
 
