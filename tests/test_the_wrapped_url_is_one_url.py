@@ -99,6 +99,36 @@ assert.strictEqual(paneUrlFromRows(withStatus,statusJoined,0,40),URL,
   'a row that stops the walk must not cost the rows above their mapping');
 assert.strictEqual(paneUrlFromRows(withStatus,statusJoined,3,2),null,
   'the row that stopped the walk is unknown, not empty');
+// THE OPERATOR'S OWN CASE (14844): a 450-char login URL that tmux painted as
+// THREE SEPARATE xterm lines. Every row carries `isWrapped:false` -- measured,
+// not assumed -- so the old arm predicate walked nothing, found no scheme on
+// rows 2 and 3, and returned null. tmux was never asked and those rows were
+// dead to the click.
+const OP='https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e'
+       +'&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+       +'&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=GXFfuJN51fMLjFLifdBI3ALtblvGp0Ig5oy662oboaw'
+       +'&code_challenge_method=S256&state=20EioI5K7uOiAmujTfuOFHge1alGDkS_fA6_GGY7BWU';
+const W=175, opRows=[OP.slice(0,W), OP.slice(W,2*W), OP.slice(2*W), '', 'bash-5.2$'];
+// A tmux-painted buffer: separate lines, NO wrap flags anywhere.
+const fakeWin=rows=>({term:{rows:rows.length,buffer:{active:{baseY:0,
+  getLine:i=>i<rows.length?{isWrapped:false,translateToString:()=>rows[i]}:undefined}}}});
+
+// the click that was dead: the LAST row of the URL
+assert.strictEqual(paneXtermUrl(fakeWin(opRows),{row:2,col:5}),OP,
+  'the last row of a tmux-painted URL must arm');
+assert.strictEqual(paneXtermUrl(fakeWin(opRows),{row:1,col:5}),OP,'middle row must arm');
+assert.strictEqual(paneXtermUrl(fakeWin(opRows),{row:0,col:5}),OP,'first row still arms');
+// the run STOPS at a blank row: the prompt below is not part of the URL
+assert.strictEqual(paneXtermUrl(fakeWin(opRows),{row:4,col:2}),null,
+  'a row past the blank separator is not in the run');
+assert.strictEqual(paneXtermUrl(fakeWin(opRows),{row:3,col:0}),null,
+  'a blank row is not a link');
+// AND THE PREDICATE MUST NOT CONSULT THE RENDERER'S WRAP FLAG: the same rows
+// with isWrapped true everywhere give the same answers, because it is not read.
+const wrapped=rows=>({term:{rows:rows.length,buffer:{active:{baseY:0,
+  getLine:i=>i<rows.length?{isWrapped:true,translateToString:()=>rows[i]}:undefined}}}});
+assert.strictEqual(paneXtermUrl(wrapped(opRows),{row:2,col:5}),OP,
+  'the answer must not depend on isWrapped either way');
 console.log('ok');
 """
 
