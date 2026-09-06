@@ -3087,12 +3087,25 @@ function closeAgentsWell(){
 // is no cache, no polling, and one exec per actual click on a link.
 
 // PANE-PURE-BEGIN
-// WHERE THE LINE IS DRAWN, so nobody later reads the isWrapped test below as
-// the wrap-guessing heuristic creeping back in (architect 14682): xterm's
-// `isWrapped` is a FACT THE RENDERER RECORDED when it laid the row down, not a
-// width guess made after the fact. So -- ASK-OR-NOT comes from xterm's own
-// recorded state, WHAT TO OPEN comes from tmux, and the fallback is whatever
-// xterm would have done. This code may never derive the URL from xterm's rows.
+// WHERE THE LINE IS DRAWN (amended by 14845; the earlier rule, taken from
+// 14682, is kept below because it is the mistake worth not repeating).
+//
+// THE OLD RULE SAID: ask-or-not comes from xterm's own recorded state, because
+// `isWrapped` is a fact the renderer stored rather than a width guess. That is
+// true about xterm and USELESS UNDER TMUX -- xterm records ITS OWN wraps, and
+// tmux paints the client row by row, so a line tmux wrapped arrives as separate
+// xterm lines with `isWrapped:false` on every one. The operator found it with a
+// 450-char login URL: row 1 underlined, rows 2 and 3 dead, because rows 2 and 3
+// carry no scheme and xterm never joined them to row 1. The gate read the
+// renderer's view of a fact the renderer never owned, so tmux was NEVER ASKED --
+// and tmux had the whole URL the entire time.
+//
+// THE RULE NOW: ASK-OR-NOT is a PRE-FILTER over the run of consecutive
+// NON-EMPTY rows around the click -- no wrap flag, no width test, and it is
+// deliberately generous. WHAT TO OPEN is still tmux's `-J` text and nothing
+// else. A false arm is cheap and self-correcting: the blank tab closes itself
+// when tmux says there is no link there (`land(null)`), which is why the
+// pre-filter is allowed to be loose where the ANSWER may not be.
 //
 // The rows the terminal shows, mapped onto the lines tmux joined, by LONGEST
 // PREFIX THAT CONTINUES THE JOINED LINE. Equality would do for a clean pane and
@@ -3143,6 +3156,51 @@ function paneUrlFromRows(rows,joined,row,col){
   if(at>=hit.index&&at<hit.index+hit[0].length)return hit[0];
  return '';
 }
+// THE ARM TEST, AND THE FALLBACK URL: the run of consecutive NON-EMPTY rows
+// around the click, joined and searched. It asks xterm for the CHARACTERS ON
+// THE SCREEN and for nothing else -- no wrap flag, no width, no opinion about
+// where a line began.
+//
+// It used to walk `isWrapped` and the header here used to defend that. Both
+// were wrong under tmux for the same reason: tmux paints the client row by row,
+// so a line TMUX wrapped is several xterm lines with `isWrapped:false` on every
+// one, and the walk stopped dead on any row without a scheme. That is how rows
+// 2 and 3 of the operator's login URL came to be unclickable while row 1 worked
+// (14844, ruled 14845).
+//
+// TWO PROPERTIES KEEP THIS FROM BECOMING THE FORBIDDEN HEURISTIC. It never
+// decides WHAT to open -- `paneUrlFromRows` over tmux's `-J` text does, and it
+// may disagree; and being wrong here is cheap and visible, because a false arm
+// opens a blank tab that closes itself the moment tmux says there is no link.
+// A pre-filter is allowed to be generous exactly because it is not the answer.
+function paneXtermUrl(win,hit){
+ // THE ARM PRE-FILTER, and it asks the RENDERER NOTHING about wrapping (14845).
+ // The run is the consecutive NON-EMPTY rows around the click: under tmux a
+ // wrapped line arrives as separate xterm lines with `isWrapped:false`, so the
+ // old walk stopped at the clicked row, found no scheme on it, and returned
+ // null -- which is why rows 2 and 3 of a long URL were dead.
+ //
+ // Generous on purpose. This decides only WHETHER TO ASK; tmux's joined text
+ // still decides what opens, and an arm that turns out to be nothing costs one
+ // blank tab that closes itself.
+ const buf=win.term.buffer.active,base=buf.baseY,rows=win.term.rows;
+ const textAt=i=>{const l=buf.getLine(base+i);
+  return l?l.translateToString(true).replace(/\s+$/,''):'';};
+ if(!textAt(hit.row))return null;                 // a blank row is not a link
+ let first=hit.row;
+ while(first>0&&textAt(first-1))first--;
+ let text='',at=null;
+ for(let i=first;i<rows;i++){
+  const s=textAt(i);
+  if(!s)break;
+  if(i===hit.row)at=text.length+hit.col;
+  text+=s;
+ }
+ if(at===null)return null;
+ for(const h of text.matchAll(PANE_URL_RE))
+  if(at>=h.index&&at<h.index+h[0].length)return h[0];
+ return null;
+}
 // PANE-PURE-END
 
 // The DOM half: what the pure function is asked ABOUT. Browser-only by nature --
@@ -3164,35 +3222,6 @@ function paneClickAt(win,ev){
  const row=[].indexOf.call(strip.children,el);
  const b=el.getBoundingClientRect();
  return {row,col:Math.floor((ev.clientX-b.left)/(b.width/win.term.cols)),el};
-}
-// WHAT XTERM ITSELF WOULD OPEN, computed the way xterm computes it: over its
-// OWN logical line, which it marks with `isWrapped`. Two reasons this is not the
-// heuristic the ruling forbids -- it reads a flag xterm already set rather than
-// inferring one from row width, and its answer is only ever a FALLBACK and the
-// test for whether we take the click at all. The truth still comes from tmux.
-//
-// It is also what makes the CONTINUATION row work: that row holds no `https://`
-// of its own, so a row-only test would decline to act on exactly the click the
-// operator is complaining about, and xterm would open the polluted address.
-function paneXtermUrl(win,hit){
- const buf=win.term.buffer.active,base=buf.baseY;
- let first=hit.row;
- while(first>0&&buf.getLine(base+first)&&buf.getLine(base+first).isWrapped)first--;
- let text='',at=null,i=first;
- for(;;){
-  const l=buf.getLine(base+i);
-  if(!l)break;
-  const s=l.translateToString(true).replace(/\s+$/,'');
-  if(i===hit.row)at=text.length+hit.col;
-  text+=s;
-  const nx=buf.getLine(base+i+1);
-  if(!nx||!nx.isWrapped)break;
-  i++;
- }
- if(at===null)return null;
- for(const h of text.matchAll(PANE_URL_RE))
-  if(at>=h.index&&at<h.index+h[0].length)return h[0];
- return null;
 }
 
 // Installed on the iframe's OWN window -- /attach/<agent>/ is a launcher route,
