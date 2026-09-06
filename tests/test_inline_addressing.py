@@ -106,6 +106,23 @@ def test_submit_never_reparses_the_body():
     assert "inline:inlineTargets" in call and "recip:[...recip]" in call
 
 
+def test_the_panel_and_the_chip_wear_the_feeds_own_color():
+    """Operator 14831: the type-ahead row carries the agent's icon in the SAME
+    color the feed gives that agent, and the bound chip coordinates with it.
+    Pinned as code tokens, not prose: both render sites must call the shared
+    hue functions (color/tint/initials) -- a second palette here is how the
+    same agent ends up two colors on one screen. The textarea cannot color a
+    substring, so the chip is the in-text half's carrier; that constraint is
+    recorded at the render site."""
+    ta = PAGE[PAGE.index("function taRender("):PAGE.index("function taBindItem(")]
+    assert '<span class="tav"' in ta and "color(key)" in ta \
+        and "tint(key)" in ta and "initials(key)" in ta, (
+        "the panel row lost its feed-colored icon")
+    chips = PAGE[PAGE.index("function renderTaChips("):PAGE.index("function taSweepUnbound(")]
+    assert "s.style.color=color(key)" in chips and "tint(key)" in chips, (
+        "the bound chip lost its color coordination")
+
+
 def test_the_popup_anchors_to_its_own_composer():
     """Field defect (14652/14653): #taPanel is bottom-anchored absolute and
     shipped with NO positioned ancestor nearer than #main -- the popup opened
