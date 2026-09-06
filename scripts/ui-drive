@@ -509,6 +509,74 @@ def scene_boot_refused(ctx, url, out, tag, phone):
     TOKEN_STATUS[0] = None
 
 
+# ---- scene 8: one agent, one colour ------------------------------------------
+def scene_one_agent_one_color(ctx, url, out, tag, phone):
+    """RULED GATE (14832/14835): an agent's colour follows the agent everywhere
+    it is named. The RAIL's swatch is the one source; the type-ahead row, the
+    bound chip, the to: button and the posted mention are the readers -- four
+    DOM reads COMPARED against it, never an hsl literal and never a source
+    pin: a pin passes whenever the colour functions are CALLED, and the
+    invariant is that the colours come out EQUAL. Two of tonight's defects
+    shipped behind pins exactly that shape.
+    """
+    print(f"ONE AGENT ONE COLOUR ({tag})")
+    p = open_page(ctx, url)
+    # roc-ui-dev is the extra the seed JOINS (uilab: presence is members rows,
+    # a token alone is invisible) -- the one real second being every viewport
+    # can see in the rail, the type-ahead and the feed.
+    agent = "roc-ui-dev"
+    rail = p.evaluate(
+        """a=>{for(const r of document.querySelectorAll('#agents .agent')){
+             const nm=r.querySelector('.nm');
+             if(nm&&nm.textContent===a)
+               return getComputedStyle(r.querySelector('.swatch')).backgroundColor}
+           return null}""", agent)
+    check("the rail names the agent and wears a colour", bool(rail), f"rail={rail}")
+
+    p.click("#body")
+    p.type("#body", "@roc-ui", delay=60)
+    p.wait_for_selector("#taPanel.on .ti", timeout=5000)
+    row = p.evaluate(
+        """()=>{const r=document.querySelector('#taPanel .ti');
+            return {label:getComputedStyle(r.querySelector('span:nth-child(2)')).color,
+                    icon:getComputedStyle(r.querySelector('.tav')).color}}""")
+    check("the panel row's label wears the rail's colour", row["label"] == rail,
+          f"row={row['label']} rail={rail}")
+    check("the panel row's icon wears the rail's colour", row["icon"] == rail,
+          f"icon={row['icon']} rail={rail}")
+    shoot(p, out, f"{tag}-color-panel")
+
+    p.keyboard.press("Tab")                       # accept -> binds, chips up
+    p.wait_for_selector("#taChips .tc", timeout=3000)
+    chip = p.evaluate(
+        "()=>getComputedStyle(document.querySelector('#taChips .tc')).color")
+    check("the bound chip wears the rail's colour", chip == rail,
+          f"chip={chip} rail={rail}")
+    tobtn = p.evaluate(
+        """()=>{const s=document.querySelector('#toBtn span');
+            return s?getComputedStyle(s).color:null}""")
+    check("the to: button renders the bound target as a coloured span",
+          tobtn == rail, f"toBtn={tobtn} rail={rail}")
+
+    p.type("#body", " ping, and @nobody-here stays plain", delay=15)
+    p.click("#send")
+    p.wait_for_timeout(1200)
+    posted = p.evaluate(
+        """a=>{const rows=[...document.querySelectorAll('#inner .row .body span')]
+              .filter(s=>s.textContent==='@'+a);
+            const last=rows[rows.length-1];
+            return last?getComputedStyle(last).color:null}""", agent)
+    check("the posted mention wears the rail's colour", posted == rail,
+          f"posted={posted} rail={rail}")
+    plain = p.evaluate(
+        """()=>[...document.querySelectorAll('#inner .row .body span')]
+            .some(s=>s.textContent.includes('@nobody-here'))""")
+    check("an unknown name stays plain text", not plain,
+          "span wrapped @nobody-here" if plain else "no span")
+    shoot(p, out, f"{tag}-color-posted")
+    p.close()
+
+
 def main():
     out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "shots/ui")
     out.mkdir(parents=True, exist_ok=True)
@@ -534,7 +602,8 @@ def main():
                     ("iphone14", dict(pw.devices["iPhone 14"]), True)):
                 for scene in (scene_modal, scene_multidriver, scene_manager,
                               scene_refusal, scene_refusal_expired,
-                              scene_boot_wait, scene_boot_refused):
+                              scene_boot_wait, scene_boot_refused,
+                              scene_one_agent_one_color):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)
