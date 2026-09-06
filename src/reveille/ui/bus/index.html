@@ -3115,15 +3115,23 @@ function paneUrlFromRows(rows,joined,row,col){
   if(at>=hit.index&&at<hit.index+hit[0].length)return hit[0];
  return '';
 }
-// WHAT XTERM ITSELF WOULD OPEN, computed the way xterm computes it: over its
-// OWN logical line, which it marks with `isWrapped`. Two reasons this is not the
-// heuristic the ruling forbids -- it reads a flag xterm already set rather than
-// inferring one from row width, and its answer is only ever a FALLBACK and the
-// test for whether we take the click at all. The truth still comes from tmux.
+// THE ARM TEST, AND THE FALLBACK URL: the run of consecutive NON-EMPTY rows
+// around the click, joined and searched. It asks xterm for the CHARACTERS ON
+// THE SCREEN and for nothing else -- no wrap flag, no width, no opinion about
+// where a line began.
 //
-// It is also what makes the CONTINUATION row work: that row holds no `https://`
-// of its own, so a row-only test would decline to act on exactly the click the
-// operator is complaining about, and xterm would open the polluted address.
+// It used to walk `isWrapped` and the header here used to defend that. Both
+// were wrong under tmux for the same reason: tmux paints the client row by row,
+// so a line TMUX wrapped is several xterm lines with `isWrapped:false` on every
+// one, and the walk stopped dead on any row without a scheme. That is how rows
+// 2 and 3 of the operator's login URL came to be unclickable while row 1 worked
+// (14844, ruled 14845).
+//
+// TWO PROPERTIES KEEP THIS FROM BECOMING THE FORBIDDEN HEURISTIC. It never
+// decides WHAT to open -- `paneUrlFromRows` over tmux's `-J` text does, and it
+// may disagree; and being wrong here is cheap and visible, because a false arm
+// opens a blank tab that closes itself the moment tmux says there is no link.
+// A pre-filter is allowed to be generous exactly because it is not the answer.
 function paneXtermUrl(win,hit){
  // THE ARM PRE-FILTER, and it asks the RENDERER NOTHING about wrapping (14845).
  // The run is the consecutive NON-EMPTY rows around the click: under tmux a
