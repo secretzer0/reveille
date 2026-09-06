@@ -817,9 +817,14 @@
   max-height:14rem;overflow-y:auto;background:var(--panel);border:1px solid var(--line);
   border-radius:8px;padding:.25rem;z-index:30;box-shadow:0 6px 24px rgba(0,0,0,.4)}
  #taPanel.on{display:block}
- #taPanel .ti{display:block;width:100%;text-align:left;padding:.3rem .55rem;border:0;
+ #taPanel .ti{display:flex;align-items:center;gap:.45rem;width:100%;text-align:left;
+  padding:.3rem .55rem;border:0;
   background:none;color:var(--fg);border-radius:6px;cursor:pointer;font:inherit}
  #taPanel .ti.sel,#taPanel .ti:hover{background:var(--hover)}
+ /* The row's icon wears the agent's feed color (operator 14831): same hue
+    function as the avatar, so panel, feed and chip agree on who is what color. */
+ #taPanel .tav{width:1.3rem;height:1.3rem;border-radius:.35rem;display:inline-flex;
+  align-items:center;justify-content:center;font-size:.55rem;font-weight:700;flex:none}
  #taPanel .ti .kind{opacity:.55;font-size:.85em;margin-left:.4rem}
  #taChips{display:inline-flex;gap:.3rem;flex-wrap:wrap}
  #taChips .tc{display:inline-flex;align-items:center;gap:.3rem;padding:.1rem .5rem;
@@ -2705,7 +2710,13 @@ function taRender(){
  taState.items.forEach((it,i)=>{
   const b=document.createElement('button');
   b.type='button';b.className='ti'+(i===taState.sel?' sel':'');
-  b.innerHTML=esc(it.label)+'<span class="kind">'+(it.kind==='room'?'room':'in '+esc(it.roomName))+'</span>';
+  // The row wears the SAME color the feed gives this agent (operator 14831):
+  // one hue function everywhere, so the icon here, the avatar in the feed and
+  // the bound chip below all agree. Rooms hash their own name the same way.
+  const key=it.agent||it.roomName;
+  b.innerHTML='<span class="tav" style="color:'+color(key)+';background:'+tint(key)+'">'
+   +initials(key)+'</span><span style="color:'+color(key)+'">'+esc(it.label)+'</span>'
+   +'<span class="kind">'+(it.kind==='room'?'room':'in '+esc(it.roomName))+'</span>';
   b.onclick=()=>taAccept(it);
   p.appendChild(b);
  });
@@ -2743,6 +2754,11 @@ function renderTaChips(){
  inlineTargets.forEach((t,i)=>{
   const s=document.createElement('span');
   s.className='tc';s.title='remove target';
+  // Color-coordinated with the panel row and the feed (operator 14831): the
+  // textarea itself cannot color a substring, so the chip is where the bound
+  // name wears its agent's color.
+  const key=t.agent||t.roomName;
+  s.style.color=color(key);s.style.background=tint(key);
   s.textContent=(t.agent?(t.roomId===room?'@'+t.agent:'#'+t.roomName+'@'+t.agent)
                  :'#'+t.roomName)+' ×';
   s.onclick=()=>{inlineTargets.splice(i,1);renderTaChips();renderPicker();};
