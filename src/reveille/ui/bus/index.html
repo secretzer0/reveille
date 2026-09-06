@@ -3138,6 +3138,11 @@ function paneMapRows(rows,joined){
 }
 
 const PANE_URL_RE=/https?:\/\/[^\s"'<>`]+/g;
+// Non-global twins: `matchAll` needs /g, `match(...).index` needs the opposite,
+// and a /g regex carries lastIndex between calls -- one shared object with a
+// cursor is a defect waiting for a second caller.
+const PANE_URL_ONE=/https?:\/\/[^\s"'<>`]+/;
+const PANE_URL_HEAD=/^[^\s"'<>`]/;
 
 // THREE ANSWERS, and the difference between the last two is the whole point:
 //   a string -- the whole URL under (row, col), from tmux's own joined line
@@ -3146,15 +3151,52 @@ const PANE_URL_RE=/https?:\/\/[^\s"'<>`]+/g;
 //               there opens the address with `│···` glued on
 //   null     -- we could not map it, so we know nothing and the caller must
 //               keep doing whatever the terminal would have done
-function paneUrlFromRows(rows,joined,row,col){
+function paneUrlFromRows(rows,joined,row,col,cols){
  if(!joined)return null;
  const m=paneMapRows(rows,joined),e=m.map[row];
  if(!e)return null;
  if(col>=e.span)return '';       // past the pane's own text: border, padding
- const at=e.off+col,line=m.lines[e.line];
- for(const hit of line.matchAll(PANE_URL_RE))
+ const r=paneHardRun(m.lines,e.line,cols);
+ const at=r.before+e.off+col;
+ for(const hit of r.text.matchAll(PANE_URL_RE))
   if(at>=hit.index&&at<hit.index+hit[0].length)return hit[0];
  return '';
+}
+
+// THE LINE THE PROGRAM BROKE, PUT BACK TOGETHER -- and this is NOT the wrap
+// heuristic the ruling refused, because it is keyed on TMUX'S OWN PANE WIDTH
+// rather than on a guess about what "looks full" (14873).
+//
+// Claude Code prints its oauth URL with REAL NEWLINES at the terminal width
+// (Ink), so `capture-pane -J` returns those pieces UNJOINED: tmux joins what
+// TMUX wrapped and nothing else. Measured on a 214-col pane -- two rows of
+// exactly 214 characters, `-J` giving back the same two, the https one
+// carrying no `state=`. That is why clicking the URL opened a truncated
+// address and why its lower rows opened nothing at all.
+//
+// THE TEST IS EQUALITY WITH THE PANE WIDTH, which is what makes it a fact
+// rather than an inference: a line TMUX wrapped comes back from `-J` LONGER
+// than the pane, and a line that merely ended near the edge comes back
+// SHORTER. Only a line the program cut lands exactly ON it. With no width in
+// hand the run is one line and nothing changes.
+//
+// IT WALKS BOTH WAYS. The click is as likely to land on a continuation row as
+// on the one holding the scheme -- that is precisely what the operator
+// reported -- so the run is rebuilt from its first line and the click's offset
+// is carried into it.
+//
+// ACCEPTED COST, stated rather than hidden: a URL ending exactly at column
+// `cols`, followed by a non-blank line, takes that line's first token. Pinned
+// as a test so the next reader meets it as a decision and not a surprise.
+function paneHardRun(lines,i,cols){
+ if(!cols)return {text:lines[i],before:0};
+ let start=i;
+ while(start>0&&lines[start-1].length===cols)start--;
+ let before=0;
+ for(let k=start;k<i;k++)before+=lines[k].length;
+ let text=lines[start],k=start;
+ while(lines[k].length===cols&&lines[k+1]!==undefined){text+=lines[++k];}
+ return {text,before};
 }
 // THE ARM TEST, AND THE FALLBACK URL: the run of consecutive NON-EMPTY rows
 // around the click, joined and searched. It asks xterm for the CHARACTERS ON
@@ -3264,7 +3306,7 @@ function paneLinkFix(win,agent){
   };
   lapi('/agents/'+encodeURIComponent(agent)+'/read/pane').then(r=>{
    const rows=paneRowsOf(win.term);
-   const said=rows?paneUrlFromRows(rows,r.text,hit.row,hit.col):null;
+   const said=rows?paneUrlFromRows(rows,r.text,hit.row,hit.col,r.cols):null;
    // null = tmux told us nothing about this spot, so behave as today.
    land(said===null?fallback:said);
   }).catch(()=>land(fallback));
