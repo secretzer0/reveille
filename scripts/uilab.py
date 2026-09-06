@@ -67,9 +67,16 @@ def seed(db, media=False, extra_agents=()):
     # which is 8756's own defect wearing a fixture's clothes. Extra names get a
     # real bound token in the same room, so the roster shows them where a
     # launcher's would.
-    for name in extra_agents:
+    for i, name in enumerate(extra_agents):
         t = store.create_token(conn, u["id"], "dev", agent_name=name, create=True)
         store.assign_room(conn, t["id"], rid, u["id"])
+        # THE FIRST EXTRA JOINS. Presence is `members` rows, written by join()
+        # -- a token alone is invisible to the rail and the type-ahead, which
+        # is why the colour scene could never open the panel: the only present
+        # name was the logged-in user, and taItems filters myName out. One
+        # joined agent gives every scene a real second being to point at.
+        if i == 0:
+            store.join(conn, name, "dev", rid, token_id=t["id"])
     store.send(conn, agent, "*", "Deployed 0.2.130 to reveille.mythos.org: writer at "
                "192.168.85.101:18080, ear take cap 8 MiB / 60 s, GPU 0 at 11.26 of 12.29 GB, "
                "PR #65 merged.", subject="smoke 0.2.130", room=rid)
