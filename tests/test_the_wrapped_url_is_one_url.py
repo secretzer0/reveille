@@ -129,6 +129,66 @@ const wrapped=rows=>({term:{rows:rows.length,buffer:{active:{baseY:0,
   getLine:i=>i<rows.length?{isWrapped:true,translateToString:()=>rows[i]}:undefined}}}});
 assert.strictEqual(paneXtermUrl(wrapped(opRows),{row:2,col:5}),OP,
   'the answer must not depend on isWrapped either way');
+// ---- THE PROGRAM BROKE IT, NOT TMUX (14873) --------------------------------
+// Claude Code prints its oauth URL with REAL newlines at the terminal width, so
+// `capture-pane -J` hands the pieces back UNJOINED -- tmux joins what tmux
+// wrapped and nothing else. Measured on a 214-col pane: two rows of exactly 214
+// characters. The continuation rule is keyed on that equality, which is a fact
+// tmux reports, never a guess about what looks full.
+const COLS=214;
+const OAUTH='https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e'
+         +'&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback'
+         +'&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code'
+         +'&code_challenge=PhFBB6U8XRLFcyvbYPaENh2M0-Vf4RO-GLA6b5YJM9k&code_challenge_method=S256'
+         +'&state=-mMobgrMuv3QJEEhNPg1NT2my58MlhRazeJEuJ2BEWw';
+const cut=[OAUTH.slice(0,COLS), OAUTH.slice(COLS)];
+assert.strictEqual(cut[0].length,COLS,'fixture row 1 must be exactly pane width');
+assert.ok(cut[1].length>0&&cut[1].length<COLS,'row 2 is the short remainder');
+// tmux returns them UNJOINED, which is the whole point of this case
+const hardJoined=cut.join('\n')+'\nHold Shift to select\n';
+const hardRows=[cut[0],cut[1],'Hold Shift to select'];
+// BOTH ROWS, because the click is as likely to land on the continuation as on
+// the line carrying the scheme -- which is exactly what the operator hit.
+for(const r of [0,1])
+  assert.strictEqual(paneUrlFromRows(hardRows,hardJoined,r,5,COLS),OAUTH,
+    'a program-wrapped URL must come back whole from row '+r);
+// `state=` intact is the thing the operator will actually check in the address bar
+assert.ok(paneUrlFromRows(hardRows,hardJoined,1,5,COLS).includes('&state=-mMobgr'),
+  'the state parameter must survive the join');
+
+// THREE PIECES, so the continuation is proven to ITERATE rather than join once.
+const THREE=OAUTH+'&pad='+'z'.repeat(120);
+const c3=[THREE.slice(0,COLS),THREE.slice(COLS,2*COLS),THREE.slice(2*COLS)];
+assert.strictEqual(c3[1].length,COLS,'the middle piece must also be full width');
+const j3=c3.join('\n')+'\nprompt$\n', r3=[c3[0],c3[1],c3[2],'prompt$'];
+for(const r of [0,1,2])
+  assert.strictEqual(paneUrlFromRows(r3,j3,r,5,COLS),THREE,
+    'a three-piece program-wrapped URL must come back whole from row '+r);
+
+// WITHOUT THE WIDTH, NOTHING IS JOINED: the rule is keyed on cols, so a caller
+// that could not read the pane width changes no behaviour.
+assert.strictEqual(paneUrlFromRows(hardRows,hardJoined,0,5,null),cut[0],
+  'no cols = no continuation, first line only');
+
+// A TMUX-WRAPPED URL MUST BE UNTOUCHED (0.2.242 preserved): its -J line is
+// OAUTHER than the pane, so the equality never fires.
+const wideJoined2=('see: '+OAUTH)+'\n'+'bash-5.2$\n';
+const wideRows2=[('see: '+OAUTH).slice(0,COLS),('see: '+OAUTH).slice(COLS),'bash-5.2$'];
+assert.strictEqual(paneUrlFromRows(wideRows2,wideJoined2,1,3,COLS),OAUTH,
+  'a tmux-joined line stays as tmux gave it');
+
+// THE ACCEPTED COST, pinned so it is a decision and not a surprise: a URL that
+// ends EXACTLY at the pane width followed by a non-blank line takes that
+// line's first token.
+const edge='https://example.com/'+'a'.repeat(COLS-20);
+assert.strictEqual(edge.length,COLS,'edge fixture must be exactly pane width');
+const costRows=[edge,'next-line-prose'], costJoined=edge+'\nnext-line-prose\n';
+assert.strictEqual(paneUrlFromRows(costRows,costJoined,0,5,COLS),edge+'next-line-prose',
+  'known cost: a full-width URL absorbs the following token');
+// but a line ending SHORT of the width absorbs nothing
+const shortRows=['https://example.com/x','next-line-prose'];
+assert.strictEqual(paneUrlFromRows(shortRows,'https://example.com/x\nnext-line-prose\n',0,5,COLS),
+  'https://example.com/x','a short line must never continue');
 console.log('ok');
 """
 

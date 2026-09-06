@@ -1039,7 +1039,13 @@ def parse_login_pane(text):
     truth (ruling 8644): expiry and failure surface here, not from exit codes.
     -> {stage: starting|picker|awaiting-code|url-missing|failed, url: str|None}"""
     url = None
-    m = _LOGIN_URL_RE.search(text.replace("\n", ""))   # tmux wraps the long URL
+    # THE NEWLINES ARE CLAUDE'S, NOT TMUX'S. This comment used to say "tmux
+    # wraps the long URL" and that is wrong in a way that cost a night: Ink
+    # prints the oauth URL with REAL newlines at the terminal width, so
+    # `capture-pane -J` hands back the broken lines unchanged -- tmux joins
+    # only what tmux wrapped. Stripping them here is right; the reason is not
+    # what it said (14873, measured: two 214-char rows in a 214-col pane).
+    m = _LOGIN_URL_RE.search(text.replace("\n", ""))
     if m:
         url = m.group(0)
     if url:
@@ -1478,6 +1484,18 @@ def _agent_pane_tail(name):
 
 
 PANE_READ_MAX_SCROLLBACK = 2000
+
+
+def pane_cols_argv(container):
+    """The pane's WIDTH, frozen argv, no parameters at all.
+
+    The client needs it to tell a line CLAUDE broke from a line TMUX wrapped:
+    a `-J` line that is exactly `pane_width` long was cut by the program at the
+    terminal edge, and a tmux-wrapped one comes back LONGER than the pane
+    because -J already joined it. Without the width there is no way to tell
+    those apart that is not a guess (14873)."""
+    return ("exec", container, "tmux", "display-message", "-p", "-t", "agent",
+            "#{pane_width}")
 
 
 def pane_read_argv(container, scrollback):
@@ -4427,8 +4445,19 @@ def build_api(auth_url):
                     {"agent": name, "verb": verb, "here": True, "text": None,
                      "detail": (out.stderr or "").strip()[:200]
                                or "no pane to read yet"}, status_code=409)
+            # THE WIDTH RIDES WITH THE TEXT. A second frozen exec, no
+            # parameters: the caller cannot tell a line the PROGRAM broke at
+            # the terminal edge from one TMUX wrapped without knowing where
+            # that edge is. Unreadable width is not fatal -- the client simply
+            # does not apply the continuation rule (14873).
+            wide = _docker(*pane_cols_argv(cname), check=False, capture=True)
+            try:
+                cols = int((wide.stdout or "").strip())
+            except ValueError:
+                cols = None
             return JSONResponse({"agent": name, "verb": verb, "here": True,
-                                 "joined": True, "text": out.stdout or ""})
+                                 "joined": True, "cols": cols,
+                                 "text": out.stdout or ""})
         return JSONResponse({"error": "unknown read verb",
                              "detail": f"{verb!r} is not a read verb. This launcher "
                                        f"reads logs, version, inspect and pane, and "

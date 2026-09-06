@@ -45,6 +45,28 @@ def test_the_argv_is_frozen_and_only_the_integer_moves():
         "-p", "-J", "-S", "-500", "-E", "-")
 
 
+def test_the_width_argv_is_frozen_and_takes_nothing():
+    """The pane WIDTH, under the same invariant as the capture: a compile-time
+    constant argv with no caller-supplied parameter at all -- not even an
+    integer. It is what lets the client tell a line CLAUDE broke at the
+    terminal edge from one TMUX wrapped, which is the difference between a
+    whole address and a truncated one (14873)."""
+    assert rl.pane_cols_argv("c1") == (
+        "exec", "c1", "tmux", "display-message", "-p", "-t", "agent",
+        "#{pane_width}")
+
+
+def test_the_route_answers_with_the_width():
+    """An unreadable width must NOT be fatal: the client simply stops applying
+    the continuation rule. A pane read that refused whenever the width could
+    not be parsed would turn a cosmetic gap into a dead terminal link."""
+    block = SRC[SRC.index('if verb == "pane":'):]
+    block = block[:block.index('return JSONResponse({"error": "unknown read verb"')]
+    assert "pane_cols_argv(cname)" in block
+    assert '"cols": cols' in block
+    assert "except ValueError:" in block and "cols = None" in block
+
+
 def test_minus_j_is_the_whole_point():
     """-J is what the ruling is FOR: tmux is the layer that wrapped the line and
     the only one that still knows where. Without it the route returns the same
