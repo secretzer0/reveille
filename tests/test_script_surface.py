@@ -181,10 +181,12 @@ def test_the_page_paints_icons_from_the_flags_and_the_frames():
     play = play[:play.index("\n}\n")]
     assert "vStop();" in play and "vPlay(id,vUrl(id))" in play
     assert UI.count("'/audio/'") == 1
-    # The script view replaces the body in place and a second click restores esc(m.body).
+    # The script view replaces the body in place and a second click restores the
+    # escaped body -- since 14835 it comes back through colorMentions (escape
+    # FIRST, then wrap known @names), so the pin moved with the ruled text.
     tog = UI[UI.index("async function toggleScript(row,m){"):]
     tog = tog[:tog.index("\n}\n")]
-    assert "body.innerHTML=esc(m.body)" in tog and "mdToHtml(m.script)" in tog
+    assert "body.innerHTML=colorMentions(esc(m.body))" in tog and "mdToHtml(m.script)" in tog
     assert "'/script/'+encodeURIComponent(m.id)" in tog
     assert "generated, in character" in tog
     # Row click ignores the icons (they own their click), like .mid does. THE
