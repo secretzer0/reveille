@@ -61,10 +61,21 @@ def _force_note_fn():
     return ENTRYPOINT[start:end + 2]
 
 
+def _waked_observed_fn():
+    # mcp_force_note and the twice-refused branch both call it, so every
+    # harness that runs either has to carry it -- shipped, never stubbed, for
+    # the same reason mcp_force_note is (12944 R-B): a stub is where the
+    # defect hides from the gate that greps for it.
+    start = ENTRYPOINT.index("waked_observed() {")
+    end = ENTRYPOINT.index("\n}", start)
+    return ENTRYPOINT[start:end + 2]
+
+
 def _render(said):
     script = ("BOOT_REPORT=/dev/stdout\n"
               "say() { printf '%s\\n' \"$1\"; }\n"
               "note() { printf '%s\\n' \"$1\"; }\n"
+              + _waked_observed_fn() + "\n"
               + _force_note_fn() + "\n"
               + 'mcp_force_note "$1"\n')
     r = subprocess.run(["bash", "-c", script, "_", said],
@@ -159,7 +170,9 @@ def _run_boot_block(tmp_path, init_rc=1, force_rc=1):
         'say() { printf "%s\\n" "$*" >> "$BOOT_REPORT"; }\n'
         'note() { printf "%s\\n" "$*" >> "$BOOT_REPORT"; printf "%s\\n" "$*" >&2; }\n'
         # the SHIPPED mcp_force_note, never a stub: the stub is exactly how
-        # the first-line-quote defect survived this harness (12944 R-B)
+        # the first-line-quote defect survived this harness (12944 R-B),
+        # and waked_observed rides beside it for the same reason
+        + _waked_observed_fn() + "\n"
         + _force_note_fn() + "\n"
         + _waked_block()
         + _init_block()
@@ -333,3 +346,56 @@ def test_the_roll_record_reaches_a_reader():
     # word that cannot carry its own timestamp is read as current forever
     assert "grep -m1 '^- when: ' /home/agent/.claude/roll-record.md" in ENTRYPOINT
     assert "rolled_when" in ENTRYPOINT
+# ---- 14716 item 4: the report OBSERVES the daemon, never asserts it ---------
+# The two sentences that died here claimed the daemon -- present tense in the
+# twice-refused branch, future tense in the force-kept one -- in the report a
+# body reads about its own broken boot. Both were written by a script that had
+# looked at nothing, so a container whose supervisor was dead read exactly like
+# a healthy one, and the reader's next question ("do rings still land here?")
+# had no answer on the page. Lesson 360d38ff's corollary states the rule: a
+# sentence about a process is an observation or it is not written.
+
+
+def _waked_line(report):
+    m = re.search(r"waked: pgrep -c -f reveille-waked = (\d+); (\S+) last line:",
+                  report)
+    assert m, f"no observed daemon line in the report:\n{report}"
+    return m
+
+
+def test_no_unobserved_claim_about_the_daemon_survives():
+    # Asserted on the shipped text: the claims are gone AND one function makes
+    # every such statement, so a third call site cannot reinvent the prose.
+    for claim in ("waked is running regardless", "waked will keep retrying"):
+        assert claim not in ENTRYPOINT, (
+            f"{claim!r} is back -- the entrypoint is asserting the daemon "
+            "again instead of looking at it")
+    assert ENTRYPOINT.count("waked_observed") == 3, (
+        "one definition and exactly two callers -- the force-kept note and "
+        "the twice-refused branch")
+
+
+def test_the_twice_refused_branch_observes_the_daemon(tmp_path):
+    """The branch that matters most: init refused twice, the body is
+    unregistered, and whether rings still reach it is the whole question."""
+    _r, _order, report = _run_boot_block(tmp_path, init_rc=1, force_rc=1)
+    m = _waked_line(report)
+    assert m.group(2).endswith("/waked.log"), m.group(0)
+
+
+def test_the_force_kept_note_observes_the_daemon(tmp_path):
+    """Same rule on the other caller: --force kept the credential, and the
+    note used to promise a retry loop it had not looked for."""
+    _r, _order, report = _run_boot_block(tmp_path, init_rc=1, force_rc=0)
+    _waked_line(report)
+
+
+def test_the_count_is_read_from_the_process_table(tmp_path):
+    """The negative that earns its keep: a hardcoded number, or a line copied
+    from a healthy boot, would pass the two above. The harness's own waked
+    stub sleeps, so the count is 1 while it runs -- and reading a REAL count
+    is the only way this can be right on a boot where it is 0."""
+    _r, _order, report = _run_boot_block(tmp_path, init_rc=1, force_rc=1)
+    assert int(_waked_line(report).group(1)) >= 1, (
+        "the count is 0 while the harness's own waked stub is running -- "
+        f"it is not being read from the process table:\n{report}")
