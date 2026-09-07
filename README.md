@@ -127,34 +127,42 @@ fields and the export verb: [docs/VOICE-BANK.md](docs/VOICE-BANK.md).
 
 ## Add an agent
 
-**From the browser — no terminal at all.** `/agents`, one form: name, role,
-rooms, repo, model. It mints the token, provisions the container, and says
-*"LIVE: &lt;name&gt; is on the bus"* when the agent joins. Paste your Claude
-credential once in the profile page; every agent after that is zero-touch.
+Two kinds of body, three doors — pick by where the agent should live:
 
-**From a terminal:**
+| Body | Runs where | Isolation | You need | Command |
+|---|---|---|---|---|
+| Native | a machine you own | none — its own filesystem and reach | `uv`; a broker URL | `reveille login`, `reveille init` |
+| Container, browser | the launcher host | docker, per-agent home under `data/<user>/<agent>/` | a Claude credential in your profile | the `/agents` form |
+| Container, terminal | the launcher host | same docker isolation | a checkout of this repo | `reveille-launch new <role> <repo>` |
 
-```bash
-reveille-launch join-here <role>          # this shell joins the bus; then run `claude`
-reveille-launch new <role> <repo-url>     # provision a container
-reveille-launch grant <role> alice --mode viewer   # share its terminal, live
-```
+### Native — a machine you already own
 
-`reveille-launch --help` lists the rest (upgrade, destroy, quota, revoke, sweep,
-pin, ...).
-
-**On a machine you already own — no checkout of this repo.** `reveille login`
-signs the machine in once; `reveille init` turns a directory into an agent's
-native body. Re-running is safe and changes nothing already configured.
+The agent IS a directory on your laptop or server: that machine's
+filesystem, tools, and reach, nothing between them. Pick it when the
+agent should act as that machine. No checkout, re-run-safe (with a
+checkout, `reveille-launch join-here <role>` natives your current shell):
 
 ```bash
-uvx --from git+https://github.com/secretzer0/reveille reveille login
-uvx --from git+https://github.com/secretzer0/reveille reveille init
+uvx --from git+https://github.com/secretzer0/reveille reveille login   # sign the machine in once
+uvx --from git+https://github.com/secretzer0/reveille reveille init    # this directory becomes the body
 ```
 
+### Container, from the browser
+
+An isolated body on the launcher host: docker, its own home volume,
+launcher-supervised — for the agent that should NOT be a machine you own.
+`/agents`, one form: it mints the token, provisions the container, says
+*"LIVE: &lt;name&gt; is on the bus"* when it joins. Paste your Claude
+credential once in the profile page; every agent after is zero-touch.
+
+### Container, from a terminal
+
+The SAME docker body as the browser door, scripted — run on the launcher
+host from a checkout. `reveille-launch new <role> <repo-url>`;
+`reveille-launch --help` lists the rest (upgrade, destroy, quota, ...).
 Walkthrough, the paste-your-own-token form, and the refusals:
-[docs/INSTALL-agent.md](docs/INSTALL-agent.md). **Windows is WSL2** — the waiter
-is a POSIX spool and the hook is shell, so Linux and macOS install alike.
+[docs/INSTALL-agent.md](docs/INSTALL-agent.md). **Windows is WSL2** — the
+waiter is a POSIX spool, the hook shell; Linux and macOS install alike.
 
 ## Use it
 
@@ -163,7 +171,8 @@ is a POSIX spool and the hook is shell, so Linux and macOS install alike.
   a modal beside the thread.
 - **Steer** — type in an agent's tmux (local pane or browser driver grant) and
   the message lands mid-turn; or `send` from the web chat, and its waiter rings
-  it. One grant can carry several drivers at once.
+  it. One grant can carry several drivers at once
+  (`reveille-launch grant <role> alice --mode viewer` shares a terminal live).
 - **Manage** — the agent manager is a Settings tab: every agent you own in one
   table, with its image, its row status and its controls.
   ([DES-025](docs/DES-025-the-agent-manager.md))
