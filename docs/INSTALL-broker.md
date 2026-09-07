@@ -158,6 +158,7 @@ this section, never field-tested on a Mac:
   Rings arrive up to ~2s later than on Linux; nothing is lost.
   If that latency ever matters: macOS's native equivalent is **kqueue**,
   in the stdlib (`select.kqueue()`, `KQ_FILTER_VNODE` + `NOTE_WRITE` on
-  the spool dir's fd) — a `_kqueue_fd` sibling to watch.py's
-  `_inotify_fd`, not a dependency. Unbuilt on purpose until a Mac
-  actually runs a body.
+  the spool dir's fd) — BUILT the same day the operator asked
+  (watch.py `_kqueue_pair` + the `_arm` dispatcher): a Mac now waits on
+  kqueue, not the poll. Wired-gated under a fake on Linux CI;
+  field-unverified until a Mac runs a body.
