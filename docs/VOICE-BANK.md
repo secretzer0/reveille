@@ -47,10 +47,10 @@ shown — the name is the key the loader matches to the row.
 | `dr-mccoy.wav` | Dr Mccoy |
 | `general-hammond.wav` | General Hammond |
 | `han-solo.wav` | Han Solo |
-| `harly-quinn.wav` | Harly Quinn |
+| `harly-quinn.wav` | Harley Quinn |
 | `jack-oneill.wav` | Jack Oneill |
 | `khan.wav` | Khan |
-| `lt-checkov.wav` | Lt Checkov |
+| `lt-checkov.wav` | Lt Chekov |
 | `luke-skywalker.wav` | Luke Skywalker |
 | `morty.wav` | Morty |
 | `mr-meeseeks.wav` | Mr Meeseeks |
@@ -58,7 +58,7 @@ shown — the name is the key the loader matches to the row.
 | `mr-spock.wav` | Mr Spock |
 | `mr-sulu.wav` | Mr Sulu |
 | `obi-wan-kenobi.wav` | Obi Wan Kenobi |
-| `princess-leah.wav` | Princess Leah |
+| `princess-leah.wav` | Princess Leia |
 | `quark-ferengi.wav` | Quark Ferengi |
 | `rick-sanchez.wav` | Rick Sanchez |
 | `rom-ferengi.wav` | Rom Ferengi |
