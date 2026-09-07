@@ -10,9 +10,9 @@ A pre-existing entry means immediate exit: a ring that arrived while unarmed
 is delivered at the next arm, never lost (I3). N concurrent watchers all see
 the same file and all exit -- duplicates are harmless by construction (I2).
 
-Waiting: inotify on new/ where the OS offers it, a 2s poll everywhere else.
-Both paths re-check the directory after arming the watch, closing the
-file-landed-between-scan-and-watch race.
+Waiting: inotify on new/ where the OS offers it, kqueue on the BSDs and
+macOS, a 2s poll everywhere else. Every path re-checks the directory after
+arming the watch, closing the file-landed-between-scan-and-watch race.
 
 --follow keeps the same program running instead: every NEW ring is printed
 once and the process never exits, so one arm covers a whole session. Exit-to-
@@ -52,6 +52,56 @@ def _inotify_fd(path):
         return None
 
 
+def _kqueue_pair(path):
+    """A (kqueue, dirfd) watching path, or None if the OS says no.
+
+    The BSD/macOS native equivalent of inotify, stdlib only: a Maildir
+    delivery is a rename INTO new/, which is a WRITE on the directory, and
+    KQ_NOTE_WRITE on the directory's own fd fires on exactly that. EV_CLEAR
+    makes it edge-triggered so a drained event does not refire forever.
+    Linux python ships no select.kqueue, so the hasattr is the OS test."""
+    if not hasattr(select, "kqueue"):
+        return None
+    try:
+        dirfd = os.open(path, os.O_RDONLY)
+        kq = select.kqueue()
+        ev = select.kevent(dirfd, select.KQ_FILTER_VNODE,
+                           select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                           select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND)
+        kq.control([ev], 0, 0)
+        return kq, dirfd
+    except OSError:
+        return None
+
+
+def _arm(path):
+    """The change watch, chosen per OS: returns (wait, close).
+
+    wait() blocks until the directory changed or ~30s passed and drains the
+    event; close() releases whatever was opened. inotify on Linux, kqueue on
+    the BSDs and macOS, a 2s poll where neither answers. Every caller
+    re-scans AFTER wait() returns, so the backend choice is latency, never
+    correctness -- and the poll path is the proof the scan loop needs no
+    events at all."""
+    fd = _inotify_fd(path)
+    if fd is not None:
+        def wait():
+            r, _, _ = select.select([fd], [], [], 30)
+            if r:
+                os.read(fd, 65536)   # drain events; the re-scan reads names
+        return wait, lambda: os.close(fd)
+    pair = _kqueue_pair(path)
+    if pair is not None:
+        kq, dirfd = pair
+        def wait():
+            kq.control(None, 4, 30)  # up to 4 coalesced events, or timeout
+        def close():
+            kq.close()
+            os.close(dirfd)
+        return wait, close
+    return (lambda: time.sleep(2)), (lambda: None)   # polling fallback
+
+
 def _follow(agent, newdir):
     """Print every ring once, forever. Never returns.
 
@@ -60,7 +110,7 @@ def _follow(agent, newdir):
     bounds the set without ever re-printing a ring.
     """
     seen = set()
-    fd = _inotify_fd(newdir)
+    wait, close = _arm(newdir)
     try:
         while True:
             for p in spool.entries(agent):
@@ -75,15 +125,9 @@ def _follow(agent, newdir):
                 seen.add(n)
                 print(text, flush=True)
             seen &= {os.path.basename(p) for p in spool.entries(agent)}
-            if fd is not None:
-                r, _, _ = select.select([fd], [], [], 30)
-                if r:
-                    os.read(fd, 65536)   # drain events; the re-scan reads names
-            else:
-                time.sleep(2)            # polling fallback (no inotify here)
+            wait()
     finally:
-        if fd is not None:
-            os.close(fd)
+        close()
 
 
 def main():
@@ -105,24 +149,18 @@ def main():
         print(got[1], flush=True)   # parked ring: deliver at arm, never lost
         return 0
 
-    fd = _inotify_fd(newdir)
+    wait, close = _arm(newdir)
     try:
         while True:
-            # Re-check AFTER the watch is armed (or between polls): a file that
+            # Re-check AFTER the watch is armed (or between waits): a file that
             # landed in the gap is caught here, not missed forever.
             got = spool.oldest(a.agent)
             if got:
                 print(got[1], flush=True)
                 return 0
-            if fd is not None:
-                r, _, _ = select.select([fd], [], [], 30)
-                if r:
-                    os.read(fd, 65536)   # drain events; the re-check reads names
-            else:
-                time.sleep(2)            # polling fallback (no inotify here)
+            wait()
     finally:
-        if fd is not None:
-            os.close(fd)
+        close()
 
 
 if __name__ == "__main__":
