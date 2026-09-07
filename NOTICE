@@ -1,0 +1,5 @@
+src/reveille/ui/bus/earcon.wav -- the one audio file this repository ships --
+was SYNTHESIZED IN HOUSE: the operator's pick of four synthesized samples,
+CHANGES 0.2.134 (commit 2a7e9dd), ruling 11465. No third-party recording, no
+sound library. Voice-bank clips are the opposite case and never enter git
+(.gitignore, ruling 14925); they are data the operator supplies.
