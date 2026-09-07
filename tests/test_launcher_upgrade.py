@@ -188,6 +188,35 @@ def test_health_failure_puts_the_old_container_back(world):
     _nothing_parked(w)
 
 
+def test_a_rollback_reason_quotes_the_reports_failed_line(world):
+    """Ruled 14698 (the 12/12 rollback night; lesson 360d38ff): every rollback
+    said `not present on the broker within 120s` while the failed body's own
+    boot report held the diagnosis -- `reveille: command not found` sat on
+    disk and nothing made anyone read it. The reason now carries the report's
+    last **FAILED** line, read only AFTER the new container started: a
+    docker-run refusal never booted a body, so the report on disk is the OLD
+    body's leftover and quoting it would pin the wrong diagnosis."""
+    w = world
+    w.monkeypatch.setattr(rl, "_presence", lambda url, role, tok: [])
+    w.monkeypatch.setattr(
+        rl, "read_boot_report",
+        lambda u, a: "# boot\n- mcp: **FAILED** -- reveille init refused twice\nok")
+    with pytest.raises(rl.LaunchError, match="not present.*its boot report says"):
+        rl.upgrade_agent(w.conn, "ana", "scout", "reveille-agent:0.2.19",
+                         health_url="http://h", timeout=0.01)
+    audit = (w.tmp / "audit.log").read_text()
+    assert "its boot report says: - mcp: **FAILED** -- reveille init refused twice" in audit
+    # The PRE-START refusal quotes nothing: no body booted, so the report on
+    # disk belongs to the old container and must not speak for the new one.
+    w.d.run_fails = True
+    with pytest.raises(rl.LaunchError) as e:
+        rl.upgrade_agent(w.conn, "ana", "scout", "reveille-agent:0.2.19",
+                         health_url="http://h", timeout=1)
+    assert "boot report says" not in str(e.value)
+    w.d.run_fails = False
+    _nothing_parked(w)
+
+
 def test_a_stopped_agent_is_upgraded_and_a_failed_run_leaves_it_stopped(world):
     w = world
     w.d.c["rev-ana-scout"]["running"] = False
