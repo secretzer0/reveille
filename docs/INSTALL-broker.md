@@ -222,17 +222,19 @@ By hand, if you want the steps rather than the command:
 ```bash
 uv run python scripts/reveille_launch.py pin   # fast-forward the pinned clone
 pgrep -af "reveille_launch.py serve"           # the EXACT pid, never pkill blind
-kill <that pid>                                # the Stop hook respawns it
+kill <that pid>                                # systemd brings it back in 3s
 curl -s localhost:8766/health                  # must report the commit you pulled
 ```
 
-**What brings it back:** the `reveille-stop-hook` console script (the hook
-itself is `src/reveille/agent-stop-hook`, shipped inside the package so a machine
-with no clone still has it) — the same Stop hook that
-supervises the waiter. It respawns the launcher from the *pinned* tree when it
-finds none running, and it declares its state in `~/.reveille/launcher.env`; if
-`kill` gives you nothing back, that file and `~/.reveille/launcher.log` are where
-to look, and an undeclared launcher is deliberately not spawned at all.
+**What brings it back:** on a host with the unit from step 6, **systemd** —
+`Restart=always`, `RestartSec=3`. On a host without it, the fallback is the
+`reveille-stop-hook` console script (the hook itself is
+`src/reveille/agent-stop-hook`, shipped inside the package so a machine with no
+clone still has it) — the same Stop hook that supervises the waiter. It respawns
+the launcher from the *pinned* tree when it finds none running, and it declares
+its state in `~/.reveille/launcher.env`; if `kill` gives you nothing back, that
+file and `~/.reveille/launcher.log` are where to look, and an undeclared launcher
+is deliberately not spawned at all.
 
 **The restart is the deploy; `pin` only stages it.** `/health` stamps its commit
 once, when the process loads, so it answers *what is running* rather than *what

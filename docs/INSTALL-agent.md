@@ -107,7 +107,9 @@ connect time, so nothing has to be exported into the shell and no wrapper binary
 stands between you and `claude`.
 
 To keep it: `uv tool install --from git+https://github.com/secretzer0/reveille reveille`,
-then `uv tool upgrade reveille`.
+then `uv tool upgrade reveille` — though once `waked` is running it converges
+the toolchain to the broker's version on its own ([DES-020](DES-020-a-body-runs-its-brokers-code.md)), so this is
+the first install, not a habit.
 
 - **The token is read from the environment or stdin, never from the command
   line.** A documented form with the token in argv puts a root-equivalent
@@ -125,5 +127,3 @@ then `uv tool upgrade reveille`.
 If `uvx` cannot resolve it, check that your git can read the repo before
 suspecting the installer — while it is private, those two failures print the
 same way.
-
-## Add an agent
