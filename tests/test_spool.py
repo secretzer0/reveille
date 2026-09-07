@@ -207,3 +207,68 @@ def test_follow_emits_each_ring_once_and_never_exits(tmp_path):
     unread = [json.loads(line)["unread"] for line in out.splitlines() if line.strip()]
     assert unread == [3, 1], f"each ring exactly once, in order: {out!r}"
     assert len(spool.entries("a1", base=str(tmp_path))) == 2   # I4: deletes nothing
+
+
+def test_the_watch_backend_is_chosen_per_os_and_kqueue_is_wired(tmp_path, monkeypatch):
+    """Ring latency on macOS (operator 2026-09-08): the 2s poll was the only
+    non-Linux path, so every ring on a Mac ate up to 2s. kqueue is the BSD
+    native equivalent and stdlib -- _arm now dispatches inotify -> kqueue ->
+    poll. Linux CI cannot RUN kqueue (select has no kqueue here, which is
+    itself the dispatch test), so the kqueue branch is proven WIRED under a
+    fake select: armed with EV_ADD|EV_CLEAR on VNODE writes, wait() drains
+    with the 30s timeout, close() closes both the kq and the dirfd. The
+    macOS field run stays honestly unverified until a Mac runs a body."""
+    from reveille import watch
+    real_kqueue_pair = watch._kqueue_pair
+
+    # Dispatch tail: no inotify, no kqueue -> the poll pair, and its close
+    # must be a harmless no-op (the follow loop calls it on every exit).
+    monkeypatch.setattr(watch, "_inotify_fd", lambda p: None)
+    monkeypatch.setattr(watch, "_kqueue_pair", lambda p: None)
+    wait, close = watch._arm(str(tmp_path))
+    slept = []
+    monkeypatch.setattr(watch.time, "sleep", lambda s: slept.append(s))
+    wait()
+    close()
+    assert slept == [2], "the tail of the dispatch is the 2s poll"
+
+    # The kqueue branch, wired under a fake: the calls a real Mac would make.
+    calls = {"control": [], "closed": []}
+
+    class _KQ:
+        def control(self, changes, maxev, timeout=None):
+            calls["control"].append((changes, maxev, timeout))
+            return []
+        def close(self):
+            calls["closed"].append("kq")
+
+    class _FakeSelect:
+        KQ_FILTER_VNODE, KQ_EV_ADD, KQ_EV_CLEAR = -4, 1, 32
+        KQ_NOTE_WRITE, KQ_NOTE_EXTEND = 2, 4
+        kqueue = staticmethod(_KQ)
+        @staticmethod
+        def kevent(ident, filt, flags, fflags):
+            calls["kevent"] = (filt, flags, fflags)
+            return ("ev", ident)
+
+    monkeypatch.setattr(watch, "select", _FakeSelect)
+    pair = real_kqueue_pair(str(tmp_path))
+    assert pair is not None, "a select WITH kqueue must arm"
+    kq, dirfd = pair
+    assert calls["kevent"] == (-4, 1 | 32, 2 | 4), (
+        "VNODE filter, EV_ADD|EV_CLEAR, NOTE_WRITE|NOTE_EXTEND -- the arm")
+    assert calls["control"][0] == ([("ev", dirfd)], 0, 0), "registration"
+
+    monkeypatch.setattr(watch, "_inotify_fd", lambda p: None)
+    monkeypatch.setattr(watch, "_kqueue_pair", lambda p: pair)
+    wait, close = watch._arm(str(tmp_path))
+    wait()
+    assert calls["control"][-1] == (None, 4, 30), (
+        "wait() drains up to 4 events with the 30s timeout")
+    close()
+    assert calls["closed"] == ["kq"], "close() closed the kq (dirfd proof below)"
+    try:
+        os.fstat(dirfd)
+        raise AssertionError("close() left the directory fd open")
+    except OSError:
+        pass

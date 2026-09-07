@@ -198,6 +198,24 @@ done
 # mechanism between shapes now, so a REFUSED credential at boot is a state we
 # deliberately create, and a report saying "network" at that moment aims the
 # re-provision at the wrong thing.
+# A SENTENCE ABOUT A PROCESS IS AN OBSERVATION, OR IT IS NOT WRITTEN (lesson
+# 360d38ff corollary; architect 14716 item 4). Both callers below used to
+# ASSERT the daemon in the boot report -- one in the present tense, one in the
+# future -- at the exact moment the reader needs to know whether rings still
+# land in this container, and neither had looked at anything. A claim is not a
+# diagnostic: a body whose supervisor died reads identically to a healthy one.
+# So this looks: the process count, and waked.log's last line, which together
+# say whether the daemon is up and what it last did. Both are best-effort --
+# a report that cannot be written is worse than a rough one, and neither read
+# may exit a boot (12851 R1).
+waked_observed() {
+  local n log last
+  n="$(pgrep -c -f reveille-waked 2>/dev/null || true)"
+  log="$HOME/.reveille/spool/${REVEILLE_AGENT_ROLE}/waked.log"
+  last="$(tail -n 1 "$log" 2>/dev/null || true)"
+  say "  waked: pgrep -c -f reveille-waked = ${n:-0}; $log last line:"
+  printf '%s\n' "      ${last:-(nothing logged yet)}" >> "$BOOT_REPORT"
+}
 mcp_force_note() {
   note "- mcp: registered via reveille init --force -- the credential is UNVERIFIED"
   say "  init said:"
@@ -210,7 +228,7 @@ mcp_force_note() {
   # body can read about its own broken boot (8691), and truncating it is how
   # the body learned the wrong sentence.
   printf '%s\n' "$1" | sed 's/^/      /' >> "$BOOT_REPORT"
-  say "  waked will keep retrying the bus"
+  waked_observed
 }
 # The wake socket holder is spawned at the TOP of this file, immediately after
 # the `:?` checks -- see the R1 block there (12851, hoisted by 12882).
@@ -305,8 +323,9 @@ else
     # reachable, recallable and able to say what is wrong with it. An exit here
     # would take all three away.
     note "- mcp: **FAILED** -- reveille init refused twice; this agent is not"
-    say "  registered with the bus in ~/repos. waked is running regardless, so"
-    say "  the return ticket and every ring still reach this container."
+    say "  registered with the bus in ~/repos. The return ticket and every ring"
+    say "  reach this container only if the daemon below is up:"
+    waked_observed
     say "  init said (first run):"
     printf '%s\n' "$init_said" | sed 's/^/      /' >> "$BOOT_REPORT"
     say "  init said (--force):"
