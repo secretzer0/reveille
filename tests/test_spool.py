@@ -266,8 +266,7 @@ def test_the_watch_backend_is_chosen_per_os_and_kqueue_is_wired(tmp_path, monkey
     assert calls["control"][-1] == (None, 4, 30), (
         "wait() drains up to 4 events with the 30s timeout")
     close()
-    assert calls["closed"] == ["kq"] and not os.path.exists(f"/proc/self/fd/{dirfd}") \
-        or calls["closed"] == ["kq"], "close() closed the kq (dirfd close proven below)"
+    assert calls["closed"] == ["kq"], "close() closed the kq (dirfd proof below)"
     try:
         os.fstat(dirfd)
         raise AssertionError("close() left the directory fd open")
