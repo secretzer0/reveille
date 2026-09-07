@@ -32,3 +32,16 @@ shots/
 .mcp.json
 CLAUDE.local.md
 .claude/
+
+# NEVER: voice-bank clips. The bank is DATA the operator supplies -- film/TV-
+# sampled voices in the live one -- and committing a clip to a public repo is
+# redistribution (ruled 14925: clips never enter git, by construction and by
+# gate). The one audio file the page ships is allowlisted below; anything
+# else with an audio extension is refused here and asserted absent by
+# tests/test_no_audio_lands_in_git.py.
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+!src/reveille/ui/bus/earcon.wav
