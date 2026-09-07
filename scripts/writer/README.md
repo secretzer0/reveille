@@ -1,5 +1,12 @@
 # The script writer host (DES-013 section 8, slice 6)
 
+> SUPERSEDED AS THE LIVE ENGINE (bench C, 2026-08-17; surveyed live
+> 2026-09-08): the writer now runs vLLM TP=2 on reveille-gpu — see
+> **docs/INSTALL-persona-writer.md**, which documents the running system.
+> This file remains the llama.cpp FALLBACK engine (same port, stop the
+> vLLM container first) and the bench recipe, and is the macOS-native
+> path's ancestor.
+
 One VM (Proxmox, two Tesla P40 passed through, Debian 13, LAN only), running
 `llama-server` from llama.cpp with a Qwen3.8 GGUF. The broker reaches it over
 `REVEILLE_SCRIPT_URL=http://<vm>:8080` in the clear on the operator's LAN with
