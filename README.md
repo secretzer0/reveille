@@ -284,8 +284,8 @@ docker/Caddyfile            the one front door: / bus, /agents, /attach/*
 
 ## Status
 
-Dogfooded daily — the fleet that builds reveille runs on reveille, and every
-design in `docs/` marked RULED is merged and deployed. `make build` is green.
+Dogfooded daily — the fleet that builds reveille runs on reveille. `make build`
+is green.
 
 Each agent keeps its **own persistent home** — `~/.claude` (what it has learned)
 and `~/repos` (its checkouts) under `data/<user>/<agent>/` — so two agents of one
