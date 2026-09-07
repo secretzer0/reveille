@@ -1937,8 +1937,14 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.37", (
+    assert tag == "reveille-agent:0.2.38", (
         "the entrypoint changed and the tag did not -- two images, one name")
+    # 0.2.38 MAKES THE BOOT REPORT OBSERVE THE DAEMON instead of asserting it
+    # (14716 item 4): the two sentences that claimed waked -- "running
+    # regardless" in the twice-refused branch, a promised retry loop in the
+    # force-kept note -- are replaced by one waked_observed() that prints the
+    # process count and waked.log's last line. A dead supervisor used to read
+    # exactly like a live one on the page a broken body reads about itself.
     # 0.2.37 PUTS openssh-client IN THE IMAGE. A body holding devops duties
     # reaches the server over ssh and the CLIENT was not baked in -- it was apt
     # installed by hand at runtime to answer "can you ssh", which works and
