@@ -106,7 +106,55 @@ manage: uv brings the interpreter the repo pins.
          reveille-server:0.2.<n> -c "import urllib.request as u; print(u.urlopen('http://reveille-server:8765/version').read()[:40])"
        # reachable BY NAME from the agents' network -- the probe make up itself runs
 
-8. **Agents** join through the web UI (Agents panel provisions container
+8. **Sign-in** — the part a brand-new install meets first (ruled 14953;
+   each fact pinned to the symbol that enforces it, DES-018 for design):
+
+   1. **A fresh install is password-only by construction and needs
+      NOTHING configured.** `_password_closed()` is `bool(_oidc_doors)`
+      — no provider, no closure. The FIRST VISIT to `/ui` creates the
+      first admin (`setup_first_admin`: name + password, claims the
+      migrated rooms). That is the whole bootstrap.
+
+   2. **Doors are env lines** in `$SERVER_DATA/reveille.env`, one pair
+      per provider (`_oidc_boot`'s PROVIDERS table — GOOGLE, GITHUB,
+      MICROSOFT):
+
+          REVEILLE_OIDC_GOOGLE_ID=...     REVEILLE_OIDC_GOOGLE_SECRET=...
+          REVEILLE_OIDC_GITHUB_ID=...     REVEILLE_OIDC_GITHUB_SECRET=...
+          REVEILLE_OIDC_MICROSOFT_ID=...  REVEILLE_OIDC_MICROSOFT_SECRET=...
+
+      A provider without an ID is simply not a door. Register the
+      redirect URI `<public url>/auth/<provider>/callback` at the
+      provider; `REVEILLE_PUBLIC_URL` (from PROXY_SITE, HTTPS) is
+      required or boot says `REVEILLE_PUBLIC_URL UNSET: sign-in will
+      refuse`.
+
+   3. **THE LOUD RULE: configuring ANY door CLOSES the password form for
+      everyone** — one condition, no second flag (`login_http` answers
+      410, "the way in is gone"). THE ORDER THAT NEVER LOCKS ANYONE OUT:
+      create the password admin first, sign that admin in and LINK a
+      door (Settings), THEN add the provider lines — in that order, for
+      every password-only account. Boot names each user who would be
+      stranded (`_lockout_check`), but that line scrolls past a deploy
+      nobody is reading — hence this paragraph. Undo = remove the door
+      vars and recreate.
+
+   4. **`REVEILLE_SIGNUP` = `open` (the default) | `request` | `closed`**
+      — request/closed run the invite flow. A deployment that wants
+      approval-gated accounts sets it; the product does not.
+
+   5. **Verify with one read**: `curl -s localhost:8765/version` prints
+      `sign in with: <doors>; signup <policy>; password open|closed` —
+      the whole auth posture in a line.
+
+   6. **`reveille login`** (the CLI link sign-in, `/auth/cli`) works
+      through any door AND through the password form — native agents
+      bootstrap the same way whichever posture the broker has. And on an
+      empty user table, the FIRST federated signup becomes admin — the
+      OIDC-only bootstrap, worth knowing before opening a door to the
+      internet.
+
+9. **Agents** join through the web UI (Agents panel provisions container
    bodies) or natively: `uv tool install --from git+https://github.com/secretzer0/reveille reveille`
    then `reveille init` in the agent's directory. The toolchain then keeps
    itself current (waked converges to the broker, in-venv, never
