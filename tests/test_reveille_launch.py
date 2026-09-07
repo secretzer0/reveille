@@ -1649,19 +1649,37 @@ def test_agent_image_check_refuses_a_tag_that_was_never_built():
         "a missing tag must not be reported as an unreadable store")
 
     # The positive half. Docker is reachable -- proven one line up -- so exit 1
-    # here means DEFAULT_IMAGE was bumped and never built, which is exactly the
-    # thing this gate is for. Failing, not skipping -- ON A DEPLOY HOST. A CI
-    # runner is not one: it never provisions, so DEFAULT_IMAGE is legitimately
-    # unbuilt there and this half would red every PR while measuring nothing
-    # (ruling 10877.8: CI proves images build, never what a host deploys).
+    # here means the LOCAL store lacks the tag. On a deploy host that is the
+    # defect; on a dev box it is Tuesday, and a test whose result depends on
+    # which machine ran it asserts nothing (13760; this red hit a dev laptop
+    # the night #255 moved the tag, ruled at 14843: fix the instrument). The
+    # REGISTRY is the authority that exists on every machine -- CI publishes
+    # every image bump -- so absent locally falls back to a manifest probe
+    # there: absent from BOTH is bumped-and-never-built, the thing this gate
+    # is for; an unreachable registry is unknown, not absent (8744's own
+    # vocabulary). CI still skips: it proves images build, never what a host
+    # holds (10877.8), and the registry probe would race the publish of the
+    # very PR under test.
     if os.environ.get("CI"):
         pytest.skip("CI runner is not a deploy host; DEFAULT_IMAGE is "
                     "legitimately unbuilt here")
     present = subprocess.run(["bash", str(script), rl.DEFAULT_IMAGE],
                              capture_output=True, text=True)
-    assert present.returncode == 0, (
-        f"{rl.DEFAULT_IMAGE} is not built on this host, and docker can see the "
-        f"store -- build it: make agent-image AGENT_IMAGE={rl.DEFAULT_IMAGE}")
+    if present.returncode == 1:
+        # ghcr.io/secretzer0 is where publish-images pushes (its argv in
+        # .github/workflows and the deploy trips both name it).
+        reg = subprocess.run(["docker", "manifest", "inspect",
+                              f"ghcr.io/secretzer0/{rl.DEFAULT_IMAGE}"],
+                             capture_output=True, text=True)
+        if reg.returncode == 0:
+            return                       # published: the tag names a real build
+        if "manifest unknown" in reg.stderr or "not found" in reg.stderr:
+            raise AssertionError(
+                f"{rl.DEFAULT_IMAGE} exists neither in this host's store nor "
+                f"in the registry -- DEFAULT_IMAGE was bumped and never built")
+        pytest.skip(f"local store lacks {rl.DEFAULT_IMAGE} and the registry "
+                    f"is unreachable -- unknown, not absent: {reg.stderr[:120]}")
+    assert present.returncode == 0, present.stderr
     assert "present" in present.stdout
 
 

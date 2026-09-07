@@ -2090,7 +2090,25 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         _docker("stop", name, check=False, capture=True)         # never two containers with driver state
     _docker("rename", name, prev, check=True, capture=True)
 
+    started = False   # flips once the NEW container ran: only then is the
+                      # boot report on disk ITS report and worth quoting
+
     def rollback(reason):
+        # THE REASON QUOTES THE BODY'S OWN REPORT (ruled 14698; lesson
+        # 360d38ff): twelve rollbacks said `not present on the broker within
+        # 120s` while every failed body's boot report held `reveille: command
+        # not found` -- the diagnosis sat on disk and nothing made anyone read
+        # it. The report at this moment is the NEW body's (its entrypoint
+        # rotated the old one to .prev at boot), so quote its last **FAILED**
+        # line -- but only after the new container actually STARTED: a
+        # docker-run refusal never booted anything, and quoting the OLD
+        # body's leftover report there would pin the wrong diagnosis on it.
+        if started:
+            report = read_boot_report(user, agent) or ""
+            failed = [ln.strip() for ln in report.splitlines()
+                      if "**FAILED**" in ln]
+            if failed:
+                reason += " -- its boot report says: " + failed[-1]
         _docker("rm", "-f", name, check=False, capture=True)
         _docker("rename", prev, name, check=False, capture=True)
         if old["running"]:
@@ -2110,6 +2128,7 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
         subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, OSError) as e:
         rollback(f"docker run refused ({e})")
+    started = True
     if resolve_multi_driver(prof, agent) == "on":
         # Same re-copy as provision: the upgrade's rm is a path that loses
         # the marker, and the idle auto-roll reaches HERE with no human
