@@ -6008,6 +6008,12 @@ function listenTake(f32,rate){
 // same unlocked AudioContext, constant volume; never over an utterance being
 // spoken (it rings when that one ends); no bell in push-to-talk; off with listen
 // off. One sound only: a second "start" tick is what people turn off.
+// PROVENANCE of src/reveille/ui/bus/earcon.wav, recorded here because it is the
+// ONE audio file this repository ships and an unsourced sound in a public repo
+// is somebody else's licence problem by default: SYNTHESIZED IN HOUSE -- the
+// operator's pick of four synthesized samples, CHANGES 0.2.134 (commit 2a7e9dd),
+// ruling 11465. No third-party recording, no sound library. Voice-bank clips are
+// the opposite case and never enter git at all (.gitignore, ruling 14925).
 let earconBuf=null;
 function earconLoad(){
  if(earconBuf)return Promise.resolve(earconBuf);
