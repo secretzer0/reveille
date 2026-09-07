@@ -141,19 +141,26 @@ def test_a_bank_exported_from_one_broker_loads_into_another():
         assert round(after[vid]["seconds"], 2) == round(before[vid]["seconds"], 2)
 
 
-def test_a_row_without_its_clip_names_the_file_and_stops():
-    """The ordinary first-load case, because the shipped manifest carries rows
-    and no clips: the refusal must name the file and the format doc, not raise
-    a traceback at the reader."""
+def test_a_partial_bank_loads_what_it_has_and_names_what_it_skipped():
+    """Ruled 14935, and the case every user of the shipped manifest is in: the
+    seed carries 30 rows and no clips, so a person holding six of them must end
+    up with six voices. A load that refused the whole directory would make the
+    seed useless to everyone who has not sourced all thirty -- and a skip that
+    printed nothing would read as a load that worked."""
     where = pathlib.Path(tempfile.mkdtemp())
-    (where / "manifest.json").write_text(json.dumps(
-        [{"id": "yoda", "name": "Yoda", "persona": "Inverted syntax.", "sample": "Do or do not."}]))
-    r = subprocess.run([sys.executable, str(SCRIPT), "load", str(where)],
-                       capture_output=True, text=True, timeout=60,
-                       env={**os.environ, "REVEILLE_URL": "http://127.0.0.1:1",
-                            "REVEILLE_TOKEN": "x", "REVEILLE_AGENT_ROLE": "bank-carrier"})
-    assert r.returncode != 0
-    assert "yoda.wav is missing" in r.stderr and "docs/VOICE-BANK.md" in r.stderr, r.stderr
+    (where / "manifest.json").write_text(json.dumps([
+        {"id": "mr-spock", "name": "Mr Spock", "persona": "Precise.", "sample": "Fascinating."},
+        {"id": "yoda", "name": "Yoda", "persona": "Inverted syntax.", "sample": "Do or do not."},
+    ]))
+    (where / "mr-spock.wav").write_bytes(wav_bytes(5.5))
+    db, tok = _seed()
+    with scratch_broker(env_extra={"REVEILLE_DB": db}) as b:
+        out = _run(b.base, tok, "load", where)          # _run asserts exit 0
+        after = _voices(b.base, tok)
+    assert set(after) == {"mr-spock"}, f"loaded {sorted(after)}"
+    assert after["mr-spock"]["persona"] == "Precise."
+    assert "no yoda.wav, skipped" in out, f"the skip was not named:\n{out}"
+    assert "1 voices" in out and "1 skipped" in out, out
 
 
 def test_the_shipped_manifest_is_loadable_as_shipped():

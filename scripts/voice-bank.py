@@ -18,8 +18,11 @@ thing that travels; what it carries is the operator's own.
     export REVEILLE_AGENT_ROLE=<bound agent name>   # or use a web session token
     export REVEILLE_TOKEN=<the secret>
 
-    scripts/voice-bank export ~/voice-bank      # -> manifest.json + <id>.wav
-    scripts/voice-bank load   ~/voice-bank      # into whatever REVEILLE_URL names
+    scripts/voice-bank.py export ~/voice-bank   # -> manifest.json + <id>.wav
+    scripts/voice-bank.py load   ~/voice-bank   # into whatever REVEILLE_URL names
+
+`--url <broker>` overrides REVEILLE_URL for one run, which is the shape a person
+carrying a bank between two installs actually types.
 
 Both verbs are IDEMPOTENT: a load re-PUTs each clip in place (the broker writes
 bank-<id>.wav.tmp then os.replace, so the synthesizer never sees a half file)
@@ -46,6 +49,13 @@ import urllib.request
 CARRIED = ("id", "name", "persona", "sample", "personal")
 
 
+_URL = ""      # set by --url; the env is the default, never the other way round
+
+
+def _base():
+    return (_URL or _env("REVEILLE_URL")).rstrip("/")
+
+
 def _env(name):
     v = os.environ.get(name)
     if not v:
@@ -55,7 +65,7 @@ def _env(name):
 
 def _req(method, path, body=None, ctype=None):
     """One seam for every call, so the gate can drive this without a broker."""
-    url = _env("REVEILLE_URL").rstrip("/") + path
+    url = _base() + path
     req = urllib.request.Request(url, data=body, method=method)
     req.add_header("Authorization", "Bearer " + _env("REVEILLE_TOKEN"))
     role = os.environ.get("REVEILLE_AGENT_ROLE")
@@ -93,17 +103,20 @@ def cmd_export(where):
 def cmd_load(where):
     src = pathlib.Path(where)
     rows = json.loads((src / "manifest.json").read_text())
+    loaded, skipped = [], []
     for v in rows:
         vid = v["id"]
         wav = src / f"{vid}.wav"
         if not wav.is_file():
-            # THE MANIFEST IS THE INDEX, NOT THE CONTENT. A shipped manifest
-            # (docs/voice-bank/manifest.json) carries rows and no clips on
-            # purpose, so this is the ordinary case for a first load, not an
-            # exceptional one -- it names the file it wanted and the format
-            # doc that says what may go in it.
-            sys.exit(f"voice-bank: {wav} is missing -- every manifest row needs "
-                     f"its <id>.wav beside it (format: docs/VOICE-BANK.md)")
+            # A MISSING CLIP IS THE ORDINARY CASE, NOT A FAILURE (ruled 14935).
+            # The shipped manifest carries 30 rows and no clips on purpose, so
+            # a user holding six of them must get six voices -- refusing the
+            # whole load would make the seed manifest useless to everyone who
+            # has not sourced all thirty. Named, never silent: a skip nobody
+            # can see is how a load that did almost nothing reads as success.
+            skipped.append(vid)
+            print(f"  {vid:<20} no {vid}.wav, skipped")
+            continue
         clip = wav.read_bytes()
         q = urllib.parse.urlencode(
             {"name": v.get("name") or vid, **({"personal": "1"} if v.get("personal") else {})})
@@ -111,16 +124,28 @@ def cmd_load(where):
         _req("PATCH", f"/voices/{vid}",
              json.dumps({k: v.get(k) or "" for k in ("name", "persona", "sample")}).encode(),
              "application/json")
+        loaded.append(vid)
         print(f"  {vid:<20} loaded")
-    print(f"{len(rows)} voices -> {os.environ.get('REVEILLE_URL')}")
-    return rows
+    tail = f", {len(skipped)} skipped (no clip)" if skipped else ""
+    print(f"{len(loaded)} voices -> {_base()}{tail}")
+    return loaded, skipped
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("export", "load"):
+    """`--url <broker>` or `--url=<broker>` in front of the verb; the env is the
+    default. Hand-rolled because argparse buys nothing for two verbs and one
+    flag, and this file must stay copy-and-run on a machine with no checkout."""
+    global _URL
+    args = list(argv[1:])
+    if args and args[0].startswith("--url"):
+        flag = args.pop(0)
+        _URL = flag.split("=", 1)[1] if "=" in flag else (args.pop(0) if args else "")
+        if not _URL:
+            sys.exit("voice-bank: --url needs the broker's address")
+    if len(args) != 2 or args[0] not in ("export", "load"):
         sys.exit(__doc__.strip().splitlines()[0]
-                 + "\n\nusage: voice-bank export|load <directory>")
-    (cmd_export if argv[1] == "export" else cmd_load)(argv[2])
+                 + "\n\nusage: voice-bank.py [--url <broker>] export|load <directory>")
+    (cmd_export if args[0] == "export" else cmd_load)(args[1])
 
 
 if __name__ == "__main__":

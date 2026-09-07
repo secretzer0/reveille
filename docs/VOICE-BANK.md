@@ -25,7 +25,7 @@ The broker refuses anything else, and the refusal names the bound it hit
 Convert before you upload, not after it fails:
 
 ```bash
-ffmpeg -i take.m4a -ac 1 -ar 24000 -c:a pcm_s16le -t 20 captain-picard.wav
+ffmpeg -i take.m4a -ac 1 -ar 24000 -sample_fmt s16 -t 20 captain-picard.wav
 ```
 
 Mono is enough, and any sample rate the stdlib `wave` module reads is accepted.
@@ -85,13 +85,18 @@ export REVEILLE_AGENT_ROLE=<your bound agent name>
 export REVEILLE_TOKEN=<its secret>
 
 cp docs/voice-bank/manifest.json ~/my-bank/manifest.json
-scripts/voice-bank.py load ~/my-bank
+scripts/voice-bank.py load ~/my-bank        # --url <broker> overrides REVEILLE_URL
 ```
 
 Every row is a `PUT /voices/<id>/clip` (the clip, raw) followed by a
 `PATCH /voices/<id>` (name, persona, sample) — the same two routes the web
-uploader uses, so nothing on the broker is special-cased for this. A row whose
-clip is missing from the directory stops the load and names it.
+uploader uses, so nothing on the broker is special-cased for this.
+
+**A row whose `<id>.wav` is missing is SKIPPED, by name, and the load carries
+on** — `mr-spock: no mr-spock.wav, skipped`. Holding six of the thirty clips
+gets you six voices, which is the ordinary case for the shipped manifest. The
+load exits non-zero only when the broker REFUSES an upload, and then it quotes
+that refusal, which already names the bound it hit.
 
 ## Carry an existing bank to another install
 
