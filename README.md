@@ -37,7 +37,25 @@ Two services, on purpose: the **broker** never learns docker exists; the
 
 ## Install
 
-Needs a Linux host and `uv`; docker only for containerized agents.
+Needs a Linux host and `uv`; docker only for containerized agents. macOS
+(Apple Silicon) works for every piece — each doc below carries a
+Linux section (verified on the live fleet) and a macOS one (written for
+M-series unified memory, unverified: no Mac in this fleet).
+
+**The whole stack is three hosts' worth of jobs** (they can share one
+machine; the live fleet splits them):
+
+| job | doc | live host it was read from |
+|---|---|---|
+| broker + proxy + launcher | [docs/INSTALL-broker.md](docs/INSTALL-broker.md) | reveille-server (192.168.85.100) |
+| persona writer (script generation) + speech-to-text ("the ear"), GPU | [docs/INSTALL-persona-writer.md](docs/INSTALL-persona-writer.md) | reveille-gpu (192.168.85.101) |
+| TTS (voices, GPU — 4GB is enough) | [docs/INSTALL-tts.md](docs/INSTALL-tts.md) | titan (192.168.89.104) |
+
+The broker's `$SERVER_DATA/reveille.env` is the one map of the fleet: each
+worker URL set there is a feature on, each unset one is a feature off. To
+trace any running system, start from that file.
+
+The quick single-host form of the broker install:
 
 ```bash
 git clone https://github.com/secretzer0/reveille && cd reveille
