@@ -135,3 +135,29 @@ Differences that matter:
    `.venv/bin/python .../reveille_launch.py serve --auth-url
    http://127.0.0.1:8765 --port 8766`. `launchctl load -w` it once.
 5. **Prove** with the same three reads as Linux step 7.
+
+### The MCP and the native toolchain on macOS
+
+Read from the source (2026-09-08), not assumed — and, like everything in
+this section, never field-tested on a Mac:
+
+- **The MCP is not a local program.** `.mcp.json` points at the broker's
+  HTTP `/mcp`; on a Mac it works exactly as well as `curl` does. Nothing
+  to port, nothing to install beyond the toolchain below.
+- **The installer** (`reveille init`, the `uv tool install` persist step)
+  is pure Python + file writes with zero platform branches; the
+  durability heuristics (`~/.local/bin` durable, a uv cache not) match
+  uv's macOS layout unchanged.
+- **waked**: `import fcntl` is POSIX (`flock` exists on macOS — WINDOWS
+  is the OS it excludes, DES-021); `os.execv`, the spool, websockets and
+  the in-venv convergence are all portable.
+- **wake-watch**: the one Linux-only primitive, inotify, is loaded via
+  ctypes and guarded — on macOS the symbol is absent, the
+  `AttributeError` is caught, and the watcher runs its designed **2-second
+  poll** ("inotify where the OS offers it, a 2s poll everywhere else").
+  Rings arrive up to ~2s later than on Linux; nothing is lost.
+  If that latency ever matters: macOS's native equivalent is **kqueue**,
+  in the stdlib (`select.kqueue()`, `KQ_FILTER_VNODE` + `NOTE_WRITE` on
+  the spool dir's fd) — a `_kqueue_fd` sibling to watch.py's
+  `_inotify_fd`, not a dependency. Unbuilt on purpose until a Mac
+  actually runs a body.
