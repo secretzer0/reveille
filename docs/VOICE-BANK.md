@@ -1,13 +1,70 @@
-# The voice bank: what a clip must be, and how to load one
+# The voice bank: load 30 voices with your own clips
 
-A **bank voice** is two things: a reference **clip** the synthesizer clones, and
-a **row** that carries the voice's name, its **persona** (the script writer's
-whole instruction for how that speaker talks) and its audition **sample** line.
-A clip without its row is a timbre; the row is what makes it a character.
+This repository ships the **rows** for 30 voices — each one's name, its
+**persona** (the instruction that makes it talk like that character) and its
+audition line. It ships **no audio**: the clips are yours to source. Give each
+voice a clip and the bank is complete.
 
-Clips are **data you supply**. They never live in this repository — see
-`docs/DES-013-a-voice-bank-and-a-script-writer.md` §3, and the `*.wav` rule in
-`.gitignore`. What ships here is the loader and a manifest you can start from.
+## Quickstart
+
+```bash
+mkdir ~/my-bank                                   # 1. a directory
+cp docs/voice-bank/manifest.json ~/my-bank/       # 2. the 30 rows
+
+#    3. save each of your clips into ~/my-bank/ under the FILE NAME in the
+#       table below -- Picard's clip becomes ~/my-bank/captain-picard.wav
+
+export REVEILLE_URL=https://your.broker           # 4. load it
+export REVEILLE_AGENT_ROLE=<your bound agent name>
+export REVEILLE_TOKEN=<its secret>
+scripts/voice-bank.py load ~/my-bank
+```
+
+You do not need all thirty. **Every voice you have a clip for is loaded; every
+voice you don't is skipped by name and the load carries on**, so you can add the
+rest later by dropping in more files and running the same command again.
+
+The clip has to be a **PCM WAV, 5–30 seconds, under 10 MB, and not silent** —
+[the exact rules are below](#what-a-clip-must-be), and one `ffmpeg` line converts
+anything else.
+
+## The 30 voices, and what to call each file
+
+Every file goes in the bank directory you made in step 1, spelled exactly as
+shown — the name is the key the loader matches to the row.
+
+| Save your clip as | Voice |
+|---|---|
+| `c3p0.wav` | C3p0 |
+| `captain-kirk.wav` | Captain Kirk |
+| `captain-picard.wav` | Captain Picard |
+| `commander-data.wav` | Commander Data |
+| `commander-riker.wav` | Commander Riker |
+| `commander-worf.wav` | Commander Worf |
+| `daniel-jackson.wav` | Daniel Jackson |
+| `darth-vader.wav` | Darth Vader |
+| `deanna-troi.wav` | Deanna Troi |
+| `dr-mccoy.wav` | Dr Mccoy |
+| `general-hammond.wav` | General Hammond |
+| `han-solo.wav` | Han Solo |
+| `harly-quinn.wav` | Harly Quinn |
+| `jack-oneill.wav` | Jack Oneill |
+| `khan.wav` | Khan |
+| `lt-checkov.wav` | Lt Checkov |
+| `luke-skywalker.wav` | Luke Skywalker |
+| `morty.wav` | Morty |
+| `mr-meeseeks.wav` | Mr Meeseeks |
+| `mr-scott.wav` | Mr Scott |
+| `mr-spock.wav` | Mr Spock |
+| `mr-sulu.wav` | Mr Sulu |
+| `obi-wan-kenobi.wav` | Obi Wan Kenobi |
+| `princess-leah.wav` | Princess Leah |
+| `quark-ferengi.wav` | Quark Ferengi |
+| `rick-sanchez.wav` | Rick Sanchez |
+| `rom-ferengi.wav` | Rom Ferengi |
+| `samantha-carter.wav` | Samantha Carter |
+| `tealc.wav` | Tealc |
+| `yoda.wav` | Yoda |
 
 ## What a clip must be
 
@@ -73,22 +130,10 @@ my-bank/
   at **creation and never after**, so the loader can create a personal voice but
   cannot flip an existing one.
 
-`docs/voice-bank/manifest.json` is a ready-made set of 30 rows — names, personas
-and sample lines — with no clips. Copy it into a directory, drop your own
-`<id>.wav` beside each row, and load it.
+## What the load actually does
 
-## Load it
-
-```bash
-export REVEILLE_URL=https://reveille.example.org
-export REVEILLE_AGENT_ROLE=<your bound agent name>
-export REVEILLE_TOKEN=<its secret>
-
-cp docs/voice-bank/manifest.json ~/my-bank/manifest.json
-scripts/voice-bank.py load ~/my-bank        # --url <broker> overrides REVEILLE_URL
-```
-
-Every row is a `PUT /voices/<id>/clip` (the clip, raw) followed by a
+`scripts/voice-bank.py load <dir>` (or `--url <broker> load <dir>` to override
+`REVEILLE_URL` for one run) walks the manifest. Every row is a `PUT /voices/<id>/clip` (the clip, raw) followed by a
 `PATCH /voices/<id>` (name, persona, sample) — the same two routes the web
 uploader uses, so nothing on the broker is special-cased for this.
 

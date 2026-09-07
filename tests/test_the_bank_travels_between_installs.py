@@ -25,6 +25,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import struct
 import subprocess
 import sys
@@ -180,3 +181,19 @@ def test_the_shipped_manifest_is_loadable_as_shipped():
         assert not r["id"].startswith("bank-"), f"{r['id']}: the bank- prefix is reserved"
         assert len(r["sample"]) <= 2000, r["id"]
     assert len({r["id"] for r in rows}) == len(rows), "duplicate ids"
+
+
+def test_the_doc_names_every_shipped_voice_and_its_filename():
+    """Operator 14999 asked for the one thing a person with 30 clips of their
+    own actually needs: which file name goes with which voice. That table is
+    hand-unmaintainable the moment the manifest changes, so the gate is the
+    drift check -- every shipped row appears in the doc as `<id>.wav`, and the
+    doc invents no voice the manifest does not carry."""
+    rows = json.loads((REPO / "docs" / "voice-bank" / "manifest.json").read_text())
+    doc = (REPO / "docs" / "VOICE-BANK.md").read_text()
+    for r in rows:
+        assert f"`{r['id']}.wav`" in doc, f"{r['id']} is in the manifest and not in the doc"
+        assert r["name"] in doc, f"{r['name']} is in the manifest and not in the doc"
+    named = set(re.findall(r"`([a-z0-9][a-z0-9-]*)\.wav`", doc))
+    unknown = named - {r["id"] for r in rows} - {"<id>"}
+    assert not unknown, f"the doc names files the manifest does not ship: {sorted(unknown)}"
