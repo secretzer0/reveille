@@ -29,6 +29,9 @@ def main():
               f"without its hook, so nothing would keep this agent reachable",
               file=sys.stderr)
         return 1
+    # The shell hook uses this interpreter for its portable flock probe on
+    # systems such as macOS that do not ship the `flock` executable.
+    os.environ["REVEILLE_HOOK_PYTHON"] = sys.executable
     # exec, not subprocess: the hook's exit status IS this command's contract with
     # Claude Code, and an extra process between them is one more thing that can
     # swallow it.
