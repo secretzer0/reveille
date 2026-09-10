@@ -53,10 +53,23 @@ mkdir -p "$spool"
 # Linux normally supplies `flock`; macOS does not. The hook itself is launched
 # by Python, so use that same interpreter for an equivalent non-blocking probe
 # when the command is unavailable.
+#
+# A PROBE THAT CANNOT DECIDE MUST SPAWN (ruling 17377). waked takes this same
+# lock at startup and THAT is the singleton guard, so a blind spawn is safe and
+# the loser exits 0 -- this probe is an optimisation and never the authority.
+# So only a POSITIVE "somebody holds it" answer suppresses the spawn, and each
+# branch has exactly one such code: flock's 1, the fallback's 3. Everything
+# else -- 127 for no interpreter, a stale REVEILLE_HOOK_PYTHON, an unimportable
+# fcntl, a lock file that will not open, flock's own sysexits codes (measured
+# on util-linux 2.39.3: 1 conflict, 64 usage, 66 cannot-open) -- means the
+# probe did not decide, and reads as FREE. Reading it as "held" is how this
+# hook exits 0 with no daemon and no message, which is the very macOS symptom
+# the fallback below was added to fix, one layer down.
 lock_is_free() {
   lock="$1"
   if command -v flock >/dev/null 2>&1; then
     flock -n "$lock" true
+    [ "$?" -ne 1 ]
     return
   fi
   "${REVEILLE_HOOK_PYTHON:-python3}" - "$lock" <<'PY'
@@ -68,10 +81,11 @@ fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    raise SystemExit(1)
+    raise SystemExit(3)          # the one positive answer: somebody holds it
 finally:
     os.close(fd)
 PY
+  [ "$?" -ne 3 ]
 }
 
 # Daemon alive? flock -n SUCCEEDING means nobody holds it -> daemon absent ->
