@@ -1,0 +1,24 @@
+# Installed by hand, once, per docs/INSTALL-broker.md step 9. It is a FILE in
+# the repo rather than something a script writes, so the thing that gains
+# privilege on the deploy host is reviewable in the diff that adds it.
+#
+# The paths below are reveille-server's (user vyzon, clone ~/reveille-src).
+# Another host edits them at install time; nothing reads them from here.
+[Unit]
+Description=Reveille auto-deploy (main's published image -> make up)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vyzon
+WorkingDirectory=/home/vyzon/reveille-src
+# A SERVICE INHERITS NO PROFILE (f849b4b3). The Makefile resolves uv itself,
+# and this names the directory it resolves it from -- neither relies on
+# whoever's login shell installed the unit.
+Environment=PATH=/home/vyzon/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Optional, and the `-` means optional: REVEILLE_URL is not needed, only
+# REVEILLE_TOKEN + REVEILLE_AGENT_ROLE for the room announcement. Without the
+# file the deploy still runs and logs that it announced nothing.
+EnvironmentFile=-/home/vyzon/.reveille/autodeploy.env
+ExecStart=/home/vyzon/reveille-src/scripts/autodeploy

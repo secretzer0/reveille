@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# THE DEPLOY THAT FOLLOWS A GREEN MAIN, instead of a human remembering to.
+#
+# "MERGED DOES NOT MEAN RUNNING" was doctrine (10877.6) and was measured true
+# on 2026-09-15: the broker served 0.2.249 while main had published 0.2.250.
+# Operator 18713 overrides the human-types-it half -- "I want all code that
+# successfully builds to deploy ... the identification of a prod deploy is when
+# a PR into main successfully builds its assets" -- and overrides nothing else.
+#
+# THE TRUST ARROW STILL POINTS OUTWARD (DES-010 s2, 10877's hosted-runners-only
+# clause). No self-hosted runner, no inbound port, no GitHub credential on this
+# box: the VM reads a public registry and decides for itself. This script is the
+# whole deployer; systemd/reveille-autodeploy.{service,timer} run it.
+#
+# THE TRIGGER IS THE PUBLISHED IMAGE, NOT THE MERGE. A commit on main whose
+# image CI has not pushed yet is not a release this can deploy -- asking the
+# registry is asking "did its assets build", in the operator's own words, and
+# it is the only form of that question with an answer on this side of the wire.
+#
+# A FAILED DEPLOY LATCHES. systemd would otherwise re-run a broken deploy every
+# five minutes forever: the hold file stops the next tick, names what failed,
+# and says how to clear it. No retry loop, no silent thrash.
+#
+# IT INSTALLS NOTHING AND NEEDS NO PRIVILEGE. The units are files a person
+# copies once (docs/INSTALL-broker.md step 10); this runs as the same
+# unprivileged user `make up` has always run as.
+set -uo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+BROKER="${REVEILLE_AUTODEPLOY_BROKER:-http://127.0.0.1:8765}"
+REG="${REGISTRY:-ghcr.io/secretzer0}"
+HOLD="${REVEILLE_AUTODEPLOY_HOLD:-$HOME/.reveille/autodeploy.hold}"
+
+say() { printf '%s\n' "autodeploy: $*"; }
+
+# THE DEPLOY ANNOUNCES ITSELF TO THE ROOM (DES-010 s3.2): a deploy nobody can
+# see is the failure 10877.6 was written against, whoever performed it. The
+# credential is this box's own, read from the unit's EnvironmentFile; with none
+# set the deploy still happens and says so, because an unannounced deploy is
+# better than a server that never catches up to main.
+announce() {
+  if [ -z "${REVEILLE_TOKEN:-}" ] || [ -z "${REVEILLE_AGENT_ROLE:-}" ]; then
+    say "ANNOUNCE SKIPPED (no REVEILLE_TOKEN/REVEILLE_AGENT_ROLE): $1"
+    return 0
+  fi
+  local payload
+  payload="$(python3 -c 'import json,sys; print(json.dumps({"to":"*","body":sys.argv[1]}))' "$1")"
+  curl -fsS --max-time 10 -X POST "$BROKER/send" \
+    -H "Authorization: Bearer $REVEILLE_TOKEN" \
+    -H "X-Agent: $REVEILLE_AGENT_ROLE" \
+    -H "Content-Type: application/json" \
+    -d "$payload" >/dev/null 2>&1 \
+    || say "ANNOUNCE FAILED (the deploy itself is unaffected): $1"
+}
+
+hold() {
+  printf '%s -- %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$HOLD"
+  say "HELD: $1"
+  say "nothing will deploy until this is cleared: rm $HOLD"
+  announce "DEPLOY HELD on $(hostname): $1 -- cleared by: rm $HOLD"
+  exit 1
+}
+
+if [ -e "$HOLD" ]; then
+  say "HELD since $(cat "$HOLD")"
+  say "clear with: rm $HOLD"
+  exit 0
+fi
+
+cd "$REPO" || { say "no repo at $REPO"; exit 1; }
+
+# A FETCH THAT FAILED IS NOT A MAIN THAT DID NOT MOVE. Nothing is touched and
+# nothing is held: the next tick asks again, which is what a poll is for.
+git fetch --quiet origin main || { say "fetch failed -- nothing touched"; exit 0; }
+
+main_sha="$(git rev-parse origin/main)"
+version="$(git show origin/main:pyproject.toml | grep -m1 '^version' | cut -d'"' -f2)"
+[ -n "$version" ] || { say "no version in origin/main:pyproject.toml"; exit 0; }
+image="$REG/reveille-server:$version"
+running="$(docker inspect --format '{{.Config.Image}}' reveille-server 2>/dev/null)"
+
+# NOTHING TO DO IS SILENT. This runs every five minutes forever; a line here is
+# 288 a day saying the same thing, and a log nobody reads is not a record.
+if [ "$(git rev-parse HEAD)" = "$main_sha" ] && [ "$running" = "$image" ]; then
+  exit 0
+fi
+
+# DID ITS ASSETS BUILD. Absent is "not yet" and unreadable is "not now" -- both
+# wait, because neither is a reason to deploy and neither is this box's fault.
+# `make up` asks the same question about the agent image, and refuses there.
+if ! reg_err="$(docker manifest inspect "$image" 2>&1 >/dev/null)"; then
+  say "main is $version; not deploying yet -- $reg_err"
+  exit 0
+fi
+
+git merge --ff-only origin/main --quiet \
+  || hold "the checkout will not fast-forward to origin/main (local commits?)"
+
+say "deploying $version ($(git rev-parse --short HEAD)); running: ${running:-none}"
+announce "DEPLOY START $version on $(hostname) -- from ${running:-none}"
+
+make up || hold "make up failed for $version -- whatever it left is what is running"
+
+# THE CLAIM IS THE READ, NOT THE EXIT CODE. `make up` returning 0 says its own
+# steps ran; only the broker says which version answers.
+live="$(curl -fsS --max-time 10 "$BROKER/version" 2>/dev/null | cut -d' ' -f1)"
+[ "$live" = "$version" ] \
+  || hold "make up returned 0 but $BROKER/version says '${live:-unreadable}', wanted $version"
+
+say "deployed $version -- /version confirms"
+announce "DEPLOY OK $version on $(hostname) -- /version confirms"

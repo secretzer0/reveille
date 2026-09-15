@@ -1,0 +1,13 @@
+# Five minutes is the whole latency budget between a green main and a running
+# broker. The poll is cheap by construction: a `git fetch` and, only when main
+# actually moved, one registry read. A tick with nothing to do prints nothing.
+[Unit]
+Description=Reveille auto-deploy poll
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
