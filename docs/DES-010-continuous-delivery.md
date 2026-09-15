@@ -39,7 +39,29 @@ CI (hosted runner) --push--> ghcr.io (public)  <--pull-- deployer (VM)
 What the VM needs from GitHub: nothing. It reads a public registry and a
 public release marker. What GitHub needs from the VM: nothing.
 
-## 3. RULED: the release cut is the human act
+## 3. SUPERSEDED by operator 18713 (2026-09-15): every green main is the cut
+
+**What this section ruled, kept here because the reasoning is still the reason
+the deployer is shaped the way it is:** a human cuts the release, the deployer
+follows a MARKER naming an attested image, never the branch.
+
+**What replaced it:** "I want all code that successfully builds to deploy.
+There is no version limitation or specific tag that I want as an identifier.
+The identification of a prod deploy is when a PR into main successfully builds
+its assets" (operator 18713, answering the devops blocker at 18711/18712, which
+refused to build this until the contract it contradicted was overruled by the
+person who owns it). The marker is gone; the trigger is main's version having
+a published image in ghcr, which `scripts/autodeploy` asks the registry.
+
+**What did NOT change, and was not asked to:** s2's trust arrow (no self-hosted
+runner, no inbound path, no GitHub credential on the VM) and this section's
+SECOND half -- the deploy announces itself to the room, before and after. A
+deploy nobody can see is the failure 10877.6 was written against, whoever or
+whatever performed it. The pipeline still ends at the push; what changed is who
+performs the mechanics, and now also who decides.
+
+The original text follows.
+
 
 "CI DOES NOT DEPLOY" (10877 §6) is amended, not repealed. Its load-bearing
 half was never that a human types the command — it was that **merged must not

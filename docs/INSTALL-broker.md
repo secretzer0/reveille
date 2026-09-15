@@ -158,6 +158,31 @@ manage: uv brings the interpreter the repo pins.
    itself current (waked converges to the broker, in-venv, never
    unlink-first).
 
+10. **Auto-deploy** (optional, and the only step here that needs root).
+    `scripts/autodeploy` polls for a main whose image CI has published and
+    runs `make up` itself — "MERGED DOES NOT MEAN RUNNING" was measured true
+    on 2026-09-15, broker on 0.2.249 while main had published 0.2.250.
+    The units are FILES in the repo rather than something a script writes, so
+    what gains privilege on this host is reviewable in the diff that added it;
+    edit the paths inside them if this box is not reveille-server:
+
+        sudo cp systemd/reveille-autodeploy.service systemd/reveille-autodeploy.timer \
+                /etc/systemd/system/
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now reveille-autodeploy.timer
+        systemctl list-timers reveille-autodeploy.timer
+
+    It deploys only what the registry already holds, fast-forwards the
+    checkout or refuses, and confirms `/version` actually moved before
+    calling the trip good. A FAILED DEPLOY LATCHES: `~/.reveille/autodeploy.hold`
+    stops every later tick and names what broke — `rm` it to resume. To
+    announce each trip to the room, put a bound agent credential in
+    `~/.reveille/autodeploy.env` (`REVEILLE_TOKEN=`, `REVEILLE_AGENT_ROLE=`,
+    mode 600); with none, the deploy still runs and logs that it announced
+    nothing.
+
+        journalctl -u reveille-autodeploy -n 50     # every trip, and why one waited
+
 ## macOS, Apple Silicon (UNVERIFIED — written from vendor docs; no Mac in this fleet, operator 2026-09-08)
 
 The broker is pure python + SQLite + two containers; nothing needs CUDA.
@@ -210,6 +235,11 @@ this section, never field-tested on a Mac:
   field-unverified until a Mac runs a body.
 
 ## Updating a running broker
+
+If step 10's timer is installed, THE BOX DOES THIS ITSELF within five minutes
+of the publish run finishing, and `journalctl -u reveille-autodeploy` is the
+record. What follows is the same deploy performed by hand — on a host without
+the timer, or after a hold.
 
 README carries the command (`git pull && make up`) and the refusal that matters.
 This is the rest: the hand steps, what respawns a dead launcher, and the two
