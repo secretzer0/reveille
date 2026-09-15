@@ -6,9 +6,9 @@
 #
 # THE PINS ARE A CLOSED, ENUMERATED LIST -- adding a fourth pin is a diff to
 # this file, not a discovery. The INPUTS are the docker/ files the agent
-# Dockerfile bakes; src/ rides into the image via `uv tool install` but moves
-# on the VERSION axis (branches ship unversioned, the merger numbers), so it
-# is deliberately not an input here -- the version bump is its pin.
+# Dockerfile bakes; src/ rides into the agent image via `uv tool install` but
+# moves on the VERSION axis, so it is not an AGENT input. It is a SERVER
+# input, and the version bump is its pin -- checked below, on the branch.
 #
 # Usage: image-pin-check <base-ref> <head-ref>   (exit 0 ok, 1 red, 2 usage)
 set -euo pipefail
@@ -37,6 +37,36 @@ if changed docker/tts.upstream; then
     exit 1
   fi
   echo "image-pin-check: tts.upstream changed and TTS_IMAGE moved to $(tts_at "$head")"
+fi
+
+# THE SERVER IMAGE, same rule, and its pin is the VERSION: src/, pyproject.toml
+# and uv.lock ride into reveille-server, whose tag IS the package version.
+#
+# This used to be checked on main and nowhere else, deliberately -- branches
+# shipped unversioned and the merger numbered at merge, which bought
+# collision-avoidance between concurrent PRs. The price was a guaranteed red
+# main after every src/ merge, because publish-images must refuse a tag that
+# is already written against a tree that no longer matches it. Paid twice in a
+# row (#274, #275) before the rule was moved here. Two PRs racing for one
+# number is an ordinary merge conflict in pyproject.toml: loud, local, cheap --
+# and the number now moves in the same commit as the CHANGES entry that must
+# equal it, which is where the writing was happening anyway.
+SERVER_INPUTS=(docker/Dockerfile.server src pyproject.toml uv.lock)
+if changed "${SERVER_INPUTS[@]}"; then
+  ver_at() { git show "$1:pyproject.toml" 2>/dev/null | grep -m1 '^version' | cut -d'"' -f2; }
+  b_ver=$(ver_at "$base"); h_ver=$(ver_at "$head")
+  if [ -z "$h_ver" ]; then
+    echo "image-pin-check: cannot read the version at $head" >&2; exit 2
+  fi
+  if [ "$b_ver" = "$h_ver" ]; then
+    echo "image-pin-check: RED -- server image inputs changed but the version" >&2
+    echo "  did not move ($h_ver at both ends). A tag is written once, so main" >&2
+    echo "  would have to refuse a reveille-server:$h_ver that is no longer" >&2
+    echo "  what the registry holds under that name. Bump pyproject.toml, run" >&2
+    echo "  uv lock, and add the CHANGES_ENTRIES entry that must equal it." >&2
+    exit 1
+  fi
+  echo "image-pin-check: server inputs changed and the version moved to $h_ver"
 fi
 
 if ! changed "${INPUTS[@]}"; then
