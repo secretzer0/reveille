@@ -1955,7 +1955,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     assert len(mk) == 1
     tag = mk[0].split("?=")[1].strip()
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.39", (
+    assert tag == "reveille-agent:0.2.40", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.38 MAKES THE BOOT REPORT OBSERVE THE DAEMON instead of asserting it
     # (14716 item 4): the two sentences that claimed waked -- "running
@@ -2069,6 +2069,33 @@ def test_the_pinned_set_is_every_file_the_dockerfile_copies():
     assert copied - package == set(IMAGE_INPUTS) - {"docker/Dockerfile"}, (
         "the Dockerfile copies something the fingerprint does not cover "
         "(or vice versa) -- decide whether it is an image input and say so here")
+
+
+def test_the_publisher_measures_the_set_the_fingerprint_pins():
+    """The two halves of "what is this image made of" must be ONE answer.
+
+    They were two hand-kept arrays and they drifted the way hand-kept lists
+    always drift -- quietly, and toward the smaller. scripts/publish-images
+    listed five docker/ files; this fingerprint listed seven, because the
+    Dockerfile COPYs docker/busdeaf-probe and src/reveille/agent-stop-hook
+    too. So #275 changed the stop hook's baked verdict text, the publisher
+    said "no agent inputs moved -- skipping", and reveille-agent:0.2.39 went
+    on naming a tree it no longer matched: ruling 8433, arrived at through
+    the back door of a list nobody re-read.
+
+    image-pin-check now READS the publisher's list rather than keeping its
+    own, so this gate is the last seam: the publisher's answer against the
+    one test_the_pinned_set_is_every_file_the_dockerfile_copies holds against
+    the Dockerfile itself."""
+    root = pathlib.Path(rl.__file__).parent.parent
+    out = subprocess.run(
+        ["bash", str(root / "scripts" / "publish-images"), "inputs-for", "agent"],
+        capture_output=True, text=True, check=True).stdout.split()
+
+    assert set(out) == set(IMAGE_INPUTS), (
+        "publish-images and the fingerprint disagree about the agent image's "
+        f"inputs: only the publisher has {sorted(set(out) - set(IMAGE_INPUTS))}, "
+        f"only the fingerprint has {sorted(set(IMAGE_INPUTS) - set(out))}")
 
 
 def test_the_wheel_scrolls_the_view_not_the_prompt_history():
