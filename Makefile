@@ -3,10 +3,19 @@ PREFIX ?= $(HOME)/.local/bin
 LOG  := $(REPO)/reveille.log
 PID  := $(REPO)/reveille.pid
 
+# THE HOST PULLS, IT DOES NOT BUILD (10877's deferred consequence slice, ruled
+# by the operator 2026-09-15). Every image this deployment runs is the one CI
+# built and pushed; a tag here names a REGISTRY coordinate, not something a
+# host might have lying around. Before this, ghcr.io appeared in publish.yml
+# and nowhere else on the consuming side -- CI published and the host never
+# looked, so whatever ran there had been built locally and answered to the
+# same name as the artifact nobody compared it to.
+REGISTRY ?= ghcr.io/secretzer0
+
 # Tag-per-image-change (architect ruling, msg 8433): any Dockerfile change bumps
 # this tag in the same commit -- a fixed tag over drifting content makes
 # launcher.db image records ambiguous.
-AGENT_IMAGE ?= reveille-agent:0.2.40
+AGENT_IMAGE ?= $(REGISTRY)/reveille-agent:0.2.40
 
 # uv resolved the way the launcher's _uv_bin resolves it (ruled 14605): make's
 # /bin/sh is not a login shell, so a detached deploy has no ~/.local/bin on
@@ -128,7 +137,7 @@ unregister:
 # hand deploy cannot be trusted to remember. The launcher is NOT here -- it stays a
 # host process (pinned clone + Stop hook); agent containers are launcher-created and
 # join the same network.
-SERVER_IMAGE ?= reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+SERVER_IMAGE ?= $(REGISTRY)/reveille-server:$(shell grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
 # DES-009 section 4.1: devnen/Chatterbox-TTS-Server built from THEIR
 # Dockerfile.cu128 at the SHA docker/tts.upstream pins -- their resolution, our
 # provenance. Pinned to OUR FORK (secretzer0/Chatterbox-TTS-Server) while the
@@ -252,7 +261,18 @@ tts-image:
 up:
 	@bash scripts/deploy-preflight "$(SERVER_DATA)" "$(BROKER_NAME)" "$(PROXY_NAME)" "$(PROXY_SITE)"
 	@bash scripts/agent-image-check
-	@docker image inspect $(SERVER_IMAGE) >/dev/null 2>&1 || $(MAKE) server-image
+	@# PULL, NEVER BUILD -- and NEVER fall back to building. A fallback that
+	@# changes the target is worse than a failure: building here would put a
+	@# locally-made image under the name of a published one, which is exactly
+	@# the drift ruling 8433 exists to prevent, and the deploy would report
+	@# success for an artifact CI never saw. An absent tag means the publish
+	@# has not finished or the version was never released -- both are STOP.
+	@docker pull $(SERVER_IMAGE) || { \
+	  echo "REFUSING to deploy: cannot pull $(SERVER_IMAGE)"; \
+	  echo "  The host runs what CI published; it does not build. Check that"; \
+	  echo "  the publish run for this version finished, and that this host is"; \
+	  echo "  logged in to $(REGISTRY) if the package is private."; \
+	  exit 1; }
 	@docker network create $(SERVER_NETWORK) 2>/dev/null || true
 	$(COMPOSE) up -d --wait
 	@# REACHABLE BY NAME, from the network the agents are on -- not just the

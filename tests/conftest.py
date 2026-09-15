@@ -176,3 +176,23 @@ def home_is_not_the_developers(tmp_path_factory, monkeypatch):
     whoever ran it. One fixture, autouse, rather than a line every test has to
     remember."""
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
+def makefile_image(root, var="AGENT_IMAGE"):
+    """The Makefile's value for an image variable, as a tag that can be compared
+    against the one reveille_launch.py names.
+
+    The host-pulls cutover put $(REGISTRY) in front of every image tag, so the
+    raw `?=` line stopped being the tag itself and three gates started comparing
+    a make expression against a resolved string. Only REGISTRY is resolved here:
+    any other reference arrives as the literal `$(VAR)` and fails the
+    comparison, which is how an unexpanded reference should fail.
+    """
+    lines = (root / "Makefile").read_text().splitlines()
+
+    def declared(name):
+        hit = [ln for ln in lines if ln.startswith(f"{name} ?=")]
+        assert len(hit) == 1, f"{name} is declared zero or several times"
+        return hit[0].split("?=")[1].strip()
+
+    return declared(var).replace("$(REGISTRY)", declared("REGISTRY"))

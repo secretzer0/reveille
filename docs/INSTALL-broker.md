@@ -11,7 +11,7 @@ Live deployment this document was read from (2026-09-08,
 
 | piece | how it runs | where |
 |---|---|---|
-| broker | compose service `reveille-server`, `restart: unless-stopped` | `docker/compose.yml`, image `reveille-server:0.2.x` |
+| broker | compose service `reveille-server`, `restart: unless-stopped` | `docker/compose.yml`, image `ghcr.io/secretzer0/reveille-server:0.2.x` |
 | proxy | compose service `reveille-proxy` (caddy:2-alpine) | same compose |
 | launcher | systemd `reveille-launcher.service`, `Restart=always` | pinned clone `~/.reveille/launcher-src` |
 | agent bodies | launcher-created containers, `--restart no` | only the OWNER starts a body |
@@ -53,15 +53,13 @@ manage: uv brings the interpreter the repo pins.
    Unset a worker URL and that feature is simply off — voices off beats a
    transcript in flight.
 
-4. **The images.** Pull what CI published (a tag names one build, 14518):
-
-       docker pull ghcr.io/secretzer0/reveille-server:0.2.<n>   # match pyproject version on your checkout
-       docker tag  ghcr.io/secretzer0/reveille-server:0.2.<n> reveille-server:0.2.<n>
-       docker pull ghcr.io/secretzer0/reveille-agent:0.2.<m>    # the tag reveille_launch.py DEFAULT_IMAGE names
-       docker tag  ghcr.io/secretzer0/reveille-agent:0.2.<m> reveille-agent:0.2.<m>
-
-   `make up` REFUSES to deploy if the agent image its tree provisions is
-   absent — that refusal is a guard, not a failure.
+4. **The images.** Nothing to pull by hand. Every tag this deployment runs
+   is a registry coordinate (`ghcr.io/secretzer0/...`), so `make up` pulls
+   what CI published and REFUSES rather than falling back to a build — a
+   host that builds its own runs something CI never saw, under the name of
+   something it did. The same refusal covers the agent image the tree
+   provisions: a guard, not a failure. Both packages are public; a private
+   one needs `docker login ghcr.io -u <user>` on this host, once.
 
 5. **Deploy** — `make up` is THE deploy path (network, broker, proxy, the
    preflights a hand deploy forgets, the launcher pin, the idle roll):
@@ -103,7 +101,7 @@ manage: uv brings the interpreter the repo pins.
        curl -s http://localhost:8765/version        # the version + every feature it found
        curl -s http://127.0.0.1:8766/health          # {"ok":true,"version":...,"commit":...}
        docker run --rm --network reveille --entrypoint /app/.venv/bin/python \
-         reveille-server:0.2.<n> -c "import urllib.request as u; print(u.urlopen('http://reveille-server:8765/version').read()[:40])"
+         ghcr.io/secretzer0/reveille-server:0.2.<n> -c "import urllib.request as u; print(u.urlopen('http://reveille-server:8765/version').read()[:40])"
        # reachable BY NAME from the agents' network -- the probe make up itself runs
 
 8. **Sign-in** — the part a brand-new install meets first (ruled 14953;
@@ -160,6 +158,31 @@ manage: uv brings the interpreter the repo pins.
    itself current (waked converges to the broker, in-venv, never
    unlink-first).
 
+10. **Auto-deploy** (optional, and the only step here that needs root).
+    `scripts/autodeploy` polls for a main whose image CI has published and
+    runs `make up` itself — "MERGED DOES NOT MEAN RUNNING" was measured true
+    on 2026-09-15, broker on 0.2.249 while main had published 0.2.250.
+    The units are FILES in the repo rather than something a script writes, so
+    what gains privilege on this host is reviewable in the diff that added it;
+    edit the paths inside them if this box is not reveille-server:
+
+        sudo cp systemd/reveille-autodeploy.service systemd/reveille-autodeploy.timer \
+                /etc/systemd/system/
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now reveille-autodeploy.timer
+        systemctl list-timers reveille-autodeploy.timer
+
+    It deploys only what the registry already holds, fast-forwards the
+    checkout or refuses, and confirms `/version` actually moved before
+    calling the trip good. A FAILED DEPLOY LATCHES: `~/.reveille/autodeploy.hold`
+    stops every later tick and names what broke — `rm` it to resume. To
+    announce each trip to the room, put a bound agent credential in
+    `~/.reveille/autodeploy.env` (`REVEILLE_TOKEN=`, `REVEILLE_AGENT_ROLE=`,
+    mode 600); with none, the deploy still runs and logs that it announced
+    nothing.
+
+        journalctl -u reveille-autodeploy -n 50     # every trip, and why one waited
+
 ## macOS, Apple Silicon (UNVERIFIED — written from vendor docs; no Mac in this fleet, operator 2026-09-08)
 
 The broker is pure python + SQLite + two containers; nothing needs CUDA.
@@ -212,6 +235,11 @@ this section, never field-tested on a Mac:
   field-unverified until a Mac runs a body.
 
 ## Updating a running broker
+
+If step 10's timer is installed, THE BOX DOES THIS ITSELF within five minutes
+of the publish run finishing, and `journalctl -u reveille-autodeploy` is the
+record. What follows is the same deploy performed by hand — on a host without
+the timer, or after a hold.
 
 README carries the command (`git pull && make up`) and the refusal that matters.
 This is the rest: the hand steps, what respawns a dead launcher, and the two

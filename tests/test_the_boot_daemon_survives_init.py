@@ -23,15 +23,13 @@ import uuid
 
 import pytest
 
+from conftest import makefile_image  # noqa: E402
+
 
 def test_waked_survives_init_in_the_real_image():
     if shutil.which("docker") is None:
         pytest.skip("docker not on PATH -- this gate boots the real image")
-    root = pathlib.Path(__file__).resolve().parent.parent
-    mk = [ln for ln in (root / "Makefile").read_text().splitlines()
-          if ln.startswith("AGENT_IMAGE ?=")]
-    assert len(mk) == 1
-    tag = mk[0].split("?=")[1].strip()
+    tag = makefile_image(pathlib.Path(__file__).resolve().parent.parent)
     if subprocess.run(["docker", "image", "inspect", tag],
                       capture_output=True).returncode != 0:
         pytest.skip(f"{tag} not built on this host")
