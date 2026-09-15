@@ -7,11 +7,12 @@
 # THE SKIP MUST NOT LIE (architect BLOCKING 1, msg 10922): "tag already
 # exists" is success only when the image's inputs did not move. Inputs moved
 # and the tag exists = ruling 8433 one layer out -- two different mains, one
-# tag -- and the pipeline must FAIL LOUDLY, not report green. The agent image
-# is protected on PRs by image-pin-check; the server image's pin is the
-# VERSION, which branches deliberately do not bump (the merger numbers at
-# merge), so push-to-main is the first place the number exists and therefore
-# the only honest place to enforce it.
+# tag -- and the pipeline must FAIL LOUDLY, not report green. Both images are
+# protected on PRs by image-pin-check: the agent by its tag trio, the server
+# by the VERSION, which the BRANCH carries -- it used to move only at merge,
+# which made main's refusal the first place the number existed and cost a red
+# main after every src/ merge. This refusal is now the BACKSTOP for anything
+# reaching main without that gate, and stays where the rule is written down.
 #
 # The no-identity gate is 10877 check 4 made executable: the registry is
 # PUBLIC, so a token in the image config is a published credential -- fail on
