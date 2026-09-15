@@ -18,6 +18,8 @@ import types
 
 import pytest
 
+from conftest import makefile_image  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location(
     "reveille_launch",
     pathlib.Path(__file__).resolve().parent.parent / "scripts" / "reveille_launch.py")
@@ -1611,12 +1613,9 @@ def test_the_makefile_builds_the_image_provisioning_actually_runs():
     whether the tag exists at deploy time. This one is the half a unit test can
     see: that the two files name the SAME tag.
     """
-    root = pathlib.Path(rl.__file__).parent.parent
-    mk = [ln for ln in (root / "Makefile").read_text().splitlines()
-          if ln.startswith("AGENT_IMAGE ?=")]
-    assert len(mk) == 1, "AGENT_IMAGE is declared zero or several times"
-    assert mk[0].split("?=")[1].strip() == rl.DEFAULT_IMAGE, (
-        f"the Makefile builds {mk[0].split('?=')[1].strip()} but provisioning "
+    tag = makefile_image(pathlib.Path(rl.__file__).parent.parent)
+    assert tag == rl.DEFAULT_IMAGE, (
+        f"the Makefile builds {tag} but provisioning "
         f"runs {rl.DEFAULT_IMAGE} -- one of them was bumped alone")
 
 
@@ -1639,48 +1638,62 @@ def test_agent_image_check_refuses_a_tag_that_was_never_built():
     if shutil.which("docker") is None:
         pytest.skip("docker not on PATH -- this gate asks docker")
 
-    absent = subprocess.run(["bash", str(script), "reveille-agent:0.0.0-never-built"],
-                            capture_output=True, text=True)
+    # THE NEGATIVE PROBE NAMES OUR REGISTRY, because that is where the gate's
+    # question lives now. An unqualified `reveille-agent:...` resolves to Docker
+    # Hub, whose answer for a repo nobody owns is `denied: requested access to
+    # the resource is denied` -- unknown, not absent (measured), and the script
+    # is right to call that unknown. ghcr answers a missing tag on a package it
+    # serves with `manifest unknown`: the real negative this gate exists for.
+    absent = subprocess.run(
+        ["bash", str(script), "ghcr.io/secretzer0/reveille-agent:0.0.0-never-built"],
+        capture_output=True, text=True)
     if absent.returncode == 2:
-        pytest.skip("docker unreachable from here -- the store cannot be read")
+        pytest.skip(f"neither store could be read from here: {absent.stderr[:160]}")
     assert absent.returncode == 1, "a missing agent image must stop the deploy"
     assert "REFUSING to deploy" in absent.stderr
     assert "CANNOT VERIFY" not in absent.stderr, (
         "a missing tag must not be reported as an unreadable store")
 
-    # The positive half. Docker is reachable -- proven one line up -- so exit 1
-    # here means the LOCAL store lacks the tag. On a deploy host that is the
-    # defect; on a dev box it is Tuesday, and a test whose result depends on
-    # which machine ran it asserts nothing (13760; this red hit a dev laptop
-    # the night #255 moved the tag, ruled at 14843: fix the instrument). The
-    # REGISTRY is the authority that exists on every machine -- CI publishes
-    # every image bump -- so absent locally falls back to a manifest probe
-    # there: absent from BOTH is bumped-and-never-built, the thing this gate
-    # is for; an unreachable registry is unknown, not absent (8744's own
-    # vocabulary). CI still skips: it proves images build, never what a host
-    # holds (10877.8), and the registry probe would race the publish of the
-    # very PR under test.
+    # The positive half, now answered entirely inside the script: a local hit or
+    # a published manifest are both yes, and the host pulls either way. CI still
+    # skips -- it proves images build, never what a host holds (10877.8), and
+    # the registry probe would race the publish of the very PR under test.
     if os.environ.get("CI"):
         pytest.skip("CI runner is not a deploy host; DEFAULT_IMAGE is "
                     "legitimately unbuilt here")
     present = subprocess.run(["bash", str(script), rl.DEFAULT_IMAGE],
                              capture_output=True, text=True)
-    if present.returncode == 1:
-        # ghcr.io/secretzer0 is where publish-images pushes (its argv in
-        # .github/workflows and the deploy trips both name it).
-        reg = subprocess.run(["docker", "manifest", "inspect",
-                              f"ghcr.io/secretzer0/{rl.DEFAULT_IMAGE}"],
-                             capture_output=True, text=True)
-        if reg.returncode == 0:
-            return                       # published: the tag names a real build
-        if "manifest unknown" in reg.stderr or "not found" in reg.stderr:
-            raise AssertionError(
-                f"{rl.DEFAULT_IMAGE} exists neither in this host's store nor "
-                f"in the registry -- DEFAULT_IMAGE was bumped and never built")
-        pytest.skip(f"local store lacks {rl.DEFAULT_IMAGE} and the registry "
-                    f"is unreachable -- unknown, not absent: {reg.stderr[:120]}")
+    if present.returncode == 2:
+        pytest.skip(f"registry unreadable from here: {present.stderr[:160]}")
     assert present.returncode == 0, present.stderr
-    assert "present" in present.stdout
+    assert rl.DEFAULT_IMAGE in present.stdout
+
+
+def test_agent_image_check_says_unknown_when_the_registry_does_not_answer():
+    """The half the host-pulls cutover added, and the half that would fail open.
+
+    Once the registry became the authority, every reason it might not answer --
+    no network, no login, a name that does not resolve -- arrived as the same
+    non-zero status as "that tag was never built". Reported as the second, a
+    deploy refuses over a DNS blip. Reserve exit 1 for the registry's own
+    `manifest unknown` and let everything else fall to exit 2, the vocabulary
+    8744 already gave the docker-socket case one level in.
+
+    `.invalid` cannot resolve anywhere, by RFC 2606: the unknown is real and
+    needs no fixture.
+    """
+    script = pathlib.Path(rl.__file__).parent.parent / "scripts" / "agent-image-check"
+    if shutil.which("docker") is None:
+        pytest.skip("docker not on PATH -- this gate asks docker")
+    out = subprocess.run(
+        ["bash", str(script), "no-such-registry.invalid/reveille-agent:0.2.0"],
+        capture_output=True, text=True)
+    if "CANNOT VERIFY the agent image: docker is not reachable" in out.stderr:
+        pytest.skip("docker unreachable from here -- the local store is asked first")
+    assert out.returncode == 2, (
+        f"a registry that never answered must not read as an absent tag: {out.stderr}")
+    assert "registry did not answer" in out.stderr
+    assert "REFUSING to deploy" not in out.stderr
 
 
 def test_agent_image_check_says_unknown_when_it_cannot_see_docker():
@@ -1949,13 +1962,9 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     options are the current instance: edit them, keep 0.2.11, and every existing
     container claims to be an image it is not.
     """
-    root = pathlib.Path(rl.__file__).parent.parent
-    mk = [ln for ln in (root / "Makefile").read_text().splitlines()
-          if ln.startswith("AGENT_IMAGE ?=")]
-    assert len(mk) == 1
-    tag = mk[0].split("?=")[1].strip()
+    tag = makefile_image(pathlib.Path(rl.__file__).parent.parent)
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "reveille-agent:0.2.40", (
+    assert tag == "ghcr.io/secretzer0/reveille-agent:0.2.40", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.38 MAKES THE BOOT REPORT OBSERVE THE DAEMON instead of asserting it
     # (14716 item 4): the two sentences that claimed waked -- "running

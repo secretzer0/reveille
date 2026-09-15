@@ -13,16 +13,21 @@
 # the control: the deploy asks docker, and docker either has the tag or the
 # deploy stops.
 #
-# Deliberately LOCAL-ONLY (image inspect, never pull): these images are built on
-# the host and pushed nowhere, so "docker can find it" and "it exists here" are
-# the same question.
+# ASKS THE REGISTRY, because that premise died. This said "LOCAL-ONLY (image
+# inspect, never pull): these images are built on the host and pushed nowhere,
+# so 'docker can find it' and 'it exists here' are the same question." CI has
+# published every image to ghcr since 10877, and as of the host-pulls cutover
+# the deployment RUNS the published one -- so the question that matters is
+# whether the registry holds the tag, not whether this box happens to. A local
+# hit still answers yes (the pull would be a no-op); a local miss is no longer
+# a refusal until the registry has also been asked.
 set -u
 
 src="$(dirname "$0")/.."
 image="${1:-}"
 if [ -z "$image" ]; then
-  image="$(grep -m1 '^DEFAULT_IMAGE' "$src/scripts/reveille_launch.py" \
-           | sed -n 's/.*"\(reveille-agent:[^"]*\)".*/\1/p')"
+  image="$(grep -m1 -A1 '^DEFAULT_IMAGE' "$src/scripts/reveille_launch.py" \
+           | sed -n 's|.*"\([^"]*reveille-agent:[^"]*\)".*|\1|p' | head -1)"
 fi
 
 if [ -z "$image" ]; then
@@ -51,9 +56,35 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 if docker image inspect "$image" >/dev/null 2>&1; then
-  echo "agent image: $image present"
+  echo "agent image: $image present locally"
   exit 0
 fi
+
+# Absent here is not absent: the host pulls, so the registry is the authority.
+#
+# ONE STATUS IS THE REAL NEGATIVE, everything else is unknown -- the same rule
+# one level out from the docker-info check above. `docker manifest inspect`
+# fails identically for "no such tag", "not logged in" and "cannot reach the
+# registry", and reporting the last two as the first turns a network blip into
+# a refused deploy. MEASURED, not assumed: a missing tag on ghcr answers
+# `manifest unknown`; an unauthenticated Docker Hub repo answers `denied:
+# requested access to the resource is denied`; an unresolvable host answers
+# `failed to configure transport`.
+if reg_err="$(docker manifest inspect "$image" 2>&1 >/dev/null)"; then
+  echo "agent image: $image published (will pull on provision)"
+  exit 0
+fi
+case "$reg_err" in
+  *"manifest unknown"*|*"not found"*) ;;          # the registry looked: absent
+  *)
+    echo "CANNOT VERIFY the agent image: the registry did not answer." >&2
+    echo "  wanted: $image" >&2
+    echo "  registry said: $reg_err" >&2
+    echo "Absent from this host's store is not absent -- the deploy pulls. This" >&2
+    echo "is not a claim that the tag is missing, only that nothing here could" >&2
+    echo "read the registry that would know." >&2
+    exit 2 ;;
+esac
 
 echo "REFUSING to deploy: the agent image this build provisions does not exist." >&2
 echo "  DEFAULT_IMAGE: $image" >&2

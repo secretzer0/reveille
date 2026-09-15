@@ -56,7 +56,7 @@ def destroy_argv(role):
 def server_image():
     for line in (REPO / "pyproject.toml").read_text().splitlines():
         if line.startswith("version"):
-            return f"reveille-server:{line.split(chr(34))[1]}"
+            return f"ghcr.io/secretzer0/reveille-server:{line.split(chr(34))[1]}"
     raise SystemExit("could not read version from pyproject.toml")
 
 
