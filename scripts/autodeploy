@@ -107,4 +107,11 @@ main() {
   say "deployed $version -- /version confirms"
 }
 
-main "$@"
+# AND THE CALL EXITS ON ITS OWN LINE, because the wrapper is only half of it.
+# After main RETURNS, bash reads the NEXT line at the live offset -- an offset
+# into the old file's length -- and a rewrite that GREW the file has bytes
+# sitting exactly there. They run. Measured on this change's own PR, whose diff
+# grows this file by 63 lines: a stub appending `exit 7` past the call made the
+# trip return 7 after printing its last line, with the wrapper in place.
+# `exit` is the last read bash ever does here.
+main "$@"; exit

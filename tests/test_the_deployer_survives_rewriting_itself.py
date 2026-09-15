@@ -1,17 +1,26 @@
 """The deployer updates the checkout it is running out of -- including itself.
 
 `git merge --ff-only` replaces scripts/autodeploy mid-trip, and bash reads a
-script as it executes, by byte offset into the open file. A shorter file under
-a live offset makes the interpreter resume inside whatever now occupies those
-bytes: a line that no longer exists, or half of one that does.
+script as it executes, by byte offset into the open file. The offset belongs to
+the file that was there when the read started, so after the rewrite it points
+into bytes that mean something else.
 
 FIELD EVIDENCE, not a hypothesis: the trip that took 77fabac printed two
 `ANNOUNCE SKIPPED` lines while the file it was running from contained no
-announce at all -- the commit it had just merged deleted them. Harmless that
-time only because the deletion sat behind the offset.
+announce at all -- 77fabac is the commit that deleted them.
 
-The fixture makes the rewrite a SHORTENING, which is the damaging direction,
-and asserts the trip still reaches its last line.
+BOTH DIRECTIONS, because they break differently and a fixture that manufactures
+one is green on half the defect (architect 18725, who measured the half this
+file used to miss):
+
+  SHORTER -- the offset lands past the new end. Execution stops. The trip
+  fast-forwards the checkout and never reaches `make up`: tree advanced, old
+  image still running, no hold file, nothing recording a half-done deploy.
+
+  LONGER -- the offset lands in bytes the new file has and the old one did not,
+  so after main returns bash reads a line that was never part of this trip and
+  RUNS it. The wrapper alone does not stop this; the `exit` on the call line
+  does, by making that the last read bash ever performs.
 """
 import os
 import pathlib
@@ -31,33 +40,32 @@ CURL = """#!/usr/bin/env bash
 echo "9.9.9 (some feature line)"
 """
 
-
-def _git(target):
-    """A git whose `merge` does what the real one does to this script: replaces
-    it with a SHORTER file, while that file is the one being executed."""
-    return f"""#!/usr/bin/env bash
+GIT = """#!/usr/bin/env bash
 case "$*" in
   "fetch --quiet origin main") exit 0 ;;
   "rev-parse origin/main")     echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
   "rev-parse HEAD")            echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
   "rev-parse --short HEAD")    echo bbbbbbb ;;
   "show origin/main:pyproject.toml") echo 'version = "9.9.9"' ;;
-  "merge --ff-only origin/main --quiet")
-      printf '#!/usr/bin/env bash\\necho REPLACED\\n' > "{target}" ;;
+  "merge --ff-only origin/main --quiet") cat "{replacement}" > "{target}" ;;
   *) exit 0 ;;
 esac
 """
 
 
-def test_a_trip_runs_the_script_it_started_as(tmp_path):
+def _trip(tmp_path, replacement_bytes):
+    """Run a real trip whose `git merge` rewrites the running script."""
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     run_me = repo / "scripts" / "autodeploy"
     shutil.copy(SCRIPT, run_me)
 
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(replacement_bytes)
+
     binv = tmp_path / "bin"
     binv.mkdir()
-    (binv / "git").write_text(_git(run_me))
+    (binv / "git").write_text(GIT.format(replacement=replacement, target=run_me))
     (binv / "docker").write_text(DOCKER)
     (binv / "curl").write_text(CURL)
     (binv / "make").write_text(f'#!/usr/bin/env bash\ntouch "{tmp_path}/MAKE-RAN"\n')
@@ -69,11 +77,29 @@ def test_a_trip_runs_the_script_it_started_as(tmp_path):
     env["REVEILLE_AUTODEPLOY_HOLD"] = str(tmp_path / "hold")
 
     out = subprocess.run(["bash", str(run_me)], capture_output=True, text=True, env=env)
+    assert run_me.read_bytes() == replacement_bytes, "the fixture never rewrote it"
+    return out
 
-    assert run_me.read_text().endswith("echo REPLACED\n"), "the fixture never rewrote it"
+
+def test_a_trip_survives_being_shortened_under_itself(tmp_path):
+    out = _trip(tmp_path, b"#!/usr/bin/env bash\necho REPLACED\n")
+
     assert (tmp_path / "MAKE-RAN").exists(), "the trip stopped before deploying"
     assert "deployed 9.9.9 -- /version confirms" in out.stdout, (
-        f"the trip did not reach its last line after being rewritten: "
-        f"rc={out.returncode} stdout={out.stdout!r} stderr={out.stderr!r}")
+        f"the trip did not reach its last line: rc={out.returncode} "
+        f"stdout={out.stdout!r} stderr={out.stderr!r}")
     assert out.returncode == 0, out.stderr
     assert not (tmp_path / "hold").exists()
+
+
+def test_a_trip_does_not_run_bytes_the_rewrite_added_past_it(tmp_path):
+    """The growing direction. `exit 7` is appended where bash's offset will be
+    sitting when main returns -- if anything past the call line is ever read,
+    this trip ends 7 instead of 0, having executed a line out of a commit it
+    was not running."""
+    out = _trip(tmp_path, SCRIPT.read_bytes() + b"\nexit 7\n")
+
+    assert "deployed 9.9.9 -- /version confirms" in out.stdout, out.stderr
+    assert out.returncode == 0, (
+        f"rc={out.returncode}: the trip read past its own call line and ran "
+        f"bytes the rewrite added")
