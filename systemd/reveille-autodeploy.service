@@ -17,8 +17,7 @@ WorkingDirectory=/home/vyzon/reveille-src
 # and this names the directory it resolves it from -- neither relies on
 # whoever's login shell installed the unit.
 Environment=PATH=/home/vyzon/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Optional, and the `-` means optional: REVEILLE_URL is not needed, only
-# REVEILLE_TOKEN + REVEILLE_AGENT_ROLE for the room announcement. Without the
-# file the deploy still runs and logs that it announced nothing.
-EnvironmentFile=-/home/vyzon/.reveille/autodeploy.env
+# NO EnvironmentFile AND NO CREDENTIAL. The deployer reads a public registry
+# and talks to docker; it holds nothing worth stealing, which is the property
+# that makes it safe to run unattended on the box serving the bus.
 ExecStart=/home/vyzon/reveille-src/scripts/autodeploy

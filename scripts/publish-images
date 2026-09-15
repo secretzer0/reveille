@@ -20,8 +20,15 @@
 # PATH) or whose VALUE is a long opaque blob (dots and padding allowed, so a
 # JWT or base64 does not slip the shape).
 #
+# A TAG IN HERE IS A NAME; $REG QUALIFIES IT. The workflow, not the
+# Makefile, says where a run publishes -- so the Makefile's AGENT_IMAGE,
+# which became a registry COORDINATE at the host-pulls cutover, has its
+# registry half taken back off. It reached main without one test noticing,
+# and published every image as ghcr.io/secretzer0/$(REGISTRY)/reveille-agent.
+#
 # Usage: publish-images <registry-prefix> [<base-sha>]
 #        publish-images inputs-changed <image> <base> <head>   (gate hook)
+#        publish-images tags <registry-prefix>                 (gate hook)
 set -euo pipefail
 
 inputs_for() {  # <agent|server|tts> -> path list on stdout
@@ -54,6 +61,8 @@ if [ "${1:-}" = "inputs-for" ]; then
   shift; inputs_for "$1"; exit $?
 fi
 
+if [ "${1:-}" = "tags" ]; then TAGS_ONLY=1; shift; else TAGS_ONLY=0; fi
+
 [ $# -ge 1 ] || { echo "usage: publish-images <registry-prefix> [<base-sha>]" >&2; exit 2; }
 REG="$1"
 BASE="${2:-}"
@@ -65,8 +74,29 @@ if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
 fi
 
 agent_tag=$(grep -m1 '^AGENT_IMAGE ?=' Makefile | cut -d= -f2- | tr -d ' ')
+agent_tag=${agent_tag#'$(REGISTRY)/'}
 tts_tag=$(grep -m1 '^TTS_IMAGE ?=' Makefile | cut -d= -f2- | tr -d ' ')
 server_tag="reveille-server:$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)"
+
+# A NAME THAT STILL CARRIES A REGISTRY IS ONE THIS RUN WAS NOT TOLD ABOUT.
+# Refusing beats publishing to a second place: a fallback that changes the
+# target is worse than a failure, and this is the shape the broken publish
+# took -- one prefix silently stacked on another.
+for t in "$agent_tag" "$server_tag" "$tts_tag"; do
+  case "$t" in
+    */*|*'$('*)
+      echo "publish: REFUSING -- '$t' is not a bare tag. In here a tag is a" >&2
+      echo "  NAME and \$REG ($REG) qualifies it; this one names a registry or" >&2
+      echo "  carries an unexpanded make variable." >&2
+      exit 1 ;;
+  esac
+done
+
+if [ "$TAGS_ONLY" = 1 ]; then
+  printf 'agent\t%s\nserver\t%s\ntts\t%s\n' \
+         "$REG/$agent_tag" "$REG/$server_tag" "$REG/$tts_tag"
+  exit 0
+fi
 
 scan_config() {  # <local-tag> -> 0 clean, 1 credential-shaped content
   # Two inspects, never one space-joined line: an env VALUE may contain a

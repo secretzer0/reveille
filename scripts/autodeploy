@@ -31,33 +31,17 @@ BROKER="${REVEILLE_AUTODEPLOY_BROKER:-http://127.0.0.1:8765}"
 REG="${REGISTRY:-ghcr.io/secretzer0}"
 HOLD="${REVEILLE_AUTODEPLOY_HOLD:-$HOME/.reveille/autodeploy.hold}"
 
+# EVERY LINE HERE IS THE RECORD, and journald is where it lands
+# (`journalctl -u reveille-autodeploy`). DES-010 s3.2 wanted the room told as
+# well; the operator dropped that (2026-09-15) rather than keep a bus
+# credential at rest on the deploy host to buy a chat message. Nothing about
+# a deploy is invisible: the journal has the trip, /version has the outcome.
 say() { printf '%s\n' "autodeploy: $*"; }
-
-# THE DEPLOY ANNOUNCES ITSELF TO THE ROOM (DES-010 s3.2): a deploy nobody can
-# see is the failure 10877.6 was written against, whoever performed it. The
-# credential is this box's own, read from the unit's EnvironmentFile; with none
-# set the deploy still happens and says so, because an unannounced deploy is
-# better than a server that never catches up to main.
-announce() {
-  if [ -z "${REVEILLE_TOKEN:-}" ] || [ -z "${REVEILLE_AGENT_ROLE:-}" ]; then
-    say "ANNOUNCE SKIPPED (no REVEILLE_TOKEN/REVEILLE_AGENT_ROLE): $1"
-    return 0
-  fi
-  local payload
-  payload="$(python3 -c 'import json,sys; print(json.dumps({"to":"*","body":sys.argv[1]}))' "$1")"
-  curl -fsS --max-time 10 -X POST "$BROKER/send" \
-    -H "Authorization: Bearer $REVEILLE_TOKEN" \
-    -H "X-Agent: $REVEILLE_AGENT_ROLE" \
-    -H "Content-Type: application/json" \
-    -d "$payload" >/dev/null 2>&1 \
-    || say "ANNOUNCE FAILED (the deploy itself is unaffected): $1"
-}
 
 hold() {
   printf '%s -- %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$HOLD"
   say "HELD: $1"
   say "nothing will deploy until this is cleared: rm $HOLD"
-  announce "DEPLOY HELD on $(hostname): $1 -- cleared by: rm $HOLD"
   exit 1
 }
 
@@ -97,7 +81,6 @@ git merge --ff-only origin/main --quiet \
   || hold "the checkout will not fast-forward to origin/main (local commits?)"
 
 say "deploying $version ($(git rev-parse --short HEAD)); running: ${running:-none}"
-announce "DEPLOY START $version on $(hostname) -- from ${running:-none}"
 
 make up || hold "make up failed for $version -- whatever it left is what is running"
 
@@ -108,4 +91,3 @@ live="$(curl -fsS --max-time 10 "$BROKER/version" 2>/dev/null | cut -d' ' -f1)"
   || hold "make up returned 0 but $BROKER/version says '${live:-unreadable}', wanted $version"
 
 say "deployed $version -- /version confirms"
-announce "DEPLOY OK $version on $(hostname) -- /version confirms"

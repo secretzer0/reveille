@@ -53,12 +53,21 @@ refused to build this until the contract it contradicted was overruled by the
 person who owns it). The marker is gone; the trigger is main's version having
 a published image in ghcr, which `scripts/autodeploy` asks the registry.
 
-**What did NOT change, and was not asked to:** s2's trust arrow (no self-hosted
-runner, no inbound path, no GitHub credential on the VM) and this section's
-SECOND half -- the deploy announces itself to the room, before and after. A
-deploy nobody can see is the failure 10877.6 was written against, whoever or
-whatever performed it. The pipeline still ends at the push; what changed is who
-performs the mechanics, and now also who decides.
+**What did NOT change:** s2's trust arrow -- no self-hosted runner, no inbound
+path, no GitHub credential on the VM. The pipeline still ends at the push; what
+changed is who performs the mechanics, and now also who decides.
+
+**AND THE SECOND HALF WENT TOO, deliberately (operator, 2026-09-15).** This
+section also ruled that the deploy announces itself to the room. Built that
+way first, it meant a bus credential at rest on the host serving the bus, in
+exchange for a chat message -- the operator refused the trade, and was right:
+a deployer that holds nothing worth stealing is the property that makes it
+safe to run unattended there. The concern the rule existed for is met without
+one. A deploy is not invisible: `journalctl -u reveille-autodeploy` carries
+every trip and every reason one waited, and `/version` carries the outcome.
+If a room announcement is wanted later, the broker announcing its own boot
+version is the place for it -- the thing that restarted already knows it
+restarted, and needs no new secret anywhere.
 
 The original text follows.
 
