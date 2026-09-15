@@ -344,8 +344,25 @@ down:
 # A container is just another client: it sets the same two env vars and runs the same
 # `claude mcp add` as `make register`. Nothing here may become required to reach the bus,
 # because standalone agents on a laptop must keep working exactly as they do today.
+# 14518'S UNBUILT HALF, now built. A bare version tag is the PUBLISHED name --
+# CI writes it once, ever -- and a local build under it makes two images answer
+# to one name, which a provisioning host cannot tell apart. Only devops
+# noticing stopped exactly that on the provisioning host once already. The rule
+# is a SHAPE, not a list: bare digits are the publisher's; every other build
+# carries its own `-<purpose>.<n>`, so a hand-typed `AGENT_IMAGE=...:0.2.41` is
+# refused too, and nothing here needs a second copy of the version to compare
+# against. CI is exempt because CI IS the writer.
 agent-image:
-	docker build -t $(AGENT_IMAGE) -f docker/Dockerfile .
+	@tag="$(AGENT_IMAGE)"; \
+	if [ -z "$$CI" ] && printf '%s' "$${tag##*:}" | grep -Eq '^[0-9]+(\.[0-9]+)*$$'; then \
+	  echo "REFUSING to build $$tag outside CI: that tag is PUBLISHED." >&2; \
+	  echo "  A tag names ONE build (14518). The bare version belongs to the" >&2; \
+	  echo "  publisher; a build here would answer to the same name as the" >&2; \
+	  echo "  artifact nobody can compare it to. Name your own:" >&2; \
+	  echo "    make agent-image AGENT_IMAGE=$${tag}-gate.1" >&2; \
+	  exit 1; \
+	fi; \
+	docker build -t "$$tag" -f docker/Dockerfile .
 
 # One agent, one container, one role. State and workspace are SEPARATE mounts on purpose:
 #   reveille-<role>  (volume) -- what the agent KNOWS: its claude login + memory. Survives.
