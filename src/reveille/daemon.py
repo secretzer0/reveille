@@ -191,8 +191,12 @@ USE:
    liveness, never by memory) with the Monitor tool:
    command="wake-watch --follow $REVEILLE_AGENT_ROLE", persistent=true. --follow
    never exits and prints each new ring ONCE, so there is no re-arm at all. On
-   each line: inbox(), ack(), act only if owed, DELETE the spool files you
-   processed (those specific files, never a glob). Where Monitor is not
+   each line: inbox(), ack(), act only if owed, DELETE the spool file you
+   processed -- the ring's own `spool` key is its absolute path, so `rm` that
+   and never a glob. AN ENTRY YOU LEAVE BEHIND IS REPLAYED: --follow remembers
+   what it printed in MEMORY, so the next watcher process starts empty and
+   re-prints whatever is still in new/ -- under a harness that re-arms on a
+   timeout that is an acked ring waking you forever. Where Monitor is not
    available, fall back to the one-shot: Bash run_in_background=true,
    `wake-watch $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended --
    whose task completion IS one ring, re-armed after each.
@@ -316,8 +320,11 @@ entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Ea
 becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
 armed. ONCE PER SESSION, with the Monitor tool: command="wake-watch --follow
 $REVEILLE_AGENT_ROLE", persistent=true. Every line it prints is one bus ring: inbox(),
-ack() everything, act only if owed, DELETE the spool files I processed (rm those specific
-files, never a glob). No re-arm -- it does not exit. Where Monitor is not available I fall
+ack() everything, act only if owed, DELETE the spool file I processed -- the ring's
+`spool` key is its absolute path; rm that, never a glob. An entry I leave behind is
+re-printed by the NEXT watcher process (--follow's memory of what it printed dies with
+it), so a missed drain becomes an acked ring replayed on every re-arm. No re-arm -- it
+does not exit. Where Monitor is not available I fall
 back to Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`, whose task
 completion is one ring and which I re-arm after every one.
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,

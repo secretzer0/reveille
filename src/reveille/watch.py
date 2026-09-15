@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """wake-watch: exit-to-notify, made harmless (DES-003 2.2).
 
-Blocks until the agent's spool holds a ring, prints the oldest entry's JSON,
-exits 0. That is the whole program: it never connects to the broker, holds no
-secret at all (I5 -- the spool path is its only input), and never deletes a
-spool file (I4 -- the session that processed a ring deletes it).
+Blocks until the agent's spool holds a ring, prints the oldest entry's JSON
+with a `spool` key naming the file it came from, exits 0. That is the whole
+program: it never connects to the broker, holds no secret at all (I5 -- the
+spool path is its only input), and never deletes a spool file (I4 -- the
+session that processed a ring deletes it, and `spool` is how it knows which).
 
 A pre-existing entry means immediate exit: a ring that arrived while unarmed
 is delivered at the next arm, never lost (I3). N concurrent watchers all see
@@ -23,6 +24,7 @@ is silent deafness with every control green (measured on the architect,
 """
 import argparse
 import ctypes
+import json
 import ctypes.util
 import os
 import select
@@ -102,6 +104,33 @@ def _arm(path):
     return (lambda: time.sleep(2)), (lambda: None)   # polling fallback
 
 
+def _emit(path, text):
+    """Print one ring, naming the spool file it came from.
+
+    I4 makes the SESSION the only thing that deletes a spool entry, and the
+    doctrine tells it to remove the specific files it handled rather than a
+    glob -- but the ring carried no way to know which file that was, so a body
+    had to list the directory and match by eye. Every entry it fails to drain
+    is re-read by the NEXT watcher process: `--follow` keeps `seen` in memory,
+    so an arm that is not the first one starts empty and re-prints whatever is
+    still there. A harness that re-arms on a timeout (Claude Code's Monitor
+    tool, 1800 s) therefore replays an acked ring on every cycle, forever.
+    Naming the file is what makes I4 executable.
+
+    Additive and non-fatal: `spool` joins the frame the daemon wrote, and text
+    that is not a JSON object is printed exactly as it arrived -- a ring that
+    cannot be annotated is still a ring, and losing it would be the worse bug.
+    """
+    try:
+        frame = json.loads(text)
+    except (TypeError, ValueError):
+        frame = None
+    if isinstance(frame, dict):
+        frame["spool"] = path
+        text = json.dumps(frame)
+    print(text, flush=True)
+
+
 def _follow(agent, newdir):
     """Print every ring once, forever. Never returns.
 
@@ -123,7 +152,7 @@ def _follow(agent, newdir):
                 except FileNotFoundError:
                     continue    # another session drained it first (I2)
                 seen.add(n)
-                print(text, flush=True)
+                _emit(p, text)
             seen &= {os.path.basename(p) for p in spool.entries(agent)}
             wait()
     finally:
@@ -146,7 +175,7 @@ def main():
 
     got = spool.oldest(a.agent)
     if got:
-        print(got[1], flush=True)   # parked ring: deliver at arm, never lost
+        _emit(*got)   # parked ring: deliver at arm, never lost
         return 0
 
     wait, close = _arm(newdir)
@@ -156,7 +185,7 @@ def main():
             # landed in the gap is caught here, not missed forever.
             got = spool.oldest(a.agent)
             if got:
-                print(got[1], flush=True)
+                _emit(*got)
                 return 0
             wait()
     finally:
