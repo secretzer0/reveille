@@ -40,3 +40,24 @@ jobs:
       # base...head over the whole PR range: a stacked slice whose parent
       # moved the pins is green; an input change with no pin move is red.
       - run: scripts/image-pin-check "origin/${{ github.base_ref }}" HEAD
+      # THE BOOT GATE, RUN WHERE IT CAN CATCH SOMETHING (ruling 13094).
+      # test_the_boot_daemon_survives_init boots the real image and asks the
+      # one question units cannot: is the daemon the entrypoint spawned still
+      # alive after `init` ran? Every unit passed while every 0.2.24/0.2.25
+      # boot murdered its own daemon, which is why it exists. But it skips
+      # unless the pinned tag is BUILT on the host, and this job never built
+      # it -- so it had never run here, once, while reporting a tidy "1
+      # skipped" that trains everyone to read skips as normal.
+      # It runs on the PRs that can reproduce 13094 and no others: the image's
+      # shape only moves when its inputs do, which the publisher already
+      # knows. ~95% of PRs pay nothing; the rest pay one build to find out
+      # whether the container still stands up.
+      - name: boot gate, when the agent image's inputs moved
+        run: |
+          if scripts/publish-images inputs-changed agent \
+               "$(git merge-base origin/${{ github.base_ref }} HEAD)" HEAD; then
+            make agent-image
+            uv run pytest tests/test_the_boot_daemon_survives_init.py -q
+          else
+            echo "agent image inputs unchanged -- boot gate not needed"
+          fi
