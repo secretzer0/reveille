@@ -45,49 +45,73 @@ hold() {
   exit 1
 }
 
-if [ -e "$HOLD" ]; then
-  say "HELD since $(cat "$HOLD")"
-  say "clear with: rm $HOLD"
-  exit 0
-fi
 
-cd "$REPO" || { say "no repo at $REPO"; exit 1; }
+# BASH READS A SCRIPT AS IT RUNS, AND THIS ONE REWRITES ITSELF. The
+# fast-forward below replaces scripts/autodeploy -- this file -- while the
+# interpreter still holds a byte offset into it, so the next read comes from a
+# file whose contents have moved under it: the tail of a trip can execute lines
+# that no longer exist, or half of one that now does. Observed on the 77fabac
+# trip, which printed two `ANNOUNCE SKIPPED` lines out of a file that by then
+# contained no announce at all -- harmless only because the removal happened to
+# be behind the offset.
+#
+# Wrapping the body in a function is the whole fix: bash must read to the
+# closing brace before it can call main, so a trip runs the script it STARTED
+# as, from end to end, and picks up the new one on the next tick.
+main() {
+  if [ -e "$HOLD" ]; then
+    say "HELD since $(cat "$HOLD")"
+    say "clear with: rm $HOLD"
+    exit 0
+  fi
 
-# A FETCH THAT FAILED IS NOT A MAIN THAT DID NOT MOVE. Nothing is touched and
-# nothing is held: the next tick asks again, which is what a poll is for.
-git fetch --quiet origin main || { say "fetch failed -- nothing touched"; exit 0; }
+  cd "$REPO" || { say "no repo at $REPO"; exit 1; }
 
-main_sha="$(git rev-parse origin/main)"
-version="$(git show origin/main:pyproject.toml | grep -m1 '^version' | cut -d'"' -f2)"
-[ -n "$version" ] || { say "no version in origin/main:pyproject.toml"; exit 0; }
-image="$REG/reveille-server:$version"
-running="$(docker inspect --format '{{.Config.Image}}' reveille-server 2>/dev/null)"
+  # A FETCH THAT FAILED IS NOT A MAIN THAT DID NOT MOVE. Nothing is touched and
+  # nothing is held: the next tick asks again, which is what a poll is for.
+  git fetch --quiet origin main || { say "fetch failed -- nothing touched"; exit 0; }
 
-# NOTHING TO DO IS SILENT. This runs every five minutes forever; a line here is
-# 288 a day saying the same thing, and a log nobody reads is not a record.
-if [ "$(git rev-parse HEAD)" = "$main_sha" ] && [ "$running" = "$image" ]; then
-  exit 0
-fi
+  main_sha="$(git rev-parse origin/main)"
+  version="$(git show origin/main:pyproject.toml | grep -m1 '^version' | cut -d'"' -f2)"
+  [ -n "$version" ] || { say "no version in origin/main:pyproject.toml"; exit 0; }
+  image="$REG/reveille-server:$version"
+  running="$(docker inspect --format '{{.Config.Image}}' reveille-server 2>/dev/null)"
 
-# DID ITS ASSETS BUILD. Absent is "not yet" and unreadable is "not now" -- both
-# wait, because neither is a reason to deploy and neither is this box's fault.
-# `make up` asks the same question about the agent image, and refuses there.
-if ! reg_err="$(docker manifest inspect "$image" 2>&1 >/dev/null)"; then
-  say "main is $version; not deploying yet -- $reg_err"
-  exit 0
-fi
+  # NOTHING TO DO IS SILENT. This runs every five minutes forever; a line here is
+  # 288 a day saying the same thing, and a log nobody reads is not a record.
+  if [ "$(git rev-parse HEAD)" = "$main_sha" ] && [ "$running" = "$image" ]; then
+    exit 0
+  fi
 
-git merge --ff-only origin/main --quiet \
-  || hold "the checkout will not fast-forward to origin/main (local commits?)"
+  # DID ITS ASSETS BUILD. Absent is "not yet" and unreadable is "not now" -- both
+  # wait, because neither is a reason to deploy and neither is this box's fault.
+  # `make up` asks the same question about the agent image, and refuses there.
+  if ! reg_err="$(docker manifest inspect "$image" 2>&1 >/dev/null)"; then
+    say "main is $version; not deploying yet -- $reg_err"
+    exit 0
+  fi
 
-say "deploying $version ($(git rev-parse --short HEAD)); running: ${running:-none}"
+  git merge --ff-only origin/main --quiet \
+    || hold "the checkout will not fast-forward to origin/main (local commits?)"
 
-make up || hold "make up failed for $version -- whatever it left is what is running"
+  say "deploying $version ($(git rev-parse --short HEAD)); running: ${running:-none}"
 
-# THE CLAIM IS THE READ, NOT THE EXIT CODE. `make up` returning 0 says its own
-# steps ran; only the broker says which version answers.
-live="$(curl -fsS --max-time 10 "$BROKER/version" 2>/dev/null | cut -d' ' -f1)"
-[ "$live" = "$version" ] \
-  || hold "make up returned 0 but $BROKER/version says '${live:-unreadable}', wanted $version"
+  make up || hold "make up failed for $version -- whatever it left is what is running"
 
-say "deployed $version -- /version confirms"
+  # THE CLAIM IS THE READ, NOT THE EXIT CODE. `make up` returning 0 says its own
+  # steps ran; only the broker says which version answers.
+  live="$(curl -fsS --max-time 10 "$BROKER/version" 2>/dev/null | cut -d' ' -f1)"
+  [ "$live" = "$version" ] \
+    || hold "make up returned 0 but $BROKER/version says '${live:-unreadable}', wanted $version"
+
+  say "deployed $version -- /version confirms"
+}
+
+# AND THE CALL EXITS ON ITS OWN LINE, because the wrapper is only half of it.
+# After main RETURNS, bash reads the NEXT line at the live offset -- an offset
+# into the old file's length -- and a rewrite that GREW the file has bytes
+# sitting exactly there. They run. Measured on this change's own PR, whose diff
+# grows this file by 63 lines: a stub appending `exit 7` past the call made the
+# trip return 7 after printing its last line, with the wrapper in place.
+# `exit` is the last read bash ever does here.
+main "$@"; exit
