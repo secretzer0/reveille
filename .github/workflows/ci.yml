@@ -56,7 +56,15 @@ jobs:
         run: |
           if scripts/publish-images inputs-changed agent \
                "$(git merge-base origin/${{ github.base_ref }} HEAD)" HEAD; then
-            make agent-image
+            # A PR RUNNER IS NOT THE PUBLISHER (14518). This step used to build
+            # the bare published tag, which worked only because the refusal that
+            # forbids it had never been written -- a trap that springs on exactly
+            # the PRs this gate guards. It names its own tag, and the boot test
+            # reads that name rather than the Makefile's.
+            base=$(scripts/publish-images tags ghcr.io/secretzer0 \
+                   | awk -F'\t' '$1 == "agent" { print $2 }')
+            export REVEILLE_AGENT_IMAGE="$base-gate.${{ github.run_number }}"
+            make agent-image AGENT_IMAGE="$REVEILLE_AGENT_IMAGE"
             uv run pytest tests/test_the_boot_daemon_survives_init.py -q
           else
             echo "agent image inputs unchanged -- boot gate not needed"

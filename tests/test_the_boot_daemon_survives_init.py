@@ -15,6 +15,7 @@ dead -> that is the defect, fail. The broker URL is unreachable ON PURPOSE:
 waked's connect loop retries forever, so a live daemon is distinguishable
 from one that was killed, and no test traffic reaches any real broker.
 """
+import os
 import pathlib
 import shutil
 import subprocess
@@ -29,7 +30,12 @@ from conftest import makefile_image  # noqa: E402
 def test_waked_survives_init_in_the_real_image():
     if shutil.which("docker") is None:
         pytest.skip("docker not on PATH -- this gate boots the real image")
-    tag = makefile_image(pathlib.Path(__file__).resolve().parent.parent)
+    # THE TAG THE CALLER BUILT, then the Makefile's. CI builds its own
+    # `-gate.<run>` tag because the bare one is the publisher's (14518), and a
+    # gate that looks past what its runner just built tests an older image or
+    # skips for a tag nobody asked it to boot.
+    tag = (os.environ.get("REVEILLE_AGENT_IMAGE")
+           or makefile_image(pathlib.Path(__file__).resolve().parent.parent))
     if subprocess.run(["docker", "image", "inspect", tag],
                       capture_output=True).returncode != 0:
         pytest.skip(f"{tag} not built on this host")
