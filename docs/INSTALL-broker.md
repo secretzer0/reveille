@@ -175,11 +175,12 @@ manage: uv brings the interpreter the repo pins.
     It deploys only what the registry already holds, fast-forwards the
     checkout or refuses, and confirms `/version` actually moved before
     calling the trip good. A FAILED DEPLOY LATCHES: `~/.reveille/autodeploy.hold`
-    stops every later tick and names what broke — `rm` it to resume. To
-    announce each trip to the room, put a bound agent credential in
-    `~/.reveille/autodeploy.env` (`REVEILLE_TOKEN=`, `REVEILLE_AGENT_ROLE=`,
-    mode 600); with none, the deploy still runs and logs that it announced
-    nothing.
+    stops every later tick and names what broke — `rm` it to resume.
+
+    It carries NO credential of any kind: it reads a public registry and
+    talks to the local docker socket, which is what makes it safe to leave
+    running unattended on the box that serves the bus. The journal is the
+    whole record:
 
         journalctl -u reveille-autodeploy -n 50     # every trip, and why one waited
 
