@@ -27,7 +27,8 @@ set -euo pipefail
 inputs_for() {  # <agent|server|tts> -> path list on stdout
   case "$1" in
     agent)  printf '%s\n' docker/Dockerfile docker/entrypoint.sh \
-                          docker/tmux.conf docker/attach-gate docker/agent-probe ;;
+                          docker/tmux.conf docker/attach-gate docker/agent-probe \
+                          docker/busdeaf-probe src/reveille/agent-stop-hook ;;
     server) printf '%s\n' docker/Dockerfile.server src pyproject.toml uv.lock ;;
     tts)    printf '%s\n' docker/tts.upstream ;;
     *) echo "unknown image: $1" >&2; return 2 ;;
@@ -42,6 +43,15 @@ inputs_changed() {  # <image> <base> <head> -> exit 0 changed, 1 unchanged
 
 if [ "${1:-}" = "inputs-changed" ]; then
   shift; inputs_changed "$@"; exit $?
+fi
+
+# THE LIST, not the answer: image-pin-check needs the same paths but a DIFFERENT
+# range (base...head three-dot, the PR's own changes) than the publisher's
+# two-dot event.before..HEAD. Handing out the list instead of the verdict is
+# what lets one definition serve both without either borrowing the other's
+# range semantics -- the bug that shipped when they were two hand-kept arrays.
+if [ "${1:-}" = "inputs-for" ]; then
+  shift; inputs_for "$1"; exit $?
 fi
 
 [ $# -ge 1 ] || { echo "usage: publish-images <registry-prefix> [<base-sha>]" >&2; exit 2; }
