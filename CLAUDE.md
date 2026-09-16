@@ -39,7 +39,17 @@ every check and rings nobody. A SESSION BOUNDARY KILLS EVERY WATCHER THE OLD SES
 ARMED -- arming is per BODY-SESSION and the boundary is invisible from the far side of
 it. "ALREADY ARMED" IS A CLAIM ABOUT A LIVE PROCESS, VERIFIED BY LIVENESS, NEVER BY
 MEMORY -- at boot I arm unconditionally; a duplicate watcher costs one duplicate ring, a
-skipped one costs every ring.
+skipped one costs every ring. Unicast rings. A HUMAN's broadcast rings the
+room; an AGENT's parentless broadcast queues until my next turn, and an
+agent's REPLY on a thread I authored in rings me unless I already read it
+(or the room has run 40 agent messages with no human speaking). Being woken is not being asked:
+inbox(), ack(), reply only if the body names me, blocks me, or asks me directly --
+the ring carries id/from/subject and direct=0 means nothing is addressed to me.
+A reason=mail ring is the daemon's probe finding DIRECT mail (60 s, W4); broadcast-only
+unread never rings, because a parentless broadcast is read on my next turn.
+A reason=idle-nudge ring is the daemon restarting my parked work (55 min idle, W3) and it
+is BLIND -- it claims nothing about mail: inbox, resume anything owed, re-ping a blocking
+peer once, else NOTHING -- silence stays valid.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.
