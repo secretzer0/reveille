@@ -367,6 +367,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.253",
+     "0.2.253 THE BROKER TELLS YOU IT MOVED (ruling 20441 F8, on the operator's\nown complaint: \"waiting and hiding the upgrade is terrible\"). The local\ntoolchain converged by POLLING GET /version behind a 3600 s rate limit, so a\ndeploy was up to an hour invisible to every body, cost one HTTP call per body\nper hour for ever, and was recorded only in one box's waked.log.\n\nTHE ATTACH FRAME WAS CONDITIONAL, which is what made a push impossible:\nwake_ws sent a frame at connect ONLY when direct backlog existed, so an attach\nwith an empty inbox was silent. It is unconditional now, composed from\nagent_activity(): {\"wake\": <ringing>, \"reason\": \"backlog\"|\"hello\", \"unread\": n,\n\"direct\": d, \"id\": newest, \"version\": <this broker>}. `backlog` keeps its name\nand its ring -- the field reads that reason (23c0f823).\n\nA BROKER RESTART NECESSARILY DROPS EVERY SOCKET, so the reconnect IS the deploy\nsignal and the only moment the version can have changed. waked converges on the\nframe; _broker_version, UPGRADE_INTERVAL_S, state[\"upgrade_checked\"] and the\nbefore-dial _converge call are DELETED. No timer, no HTTP, no new mechanism --\nconvergence lands seconds after a deploy instead of up to an hour.\n\nTHREE THINGS THE UNCONDITIONAL FRAME FIXES AT ONCE: the version reaches every\nbody when it can have changed; the wedge detector's streak resets on \"the\nbroker SPOKE\", which a HEALTHY IDLE socket never did -- indistinguishable from\na wedged one until mail happened to arrive, while the comment claimed\n\"registration and refusal both speak\"; and `id` lets the two ring producers\nshare one high-water mark, closing 0.2.252's named gap where a backlog ring\nplus 60 s without an ack double-rang.\n\nTHE VERSION CARRIES ITS TIMINGS ANNOTATION, not just the number: waked greps it\nfor the profile-skew warning, so a bare version would have retired that warning\nsilently. /version and the frame are composed from ONE helper and asserted\nEQUAL (6e493fe8), never eyeballed separately.\n\nORDER: THE RING IS WRITTEN BEFORE CONVERGENCE RUNS, asserted and not inferred\nfrom reading the handler. Convergence ends in execv -- the process is REPLACED,\nand a ring not already in the spool would die with it. BACKWARD-COMPATIBLE BY\nCONSTRUCTION: a deployed waked spools only `wake: true` frames and ignores\nwhat it cannot name, so a hello reaching an old daemon does nothing; a frame\nWITHOUT `version` is an old broker and converges nothing.\n\nTESTS DELETED, STATED NOT HIDDEN: test_the_check_is_rate_limited_and_fails_open\nand test_a_failing_probe_still_burns_the_interval asserted the rate limit, whose\nmechanism no longer exists -- deleted rather than skipped or weakened (13760).\ntest_an_unreachable_broker_does_not_raise tested _broker_version throwing; the\nhazard moved to a garbage version STRING on the frame, so it is replaced by\ntwo tests covering that and the absent-version case. Suite 1340 -> 1348.\n\nHERD, ACCEPTED AND STATED: a broker restart reconnects every body inside the\n1-15 s ladder, so N bodies may converge at once. Accepted at N<=20; if it ever\nbites the fix is jitter on the ladder, NOT a return to polling. STILL OWED, own\nlayer (F8.4): waked reporting its INSTALLED version at connect, so a body\nbehind the broker is visible in presence rather than only in its own log.\n"),
     ("0.2.252",
      "0.2.252 THE PROBE RINGS ON MAIL; THE NUDGE STOPS PRETENDING TO (ruling\n20404 F1 + 20421, on the efficiency sweep 20399). waked's idle nudge is\nBLIND -- it fires on a wall clock and knows nothing about mail. Measured on\none native body 2026-09-16: nine reason=idle-nudge rings in one session,\ninbox() empty on every one. Worse than waste: a parentless broadcast never\nrings (broadcast-wake-storm) and waits for the next turn, so the blind nudge\nWAS that delivery -- real mail could sit up to a full interval while empty\nnudges fired on schedule.\n\nW4, THE MAIL PROBE: every --mail-probe seconds (default 60, 0 disables) the\ndaemon asks GET /agent/activity -- the counted answer 0.2.251 built -- and\nwrites a reason=mail ring IFF direct > 0 AND newest_id > last_rung_id. Same\nkeys as a socket ring so watcher and agent code is unchanged; the reason\ndiffers because a probe ring proves HTTP + token and says nothing about WS\nrouting (7d89738a). Costs the agent nothing: the daemon spends the HTTP\ncall, the agent spends a turn only when something is addressed to it.\n\nDEDUP BY ID, NEVER BY COUNT. One fact, one ring, whatever the agent's turn\nstate -- a count changes when the agent acks, which the daemon cannot see.\nBoth producers share the high-water mark: a socket ring advances it too, or\nthe probe re-rings a minute later for mail the socket already delivered.\n\nBROADCAST-ONLY UNREAD DOES NOT RING, deliberately. Ringing every body in a\nroom within 60 s of an FYI is the storm WHO HEARS WHAT exists to prevent, at\n15x the old ceiling. Needed now means unicast. UNDECIDABLE DOES NOT RING\neither (d9245252): 401, 5xx, timeout, unparsable, and an OLD BROKER whose\n/agent/activity has no `direct` all arrive as None -- which is not zero. A\nspurious ring SPENDS A MODEL TURN and is not idempotent, so undecidable falls\nsilent; the socket stays the primary delivery. Logged once per state change,\nnever per tick.\n\n--idle-nudge KEEPS its name and its blind W3 semantics, default 900 -> 3300.\n3300 AND NOT 3600 IS THE WHOLE POINT: a blind turn at exactly the 1-hour\nprompt-cache TTL lands COLD and pays full input; at 3300 it lands warm and\npays ~10%. Idle 3 h, context C: 900 s = 12 x 0.1C = 1.2C; 3600 = 3 x 1.0C =\n3.0C (WORSE than the old default); 3300 = 3 x 0.1C = 0.3C. Raising a blind\ninterval PAST the cache TTL makes it more expensive, not cheaper. No --parked-\nnudge: one flag, new default.\n\nF6, THE COUNT EVERY FURTHER CUT IS JUDGED BY: nothing counted turns by CAUSE\n-- rings are deleted by the session that handles them and a blind nudge never\ntouches the broker. Every producer now writes one line per ring, `ring\n<reason> id=<n> direct=<d>`, DERIVED FROM THE FRAME THAT WAS WRITTEN rather\nthan from what the caller meant, so `grep -c 'ring idle-nudge' waked.log` is a\nreal number.\n\nGATE tests/test_the_probe_rings_on_mail.py, driven through the pure decision\nand a clockless tick -- no sleeps, because a probe test that waits for an\ninterval asserts whatever the machine's load allows. Proven red five ways:\ndedup by count instead of id, ringing on unread instead of direct, undecidable\nringing, the blind interval raised onto the cache TTL, and an old broker's\nanswer read as an empty inbox. DES-003 gains W4 and retunes W3; s6's 900 s\nfloor becomes 60 s for direct, 3300 s otherwise.\n\nKNOWN GAP, NAMED NOT HIDDEN: the attach `backlog` frame carries no newest_id,\nso a backlog ring followed by 60 s without an ack can still double-ring. F8\nputs newest_id on that frame.\n"),
     ("0.2.251",
@@ -3639,10 +3641,30 @@ async def wake_ws(ws: WebSocket):
         # integers, ON EVERY ATTACH. Against a flapping broker that is per agent
         # per reconnect. agent_activity answers exactly these two numbers.
         act = store.agent_activity(_conn, principal, rooms)
-        if act["direct"] and _poke_ok(key):
+        ring = bool(act["direct"]) and _poke_ok(key)
+        if ring:
             _poke_pending[key] = time.time_ns()
-            await ws.send_json({"wake": True, "reason": "backlog",
-                                "unread": act["unread"], "direct": act["direct"]})
+        # ONE ATTACH FRAME, ALWAYS (F8, ruling 20441). It used to be sent only
+        # when direct backlog existed, so an attach with an empty inbox was
+        # SILENT -- and three things depended on a frame that might never come:
+        #  1. the daemon learned this broker's version by polling GET /version
+        #     once an hour, so a deploy was up to 3600 s invisible to every
+        #     body. A broker restart necessarily drops every socket, so THE
+        #     RECONNECT IS THE DEPLOY SIGNAL and the only moment the version
+        #     can have changed. Push beats poll and needs no timer.
+        #  2. the wedge detector resets its streak on "the broker SPOKE", which
+        #     a healthy IDLE socket never did -- indistinguishable from a
+        #     wedged one until mail happened to arrive.
+        #  3. `id` lets the daemon's two ring producers share one high-water
+        #     mark; without it a backlog ring plus 60 s with no ack double-rang.
+        # BACKWARD-COMPATIBLE BY CONSTRUCTION: a deployed waked writes a ring
+        # only for `wake: true`, and ignores any other frame it cannot name.
+        await ws.send_json({"wake": ring,
+                            "reason": "backlog" if ring else "hello",
+                            "unread": act["unread"], "direct": act["direct"],
+                            "id": act["newest_id"],
+                            "version": wake_version_line()})
+        if ring:
             log.info("%s wake ring (backlog %s direct of %s unread)",
                      name, act["direct"], act["unread"])
         # Then stay connected and push one frame per new message until the client drops.
@@ -3775,6 +3797,27 @@ async def health(_request):
     return PlainTextResponse("ok")
 
 
+def _timings_note():
+    """The timings annotation, or "" under production.
+
+    ONE COMPOSER, because two consumers now read it: /version and the wake
+    socket's attach frame (F8). waked greps this annotation for the
+    profile-skew warning, so a frame that carried only the bare version would
+    silently retire that warning -- and a second copy of the f-string here
+    would be two places computing one string that must match (6e493fe8).
+    """
+    return (f" (timings: {timings.PROFILE} -- REVEILLE_TIMINGS)"
+            if timings.PROFILE != "production" else "")
+
+
+def wake_version_line():
+    """What the attach frame tells a daemon about this broker: the bare
+    version every probe already parses, plus the timings annotation. NOT the
+    LAN/uploads/doors prose -- that is for a human reading /version, and a
+    wake frame is read by a program."""
+    return __version__ + _timings_note()
+
+
 async def version_http(_request):
     # The override announces itself HERE too: "which UI am I serving" must be
     # answerable from outside. Absent override, the body is exactly the bare
@@ -3789,10 +3832,10 @@ async def version_http(_request):
     # A trimmed clock that cannot be SEEN from outside is how a test-night
     # value becomes production (12415; the TTS_BATCH_SIZE lesson). production
     # says nothing -- the bare version is what every probe already parses.
-    fast = (f" (timings: {timings.PROFILE} -- REVEILLE_TIMINGS)"
-            if timings.PROFILE != "production" else "")
+    # Composed once, in _timings_note: the wake attach frame carries the same
+    # annotation and waked greps it.
     return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "")
-                             + fast + lan + cap + doors)
+                             + _timings_note() + lan + cap + doors)
 
 
 async def usage_http(_request):

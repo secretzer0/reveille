@@ -260,7 +260,7 @@ synthetic rings too).
 
 ## W4 — the mail probe: the ring the nudge never was
 
-*Ruling 20404 F1, on the efficiency sweep in 20399. Built in 0.2.252.*
+*Ruling 20404 F1, on the efficiency sweep in 20399. Built 0.2.252 (stack .01).*
 
 **The defect.** W3's nudge is blind, and for an idle body it was the only thing
 that fired. Measured on one native body, 2026-09-16: nine `reason=idle-nudge`
@@ -335,6 +335,82 @@ that handles them, and a blind nudge never touches the broker. Every producer
 now writes one line per ring — `ring <reason> id=<n> direct=<d>` — derived from
 the frame that was actually written, so `grep -c 'ring idle-nudge' waked.log`
 per body per day is the number every further cut is judged by.
+
+---
+
+## W5 — the broker tells you it moved
+
+*Ruling 20441 F8, on the operator's own complaint. Built 0.2.253 (stack .02).*
+
+**The defect.** The local toolchain converged by polling `GET /version` behind a
+3600 s rate limit. A deploy was therefore **up to an hour invisible to every
+body**, cost one HTTP call per body per hour for ever, and was recorded only in
+one box's `waked.log`. In the operator's words: *"waiting and hiding the upgrade
+is terrible."*
+
+**And the attach frame was conditional**, which is what made a push impossible:
+`wake_ws` sent a frame at connect *only* when direct backlog existed, so an
+attach with an empty inbox was silent.
+
+**Mechanism.** One attach frame, always, composed from `store.agent_activity()`:
+
+```json
+{"wake": false, "reason": "hello", "unread": 0, "direct": 0,
+ "id": 0, "version": "0.2.253"}
+```
+
+`wake` is true and `reason` is `backlog` when direct mail is already waiting and
+the poke gate allows it; otherwise `wake` is false and `reason` is `hello`.
+`backlog` keeps its name and its semantics — the field reads that reason
+(`23c0f823`).
+
+**A broker restart necessarily drops every socket, so the reconnect IS the
+deploy signal** — and the only moment the version can have changed. `waked`
+converges on the frame's `version`; `_broker_version`, `UPGRADE_INTERVAL_S`,
+`state["upgrade_checked"]` and the before-dial `_converge` call are all
+**deleted**. No timer, no HTTP, no new mechanism. Convergence lands seconds
+after a deploy instead of up to an hour.
+
+**Three things the unconditional frame fixes at once:**
+
+1. the version reaches every body at the moment it can have changed;
+2. the wedge detector resets its streak on *"the broker SPOKE"* — which a
+   healthy **idle** socket never did, making it indistinguishable from a wedged
+   one until mail happened to arrive. The comment claimed "registration and
+   refusal both speak" while registration sent no frame at all;
+3. `id` lets the two ring producers share one high-water mark, closing W4's
+   named gap where a backlog ring plus 60 s without an ack double-rang.
+
+**The version string carries its timings annotation**, not just the bare number:
+`waked` greps it for the profile-skew warning, so a frame with only the version
+would have retired that warning silently. `/version` and the frame are composed
+from one helper and asserted **equal** (`6e493fe8`), never eyeballed separately.
+
+**Order: the ring is written BEFORE convergence runs**, and it is asserted, not
+inferred from reading the handler. Convergence ends in `execv` — the process is
+*replaced*. A ring not already in the spool would die with it, and the mail it
+named would wait for the next producer. The spool survives the exec; an
+unwritten frame does not.
+
+**Backward-compatible by construction:** a deployed `waked` writes a ring only
+for `wake: true` and ignores any frame it cannot name, so a `hello` reaching an
+old daemon does nothing at all. Fail-open the other way too: a frame *without*
+`version` is an old broker, and an old broker converges nothing.
+
+**Herd, accepted and stated rather than fixed:** a broker restart reconnects
+every body inside the 1-15 s ladder, so N bodies may converge at once — N
+in-venv `uv pip install` runs against GitHub, then N `execv`. Accepted at
+N<=20. If it ever bites, the fix is jitter on the ladder, **not** a return to
+polling.
+
+**Still owed, its own layer (F8.4):** `waked` reporting its *installed* version
+at connect, so the broker and the UI can show toolchain version per body. That
+is the other half of "hiding" — today a body behind the broker is visible only
+in its own log.
+
+**Gate:** `tests/test_the_broker_tells_you_it_moved.py` drives the real
+`_session` over a scripted socket, because the properties that matter are about
+**order** and about which frames trigger what.
 
 ## 6. Thread-wake pendings are in-memory, and that is a decision
 

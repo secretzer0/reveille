@@ -468,6 +468,23 @@ async def _session(uri, agent, state):
                     mid = obj.get("id") or 0
                     if mid > state.get("last_rung_id", 0):
                         state["last_rung_id"] = mid
+                # THE ATTACH FRAME SAYS WHAT THE BROKER IS RUNNING (F8), and a
+                # broker restart necessarily drops every socket -- so arriving
+                # here is the deploy signal. Also the non-ringing `hello`
+                # case, which is why the frame is unconditional.
+                #
+                # AFTER THE RING, NEVER BEFORE, and the order is the whole
+                # point: convergence ends in execv, so this process is
+                # REPLACED. A ring not already in the spool would die with it,
+                # and the mail it named would wait for the next producer.
+                # The spool survives the exec; an unwritten frame does not.
+                if obj.get("version"):
+                    # The attach frame also carries `id`, so the two producers
+                    # share one high-water mark even when nothing rang.
+                    nid = obj.get("id") or 0
+                    if nid > state.get("last_rung_id", 0):
+                        state["last_rung_id"] = nid
+                    _converge(obj["version"], state)
                 # anything else is informational (e.g. the shutdown note):
                 # hold the socket; a close leads to the reconnect loop.
         finally:
@@ -789,10 +806,22 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
 # caught in review). main is normally AHEAD of the deployed broker -- it moves on
 # merge, the deploy lags -- and the install source is main's HEAD, not a version.
 # So `!=` would see a body that just installed 0.2.185 against a 0.2.184 broker,
-# call it divergent, reinstall the same 0.2.185, and do that once an hour for
-# ever. Running newer-than-broker is the ordinary state for the minutes after a
-# merge and must not be pathological. Behind: converge. Equal or ahead: nothing.
-UPGRADE_INTERVAL_S = 3600
+# call it divergent, reinstall the same 0.2.185, and do that for ever. Running
+# newer-than-broker is the ordinary state for the minutes after a merge and must
+# not be pathological. Behind: converge. Equal or ahead: nothing.
+#
+# PUSH, NOT POLL (F8, operator's own complaint: "waiting and hiding the upgrade
+# is terrible"). This used to fetch GET /version on a 3600 s rate limit, so a
+# deploy was up to an hour invisible to every body, once per body per hour,
+# for ever, recorded only in one box's waked.log. THE BROKER NOW TELLS US: its
+# attach frame carries `version`, and a broker restart necessarily drops every
+# socket -- so the reconnect IS the deploy signal, and the only moment the
+# version can have changed. No timer, no HTTP, no UPGRADE_INTERVAL_S; the
+# frame is the whole trigger, and convergence lands seconds after a deploy
+# instead of up to an hour.
+#
+# FAIL-OPEN IS UNCHANGED: a frame without `version` is an old broker, and an
+# old broker converges nothing.
 
 
 def version_tuple(text):
@@ -850,20 +879,6 @@ def _warn_profile_skew(version_string):
               file=sys.stderr)
 
 
-def _broker_version(url):
-    """The broker's version string, or "" -- unauthenticated, short timeout, and
-    every failure is silence. An unreachable broker means no upgrade, never an
-    error: the wake path matters more than the convergence."""
-    import urllib.request
-    base = url.replace("wss://", "https://").replace("ws://", "http://")
-    base = base.split("/wake")[0]
-    try:
-        with urllib.request.urlopen(base + "/version", timeout=5) as r:
-            return r.read().decode().strip()
-    except Exception:
-        return ""
-
-
 def _uv_or_bootstrap():
     """Path to uv, installing it first if this machine has none.
 
@@ -898,13 +913,14 @@ def _uv_or_bootstrap():
         if os.path.exists(os.path.expanduser("~/.local/bin/uv")) else "")
 
 
-def _converge(url, state):
+def _converge(raw, state):
     """Bring the toolchain up to the broker, then re-exec so it is RUNNING it.
 
-    Returns without doing anything unless a full hour has passed, the broker
-    answered, and this install is genuinely behind. Never raises, never exits,
-    never blocks the wake -- a failed convergence is a log line and the old code
-    keeps working, which is the whole point of doing it here.
+    `raw` is the version string the broker put in its attach frame. Returns
+    without doing anything unless it parses and this install is genuinely
+    behind. Never raises, never exits, never blocks the wake -- a failed
+    convergence is a log line and the old code keeps working, which is the
+    whole point of doing it here.
 
     THE WHOLE BODY IS SHIELDED, not just the network call. This runs inside the
     daemon's reconnect loop, so an exception escaping here would kill the wake
@@ -912,20 +928,14 @@ def _converge(url, state):
     about staying on old code is worth that.
     """
     try:
-        _converge_inner(url, state)
+        _converge_inner(raw, state)
     except Exception as e:      # noqa: BLE001 -- deliberately total
         print(f"reveille-waked: convergence check failed ({e!r}) -- staying on "
               f"{__version__}", file=sys.stderr)
 
 
-def _converge_inner(url, state):
+def _converge_inner(raw, state):
     import subprocess
-    now = time.monotonic()
-    if state.get("upgrade_checked") and now - state["upgrade_checked"] < UPGRADE_INTERVAL_S:
-        return
-    state["upgrade_checked"] = now
-
-    raw = _broker_version(url)
     _warn_profile_skew(raw)
     broker = version_tuple(raw)
     installed = version_tuple(__version__)
@@ -1019,11 +1029,6 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     state["wedge_fails"] = 0
     try:
         while True:
-            # Before dialling, not after: a body that is behind should reach the
-            # broker already running the code the broker expects. Rate-limited
-            # and fail-open inside, so this is a no-op on all but one pass an
-            # hour and never delays a reconnect that matters.
-            _converge(url, state)
             state["spoke"] = False
             try:
                 code = await _session(uri, agent, state)

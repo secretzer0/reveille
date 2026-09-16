@@ -50,30 +50,24 @@ def test_an_unreadable_version_never_triggers_an_install():
     assert waked.upgrade_due((), ()) is False
 
 
-def test_the_check_is_rate_limited_and_fails_open(monkeypatch):
-    """Once an hour, and an unreachable broker is silence -- the wake path
-    matters more than the convergence."""
-    assert waked.UPGRADE_INTERVAL_S == 3600
-    calls = []
-    monkeypatch.setattr(waked, "_broker_version", lambda url: calls.append(url) or "")
-    state = {}
-    waked._converge("ws://x/wake", state)
-    waked._converge("ws://x/wake", state)   # inside the window: not asked again
-    assert len(calls) == 1, "one probe per interval, not one per reconnect"
-    assert "upgrade_checked" in state
+def test_a_frame_version_that_makes_no_sense_does_not_raise():
+    """Replaces the unreachable-broker case, which tested a network call that
+    F8 deleted. The hazard moved rather than went away: the version now
+    arrives in a frame the broker sent, so the thing that can be wrong is the
+    STRING, and a body must not go deaf over one. Every shape a broker could
+    put there -- empty, prose, None, the wrong type -- is silence."""
+    for raw in ("", "not a version", "..", None, 7, {"nope": 1}):
+        waked._converge(raw, {})     # no raise, no install, no exit
 
 
-def test_an_unreachable_broker_does_not_raise(monkeypatch):
-    """Every failure path is silence: a convergence that cannot happen must not
-    cost the wake."""
-    monkeypatch.setattr(waked, "_broker_version",
-                        lambda url: (_ for _ in ()).throw(OSError("no route")))
-    try:
-        waked._converge("ws://x/wake", {})
-    except OSError:
-        raise AssertionError("_broker_version must be shielded, not propagate")
-    except Exception:
-        pass
+def test_an_old_broker_sends_no_version_and_converges_nothing(monkeypatch):
+    """Fail-open, F8.3. A broker older than this frame simply has no `version`
+    in its attach frame -- which must read as "nothing to do", never as a
+    reason to reinstall."""
+    monkeypatch.setattr(waked, "_uv_or_bootstrap",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("an absent version tried to install")))
+    waked._converge("", {})
 
 
 def test_it_installs_from_the_same_source_init_persists():
@@ -85,24 +79,13 @@ def test_it_installs_from_the_same_source_init_persists():
     assert GIT_SOURCE.startswith("git+https://github.com/secretzer0/")
 
 
-def test_a_failing_probe_still_burns_the_interval(monkeypatch):
-    """The stamp is taken BEFORE the probe. Otherwise a broker that throws on
-    every call would be probed once per reconnect instead of once per hour --
-    the backoff ladder would turn a broker outage into a probe storm."""
-    monkeypatch.setattr(waked, "_broker_version",
-                        lambda url: (_ for _ in ()).throw(OSError("no route")))
-    state = {}
-    waked._converge("ws://x/wake", state)
-    assert "upgrade_checked" in state, "a failed check still counts as a check"
-
-
 def test_convergence_never_exits_the_daemon(monkeypatch):
     """It runs inside the reconnect loop. An exception escaping here would kill
     the wake path -- the agent would go deaf to fix a version number."""
     def boom(*a, **k):
         raise RuntimeError("anything at all")
     monkeypatch.setattr(waked, "_converge_inner", boom)
-    waked._converge("ws://x/wake", {})   # must simply return
+    waked._converge("0.2.999", {})   # must simply return
 
 
 def test_the_probe_and_the_exec_use_the_console_script_never_dash_m():
@@ -143,9 +126,8 @@ def test_uv_is_a_bootstrap_dependency_not_a_prerequisite(monkeypatch):
 def test_a_missing_uv_that_cannot_be_installed_skips_rather_than_raises(monkeypatch):
     """Skipping the convergence is correct; taking the wake path down over it
     is not."""
-    monkeypatch.setattr(waked, "_broker_version", lambda url: "0.2.999")
     monkeypatch.setattr(waked, "_uv_or_bootstrap", lambda: "")
-    waked._converge("ws://x/wake", {})   # returns quietly
+    waked._converge("0.2.999", {})   # returns quietly
 
 
 def test_the_upgrade_happens_inside_the_venv_never_unlink_first(monkeypatch):
@@ -169,11 +151,10 @@ def test_the_upgrade_happens_inside_the_venv_never_unlink_first(monkeypatch):
             stdout = ""
         return R()
 
-    monkeypatch.setattr(waked, "_broker_version", lambda url: "0.2.999")
     monkeypatch.setattr(waked, "_uv_or_bootstrap", lambda: "/usr/bin/uv")
     import subprocess
     monkeypatch.setattr(subprocess, "run", fake_run)
-    waked._converge("ws://x/wake", {})
+    waked._converge("0.2.999", {})
     assert calls == [["/usr/bin/uv", "pip", "install",
                       "--python", sys.executable,
                       "--reinstall-package", "reveille", waked.GIT_SOURCE]], calls
