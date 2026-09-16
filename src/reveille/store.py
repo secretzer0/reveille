@@ -6993,9 +6993,12 @@ def _sealed(payload):
 
 
 def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
-    """The onboarding pack (DES-001 section 7): lessons, then doctrine ranked by
-    entity overlap with the caller's role, then live contracts, then decisions
-    (recent weighted up), then own state, then a presence digest. Budget is the
+    """The onboarding pack (DES-001 section 7): a pointer to the lesson floor,
+    then doctrine ranked by entity overlap with the caller's role, then live
+    contracts, then decisions (recent weighted up), then own state, then a
+    presence digest. LESSONS ARE COUNTED, NEVER QUOTED (F4): lessons() is the
+    exhaustive read and the boot ritual already calls it, so quoting them here
+    made every boot pay for the same rows twice. Budget is the
     BYTES THAT LEAVE (wire_chars: the JSON-escaped tool result, ~4/token,
     approximate by construction: the broker has no tokenizer, G4), so the
     number a caller picks against its harness cap is the number it receives.
@@ -7081,20 +7084,32 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
                     else f"recall(kind='{title.rstrip('s')}')")
             emit(f"[{shown} of {len(rows)} shown -- {more} for the rest]")
 
-    # 1. lessons -- the rules the fleet already paid for, all of them if they fit
-    lrows = conn.execute(
-        f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
-        f"scope IN ({_ph(room_scopes())}) ORDER BY created_ns DESC", room_scopes()
-    ).fetchall()
-    section("lessons", lrows,
-            lambda r, _: f"- {r['slug']}: {r['rule']} [detect: {r['detection']}]", 0.30)
+    # 1. LESSONS ARE COUNTED HERE, NOT QUOTED (F4, ruling 20404). This section
+    # used to print the newest lessons in FULL -- rule text plus detection --
+    # under a 0.30 share. But the boot ritual is join(), lessons(), brief(),
+    # and lessons() serves those same newest rows FIRST, so every boot bought
+    # them twice: measured on one body 2026-09-16, lessons() 23305 chars and
+    # brief() 26690, of which the overlap was the same newest rows.
+    #
+    # lessons() STAYS the exhaustive read (13219: it is cross-body comparable
+    # and complete), so what belongs here is a POINTER and a count -- enough to
+    # know the floor exists and how big it is. The freed 0.30 goes to the three
+    # sections that were truncating on every call; a cut that frees bytes must
+    # be seen spending them.
+    #
+    # Counted, not fetched: the old code read every lesson row to render a few
+    # and report len(). The count is the only part that survives.
+    n_lessons = conn.execute(
+        f"SELECT count(*) FROM memories WHERE kind='lesson' AND status='live' "
+        f"AND scope IN ({_ph(room_scopes())})", room_scopes()).fetchone()[0]
+    emit(f"lessons: {n_lessons} -- lessons() is the exhaustive read")
     # 2. doctrine, role-relevant first
     drows = sorted(mem_rows("doctrine"), key=lambda r: (-overlap(r), -r["created_ns"]))
-    section("doctrine", drows, lambda r, _: f"- {r['fact']}", 0.25)
+    section("doctrine", drows, lambda r, _: f"- {r['fact']}", 0.35)
     # 3. live contracts (supersession already resolved by status='live')
     section("contracts", mem_rows("contract"),
             lambda r, _: f"- {r['fact']}" + src(r),
-            0.20)
+            0.30)
     # 4. decisions -- last 30d first, older by role relevance
     cutoff = time.time_ns() - 30 * 24 * 3600 * 10**9
     dec = mem_rows("decision")
@@ -7102,7 +7117,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
                                      -r["created_ns"]))
     section("decisions", dec,
             lambda r, _: f"- {r['fact']}" + src(r),
-            0.20)
+            0.30)
     # 5. own state (restart case) -- only ever the caller's own bucket
     srows = conn.execute(
         "SELECT * FROM memories WHERE kind='state' AND status='live' AND scope=? "
@@ -7140,7 +7155,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
     # never silently -- a dropped line is a truncation like any other.
     def payload():
         return {"text": "\n".join(parts),
-                "sections": {"lessons": len(lrows), "doctrine": len(drows),
+                "sections": {"lessons": n_lessons, "doctrine": len(drows),
                              "contracts": len(mem_rows('contract')),
                              "decisions": len(dec), "state": len(srows)},
                 "truncated": truncated}

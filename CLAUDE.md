@@ -20,15 +20,17 @@ then approve it: reject and redraft citing the same source.
 Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
 entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
 becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
-armed. ONCE PER SESSION, with the Monitor tool: command="wake-watch --follow
-$REVEILLE_AGENT_ROLE", persistent=true. Every line it prints is one bus ring: inbox(),
-ack() everything, act only if owed, DELETE the spool file I processed -- the ring's
-`spool` key is its absolute path; rm that, never a glob. An entry I leave behind is
-re-printed by the NEXT watcher process (--follow's memory of what it printed dies with
-it), so a missed drain becomes an acked ring replayed on every re-arm. No re-arm -- it
-does not exit. Where Monitor is not available I fall
-back to Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`, whose task
-completion is one ring and which I re-arm after every one.
+armed. I arm it with Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`,
+bare, nothing prepended or appended -- its task completion IS one bus ring. Then:
+inbox(), ack() everything, act only if owed, DELETE the spool file I processed -- the
+ring's `spool` key is its absolute path; rm that, never a glob -- and RE-ARM LAST, after
+the ack and the rm, inside a turn I am taking anyway. An entry I leave behind is
+re-printed by the NEXT watcher process, so a missed drain becomes an acked ring replayed
+at every arm. THE ONE-SHOT IS PRIMARY: measured 2026-09-16 it ran 11m06s and exited 0 on
+its ring, past Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
+backgrounded task. The Monitor tool with `wake-watch --follow` is the FALLBACK, for
+harnesses with no run_in_background: Monitor expires at 1800000 ms and the harness wakes
+me to re-arm, which is 2 blind turns an hour that nothing on our side can tune.
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
 lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
@@ -37,14 +39,7 @@ every check and rings nobody. A SESSION BOUNDARY KILLS EVERY WATCHER THE OLD SES
 ARMED -- arming is per BODY-SESSION and the boundary is invisible from the far side of
 it. "ALREADY ARMED" IS A CLAIM ABOUT A LIVE PROCESS, VERIFIED BY LIVENESS, NEVER BY
 MEMORY -- at boot I arm unconditionally; a duplicate watcher costs one duplicate ring, a
-skipped one costs every ring. Unicast rings. A HUMAN's broadcast rings the room. An AGENT's
-REPLY-broadcast rings the thread's agent authors (skipped if I already read it; nothing
-rings past 40 agent messages in the ROOM with no human speaking in it); an agent's
-PARENTLESS broadcast queues until my next turn. Being woken is not being asked: inbox(), ack(),
-reply only if the body names me, blocks me, or asks me directly -- the ring carries
-id/from/subject and direct=0 means nothing is addressed to me.
-A reason=idle-nudge ring is the daemon restarting my parked work (15 min idle, W3): inbox,
-resume anything owed, re-ping a blocking peer once, else NOTHING -- silence stays valid.
+skipped one costs every ring.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.

@@ -187,19 +187,23 @@ USE:
    hook or container entrypoint spawns and supervises it; you NEVER start, poll,
    or re-arm it. Each ring becomes a file in your spool
    (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). You arm ONLY the watcher, and
-   you arm it ONCE PER SESSION (a new session means a new watcher -- verify by
-   liveness, never by memory) with the Monitor tool:
-   command="wake-watch --follow $REVEILLE_AGENT_ROLE", persistent=true. --follow
-   never exits and prints each new ring ONCE, so there is no re-arm at all. On
-   each line: inbox(), ack(), act only if owed, DELETE the spool file you
-   processed -- the ring's own `spool` key is its absolute path, so `rm` that
-   and never a glob. AN ENTRY YOU LEAVE BEHIND IS REPLAYED: --follow remembers
-   what it printed in MEMORY, so the next watcher process starts empty and
-   re-prints whatever is still in new/ -- under a harness that re-arms on a
-   timeout that is an acked ring waking you forever. Where Monitor is not
-   available, fall back to the one-shot: Bash run_in_background=true,
-   `wake-watch $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended --
-   whose task completion IS one ring, re-armed after each.
+   you arm it with Bash run_in_background=true, `wake-watch
+   $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended -- whose task
+   completion IS one ring. Then: inbox(), ack(), act only if owed, DELETE the
+   spool file you processed -- the ring's own `spool` key is its absolute
+   path, so `rm` that and never a glob -- and RE-ARM, in that order and last,
+   inside a turn you are taking anyway. AN ENTRY YOU LEAVE BEHIND IS REPLAYED:
+   the next watcher process starts with no memory of what was printed and
+   re-prints whatever is still in new/, so a missed drain is an acked ring
+   waking you again at every arm.
+   THE ONE-SHOT IS PRIMARY BECAUSE THE FOLLOW COSTS BLIND TURNS. Measured
+   2026-09-16: the one-shot ran 11m06s and exited 0 on its ring, well past
+   Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
+   backgrounded task, which is why the follow was chosen over it. Meanwhile a
+   harness Monitor expires at 1800000 ms and wakes the body to re-arm: two
+   blind turns an hour, per body, that nothing on our side can tune. Use
+   Monitor with `wake-watch --follow $REVEILLE_AGENT_ROLE` (persistent) only
+   where run_in_background does not exist.
    ARMED MEANS THE HARNESS IS WATCHING IT. A `wake-watch ... &` inside a Bash
    call is an orphan process: it satisfies every check, including the Stop
    hook's, and rings nobody. Measured 2026-08-19, an architect deaf with every
@@ -318,15 +322,17 @@ then approve it: reject and redraft citing the same source.
 Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
 entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
 becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
-armed. ONCE PER SESSION, with the Monitor tool: command="wake-watch --follow
-$REVEILLE_AGENT_ROLE", persistent=true. Every line it prints is one bus ring: inbox(),
-ack() everything, act only if owed, DELETE the spool file I processed -- the ring's
-`spool` key is its absolute path; rm that, never a glob. An entry I leave behind is
-re-printed by the NEXT watcher process (--follow's memory of what it printed dies with
-it), so a missed drain becomes an acked ring replayed on every re-arm. No re-arm -- it
-does not exit. Where Monitor is not available I fall
-back to Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`, whose task
-completion is one ring and which I re-arm after every one.
+armed. I arm it with Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`,
+bare, nothing prepended or appended -- its task completion IS one bus ring. Then:
+inbox(), ack() everything, act only if owed, DELETE the spool file I processed -- the
+ring's `spool` key is its absolute path; rm that, never a glob -- and RE-ARM LAST, after
+the ack and the rm, inside a turn I am taking anyway. An entry I leave behind is
+re-printed by the NEXT watcher process, so a missed drain becomes an acked ring replayed
+at every arm. THE ONE-SHOT IS PRIMARY: measured 2026-09-16 it ran 11m06s and exited 0 on
+its ring, past Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
+backgrounded task. The Monitor tool with `wake-watch --follow` is the FALLBACK, for
+harnesses with no run_in_background: Monitor expires at 1800000 ms and the harness wakes
+me to re-arm, which is 2 blind turns an hour that nothing on our side can tune.
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
 lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
@@ -367,6 +373,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.254",
+     "0.2.254 THE FLOOR STOPS PAYING TWICE, AND THE WATCHER DOCTRINE FLIPS\n(rulings 20404 F4 + 20441 F5, on the efficiency sweep 20399).\n\nF4. The boot ritual is join(), lessons(), brief() -- and brief()'s first\nsection printed the newest lessons IN FULL, rule text plus detection, under a\n0.30 share. That is exactly what lessons() serves first, so every boot bought\nthe same rows twice: measured on one native body 2026-09-16, lessons() 23305\nchars and brief() 26690. lessons() STAYS the exhaustive read (13219:\ncross-body comparable, complete); brief() now emits ONE line -- `lessons: N --\nlessons() is the exhaustive read` -- and the freed 0.30 goes to doctrine,\ncontracts and decisions, which truncate on every real call (0.25/0.20/0.20 ->\n0.35/0.30/0.30). The lesson rows are COUNTED, not fetched: the old code read\nevery row to render a few and report len().\n\nA CUT THAT FREES BYTES MUST BE SEEN SPENDING THEM, so that is the gate:\ntests/test_the_floor_stops_paying_twice.py pins 15+ rendered rows across the\nthree sections on a fixed corpus and budget. Restoring the old shares gives\n12 (measured, exactly the 0.65/0.95 ratio predicted) and goes red; quoting a\nlesson again goes red on the rule text. join(brief=) NOT BUILT -- it saves a\nround trip, not bytes, and the inline wall means two floors cannot share one\npayload.\n\nF5. THE ONE-SHOT IS PRIMARY; THE FOLLOW IS THE FALLBACK. `wake-watch --follow`\nunder the harness's Monitor tool expires at its 1800000 ms cap and the harness\nwakes the body to re-arm: two blind turns an hour, per body, not tunable from\nour side -- twice what the idle nudge beside it cost. The one-shot was assumed\nto fare worse because of Bash's 600000 ms cap. MEASURED 2026-09-16: `wake-watch\n<role>` via run_in_background ran 11m06s and exited 0 on its ring, NOT killed --\nthat cap bounds a FOREGROUND call, and a backgrounded task is a different shape.\nDoctrine flipped in all three places that state it: the block `reveille init`\nwrites, the usage text and CLAUDE.md block daemon.py serves, and the Stop\nhook's verdict. Re-arm goes LAST, after ack and rm. The hook's pgrep is\nunchanged -- both shapes were always armed shapes.\n\nGATED THROUGH THE CONSUMER'S PARSER (f7142c5e): the hook's verdict is\njson.loads-ed and the ORDER asserted -- run_in_background before --follow,\nFALLBACK before --follow, ack() before RE-ARM. Red when the Monitor arm is\nnamed first again. Lesson a-30-minute-monitor-is-a-blind-turn-every-30-minutes.\n\nTESTS ADAPTED, STATED NOT HIDDEN: three brief() tests used lessons as the\nfixture for properties that belong to section() -- under-fill, carry-forward,\nand truncation marking. Their fixtures move to doctrine/contracts; the\nassertions are unchanged. The budget file's corpus was lessons-only, so after\nF4 nothing in it could overflow and its truncation gate would have gone\nVACUOUSLY GREEN -- it now seeds doctrine too. One tight-budget literal became\na fraction of the measured full size, because the freed bytes made 2000 stop\nbeing tight.\n"),
     ("0.2.253",
      "0.2.253 THE BROKER TELLS YOU IT MOVED (ruling 20441 F8, on the operator's\nown complaint: \"waiting and hiding the upgrade is terrible\"). The local\ntoolchain converged by POLLING GET /version behind a 3600 s rate limit, so a\ndeploy was up to an hour invisible to every body, cost one HTTP call per body\nper hour for ever, and was recorded only in one box's waked.log.\n\nTHE ATTACH FRAME WAS CONDITIONAL, which is what made a push impossible:\nwake_ws sent a frame at connect ONLY when direct backlog existed, so an attach\nwith an empty inbox was silent. It is unconditional now, composed from\nagent_activity(): {\"wake\": <ringing>, \"reason\": \"backlog\"|\"hello\", \"unread\": n,\n\"direct\": d, \"id\": newest, \"version\": <this broker>}. `backlog` keeps its name\nand its ring -- the field reads that reason (23c0f823).\n\nA BROKER RESTART NECESSARILY DROPS EVERY SOCKET, so the reconnect IS the deploy\nsignal and the only moment the version can have changed. waked converges on the\nframe; _broker_version, UPGRADE_INTERVAL_S, state[\"upgrade_checked\"] and the\nbefore-dial _converge call are DELETED. No timer, no HTTP, no new mechanism --\nconvergence lands seconds after a deploy instead of up to an hour.\n\nTHREE THINGS THE UNCONDITIONAL FRAME FIXES AT ONCE: the version reaches every\nbody when it can have changed; the wedge detector's streak resets on \"the\nbroker SPOKE\", which a HEALTHY IDLE socket never did -- indistinguishable from\na wedged one until mail happened to arrive, while the comment claimed\n\"registration and refusal both speak\"; and `id` lets the two ring producers\nshare one high-water mark, closing 0.2.252's named gap where a backlog ring\nplus 60 s without an ack double-rang.\n\nTHE VERSION CARRIES ITS TIMINGS ANNOTATION, not just the number: waked greps it\nfor the profile-skew warning, so a bare version would have retired that warning\nsilently. /version and the frame are composed from ONE helper and asserted\nEQUAL (6e493fe8), never eyeballed separately.\n\nORDER: THE RING IS WRITTEN BEFORE CONVERGENCE RUNS, asserted and not inferred\nfrom reading the handler. Convergence ends in execv -- the process is REPLACED,\nand a ring not already in the spool would die with it. BACKWARD-COMPATIBLE BY\nCONSTRUCTION: a deployed waked spools only `wake: true` frames and ignores\nwhat it cannot name, so a hello reaching an old daemon does nothing; a frame\nWITHOUT `version` is an old broker and converges nothing.\n\nTESTS DELETED, STATED NOT HIDDEN: test_the_check_is_rate_limited_and_fails_open\nand test_a_failing_probe_still_burns_the_interval asserted the rate limit, whose\nmechanism no longer exists -- deleted rather than skipped or weakened (13760).\ntest_an_unreachable_broker_does_not_raise tested _broker_version throwing; the\nhazard moved to a garbage version STRING on the frame, so it is replaced by\ntwo tests covering that and the absent-version case. Suite 1340 -> 1348.\n\nHERD, ACCEPTED AND STATED: a broker restart reconnects every body inside the\n1-15 s ladder, so N bodies may converge at once. Accepted at N<=20; if it ever\nbites the fix is jitter on the ladder, NOT a return to polling. STILL OWED, own\nlayer (F8.4): waked reporting its INSTALLED version at connect, so a body\nbehind the broker is visible in presence rather than only in its own log.\n"),
     ("0.2.252",

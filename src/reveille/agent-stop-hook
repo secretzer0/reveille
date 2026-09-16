@@ -144,10 +144,14 @@ fi
 # PROXY and cannot stop being one: a process exists is not the harness will be
 # notified, which is exactly how an architect armed a watcher with `cmd &`,
 # satisfied this pgrep with an orphan writing to nothing, and went deaf with
-# every control green (2026-08-19). Naming the Monitor arm in the block reason
-# is the fix that is available here.
+# every control green (2026-08-19). Naming the ARM SHAPE in the block reason is
+# the fix that is available here -- and since 2026-09-16 that shape is the
+# one-shot under run_in_background, not the Monitor follow: the follow's
+# harness timeout costs two blind turns an hour that nothing on our side can
+# tune, while the one-shot was MEASURED surviving 11m06s past the 600000 ms cap
+# people assumed would kill it. Both shapes still satisfy the pgrep above.
 pgrep -f "wake-watch (--follow )?$role( |\$)" >/dev/null 2>&1 && exit 0
 
 watch_bin="$bindir/wake-watch"; [ -x "$watch_bin" ] || watch_bin="wake-watch"
-printf '{"decision":"block","reason":"Wake watcher not armed -- you are deaf to bus rings. Arm it ONCE for this session with the Monitor tool: command=\\\"%s --follow %s\\\", persistent=true. Every line it prints is one ring: inbox(), ack(), act only if owed, DELETE the spool entry you processed -- each ring carries a `spool` key holding its absolute path under %s/new/, so rm that and never a glob; an entry left behind is re-printed by the next watcher process. No re-arm. Where Monitor is not available, fall back to Bash run_in_background=true: %s %s , whose task completion is one ring and which you must re-arm after every one."}\n' "$watch_bin" "$role" "$spool" "$watch_bin" "$role"
+printf '{"decision":"block","reason":"Wake watcher not armed -- you are deaf to bus rings. Arm it with Bash run_in_background=true: %s %s -- bare, nothing prepended or appended. Its task completion IS one ring: inbox(), ack(), act only if owed, DELETE the spool entry you processed -- each ring carries a `spool` key holding its absolute path under %s/new/, so rm that and never a glob -- then RE-ARM, last, after the ack and the rm. An entry left behind is re-printed by the next watcher process. FALLBACK, only where run_in_background does not exist: the Monitor tool with command=\\\"%s --follow %s\\\", persistent=true -- it expires at 1800000 ms and the harness wakes you to re-arm, which is two blind turns an hour."}\n' "$watch_bin" "$role" "$spool" "$watch_bin" "$role"
 exit 0
