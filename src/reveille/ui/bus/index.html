@@ -2466,10 +2466,6 @@ function renderPresence(agents){
   // about a thing they were never going to run.
   el.title=a.connected?(web?'here -- watching this room live':'wake armed -- rings on unicast')
    :a.live?(web?'signed in, not watching this room':'live, waiter down -- mail queues'):'stale';
-  // Said in the tooltip too, because the rail is narrow and the version is the
-  // thing someone goes looking for when a body behaves like an older one.
-  if(!web)el.title+=a.toolchain?(' -- toolchain '+a.toolchain)
-   :' -- toolchain not reported (a daemon older than 0.2.256, or not attached since)';
   // The activity title says what we SAW, and says it PER ROOM -- the same agent can
   // be working in another room and idle here, which is true and surprising, so it
   // gets a sentence rather than arriving later as a bug report.
@@ -2496,6 +2492,13 @@ function renderPresence(agents){
    +'life since it landed -- '+(a.deaf_reason==='no-waiter'
      ?'its wake daemon is not attached; check its container/session'
      :'rings arrive but nothing acts; its session is stuck or unarmed');
+  // APPENDED LAST, AND THE ORDER IS THE WHOLE OF IT: the activity branch and
+  // the deaf branch both REASSIGN el.title, so an append written above them is
+  // silently thrown away for exactly the agents whose version you most want --
+  // the busy ones and the deaf one. Written above them first; the browser
+  // check caught it, reading the rendered DOM rather than the source.
+  if(!web)el.title+=a.toolchain?(' -- toolchain '+a.toolchain)
+   :' -- toolchain not reported (an older daemon, or not attached since)';
   el.onclick=()=>{selAgents.has(a.name)?selAgents.delete(a.name):selAgents.add(a.name);
    recip.clear();for(const n of selAgents)if(n!==myName)recip.add(n);   // filter selection IS the target, minus yourself
    renderPicker();loadPresence();refilter();

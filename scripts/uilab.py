@@ -77,6 +77,14 @@ def seed(db, media=False, extra_agents=()):
         # joined agent gives every scene a real second being to point at.
         if i == 0:
             store.join(conn, name, "dev", rid, token_id=t["id"])
+            # F8.4: what a body REPORTED at its last wake attach. Written
+            # through the real writer rather than a raw UPDATE, so this
+            # fixture exercises the accessor the broker uses; a scene that
+            # seeded the column by hand could pass while set_toolchain was
+            # broken. The second joined-less agents keep '' on purpose --
+            # the rail must show nothing for a body that has not said.
+            store.set_toolchain(conn, store.agent_principal(t["agent_id"]),
+                                [rid], "0.2.256")
     store.send(conn, agent, "*", "Deployed 0.2.130 to reveille.mythos.org: writer at "
                "192.168.85.101:18080, ear take cap 8 MiB / 60 s, GPU 0 at 11.26 of 12.29 GB, "
                "PR #65 merged.", subject="smoke 0.2.130", room=rid)

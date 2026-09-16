@@ -577,6 +577,45 @@ def scene_one_agent_one_color(ctx, url, out, tag, phone):
     p.close()
 
 
+def scene_toolchain_in_the_rail(ctx, url, out, tag, phone):
+    """F8.4 (ruling 20441): the rail says what each body is RUNNING.
+
+    The point of the slice is that a body behind the broker is ONE GLANCE
+    rather than a grep of its own log -- so the thing to prove is that the
+    version is actually ON THE PAGE, read out of the rendered DOM, not that a
+    function was called. And the other half matters as much: a body that has
+    NOT reported must render NOTHING, because a blank is the honest rendering
+    of "it has not said" and anything else is a claim nobody observed.
+    """
+    print(f"TOOLCHAIN IN THE RAIL ({tag})")
+    p = open_page(ctx, url)
+    # NOT .allrow: `everyone` is a FILTER SCOPE, not a being, and its .cnt is
+    # the roster count. Counting it as an invented version was this check's own
+    # defect, found on the first browser run.
+    rows = p.evaluate(
+        """()=>[...document.querySelectorAll('#agents .agent:not(.allrow)')].map(r=>({
+             name:(r.querySelector('.nm')||{}).textContent||'',
+             cnt:(r.querySelector('.cnt')||{}).textContent||'',
+             title:r.title||''}))""")
+    said = [r for r in rows if r["name"] == "roc-ui-dev"]
+    check("the rail lists the body that reported", bool(said), f"rows={rows}")
+    if said:
+        check("the reported toolchain is rendered beside the body",
+              said[0]["cnt"] == "0.2.256", f"cnt={said[0]['cnt']!r}")
+        check("the tooltip names it too (the rail is narrow)",
+              "toolchain 0.2.256" in said[0]["title"], f"title={said[0]['title']!r}")
+
+    # A body that never reported: the agents the seed mints but does not join
+    # are absent from presence entirely, so the honest check is the LOGGED-IN
+    # HUMAN's row -- present, and never a body with a toolchain.
+    human = [r for r in rows if r["name"] == USER]
+    check("a person's row carries no toolchain at all", bool(human) and not human[0]["cnt"],
+          f"human={human}")
+    check("and no row invents a version", not any(
+        r["cnt"] and r["name"] != "roc-ui-dev" for r in rows), f"rows={rows}")
+    shoot(p, out, f"{tag}-toolchain-rail")
+
+
 def main():
     out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "shots/ui")
     out.mkdir(parents=True, exist_ok=True)
@@ -603,7 +642,8 @@ def main():
                 for scene in (scene_modal, scene_multidriver, scene_manager,
                               scene_refusal, scene_refusal_expired,
                               scene_boot_wait, scene_boot_refused,
-                              scene_one_agent_one_color):
+                              scene_one_agent_one_color,
+                              scene_toolchain_in_the_rail):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)
