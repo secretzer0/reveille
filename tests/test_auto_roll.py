@@ -141,11 +141,16 @@ def test_the_broker_answers_work_not_heartbeat(tmp_path):
     store.join(c, "arch", "container", room["id"], ta["id"])
     store.join(c, "peer", "container", room["id"], tp["id"])
     act = store.agent_activity(c, p, {room["id"]: "R"})
-    assert act == {"last_send_ns": 0, "unread": 0}
+    # `direct` and `newest_id` joined the answer with ruling 20404 (waked's
+    # mail probe rings on direct mail alone, deduped by the newest id). Still
+    # pinned as the WHOLE dict, not a subset: the roll decision reads this
+    # shape, and a key appearing by accident is worth a red.
+    assert act == {"last_send_ns": 0, "unread": 0, "direct": 0, "newest_id": 0}
     mid = store.send(c, store.agent_principal(other["id"]), "arch", "you owe me",
                      room=room["id"])["id"]
     act = store.agent_activity(c, p, {room["id"]: "R"})
     assert act["unread"] == 1 and act["last_send_ns"] == 0
+    assert act["direct"] == 1 and act["newest_id"] == mid
     store.ack(c, p, [mid], {room["id"]: "R"})
     assert store.agent_activity(c, p, {room["id"]: "R"})["unread"] == 0
     store.send(c, p, "*", "on it", room=room["id"])

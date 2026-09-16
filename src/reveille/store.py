@@ -5670,16 +5670,52 @@ def presence(conn, rooms):
     ]
 
 
+_ACTIVITY_COUNTS = ("SELECT COUNT(*) AS unread, "
+                    "COALESCE(SUM(m.recipient != ?), 0) AS direct, "
+                    "COALESCE(MAX(m.id), 0) AS newest_id FROM messages m ")
+
+
 def agent_activity(conn, principal, rooms):
-    """The two facts the auto-roll decision reads from the BROKER (DES-006
-    s7.2, ruling 11807): when this identity last SENT, and how many messages
-    are waiting unread for it. Both are about the AGENT's work, not its
-    transport -- a heartbeat says a process is up, which is exactly what a
-    container about to be replaced also has."""
+    """The facts the auto-roll decision and the waked mail probe read from the
+    BROKER (DES-006 s7.2, ruling 11807; reshaped by ruling 20404): when this
+    identity last SENT, how many messages are waiting unread for it, how many
+    of those are DIRECT, and the newest id among them. All about the AGENT's
+    work, not its transport -- a heartbeat says a process is up, which is
+    exactly what a container about to be replaced also has.
+
+    COUNTED, NEVER HYDRATED. This was `len(inbox(...))`, which built every
+    unread row -- two JOINs, the attachments and scripts IN queries, and two
+    os.path.exists per row (_with_artifacts) -- to produce one integer. The
+    mail probe asks this every --mail-probe seconds per agent, so that
+    hydration would be paid ~15x more often than the idle nudge it replaces:
+    agent tokens down, broker CPU up. THE PREDICATE BELOW IS inbox()'s, both
+    branches, clause for clause -- including the unbound branch's deliberate
+    absence of a reads filter (11252: reads answer, and nothing is addressed
+    to nobody). Two places computing one number are held EQUAL by a test
+    rather than each being eyeballed (lesson 6e493fe8); change one, change
+    both, or that test goes red."""
     aid = agent_of(principal)
     last = conn.execute("SELECT max(ts_ns) FROM messages WHERE sender_agent_id=?",
                         (aid,)).fetchone()[0] if aid else None
-    return {"last_send_ns": last or 0, "unread": len(inbox(conn, principal, rooms))}
+    out = {"last_send_ns": last or 0, "unread": 0, "direct": 0, "newest_id": 0}
+    if not rooms:
+        return out
+    rooms = list(rooms)
+    if not aid:
+        row = conn.execute(
+            f"{_ACTIVITY_COUNTS} WHERE m.room IN ({_ph(rooms)}) AND m.recipient=?",
+            [BROADCAST] + rooms + [BROADCAST]).fetchone()
+    else:
+        row = conn.execute(
+            f"{_ACTIVITY_COUNTS} WHERE m.room IN ({_ph(rooms)}) "
+            f"AND (m.recipient_agent_id=? OR m.recipient=?) "
+            f"AND COALESCE(m.sender_agent_id, '')!=? "
+            f"AND NOT EXISTS (SELECT 1 FROM reads r "
+            f"WHERE r.message_id=m.id AND r.principal=?)",
+            [BROADCAST] + rooms + [aid, BROADCAST, aid, principal]).fetchone()
+    out.update(unread=row["unread"], direct=row["direct"],
+               newest_id=row["newest_id"])
+    return out
 
 
 def reap_stale(conn):
