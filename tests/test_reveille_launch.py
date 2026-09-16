@@ -2284,3 +2284,34 @@ def test_dead_token_advice_checks_where_the_identity_is():
     assert "return ticket" in live and "never re-provision" in live
     dead = rl.dead_token_advice("scout", 401, False)
     assert dead == "its bound token is dead (broker said 401) -- re-provision it"
+
+
+def test_the_pin_check_resolves_the_tag_it_compares():
+    """THE GATE READ THROUGH THE WRONG ACCESSOR, and could not see it.
+
+    The host-pulls cutover put $(REGISTRY) in front of Makefile AGENT_IMAGE, so
+    the raw `?=` line stopped being the tag. image-pin-check kept grepping that
+    EXPRESSION inside scripts/reveille_launch.py and this file, which carry the
+    EXPANDED string -- a comparison that could only ever fail. It stayed green
+    because that branch runs only when an agent input MOVES, and none had since
+    the cutover: the first real bump after it (the stop hook's F5 verdict text)
+    is what surfaced it.
+
+    GATED THROUGH THE SCRIPT'S OWN ACCESSOR (`image-pin-check tag <ref>`),
+    never through a second copy of its grep -- a gate that re-derives the value
+    it checks cannot see the accessor go wrong, which is how this survived.
+    Asserted as an EQUALITY between the two computations of one string
+    (6e493fe8), not as two independent looks-right checks.
+    """
+    root = pathlib.Path(rl.__file__).parent.parent
+    got = subprocess.run(
+        ["bash", str(root / "scripts" / "image-pin-check"), "tag", "HEAD"],
+        cwd=root, capture_output=True, text=True)
+    assert got.returncode == 0, got.stderr
+    resolved = got.stdout.strip()
+
+    assert "$(" not in resolved, "an unexpanded make reference reached the comparison"
+    assert resolved == makefile_image(root), (
+        f"image-pin-check resolves {resolved!r} but the pins are compared "
+        f"against {makefile_image(root)!r}")
+    assert resolved == rl.DEFAULT_IMAGE
