@@ -4863,11 +4863,18 @@ async function refreshAgents(){
  catch(e){/* soft-degrade, see comment above */}
 }
 
-// The presence poll is armed once, here or at boot -- whichever gets a room first. A
+// The unread poll is armed once, here or at boot -- whichever gets a room first. A
 // room-less first-run boots without it, so picking the first room must start it.
+// It USED to arm the presence poll too; C3 removed that one, and this comment
+// moved with it rather than going on describing a timer that is gone.
 let polling=false;
 function start(){if(polling)return;polling=true;
- setInterval(loadPresence,15000);
+ // C3 (ruling 20403): NO PRESENCE POLL. The feed socket already pushes a
+ // `presence` frame (daemon _push_presence) into the same renderPresence this
+ // called, so the interval was a second path for data that already arrives --
+ // and it was the ONE poll with no document.hidden guard, so a backgrounded
+ // tab asked forever. One call on connect paints the initial state; the
+ // socket carries every update after it, and a reconnect repaints.
  // The feed socket carries ONE room (the one being viewed), so a count for the
  // OTHER rooms cannot be ticked from it: the broker is asked, on the poll the
  // page already runs. One small /me, no new cadence.
@@ -4942,7 +4949,12 @@ $('kmLater').onclick=()=>{knockSnoozed=true;closeKnockModal();};
 // visible symptom was the audio frame arriving twice and being spoken twice.
 function dropFeed(){if(ws){ws.onclose=null;ws.onmessage=null;ws.close();ws=null;}}
 function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();earcon('swish');
- closePanel();clearFeed();lastId=0;loadBacklog(true);loadPresence();
+ // NOT loadPresence() here either: this drops the feed and reconnects three
+ // lines down, and connect()'s onopen paints the rail for the room we are
+ // arriving in. Calling it here painted the OLD room's roster first and then
+ // asked again -- two requests for one switch, the second of which is the
+ // only correct one.
+ closePanel();clearFeed();lastId=0;loadBacklog(true);
  // Switching INTO a room clears its count as soon as the backlog lands.
  setTimeout(refreshUnread,400);
  dropFeed();connect();start();}
@@ -6872,7 +6884,11 @@ fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+
  if(!d.rooms.length){paintMe();openRooms();toast('create your first room to start');return;}
  if(!room||!d.rooms.some(r=>r.id===room))room=d.rooms[0].id;
  localStorage.revRoom=room;
- paintMe();updateBlast();loadBacklog(true);loadPresence();connect();start();
+ // NOT loadPresence() here: connect()'s onopen paints the rail, and it is
+ // the right one to keep -- it fires on every RECONNECT too, so the rail
+ // recovers after a gap instead of only at boot. Calling it here as well
+ // asked twice for the same first paint (measured: 2 /presence on sign-in).
+ paintMe();updateBlast();loadBacklog(true);connect();start();
  // Back from adding a door (DES-018): land in Account, where the door now shows.
  if(location.hash==='#doors'){history.replaceState(null,'',location.pathname);openAccount();}
  // First-run directive (ruling 8633): a user whose home-login agents have NO
