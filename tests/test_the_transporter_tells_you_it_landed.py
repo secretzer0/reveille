@@ -372,19 +372,34 @@ def test_the_knobs_are_named_not_buried(name):
 
 
 def test_the_nudge_default_is_the_ruled_constant():
-    """Ruled 12246, rebuilt per 12411: the announcement floor is 900s, and it
-    went missing the first time BECAUSE it was a bare argparse literal nothing
-    could gate -- a live memory asserted 900 while the tree shipped 1800. The
-    default must BE the constant, and the constant must be the ruled value.
-    NO_ROOMS_WINDOW_S stays a separate 1800 (ruling 9119); their old collision
-    is part of why this hid."""
-    assert waked.IDLE_NUDGE_S == 900
+    """Ruled 12246, rebuilt per 12411, RETUNED 20421: the announcement floor is
+    3300s, and it went missing the first time BECAUSE it was a bare argparse
+    literal nothing could gate -- a live memory asserted 900 while the tree
+    shipped 1800. The default must BE the constant, and the constant must be
+    the ruled value. NO_ROOMS_WINDOW_S stays a separate 1800 (ruling 9119);
+    their old collision is part of why this hid.
+
+    3300 AND NOT 3600 IS LOAD-BEARING, so it is pinned as a relation and not
+    only as a number: the nudge is BLIND, so its cost is a model turn priced by
+    the harness's prompt cache, whose TTL is 3600s. At exactly 3600 the turn
+    lands cold and pays full input -- worse than the 900 it replaced. Anything
+    that raises this constant to or past the TTL must go red here."""
+    assert waked.IDLE_NUDGE_S == 3300
+    assert waked.IDLE_NUDGE_S < 3600, "a blind nudge must land inside the cache TTL"
     assert waked.NO_ROOMS_WINDOW_S == 1800
     import re
     src = pathlib.Path(waked.__file__).read_text()
-    m = re.search(r"--idle-nudge.*?default=([A-Za-z_0-9]+)", src, re.S)
+    m = re.search(r'add_argument\("--idle-nudge".*?default=([A-Za-z_0-9]+)',
+                  src, re.S)
     assert m and m.group(1) == "IDLE_NUDGE_S", (
         "the --idle-nudge default must be the named constant, not a literal")
+    # W4's knob earns the same pin, and for the same reason: a probe interval
+    # that drifts into a bare literal is the defect this test was written for.
+    assert waked.MAIL_PROBE_S == 60
+    m = re.search(r'add_argument\("--mail-probe".*?default=([A-Za-z_0-9]+)',
+                  src, re.S)
+    assert m and m.group(1) == "MAIL_PROBE_S", (
+        "the --mail-probe default must be the named constant, not a literal")
 
 
 def test_it_does_not_re_adopt_a_credential_it_already_watched_die(monkeypatch):
