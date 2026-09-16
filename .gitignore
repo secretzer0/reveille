@@ -44,4 +44,7 @@ CLAUDE.local.md
 *.flac
 *.ogg
 *.m4a
+*.aac
+*.webm
+*.mp4
 !src/reveille/ui/bus/earcon.wav
