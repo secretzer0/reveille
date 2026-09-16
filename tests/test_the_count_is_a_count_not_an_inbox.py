@@ -9,7 +9,7 @@ replaces, so the hydration had to go.
 That leaves ONE NUMBER COMPUTED IN TWO PLACES, which is lesson 6e493fe8's
 exact shape: the gate asserts the count and the hydrated list AGREE, never
 that each looks right on its own. `direct` is held against the expression the
-wake frame uses at daemon.py:3731, character for character, for the same
+wake frame uses in wake_ws, character for character, for the same
 reason -- a frame saying direct:0 is what ends a woken agent's turn before it
 reads anything.
 """
@@ -23,7 +23,7 @@ from reveille import store  # noqa: E402
 
 
 def frame_direct(msgs):
-    """daemon.py:3731's own expression. Copied deliberately: this gate exists
+    """wake_ws's own expression. Copied deliberately: this gate exists
     to catch the two drifting apart, so it must ask the question the frame
     asks, not a tidier version of it."""
     return sum(1 for m in msgs if m["to"] != store.BROADCAST)
