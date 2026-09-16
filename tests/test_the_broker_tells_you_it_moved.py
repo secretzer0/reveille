@@ -164,3 +164,83 @@ def test_nothing_polls_the_broker_for_a_version_any_more():
     assert not hasattr(waked, "UPGRADE_INTERVAL_S")
     assert list(inspect.signature(waked._converge_inner).parameters) == ["raw", "state"]
     assert list(inspect.signature(waked._converge).parameters) == ["raw", "state"]
+
+
+# ---- the retry bound the deleted limiter was also providing -----------------
+
+def _stub_failing_install(monkeypatch):
+    """A convergence that always fails, and a record of every attempt that got
+    as far as spending a subprocess."""
+    import subprocess
+    attempts = []
+
+    def fake_run(argv, **kw):
+        attempts.append(argv)
+
+        class R:
+            returncode = 1
+            stderr = "install refused by the test"
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(waked, "_uv_or_bootstrap", lambda: "/usr/bin/uv")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return attempts
+
+
+def test_one_attempt_per_broker_version_per_process(monkeypatch):
+    """THE DEFECT THIS PINS, found in review of the first F8 draft. The hourly
+    limiter did two jobs: it paced the poll AND it bounded the retry. F8
+    deleted the poll -- correct -- and left nothing bounding the retry, so a
+    body whose install cannot succeed reconnects on the 1-15 s ladder, is told
+    the version again, and tries again: one GitHub clone per 15 s per body,
+    for ever.
+
+    The bound is the VERSION, not a count and not a clock: a broker that moves
+    is new information and earns a fresh attempt."""
+    attempts = _stub_failing_install(monkeypatch)
+    state = {}
+    waked._converge("99.9.9", state)
+    waked._converge("99.9.9", state)   # same version: not tried again
+    waked._converge("99.9.9", state)
+    assert len(attempts) == 1, f"{len(attempts)} installs for one version"
+    # A broker that MOVED is new information.
+    waked._converge("99.9.10", state)
+    assert len(attempts) == 2, "a newer broker must earn a fresh attempt"
+
+
+def test_the_skip_is_logged_once_not_per_hello(monkeypatch, capsys):
+    """Every reconnect says hello, so a line in the skip branch would be a line
+    per reconnect -- the log a human opens to find out why a body went quiet is
+    exactly what that would bury."""
+    _stub_failing_install(monkeypatch)
+    state = {}
+    waked._converge("99.9.9", state)
+    capsys.readouterr()
+    for _ in range(5):
+        waked._converge("99.9.9", state)
+    err = capsys.readouterr().err
+    assert err.count("already tried") == 1, err
+
+
+def test_convergence_runs_off_the_event_loop(monkeypatch, tmp_path):
+    """_converge_inner runs uv bootstrap, a `uv pip install` with a 600 s
+    timeout and a --version probe. Synchronously in the frame loop that starves
+    _heartbeat (HB 300 s) and _mail_prober and kills the socket that just said
+    hello -- before F8 it ran BEFORE the dial, with no socket to starve.
+
+    Asserted by THREAD IDENTITY, which is deterministic: no clock, no sleep, no
+    load dependence (592e81d9)."""
+    import threading
+    ran_on = []
+    monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path))
+    ws = FakeWS([{"wake": False, "reason": "hello", "unread": 0, "direct": 0,
+                  "id": 0, "version": "99.9.9"}])
+    monkeypatch.setattr(waked.websockets, "connect",
+                        lambda uri, **kw: FakeConnect(ws))
+    monkeypatch.setattr(waked, "_converge",
+                        lambda raw, st: ran_on.append(threading.get_ident()))
+    loop_thread = threading.get_ident()
+    asyncio.run(waked._session("ws://b/wake", AGENT, {"last": time.time_ns()}))
+    assert ran_on, "convergence never ran"
+    assert ran_on[0] != loop_thread, "convergence ran on the event loop"

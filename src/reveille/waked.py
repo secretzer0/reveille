@@ -484,7 +484,17 @@ async def _session(uri, agent, state):
                     nid = obj.get("id") or 0
                     if nid > state.get("last_rung_id", 0):
                         state["last_rung_id"] = nid
-                    _converge(obj["version"], state)
+                    # OFF THE EVENT LOOP. _converge_inner runs uv bootstrap,
+                    # a `uv pip install` with a 600 s timeout and a --version
+                    # probe; synchronously here it starves _heartbeat (HB 300 s)
+                    # and _mail_prober, and kills the socket that just said
+                    # hello. Before F8 convergence ran BEFORE the dial, with no
+                    # socket to starve -- moving the trigger onto a frame moved
+                    # it onto the loop, which is the part that had to move back
+                    # off. execv from the worker replaces the whole process,
+                    # and the ring is already spooled: the await sits after
+                    # write_ring, so the ordering gate still holds.
+                    await asyncio.to_thread(_converge, obj["version"], state)
                 # anything else is informational (e.g. the shutdown note):
                 # hold the socket; a close leads to the reconnect loop.
         finally:
@@ -941,6 +951,28 @@ def _converge_inner(raw, state):
     installed = version_tuple(__version__)
     if not upgrade_due(installed, broker):
         return
+
+    # ONE ATTEMPT PER BROKER VERSION PER PROCESS. The hourly limiter F8 deleted
+    # was doing TWO jobs: it paced the poll (gone with the poll, correctly) and
+    # it BOUNDED THE RETRY (not replaceable by nothing). Without this memo a
+    # body whose install cannot succeed -- git unreachable, GIT_SOURCE 404, uv
+    # broken -- reconnects on the 1-15 s ladder, is told the version again, and
+    # tries again: failing fast that is a clone attempt every 15 s per body for
+    # ever; failing slow it is a 600 s window per reconnect. Same shape as the
+    # "ahead reinstalls for ever" loop the comment above prevents, mirrored.
+    #
+    # The memo is the VERSION, not a count or a clock: a broker that moves is
+    # new information and earns a fresh attempt, and execv on success starts a
+    # process whose memo is empty, which is the right reset.
+    if state.get("converge_tried") == raw:
+        if not state.get("converge_skip_logged"):
+            state["converge_skip_logged"] = True
+            print(f"reveille-waked: already tried "
+                  f"{(raw or '').split()[0] or raw!r} -- not retrying until "
+                  f"the broker moves", file=sys.stderr)
+        return
+    state["converge_tried"] = raw
+    state.pop("converge_skip_logged", None)
 
     print(f"reveille-waked: toolchain {__version__} is behind the broker "
           f"{'.'.join(str(n) for n in broker)} -- converging", file=sys.stderr)

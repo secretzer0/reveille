@@ -386,6 +386,25 @@ after a deploy instead of up to an hour.
 would have retired that warning silently. `/version` and the frame are composed
 from one helper and asserted **equal** (`6e493fe8`), never eyeballed separately.
 
+**One attempt per broker version, per process, and OFF the event loop.** The
+hourly limiter this section deleted was doing *two* jobs: it paced the poll
+(gone with the poll, correctly) and it **bounded the retry** (not replaceable by
+nothing). Caught in review of the first draft. Without a bound, a body whose
+install cannot succeed — git unreachable, `GIT_SOURCE` 404, `uv` broken —
+reconnects on the 1-15 s ladder, is told the version again, and tries again:
+failing fast, one clone attempt every 15 s per body for ever; failing slow, a
+600 s window per reconnect. The memo is the **version string**, not a count and
+not a clock: a broker that moves is new information and earns a fresh attempt,
+and `execv` on success starts a process whose memo is empty — the right reset.
+The skip is logged once, not once per hello, because every reconnect says hello.
+
+And the call is `await asyncio.to_thread(...)`: `_converge_inner` runs a uv
+bootstrap, a `uv pip install` with a 600 s timeout and a `--version` probe.
+Synchronously in the frame loop that starves `_heartbeat` (HB 300 s) and the
+mail probe, and kills the socket that just said hello. Moving the *trigger* onto
+a frame moved the *work* onto the loop; this moves the work back off. Asserted
+by thread identity — deterministic, no clock.
+
 **Order: the ring is written BEFORE convergence runs**, and it is asserted, not
 inferred from reading the handler. Convergence ends in `execv` — the process is
 *replaced*. A ring not already in the spool would die with it, and the mail it
