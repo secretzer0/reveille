@@ -53,6 +53,7 @@ import os
 import shutil
 import sys
 import time
+import urllib.parse
 
 import websockets
 
@@ -1030,12 +1031,28 @@ def _converge_inner(raw, state):
     os.execv(me, [me, *sys.argv[1:]])
 
 
+def wake_uri(url, sep, agent, token):
+    """The wake socket's address, built in ONE place.
+
+    It was four hand-built copies of one f-string -- the reconnect loop's and
+    three inside the park/recall paths -- which is the defect before it
+    happens: the next field to be added gets added to three of them. F8.4 is
+    that field. `toolchain` is what this body is RUNNING, so the broker can
+    show a fleet's versions without asking each machine, and a body sitting
+    behind the broker is one glance rather than a grep of its own log.
+    """
+    out = f"{url}{sep}name={agent}"
+    if token:
+        out += f"&token={token}"
+    return out + f"&toolchain={urllib.parse.quote(__version__)}"
+
+
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                write_env=None, read_env=None, wedge_n=WEDGE_REEXEC_N,
                mail_probe_s=MAIL_PROBE_S):
     sep = "&" if "?" in url else "?"
     token = os.environ.get("REVEILLE_TOKEN", "")
-    uri = f"{url}{sep}name={agent}" + (f"&token={token}" if token else "")
+    uri = wake_uri(url, sep, agent, token)
     state = {"last": time.time_ns()}   # daemon start counts as activity
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
     # BESIDE the connect loop, like the nudger and for the same reason: the
@@ -1140,7 +1157,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         parked_secret = spent
                         token = got
                         tried.add(token)
-                        uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                        uri = wake_uri(url, sep, agent, token)
                         delay = 1
                         continue
                     print(f"reveille-waked: that credential never landed and the "
@@ -1154,7 +1171,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                    uri = wake_uri(url, sep, agent, token)
                     delay = 1
                 elif code == PARKED:
                     # SUPERSEDED IS NOT DEAD (s14). The old shape exited here and
@@ -1171,7 +1188,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                    uri = wake_uri(url, sep, agent, token)
                     delay = 1
                 else:
                     first_no_rooms = None

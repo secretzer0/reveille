@@ -2448,13 +2448,28 @@ function renderPresence(agents){
    el.classList.add('act-'+a.activity);
   const eq=(!web&&a.activity==='active')
    ? '<span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>' : '';
+  // F8.4: what this body's LOCAL TOOLCHAIN is running, as it said at its last
+  // attach. NO COLOUR RULE and nothing computed: whether it is behind the
+  // broker is the reader's comparison, not a state this row asserts (14469 --
+  // the tag marks intent, the manifest says content). Absent means the body
+  // has not said, and an empty space is the honest rendering of that; the
+  // previous value must never linger, which is why the store writes '' too.
+  // Reuses .cnt rather than growing a class: same muted right-edge slot the
+  // everyone-row count already uses.
+  const tc=(!web&&a.toolchain)
+   ? '<span class="cnt" title="toolchain this body reported at its last wake attach">'
+     +esc(a.toolchain)+'</span>' : '';
   el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
-    +'<span class="nm">'+esc(a.name)+'</span>'+eq+'<span class="st"></span>';
+    +'<span class="nm">'+esc(a.name)+'</span>'+eq+tc+'<span class="st"></span>';
   // Same three states, said in the vocabulary of what the row actually is: a person has
   // a tab where an agent has a waiter, and telling a human their "waiter is down" is noise
   // about a thing they were never going to run.
   el.title=a.connected?(web?'here -- watching this room live':'wake armed -- rings on unicast')
    :a.live?(web?'signed in, not watching this room':'live, waiter down -- mail queues'):'stale';
+  // Said in the tooltip too, because the rail is narrow and the version is the
+  // thing someone goes looking for when a body behaves like an older one.
+  if(!web)el.title+=a.toolchain?(' -- toolchain '+a.toolchain)
+   :' -- toolchain not reported (a daemon older than 0.2.256, or not attached since)';
   // The activity title says what we SAW, and says it PER ROOM -- the same agent can
   // be working in another room and idle here, which is true and surprising, so it
   // gets a sentence rather than arriving later as a bug report.
