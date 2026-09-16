@@ -1605,6 +1605,43 @@ def ring_ids(text):
     return out
 
 
+def mcp_result(body):
+    """The result inside a JSON-RPC envelope, or RuntimeError quoting a refusal.
+
+    HTTP 200 IS NOT "IT LANDED". MCP reports a TOOL refusal inside a 200 -- a
+    JSON-RPC `error` object, or `result.isError` with the reason in `content`
+    -- so reading the status alone accepts exactly the case the caller must
+    not accept: broker up, token bound to nobody or the wrong X-Agent, tool
+    says no, HTTP says yes, and a ring gets deleted for mail that is still
+    unread. Verified by the consumer's parser, never by the writer's eye
+    (f7142c5e).
+
+    The reply may also arrive as SSE, because the request accepts
+    text/event-stream: the payload is then the `data:` line.
+    """
+    text = (body or "").strip()
+    if text.startswith("event:") or "\ndata:" in text or text.startswith("data:"):
+        text = "\n".join(ln.partition("data:")[2].strip()
+                          for ln in text.splitlines() if ln.startswith("data:"))
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        raise RuntimeError(f"the broker answered something that is not JSON-RPC: "
+                           f"{(body or '')[:200]!r}")
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"the broker answered {type(obj).__name__}, not an envelope")
+    if obj.get("error"):
+        err = obj["error"]
+        said = err.get("message") if isinstance(err, dict) else None
+        raise RuntimeError(said or json.dumps(err)[:200])
+    res = obj.get("result")
+    if isinstance(res, dict) and res.get("isError"):
+        parts = [c.get("text", "") for c in (res.get("content") or [])
+                 if isinstance(c, dict)]
+        raise RuntimeError("; ".join(x for x in parts if x) or "the tool refused")
+    return res
+
+
 def post_ack(url, token, role, message_ids, timeout=15):
     """ack over /mcp -- stateless JSON, one plain POST, the shape USAGE already
     documents. No new broker route: the tool exists and this is the escape
@@ -1619,13 +1656,15 @@ def post_ack(url, token, role, message_ids, timeout=15):
                  "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode()
+            body = r.read().decode()
     except urllib.error.HTTPError as e:
         try:
             said = json.loads(e.read().decode()).get("detail") or str(e)
         except Exception:
             said = str(e)
         raise RuntimeError(said)
+    # A 200 still has to be OPENED: the refusal lives in the envelope.
+    return mcp_result(body)
 
 
 def cmd_ack(a):

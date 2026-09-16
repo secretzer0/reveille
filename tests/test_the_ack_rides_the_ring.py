@@ -123,3 +123,109 @@ def test_there_is_no_ack_everything(tmp_path):
     assert got.returncode == 0
     assert "--all" not in got.stdout and "--unread" not in got.stdout
     assert "ring_file" in got.stdout
+
+
+# ---- HTTP 200 is not "it landed" -------------------------------------------
+
+def test_the_envelope_is_opened_not_just_the_status():
+    """MCP reports a TOOL refusal inside a 200. Reading the status alone
+    accepts exactly the case ack-before-rm exists for: broker up, token bound
+    to nobody, tool says no, HTTP says yes, ring deleted for mail that is
+    still unread."""
+    import pytest
+    ok = json.dumps({"jsonrpc": "2.0", "id": 1,
+                     "result": {"content": [{"type": "text", "text": "{}"}]}})
+    assert cli.mcp_result(ok)["content"][0]["text"] == "{}"
+
+    for body, expected in [
+        (json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": "unbound token"}]}}),
+         "unbound token"),
+        (json.dumps({"jsonrpc": "2.0", "id": 1,
+                     "error": {"code": -32602, "message": "no such tool"}}),
+         "no such tool"),
+    ]:
+        with pytest.raises(RuntimeError) as e:
+            cli.mcp_result(body)
+        assert expected in str(e.value)
+
+
+def test_an_sse_reply_is_opened_too():
+    """The request accepts text/event-stream, so the answer may arrive as one
+    -- and a refusal hidden in a `data:` line must not read as success."""
+    import pytest
+    sse = ('event: message\n'
+           'data: {"jsonrpc":"2.0","id":1,"result":{"isError":true,'
+           '"content":[{"type":"text","text":"unbound token"}]}}\n\n')
+    with pytest.raises(RuntimeError) as e:
+        cli.mcp_result(sse)
+    assert "unbound token" in str(e.value)
+
+
+def test_a_non_envelope_answer_is_a_refusal_not_a_success():
+    import pytest
+    for body in ("", "<html>proxy error</html>", "[1,2,3]"):
+        with pytest.raises(RuntimeError):
+            cli.mcp_result(body)
+
+
+def _stub_broker(body_text, status=200):
+    """A one-shot HTTP server answering `body_text`. Returns (url, stop)."""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            payload = body_text.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_port}", srv.shutdown
+
+
+def test_a_tool_refusal_inside_a_200_keeps_the_ring(tmp_path):
+    """THE DEFECT THIS PINS, found in review. The first gate only manufactured
+    the connection-refused branch, which is why it was green: nothing ever
+    exercised a broker that ANSWERS and refuses."""
+    ring = write_ring(tmp_path, {"wake": True, "reason": "message", "id": 20602})
+    url, stop = _stub_broker(json.dumps(
+        {"jsonrpc": "2.0", "id": 1,
+         "result": {"isError": True,
+                    "content": [{"type": "text", "text": "unbound token"}]}}))
+    try:
+        got = run_ack(tmp_path, str(ring),
+                      env={"REVEILLE_URL": url, "REVEILLE_TOKEN": "t",
+                           "REVEILLE_AGENT_ROLE": "body"})
+    finally:
+        stop()
+    assert got.returncode == 1, got.stdout
+    assert ring.exists(), "a tool-level refusal deleted the ring"
+    assert "unbound token" in got.stderr
+
+
+def test_a_plain_result_inside_a_200_drains_the_ring(tmp_path):
+    """The control: without it, a gate that only proves the refusal branch
+    also passes for a command that never succeeds at all."""
+    ring = write_ring(tmp_path, {"wake": True, "reason": "message", "id": 20602})
+    url, stop = _stub_broker(json.dumps(
+        {"jsonrpc": "2.0", "id": 1,
+         "result": {"content": [{"type": "text", "text": '{"acked":1}'}]}}))
+    try:
+        got = run_ack(tmp_path, str(ring),
+                      env={"REVEILLE_URL": url, "REVEILLE_TOKEN": "t",
+                           "REVEILLE_AGENT_ROLE": "body"})
+    finally:
+        stop()
+    assert got.returncode == 0, got.stderr
+    assert not ring.exists()
+    assert f"acked [20602] rm {ring}" in got.stdout
