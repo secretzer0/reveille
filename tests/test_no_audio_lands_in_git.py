@@ -26,9 +26,18 @@ def test_the_only_audio_in_git_is_the_earcon():
         f"bank clips are data, never source (14925)")
 
 
-def test_the_ignore_rule_and_its_exception_exist():
+def test_the_ignore_rule_covers_every_extension_the_gate_counts():
     """The gate above catches a commit; the ignore rule prevents the add. Both
     halves, or `git add -A` in a directory holding an exported bank wins a
-    race the gate only reports after the fact."""
-    gi = (REPO / ".gitignore").read_text()
-    assert "*.wav" in gi and "!src/reveille/ui/bus/earcon.wav" in gi
+    race the gate only reports after the fact -- and the two halves must name
+    the SAME extensions, or an ext the gate counts is one `git add -A` away
+    from being staged. Derived from AUDIO, never from a second hand-written
+    list (lesson 6e493fe8: assert the two are equal, not that each looks
+    right)."""
+    gi = (REPO / ".gitignore").read_text().splitlines()
+    counted = {f"*.{e}" for e in AUDIO.pattern.split("(")[1].split(")")[0].split("|")}
+    assert counted <= set(gi), (
+        f"AUDIO counts {sorted(counted - set(gi))} but .gitignore does not ignore "
+        f"them -- a clip with that extension is addable and the gate only reports "
+        f"it after the commit")
+    assert "!src/reveille/ui/bus/earcon.wav" in gi
