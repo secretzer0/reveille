@@ -2448,8 +2448,19 @@ function renderPresence(agents){
    el.classList.add('act-'+a.activity);
   const eq=(!web&&a.activity==='active')
    ? '<span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>' : '';
+  // F8.4: what this body's LOCAL TOOLCHAIN is running, as it said at its last
+  // attach. NO COLOUR RULE and nothing computed: whether it is behind the
+  // broker is the reader's comparison, not a state this row asserts (14469 --
+  // the tag marks intent, the manifest says content). Absent means the body
+  // has not said, and an empty space is the honest rendering of that; the
+  // previous value must never linger, which is why the store writes '' too.
+  // Reuses .cnt rather than growing a class: same muted right-edge slot the
+  // everyone-row count already uses.
+  const tc=(!web&&a.toolchain)
+   ? '<span class="cnt" title="toolchain this body reported at its last wake attach">'
+     +esc(a.toolchain)+'</span>' : '';
   el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
-    +'<span class="nm">'+esc(a.name)+'</span>'+eq+'<span class="st"></span>';
+    +'<span class="nm">'+esc(a.name)+'</span>'+eq+tc+'<span class="st"></span>';
   // Same three states, said in the vocabulary of what the row actually is: a person has
   // a tab where an agent has a waiter, and telling a human their "waiter is down" is noise
   // about a thing they were never going to run.
@@ -2481,6 +2492,13 @@ function renderPresence(agents){
    +'life since it landed -- '+(a.deaf_reason==='no-waiter'
      ?'its wake daemon is not attached; check its container/session'
      :'rings arrive but nothing acts; its session is stuck or unarmed');
+  // APPENDED LAST, AND THE ORDER IS THE WHOLE OF IT: the activity branch and
+  // the deaf branch both REASSIGN el.title, so an append written above them is
+  // silently thrown away for exactly the agents whose version you most want --
+  // the busy ones and the deaf one. Written above them first; the browser
+  // check caught it, reading the rendered DOM rather than the source.
+  if(!web)el.title+=a.toolchain?(' -- toolchain '+a.toolchain)
+   :' -- toolchain not reported (an older daemon, or not attached since)';
   el.onclick=()=>{selAgents.has(a.name)?selAgents.delete(a.name):selAgents.add(a.name);
    recip.clear();for(const n of selAgents)if(n!==myName)recip.add(n);   // filter selection IS the target, minus yourself
    renderPicker();loadPresence();refilter();
@@ -4845,11 +4863,18 @@ async function refreshAgents(){
  catch(e){/* soft-degrade, see comment above */}
 }
 
-// The presence poll is armed once, here or at boot -- whichever gets a room first. A
+// The unread poll is armed once, here or at boot -- whichever gets a room first. A
 // room-less first-run boots without it, so picking the first room must start it.
+// It USED to arm the presence poll too; C3 removed that one, and this comment
+// moved with it rather than going on describing a timer that is gone.
 let polling=false;
 function start(){if(polling)return;polling=true;
- setInterval(loadPresence,15000);
+ // C3 (ruling 20403): NO PRESENCE POLL. The feed socket already pushes a
+ // `presence` frame (daemon _push_presence) into the same renderPresence this
+ // called, so the interval was a second path for data that already arrives --
+ // and it was the ONE poll with no document.hidden guard, so a backgrounded
+ // tab asked forever. One call on connect paints the initial state; the
+ // socket carries every update after it, and a reconnect repaints.
  // The feed socket carries ONE room (the one being viewed), so a count for the
  // OTHER rooms cannot be ticked from it: the broker is asked, on the poll the
  // page already runs. One small /me, no new cadence.
@@ -4924,7 +4949,12 @@ $('kmLater').onclick=()=>{knockSnoozed=true;closeKnockModal();};
 // visible symptom was the audio frame arriving twice and being spoken twice.
 function dropFeed(){if(ws){ws.onclose=null;ws.onmessage=null;ws.close();ws=null;}}
 function pickRoom(id){room=id;localStorage.revRoom=id;paintMe();updateBlast();earcon('swish');
- closePanel();clearFeed();lastId=0;loadBacklog(true);loadPresence();
+ // NOT loadPresence() here either: this drops the feed and reconnects three
+ // lines down, and connect()'s onopen paints the rail for the room we are
+ // arriving in. Calling it here painted the OLD room's roster first and then
+ // asked again -- two requests for one switch, the second of which is the
+ // only correct one.
+ closePanel();clearFeed();lastId=0;loadBacklog(true);
  // Switching INTO a room clears its count as soon as the backlog lands.
  setTimeout(refreshUnread,400);
  dropFeed();connect();start();}
@@ -6854,7 +6884,11 @@ fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+
  if(!d.rooms.length){paintMe();openRooms();toast('create your first room to start');return;}
  if(!room||!d.rooms.some(r=>r.id===room))room=d.rooms[0].id;
  localStorage.revRoom=room;
- paintMe();updateBlast();loadBacklog(true);loadPresence();connect();start();
+ // NOT loadPresence() here: connect()'s onopen paints the rail, and it is
+ // the right one to keep -- it fires on every RECONNECT too, so the rail
+ // recovers after a gap instead of only at boot. Calling it here as well
+ // asked twice for the same first paint (measured: 2 /presence on sign-in).
+ paintMe();updateBlast();loadBacklog(true);connect();start();
  // Back from adding a door (DES-018): land in Account, where the door now shows.
  if(location.hash==='#doors'){history.replaceState(null,'',location.pathname);openAccount();}
  // First-run directive (ruling 8633): a user whose home-login agents have NO

@@ -119,7 +119,12 @@ def test_the_parked_daemon_polls_and_writes_what_it_gets():
     assert "write_env" in park, "a credential that lives only in a process dies with it"
     assert "RECALLED" in park, "and it says so -- silence is the defect (11947)"
     loop = src[src.index("elif code == PARKED"):src.index("else:", src.index("elif code == PARKED"))]
-    assert "uri = f" in loop, "on return it rebuilds the URI on the new secret and carries on"
+    # F8.4 replaced four hand-built copies of the wake URI with one builder,
+    # so the pin follows the BUILDER rather than the f-string spelling it
+    # happened to have. The property is unchanged and now stated more exactly:
+    # on return the URI is rebuilt, and rebuilt on the NEW token.
+    assert "uri = wake_uri(url, sep, agent, token)" in loop, (
+        "on return it rebuilds the URI on the new secret and carries on")
 
 
 def test_the_page_offers_the_return_and_says_what_it_costs():

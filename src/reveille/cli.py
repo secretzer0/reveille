@@ -939,11 +939,16 @@ def doctrine_body(name, agent_type):
         f"Startup: `join()`, then `lessons()`, then `brief(role=\"...\")`. That is\n"
         f"the knowledge floor: rules the fleet already paid for, plus the doctrine,\n"
         f"contracts and decisions ranked to what you do.\n\n"
-        f"Arm the watcher ONCE per session, with the Monitor tool:\n"
-        f"command=\"wake-watch --follow $REVEILLE_AGENT_ROLE\", persistent=true. It\n"
-        f"never exits and every line it prints is one ring. Where Monitor is not\n"
-        f"available, fall back to Bash run_in_background=true:\n"
-        f"`wake-watch $REVEILLE_AGENT_ROLE`, one ring per arm, re-armed after each.\n"
+        f"Arm the watcher with Bash run_in_background=true:\n"
+        f"`wake-watch $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or\n"
+        f"appended. Its task completion IS one ring; re-arm AFTER you have\n"
+        f"acked and rm'd, inside a turn you are taking anyway. MEASURED\n"
+        f"2026-09-16: it survives 11m06s, well past Bash's 600000 ms cap --\n"
+        f"that cap bounds a foreground call, not a backgrounded task.\n"
+        f"The Monitor tool with `wake-watch --follow` is the FALLBACK, for\n"
+        f"harnesses with no run_in_background. Monitor expires at 1800000 ms\n"
+        f"and the harness wakes you to re-arm, so it costs 2 blind turns an\n"
+        f"hour that nothing can tune away.\n"
         f"Armed means the HARNESS is watching it: `wake-watch ... &` inside a Bash\n"
         f"call is an orphan that satisfies every check and rings nobody.\n"
         f"A SESSION BOUNDARY KILLS EVERY WATCHER THE OLD SESSION ARMED -- arming\n"
@@ -1576,6 +1581,140 @@ def post_knock(url, token, machine=None, timeout=10):
         raise RuntimeError(said)
 
 
+def ring_ids(text):
+    """The message ids a ring names: `id` and/or `ids`, deduped, in order.
+
+    A ring that is not a JSON object is still a ring (I3), and an idle-nudge
+    names nothing at all -- both yield no ids, which is not an error. What is
+    NOT here is any notion of "everything unread": acking what you did not
+    read is 23c0f823 in a new coat, so the only ids this can produce are the
+    ones the ring itself carried.
+    """
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(obj, dict):
+        return []
+    out = []
+    for v in [obj.get("id")] + list(obj.get("ids") or []):
+        if isinstance(v, bool) or not isinstance(v, int):
+            continue
+        if v > 0 and v not in out:
+            out.append(v)
+    return out
+
+
+def mcp_result(body):
+    """The result inside a JSON-RPC envelope, or RuntimeError quoting a refusal.
+
+    HTTP 200 IS NOT "IT LANDED". MCP reports a TOOL refusal inside a 200 -- a
+    JSON-RPC `error` object, or `result.isError` with the reason in `content`
+    -- so reading the status alone accepts exactly the case the caller must
+    not accept: broker up, token bound to nobody or the wrong X-Agent, tool
+    says no, HTTP says yes, and a ring gets deleted for mail that is still
+    unread. Verified by the consumer's parser, never by the writer's eye
+    (f7142c5e).
+
+    The reply may also arrive as SSE, because the request accepts
+    text/event-stream: the payload is then the `data:` line.
+    """
+    text = (body or "").strip()
+    if text.startswith("event:") or "\ndata:" in text or text.startswith("data:"):
+        text = "\n".join(ln.partition("data:")[2].strip()
+                          for ln in text.splitlines() if ln.startswith("data:"))
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        raise RuntimeError(f"the broker answered something that is not JSON-RPC: "
+                           f"{(body or '')[:200]!r}")
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"the broker answered {type(obj).__name__}, not an envelope")
+    if obj.get("error"):
+        err = obj["error"]
+        said = err.get("message") if isinstance(err, dict) else None
+        raise RuntimeError(said or json.dumps(err)[:200])
+    res = obj.get("result")
+    if isinstance(res, dict) and res.get("isError"):
+        parts = [c.get("text", "") for c in (res.get("content") or [])
+                 if isinstance(c, dict)]
+        raise RuntimeError("; ".join(x for x in parts if x) or "the tool refused")
+    return res
+
+
+def post_ack(url, token, role, message_ids, timeout=15):
+    """ack over /mcp -- stateless JSON, one plain POST, the shape USAGE already
+    documents. No new broker route: the tool exists and this is the escape
+    hatch the doctrine points at when a client is down."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "ack",
+                                  "arguments": {"message_ids": message_ids}}}).encode()
+    req = urllib.request.Request(
+        url.rstrip("/") + "/mcp", data=body, method="POST",
+        headers={"Authorization": f"Bearer {token}", "X-Agent": role or "unset-agent",
+                 "Accept": "application/json, text/event-stream",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode()
+    except urllib.error.HTTPError as e:
+        try:
+            said = json.loads(e.read().decode()).get("detail") or str(e)
+        except Exception:
+            said = str(e)
+        raise RuntimeError(said)
+    # A 200 still has to be OPENED: the refusal lives in the envelope.
+    return mcp_result(body)
+
+
+def cmd_ack(a):
+    """One ring, handled: ack what it named, then delete the file that carried
+    it -- the two acts a session owed after every ring, in one call instead of
+    an MCP round trip plus a hand-typed rm.
+
+    THE ACK COMES FIRST AND THE rm ONLY ON SUCCESS. Deleting a ring whose ack
+    did not land loses the only local record that the mail arrived, and the
+    message stays unread with nothing left to notice it. A failed ack keeps
+    the file, so the next arm re-prints it.
+
+    Never a glob, ever: the path named on the line is the only thing removed
+    (spool-rm-by-name-not-glob).
+    """
+    ring = pathlib.Path(a.ring_file)
+    try:
+        text = ring.read_text()
+    except OSError as e:
+        print(f"reveille ack: cannot read {ring}: {e}", file=sys.stderr)
+        return 1
+    ids = ring_ids(text)
+    for extra in a.ids:
+        if extra not in ids:
+            ids.append(extra)
+
+    if ids:
+        env = directory_env(os.path.abspath(a.dir or os.getcwd()))
+        url, token = env["REVEILLE_URL"], env["REVEILLE_TOKEN"]
+        if not url or not token:
+            print("reveille ack: no credential here -- run this in the agent's "
+                  "directory, or set $REVEILLE_URL and $REVEILLE_TOKEN",
+                  file=sys.stderr)
+            return 1
+        try:
+            post_ack(url, token, env["REVEILLE_AGENT_ROLE"], ids)
+        except (RuntimeError, OSError) as e:
+            print(f"reveille ack: the broker refused -- {e}. Keeping {ring} so "
+                  f"the next arm re-prints it.", file=sys.stderr)
+            return 1
+    try:
+        ring.unlink()
+    except OSError as e:
+        print(f"reveille ack: acked {ids} but could not remove {ring}: {e}",
+              file=sys.stderr)
+        return 1
+    print(f"acked {ids} rm {ring}")
+    return 0
+
+
 def cmd_knock(a):
     """THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF (DES-012
     s18). Presents THIS directory's credential -- the dead one join() just
@@ -1811,6 +1950,17 @@ def main(argv=None):
     lo = sub.add_parser("logout", help="end this machine's sign-in and remove it "
                                        "from disk")
     lo.set_defaults(fn=cmd_logout)
+    ak = sub.add_parser("ack", help="ack what a ring named and delete that ring "
+                                    "file -- the two acts every ring owes, in "
+                                    "one call instead of an MCP round trip")
+    ak.add_argument("ring_file", help="the ring's own `spool` path, exactly as "
+                                      "the watcher printed it")
+    ak.add_argument("ids", nargs="*", type=int,
+                    help="extra message ids to ack alongside the ring's own. "
+                         "There is deliberately no ack-everything: acking what "
+                         "you did not read is how mail goes missing")
+    ak.add_argument("--dir", help="the agent's directory (default: the current one)")
+    ak.set_defaults(fn=cmd_ack)
     a = ap.parse_args(argv)
     return a.fn(a)
 

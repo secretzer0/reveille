@@ -31,7 +31,7 @@ class _Ctx:
         request = None
 
 
-def _seed(tmp_path, monkeypatch, n_lessons=40):
+def _seed(tmp_path, monkeypatch, n_lessons=40, n_doctrine=12):
     path = str(tmp_path / "b.db")
     c = store.connect(path)
     store.migrate(c, path)
@@ -44,6 +44,16 @@ def _seed(tmp_path, monkeypatch, n_lessons=40):
                          room_id=None)
     tok = store.create_token(c, admin["id"], "body", agent_name="ghost",
                              create=True, rooms=[r["id"]])
+    # F4 made brief() COUNT lessons instead of quoting them, so a lessons-only
+    # corpus can no longer overflow any budget -- this file's truncation gate
+    # would have gone vacuously green. Doctrine is what brief renders now, so
+    # that is what the corpus has to contain for the gate to mean anything.
+    for i in range(n_doctrine):
+        store.memory_add(
+            c, author="architect", token_id=tok["id"], agent_bound=True,
+            tier="ratify", is_admin=True, rooms={r["id"]},
+            owned_rooms={r["id"]}, kind="doctrine", scope=r["id"],
+            fact=f"doctrine {i:03d}: " + "d" * 300)
     monkeypatch.setattr(daemon, "_conn", c)
     p = daemon.Principal(kind="agent", name="ghost", user_id=admin["id"],
                          token_id=tok["id"], rooms={r["id"]: "bridge"},
@@ -94,5 +104,10 @@ def test_brief_marks_what_the_budget_cut(tmp_path, monkeypatch):
     a small budget still names its cut sections."""
     _seed(tmp_path, monkeypatch)
     payload = json.loads(asyncio.run(daemon.brief(budget=2500, ctx=_Ctx())))
-    assert "lessons" in payload["truncated"]
+    # F4: lessons is a pointer line, so it is never the section that gets cut.
+    # The COUNT still reports the whole floor -- that is what the pointer is
+    # for -- and the cut now lands on the sections that render rows.
+    assert payload["truncated"], "a corpus far over budget must name its cut"
+    assert "lessons" not in payload["truncated"]
     assert payload["sections"]["lessons"] == 40
+    assert "lessons: 40 -- lessons() is the exhaustive read" in payload["text"]

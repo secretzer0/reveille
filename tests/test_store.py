@@ -1397,56 +1397,80 @@ def test_brief_composition_ranking_and_budget():
 
     out = store.brief(c, rooms=rooms, token_id=tok["id"], role="roc-ui dev")
     t = out["text"]
-    assert "wake-127" in t and "field_ticket_id ONLY" in t and "TRANSPORT" in t
+    # F4: the lesson is COUNTED, not quoted -- lessons() is the exhaustive read
+    # and the boot ritual already calls it, so quoting here billed the same
+    # rows twice. The pointer names the tool that serves them.
+    assert "wake-127" not in t, "brief must not quote lesson text"
+    assert "lessons: 1 -- lessons() is the exhaustive read" in t
+    assert "field_ticket_id ONLY" in t and "TRANSPORT" in t
     assert "my open task: S4" in t and "bob secret state" not in t
     # role relevance: the roc-ui doctrine line outranks the uv line
     assert t.index("roc-ui uses stacked branches") < t.index("python services pin uv")
     assert out["truncated"] == [] and out["chars"] <= 28000
-    # tight budget: hard cap holds and the cut is MARKED
-    small = store.brief(c, rooms=rooms, token_id=tok["id"], budget=2000)
-    assert len(small["text"]) <= 2000
-    assert small["truncated"] or small["sections"]["lessons"] <= 1
+    # tight budget: hard cap holds and the cut is MARKED. DERIVED FROM THE
+    # MEASURED FULL SIZE, not a magic number: F4 freed enough bytes that the
+    # old literal 2000 stopped being tight at all and the assertion went
+    # vacuous. Half of what the corpus actually needs is tight by construction,
+    # and stays tight as the corpus changes.
+    tight = max(200, out["chars"] // 2)
+    small = store.brief(c, rooms=rooms, token_id=tok["id"], budget=tight)
+    assert small["chars"] <= tight
+    assert small["truncated"], "a budget this tight must name what it cut"
 
 
 def test_brief_small_budget_fills_not_starves():
     """s7 under-fill: a section whose first row exceeds its share must still show
     it when the global remainder fits -- and the caller's budget is honored as
-    given, never silently floored to 2000."""
+    given, never silently floored to 2000.
+
+    DRIVEN THROUGH DOCTRINE SINCE F4. This property belongs to section()'s
+    share arithmetic, not to lessons; lessons were merely the first section and
+    so the convenient fixture. F4 replaced that section with a pointer line, so
+    the same assertion now needs a section that still HAS a share. The
+    arithmetic under test is unchanged."""
     c, admin, room, tok = fixture()
-    long_rule = "x" * 900  # bigger than any share of a small budget
-    store.add_lesson(c, author="alice", slug="big-lesson", room_id=room["id"],
-                     symptom="s", root_cause="rc", rule=long_rule, detection="d")
+    long_fact = "big-doctrine: " + "x" * 900  # bigger than any share of a small budget
+    store.memory_add(
+        c, author="alice", token_id=tok["id"], agent_bound=True, tier="ratify",
+        is_admin=False, rooms={room["id"]}, owned_rooms={room["id"]},
+        fact=long_fact, kind="doctrine", scope=room["id"])
     got = store.brief(c, rooms={room["id"]: "R"}, token_id=tok["id"], budget=2500)
-    # pre-fix: lessons cap was 0.30*2500=750 < the line -> zero shown, share dead
-    assert "big-lesson" in got["text"], "first row starved despite global room"
+    # pre-fix: the share was smaller than the line -> zero shown, share dead
+    assert "big-doctrine" in got["text"], "first row starved despite global room"
     assert got["chars"] <= 2500
 
     # asked-budget honored: no silent 2000 floor. 700 cannot fit the 900-char
-    # lesson, so the skeleton comes back marked truncated -- within budget.
+    # row, so the skeleton comes back marked truncated -- within budget.
     small = store.brief(c, rooms={room["id"]: "R"}, token_id=tok["id"], budget=700)
     assert small["chars"] <= 700
-    assert "big-lesson" not in small["text"]
-    assert "lessons" in small["truncated"]
+    assert "big-doctrine" not in small["text"]
+    assert "doctrine" in small["truncated"]
 
 
 def test_brief_carry_flows_unused_share_forward():
-    """A short lessons section leaves most of its 30% share unused; doctrine must
-    inherit it rather than stopping at its own 25%."""
+    """Unused share flows FORWARD to the next section rather than being lost.
+
+    DONOR MOVED SINCE F4: lessons used to hold a 0.30 share and leave most of
+    it, which made it the natural donor. It is a pointer line now and holds no
+    share at all, so the same mechanism is driven one section along -- a short
+    doctrine section must lift contracts past its own share."""
     c, admin, room, tok = fixture()
-    store.add_lesson(c, author="alice", slug="tiny", room_id=room["id"],
-                     symptom="s", root_cause="rc", rule="short", detection="d")
+    store.memory_add(
+        c, author="alice", token_id=tok["id"], agent_bound=True, tier="ratify",
+        is_admin=False, rooms={room["id"]}, owned_rooms={room["id"]},
+        fact="tiny doctrine", kind="doctrine", scope=room["id"])
     for i in range(8):
         store.memory_add(
             c, author="alice", token_id=tok["id"], agent_bound=True, tier="ratify",
             is_admin=False, rooms={room["id"]}, owned_rooms={room["id"]},
-            fact=f"doctrine number {i}: " + "y" * 180, kind="doctrine",
+            fact=f"contract number {i}: " + "y" * 180, kind="contract",
             scope=room["id"])
     got = store.brief(c, rooms={room["id"]: "R"}, token_id=tok["id"], budget=2000)
-    # doctrine's own share is 500 (~2 rows of ~200); lessons used ~60 of 600,
-    # so carry must lift doctrine to 4+ rows. Pre-fix this stops at 2.
+    # contracts' own share is 0.30*~1900 (~2-3 rows of ~200); doctrine used ~15
+    # of its 0.35, so carry must lift contracts well past its own share.
     shown = sum(1 for ln in got["text"].splitlines()
-                if ln.startswith("- doctrine number"))
-    assert shown >= 4, f"carry did not flow: only {shown} doctrine rows"
+                if ln.startswith("- contract number"))
+    assert shown >= 4, f"carry did not flow: only {shown} contract rows"
     assert got["chars"] <= 2000
 
 

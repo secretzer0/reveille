@@ -121,7 +121,34 @@ def test_the_unarmed_watcher_verdict_is_json_a_client_can_parse(tmp_path):
 
     verdict = json.loads(out)
     assert verdict["decision"] == "block"
+    # Both shapes are still named, and the escape still survives the round
+    # trip -- that `\"` is the defect this test was written for.
     assert 'command="wake-watch --follow mac-agent"' in verdict["reason"]
+
+
+def test_the_verdict_names_the_one_shot_first(tmp_path):
+    """F5 doctrine flip (ruling 20441), asserted through the CONSUMER'S PARSER
+    rather than by reading the template (f7142c5e).
+
+    The block reason is the last thing a deaf body reads before it arms, so
+    whichever shape it names first is the shape the fleet runs. It named the
+    Monitor follow, which expires at the harness's 1800000 ms cap and wakes the
+    body to re-arm: two blind turns an hour, per body, that nothing on our side
+    can tune. The one-shot under run_in_background was assumed to fare worse
+    because of Bash's 600000 ms cap -- MEASURED 2026-09-16 at 11m06s, exit 0 on
+    its ring, because that cap bounds a FOREGROUND call and a backgrounded task
+    is a different shape."""
+    commands = _fixture(tmp_path, flock_exit=1, watcher_armed=False)
+    reason = json.loads(_run_hook(commands, tmp_path, python=sys.executable))["reason"]
+
+    one_shot = reason.index("run_in_background")
+    follow = reason.index("--follow")
+    assert one_shot < follow, (
+        "the block reason must name the one-shot before the Monitor follow")
+    assert "FALLBACK" in reason and reason.index("FALLBACK") < follow
+    # The drain order is part of the instruction, not an aside: re-arming
+    # before the ack is how a body rings itself in a loop.
+    assert reason.index("ack()") < reason.index("RE-ARM")
 
 
 def test_flock_answering_held_stops_a_second_daemon(tmp_path):

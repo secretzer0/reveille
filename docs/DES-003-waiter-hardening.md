@@ -194,12 +194,28 @@ turn boundary. The session cannot wake itself; the watcher only reports what is
 already in the spool; a peer cannot know you went quiet. The daemon can.
 
 **Mechanism.** `reveille-waked` tracks the wall-clock time of the last ring it
-wrote. After `--idle-nudge` seconds with none (**default 1800 = 30 min**, `0`
+wrote. After `--idle-nudge` seconds with none (**default 3300 = 55 min**, `0`
 disables), it writes ONE synthetic spool entry:
 
 ```json
-{"wake": true, "reason": "idle-nudge", "idle_seconds": 1800}
+{"wake": true, "reason": "idle-nudge", "idle_seconds": 3300}
 ```
+
+**3300, not 3600, and the odd number is the whole point** (ruling 20421). This
+nudge is *blind*: it fires whether or not anything is waiting, so its cost is a
+model turn priced at whatever the harness's prompt cache holds. That TTL is
+3600 s on a 1-hour tier, so a nudge at exactly 3600 lands on a **cold** cache
+and pays full input; one at 3300 lands warm and pays ~10%. For an idle stretch
+of 3 h with context *C*:
+
+| interval | blind turns | input paid |
+|---|---|---|
+| 900 s (old) | 12 | 1.2 C |
+| 3600 s | 3 | **3.0 C** — worse than the old default |
+| 3300 s | 3 | 0.3 C |
+
+Raising a blind interval *past* the cache TTL makes it more expensive, not
+cheaper. The knob stays so an operator on the 5-minute tier can pick anything.
 
 Then it resets its timer. Same spool path, same watcher, no new plumbing — to
 the session a nudge is just a ring whose `reason` differs.
@@ -221,10 +237,12 @@ implies "act" manufactures traffic (global lesson `broadcast-wake-storm`):
   entry waits and fires at the next arm.
 - It is per-agent and self-generated: no broadcast, no fan-out, no N².
 - Cost is bounded and legible: one turn per idle interval per agent. At the
-  30-minute default, a fully idle agent costs 48 turns/day; tune with
-  `--idle-nudge` per role (a reviewer may want 30 min; a batch worker may want
-  hours).
+  55-minute default, a fully idle agent costs ~26 turns/day; tune with
+  `--idle-nudge` per role (a batch worker may want hours).
 - Rings from real mail reset the timer, so a busy fleet never nudges at all.
+- **The nudge is not a delivery and never was.** It says "time passed" and
+  claims nothing about mail. W4 below is what makes mail arrive quickly; W3
+  exists only to restart *parked work whose ring was already spent*.
 
 **Ruling — no exponential backoff.** A nudge whose interval grows makes an
 agent progressively harder to reach the longer it has been stuck, which is
@@ -237,6 +255,181 @@ timer; the nudge JSON is distinguishable by `reason` so a session can log it as
 such; `--idle-nudge 0` writes none, ever; and a nudge arriving while a watcher
 is unarmed still fires at the next arm (the I3 property must hold for
 synthetic rings too).
+
+---
+
+## W4 — the mail probe: the ring the nudge never was
+
+*Ruling 20404 F1, on the efficiency sweep in 20399. Built 0.2.252 (stack .01).*
+
+**The defect.** W3's nudge is blind, and for an idle body it was the only thing
+that fired. Measured on one native body, 2026-09-16: nine `reason=idle-nudge`
+rings in a single session, `inbox()` empty on every one. Worse than waste — a
+parentless broadcast never rings (`broadcast-wake-storm`) and waits for the
+recipient's next turn, so the blind nudge *was* that delivery: real mail could
+sit up to a full interval while empty nudges fired on schedule.
+
+**Mechanism.** Every `--mail-probe` seconds (**default 60**, `0` disables) the
+daemon asks the broker `GET /agent/activity` — the counted answer B1 built, one
+SQL, no hydration — and writes a ring **iff** `direct > 0` **and**
+`newest_id > last_rung_id`:
+
+```json
+{"wake": true, "reason": "mail", "unread": 2, "direct": 1, "id": 20404}
+```
+
+Same keys as a socket ring, so watcher and agent code is unchanged. The
+`reason` differs because a probe ring proves HTTP + token and says *nothing*
+about WS routing (lesson `7d89738a`), and a reader must be able to tell which
+path delivered it.
+
+**Three producers, told apart by `reason`:**
+
+| `reason` | producer | means |
+|---|---|---|
+| `message` / `backlog` | the socket | the broker pushed a fact |
+| `mail` | the mail probe (W4) | direct mail is waiting |
+| `idle-nudge` | the idle timer (W3) | time passed; nothing is claimed |
+
+**Dedup is by id, never by count.** One fact, one ring, whatever the agent's
+turn state. A count changes when the agent acks — which the daemon cannot see —
+so counting would make the ring depend on something invisible to the thing
+deciding. Both producers share the high-water mark: a socket ring advances it
+too, or the probe would re-ring a minute later for mail the socket already
+delivered.
+
+**Broadcast-only unread does not ring**, deliberately. A parentless agent
+broadcast is read on the recipient's next turn; ringing every body in a room
+within 60 s of an FYI is the storm `WHO HEARS WHAT` exists to prevent, at 15x
+the old ceiling. *Needed now* means unicast.
+
+**Undecidable does not ring.** A 401, a 5xx, a timeout, an unparsable body, and
+an *old broker whose `/agent/activity` has no `direct`* all arrive as `None` —
+which is not zero and must never be read as "no mail". Which way is safe is
+decided by what the act costs (`d9245252`): a spurious ring **spends a model
+turn** and is not idempotent, so undecidable falls silent. The socket remains
+the primary delivery. The blind branch logs once per state change, never per
+tick — a probe that cannot reach the broker for an hour must not write 60
+identical lines into the log a human reads to find out why a body went quiet.
+
+**Floor, replacing s6's "900 s":** **60 s for direct mail, 3300 s otherwise.**
+
+**Herd, accepted and stated rather than fixed:** a broker restart reconnects
+every body inside the 1-15 s ladder. With `N <= 20` bodies, each probing
+independently, that is a burst of small authenticated GETs — accepted. If it
+ever bites, the fix is jitter on the ladder, **not** a return to polling.
+
+**Known gap, closed by F8:** the attach `backlog` frame carries no `newest_id`,
+so a backlog ring followed by 60 s without an ack can still double-ring. F8 puts
+`newest_id` on that frame.
+
+**Gate:** `tests/test_the_probe_rings_on_mail.py`, driven through the pure
+decision and a clockless tick — no sleeps, because a probe test that waits for
+an interval asserts whatever the machine's load allows. Proven red five ways:
+dedup by count instead of id, ringing on `unread` instead of `direct`,
+undecidable ringing, the blind interval raised onto the cache TTL, and an old
+broker's answer read as an empty inbox.
+
+**Counting turns by cause (F6).** Nothing did: rings are deleted by the session
+that handles them, and a blind nudge never touches the broker. Every producer
+now writes one line per ring — `ring <reason> id=<n> direct=<d>` — derived from
+the frame that was actually written, so `grep -c 'ring idle-nudge' waked.log`
+per body per day is the number every further cut is judged by.
+
+---
+
+## W5 — the broker tells you it moved
+
+*Ruling 20441 F8, on the operator's own complaint. Built 0.2.253 (stack .02).*
+
+**The defect.** The local toolchain converged by polling `GET /version` behind a
+3600 s rate limit. A deploy was therefore **up to an hour invisible to every
+body**, cost one HTTP call per body per hour for ever, and was recorded only in
+one box's `waked.log`. In the operator's words: *"waiting and hiding the upgrade
+is terrible."*
+
+**And the attach frame was conditional**, which is what made a push impossible:
+`wake_ws` sent a frame at connect *only* when direct backlog existed, so an
+attach with an empty inbox was silent.
+
+**Mechanism.** One attach frame, always, composed from `store.agent_activity()`:
+
+```json
+{"wake": false, "reason": "hello", "unread": 0, "direct": 0,
+ "id": 0, "version": "0.2.253"}
+```
+
+`wake` is true and `reason` is `backlog` when direct mail is already waiting and
+the poke gate allows it; otherwise `wake` is false and `reason` is `hello`.
+`backlog` keeps its name and its semantics — the field reads that reason
+(`23c0f823`).
+
+**A broker restart necessarily drops every socket, so the reconnect IS the
+deploy signal** — and the only moment the version can have changed. `waked`
+converges on the frame's `version`; `_broker_version`, `UPGRADE_INTERVAL_S`,
+`state["upgrade_checked"]` and the before-dial `_converge` call are all
+**deleted**. No timer, no HTTP, no new mechanism. Convergence lands seconds
+after a deploy instead of up to an hour.
+
+**Three things the unconditional frame fixes at once:**
+
+1. the version reaches every body at the moment it can have changed;
+2. the wedge detector resets its streak on *"the broker SPOKE"* — which a
+   healthy **idle** socket never did, making it indistinguishable from a wedged
+   one until mail happened to arrive. The comment claimed "registration and
+   refusal both speak" while registration sent no frame at all;
+3. `id` lets the two ring producers share one high-water mark, closing W4's
+   named gap where a backlog ring plus 60 s without an ack double-rang.
+
+**The version string carries its timings annotation**, not just the bare number:
+`waked` greps it for the profile-skew warning, so a frame with only the version
+would have retired that warning silently. `/version` and the frame are composed
+from one helper and asserted **equal** (`6e493fe8`), never eyeballed separately.
+
+**One attempt per broker version, per process, and OFF the event loop.** The
+hourly limiter this section deleted was doing *two* jobs: it paced the poll
+(gone with the poll, correctly) and it **bounded the retry** (not replaceable by
+nothing). Caught in review of the first draft. Without a bound, a body whose
+install cannot succeed — git unreachable, `GIT_SOURCE` 404, `uv` broken —
+reconnects on the 1-15 s ladder, is told the version again, and tries again:
+failing fast, one clone attempt every 15 s per body for ever; failing slow, a
+600 s window per reconnect. The memo is the **version string**, not a count and
+not a clock: a broker that moves is new information and earns a fresh attempt,
+and `execv` on success starts a process whose memo is empty — the right reset.
+The skip is logged once, not once per hello, because every reconnect says hello.
+
+And the call is `await asyncio.to_thread(...)`: `_converge_inner` runs a uv
+bootstrap, a `uv pip install` with a 600 s timeout and a `--version` probe.
+Synchronously in the frame loop that starves `_heartbeat` (HB 300 s) and the
+mail probe, and kills the socket that just said hello. Moving the *trigger* onto
+a frame moved the *work* onto the loop; this moves the work back off. Asserted
+by thread identity — deterministic, no clock.
+
+**Order: the ring is written BEFORE convergence runs**, and it is asserted, not
+inferred from reading the handler. Convergence ends in `execv` — the process is
+*replaced*. A ring not already in the spool would die with it, and the mail it
+named would wait for the next producer. The spool survives the exec; an
+unwritten frame does not.
+
+**Backward-compatible by construction:** a deployed `waked` writes a ring only
+for `wake: true` and ignores any frame it cannot name, so a `hello` reaching an
+old daemon does nothing at all. Fail-open the other way too: a frame *without*
+`version` is an old broker, and an old broker converges nothing.
+
+**Herd, accepted and stated rather than fixed:** a broker restart reconnects
+every body inside the 1-15 s ladder, so N bodies may converge at once — N
+in-venv `uv pip install` runs against GitHub, then N `execv`. Accepted at
+N<=20. If it ever bites, the fix is jitter on the ladder, **not** a return to
+polling.
+
+**Still owed, its own layer (F8.4):** `waked` reporting its *installed* version
+at connect, so the broker and the UI can show toolchain version per body. That
+is the other half of "hiding" — today a body behind the broker is visible only
+in its own log.
+
+**Gate:** `tests/test_the_broker_tells_you_it_moved.py` drives the real
+`_session` over a scripted socket, because the properties that matter are about
+**order** and about which frames trigger what.
 
 ## 6. Thread-wake pendings are in-memory, and that is a decision
 

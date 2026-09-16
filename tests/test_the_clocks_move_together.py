@@ -146,11 +146,32 @@ def test_a_bare_version_is_production_and_silence_is_no_announcement(monkeypatch
 
 
 def test_the_convergence_pass_carries_the_skew_check(monkeypatch, capsys):
-    """The wiring: _converge_inner must run the warning on the string
-    _broker_version returned, every pass, before any early return."""
+    """The wiring: _converge_inner must run the warning on the version string
+    THE BROKER SENT, every pass, before any early return.
+
+    F8 moved where that string comes from -- the attach frame, not a GET
+    /version poll -- which is exactly why the annotation had to travel on the
+    frame too. A frame carrying only the bare version would have retired this
+    warning silently, and a fast broker against a production body produces
+    timings that read as defects rather than failing cleanly."""
     monkeypatch.setattr(timings, "PROFILE", "production")
-    monkeypatch.setattr(waked, "_broker_version",
-                        lambda url: f"{waked.__version__} "
-                                    f"(timings: fast -- REVEILLE_TIMINGS)")
-    waked._converge_inner("http://b.example", {})
+    waked._converge_inner(f"{waked.__version__} "
+                          f"(timings: fast -- REVEILLE_TIMINGS)", {})
     assert "SKEW" in capsys.readouterr().err
+
+
+def test_the_wake_frame_and_version_announce_the_same_profile(monkeypatch):
+    """TWO PRODUCERS OF ONE FACT, held EQUAL rather than each eyeballed
+    (lesson 6e493fe8). F8 gave the wake attach frame a `version`, so
+    /version's body is no longer the only string waked parses for the profile
+    annotation. Both are composed from daemon._timings_note; if they ever
+    drift, the frame's reader goes silently deaf to a skew that the HTTP
+    reader still sees, which is the worst of the two failure shapes."""
+    import asyncio
+    for profile in ("fast", "production"):
+        monkeypatch.setattr(timings, "PROFILE", profile)
+        served = asyncio.run(daemon.version_http(None)).body.decode()
+        frame = daemon.wake_version_line()
+        assert waked.broker_profile(frame) == waked.broker_profile(served)
+        assert waked.broker_profile(frame) == profile
+        assert waked.version_tuple(frame) == waked.version_tuple(served)

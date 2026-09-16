@@ -490,8 +490,10 @@ def test_the_pane_tells_a_wrong_answer_apart_from_no_answer():
     # all three is what sent a reviewer after the wrong service for a whole pass
     # (msg 8589): a 404 from the WRONG service, an expired session, and a
     # launcher that genuinely is not there.
-    block = PAGE[PAGE.index("U6: agents, embedded"):
-                           PAGE.index("The presence poll is armed once")]
+    # Through _slice for the same reason the comment below already gives: a
+    # bare .index() raises ValueError when an anchor moves, and this test said
+    # so about its INNER index while doing it to its own slice.
+    block = _slice("U6: agents, embedded", "The unread poll is armed once")
     # Assert before indexing: a bare .index() raises ValueError on the unfixed
     # head, which reads as a broken test rather than a caught defect.
     assert "agUnavailable(e.status" in block, "the pane must branch on the status"
@@ -506,6 +508,19 @@ def test_the_pane_tells_a_wrong_answer_apart_from_no_answer():
     assert "AGBASE" in branch, "say WHICH url answered"
 
 
+def _slice(open_at, close_at):
+    """The region between two CONTENT anchors, or a refusal that says which one
+    moved. A bare PAGE.index() raises ValueError when an anchor drifts, and a
+    reader meets a stack trace instead of the one sentence that explains it --
+    C3 reworded a comment these two tests anchored on, and that is exactly how
+    it presented."""
+    for anchor in (open_at, close_at):
+        assert anchor in PAGE, (
+            f"anchor moved: {anchor!r} is no longer in the page. It is CONTENT, "
+            f"not a line number -- re-point this slice at the text that replaced it.")
+    return PAGE[PAGE.index(open_at):PAGE.index(close_at)]
+
+
 def test_every_launcher_call_in_the_embedded_pane_is_prefixed():
     # The defect: U6 called api('/agents') and api('/profile') -- unprefixed, so
     # the proxy routed them to the BROKER, which 404s. Reachable service, wrong
@@ -514,10 +529,8 @@ def test_every_launcher_call_in_the_embedded_pane_is_prefixed():
     # msg 8752: those are the USER's credentials, not any agent's), so the pane
     # no longer owns that path. The rule went with it rather than lapsing: each
     # region is scanned for the paths it actually calls.
-    pane = PAGE[PAGE.index("U6: agents, embedded"):
-                PAGE.index("The presence poll is armed once")]
-    acct = PAGE[PAGE.index("function openAccount()"):
-                PAGE.index("function pruneAgent(")]
+    pane = _slice("U6: agents, embedded", "The unread poll is armed once")
+    acct = _slice("function openAccount()", "function pruneAgent(")
     for block, paths in ((pane, ("'/agents'", "'/agents/'", "'/rooms-mine'")),
                          (acct, ("'/profile'",))):
         # Comments in these blocks QUOTE the old wrong calls on purpose (that is

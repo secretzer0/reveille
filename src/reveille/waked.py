@@ -15,15 +15,34 @@ double-spawn resolves itself, which is what lets the Stop hook spawn blindly.
 Secrets: the token rides $REVEILLE_TOKEN only. There is no --token flag, so
 it CANNOT land in argv (I5; the wake-127 detection law).
 
+THREE PRODUCERS WRITE RINGS, and a reader tells them apart by ``reason``
+(DES-003 s5):
+
+===============  ====================  ==================================
+reason           producer              means
+===============  ====================  ==================================
+message/backlog  the socket            the broker pushed a fact
+mail             the mail probe        direct mail is waiting (F1)
+idle-nudge       the idle timer        time passed; nothing is claimed
+===============  ====================  ==================================
+
+Mail probe (DES-003 W4, ruling 20404 F1): every ``--mail-probe`` seconds
+(default MAIL_PROBE_S = 60; 0 disables) the daemon asks the broker
+``GET /agent/activity`` and writes a ``reason=mail`` ring ONLY when DIRECT
+mail is waiting whose newest id it has not already rung for. The agent spends
+a turn when something is addressed to it, and not otherwise.
+
 Idle nudge (DES-003 W3): the daemon is the only component that outlives a
 turn boundary, so it is the one that can restart a parked agent whose
 instructions were acked in an earlier turn (the ring those instructions
 carried is already spent). After ``--idle-nudge`` seconds without writing a
-ring (default IDLE_NUDGE_S = 900; 0 disables) it writes ONE synthetic entry with
-``reason=idle-nudge`` and resets its timer -- same spool, same watcher, no
-new plumbing. Fixed interval by ruling: backoff would make an agent harder
-to reach the longer it has been stuck, which is backwards. The nudge fires
-on the daemon's wall clock even while the broker is unreachable.
+ring (default IDLE_NUDGE_S = 3300; 0 disables) it writes ONE synthetic entry
+with ``reason=idle-nudge`` and resets its timer -- same spool, same watcher,
+no new plumbing. It is BLIND and claims nothing: it is not a delivery, and
+the probe above is what makes mail arrive quickly. Fixed interval by ruling:
+backoff would make an agent harder to reach the longer it has been stuck,
+which is backwards. The nudge fires on the daemon's wall clock even while the
+broker is unreachable.
 """
 import argparse
 import asyncio
@@ -34,6 +53,7 @@ import os
 import shutil
 import sys
 import time
+import urllib.parse
 
 import websockets
 
@@ -47,12 +67,35 @@ HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))
 # directly -- the LOOP decides when recoverable stops being credible.
 NO_ROOMS = "no_rooms"
 NO_ROOMS_WINDOW_S = 1800
-# The announcement floor (ruled 12246, rebuilt per 12411): a parked agent's
-# work restarts after 15 idle minutes, not 30. A NAMED constant, because the
-# ruled value sat unbuilt for days as a bare argparse literal that nothing
+# The announcement floor (ruled 12246, rebuilt per 12411; retuned 20421): a
+# parked agent's work restarts after this long idle. A NAMED constant, because
+# the ruled value sat unbuilt for days as a bare argparse literal that nothing
 # could gate -- and 1800 collided with NO_ROOMS_WINDOW_S above, which is a
 # SEPARATE 1800 with its own ruling (9119). Do not merge them.
-IDLE_NUDGE_S = 900
+#
+# 3300, NOT 3600, AND THE ODD NUMBER IS THE WHOLE POINT. This nudge is BLIND --
+# it fires whether or not anything is waiting -- so its cost is a model turn
+# priced at whatever the harness's prompt cache holds. That TTL is 3600 s on a
+# 1-hour tier, so a nudge at exactly 3600 lands on a COLD cache and pays full
+# input; at 3300 it lands warm and pays ~10%. Idle 3 h, context C:
+#   900 s -> 12 turns x 0.1C = 1.2C     3600 s -> 3 x 1.0C = 3.0C (WORSE)
+#   3300 s -> 3 turns x 0.1C = 0.3C
+# Raising a blind interval PAST the cache TTL makes it more expensive, not
+# less. The knob stays so an operator on the 5-minute tier can pick anything.
+IDLE_NUDGE_S = 3300
+
+# THE MAIL PROBE (ruling 20404 F1). The blind nudge above is not a delivery:
+# it says "some time passed", never "you have mail". This one asks the broker
+# -- GET /agent/activity, the counted answer B1 built -- and rings ONLY when
+# DIRECT mail is waiting that this daemon has not already rung for. Costs the
+# agent nothing: the daemon spends the HTTP call, the agent spends a turn only
+# when there is something addressed to it.
+#
+# BROADCAST-ONLY UNREAD DOES NOT RING, deliberately (20404 F1.2). A parentless
+# agent broadcast is read on the recipient's next turn; ringing every body in
+# the room within 60 s of an FYI is the storm WHO HEARS WHAT exists to
+# prevent, at 15x the old ceiling. Needed now means unicast.
+MAIL_PROBE_S = 60
 
 # THE WEDGE HEALER (ruling 14445). A daemon can be alive, logging, retrying
 # and deaf: the 2026-09-05 field case retried opening handshakes for eleven
@@ -180,6 +223,32 @@ def nudge_frame(interval_s):
                        "idle_seconds": interval_s})
 
 
+def write_ring(agent, frame):
+    """One ring, one spool file, ONE LOG LINE (F6, ruling 20421).
+
+    EVERY producer goes through here -- the socket, the nudger, the mail
+    probe, the arrival rings -- because the number every further cut is
+    judged by is "turns by CAUSE", and nothing counted it: rings are deleted
+    by the session that handles them, and a blind nudge never touches the
+    broker at all. `grep -c 'ring idle-nudge' waked.log` is that number now.
+
+    The line is derived from the frame that was actually written, never from
+    what the caller meant to write: a frame whose reason drifts from its log
+    line would make the count lie about the thing it exists to measure.
+    """
+    path = spool.write_ring(agent, frame)
+    try:
+        obj = json.loads(frame)
+    except (ValueError, TypeError):
+        obj = {}
+    if not isinstance(obj, dict):
+        obj = {}
+    print(f"reveille-waked: ring {obj.get('reason', '?')} "
+          f"id={obj.get('id', '-')} direct={obj.get('direct', '-')}",
+          file=sys.stderr)
+    return path
+
+
 async def _nudger(agent, interval_s, state):
     """Writes ONE nudge per idle interval -- never a burst, because every
     write (real ring or nudge) resets state['last']. Lives beside the
@@ -188,8 +257,110 @@ async def _nudger(agent, interval_s, state):
     while True:
         await asyncio.sleep(1)
         if nudge_due(state["last"], time.time_ns(), interval_s):
-            spool.write_ring(agent, nudge_frame(interval_s))
+            write_ring(agent, nudge_frame(interval_s))
             state["last"] = time.time_ns()
+
+
+def mail_ring_due(act, last_rung_id):
+    """The whole probe decision, pure.
+
+    RING IFF direct mail is waiting AND it is NEWER than whatever this daemon
+    last rang for. DEDUP BY ID, NEVER BY COUNT (20404 F1.1): one fact, one
+    ring, whatever the agent's turn state -- a count changes when the agent
+    acks, which would make the ring depend on something the daemon cannot
+    see.
+
+    `act` of None means UNDECIDABLE -- a 401, a 5xx, a timeout, a body that
+    would not parse -- and undecidable does NOT ring (d9245252). Which way is
+    safe is decided by what the act costs: a spurious ring SPENDS A MODEL
+    TURN and is not idempotent, so here the safe fall is to stay quiet. The
+    socket is still the primary delivery; a silent probe loses nothing that
+    the next tick, or the next real ring, does not carry.
+    """
+    if not act:
+        return False
+    return act.get("direct", 0) > 0 and act.get("newest_id", 0) > last_rung_id
+
+
+def mail_frame(act):
+    """Same keys as a socket ring, so watcher and agent code is unchanged; the
+    reason differs because a probe ring proves HTTP + token and says NOTHING
+    about WS routing (lesson 7d89738a), and a reader must be able to tell
+    which path delivered it."""
+    return json.dumps({"wake": True, "reason": "mail",
+                       "unread": act.get("unread", 0),
+                       "direct": act.get("direct", 0),
+                       "id": act.get("newest_id", 0)})
+
+
+def _agent_activity(url, token):
+    """{unread, direct, newest_id} from the broker, or None for UNDECIDABLE.
+
+    None is not zero and must never be read as "no mail": every failure --
+    unreachable, 401, 5xx, unparsable, and an OLD BROKER that answers without
+    `direct` -- returns it, and the caller does not ring on it.
+    """
+    import urllib.request
+    base = url.replace("wss://", "https://").replace("ws://", "http://")
+    base = base.split("/wake")[0]
+    req = urllib.request.Request(
+        base + "/agent/activity",
+        headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            obj = json.loads(r.read().decode())
+    except Exception:
+        return None
+    # A broker older than 0.2.251 answers {last_send_ns, unread, name}: no
+    # `direct`, so no decision. Undecidable, not empty.
+    if not isinstance(obj, dict) or "direct" not in obj:
+        return None
+    return obj
+
+
+def probe_tick(agent, state, act):
+    """ONE tick's decision and its effect. Separated from the loop so the gate
+    can drive it without a clock: a test that has to sleep to reach its
+    assertion is a test whose result depends on machine load.
+
+    Returns True when it rang. `act` of None never reaches here -- the caller
+    owns the undecidable branch, because that one is about LOGGING state, not
+    about ringing.
+    """
+    if not mail_ring_due(act, state.get("last_rung_id", 0)):
+        return False
+    state["last_rung_id"] = act["newest_id"]
+    write_ring(agent, mail_frame(act))
+    state["last"] = time.time_ns()       # a ring is activity: it resets W3
+    return True
+
+
+async def _mail_prober(agent, interval_s, state, url, token):
+    """Ask the broker for direct mail every `interval_s`; ring only on news.
+
+    Runs beside the connect loop, like the nudger, so it keeps working while
+    the socket is down -- which is exactly when it is worth most. The HTTP
+    call goes to a thread: a blocking urlopen on the event loop would stall
+    the socket's own ring delivery for as long as the timeout.
+    """
+    if interval_s <= 0 or not token:
+        return
+    while True:
+        await asyncio.sleep(interval_s)
+        act = await asyncio.to_thread(_agent_activity, url, token)
+        if act is None:
+            # ONCE PER STATE CHANGE, never per tick: a probe that cannot reach
+            # the broker for an hour must not write 60 identical lines into
+            # the log a human reads to find out why a body went quiet.
+            if not state.get("probe_blind"):
+                state["probe_blind"] = True
+                print("reveille-waked: mail probe cannot decide -- not "
+                      "ringing; the socket is still the primary delivery",
+                      file=sys.stderr)
+            continue
+        if state.pop("probe_blind", None):
+            print("reveille-waked: mail probe answering again", file=sys.stderr)
+        probe_tick(agent, state, act)
 
 
 async def _heartbeat(ws):
@@ -286,8 +457,45 @@ async def _session(uri, agent, state):
                           file=sys.stderr)
                     return PARKED
                 if obj.get("wake"):
-                    spool.write_ring(agent, frame)
+                    write_ring(agent, frame)
                     state["last"] = time.time_ns()   # real rings reset the nudge
+                    # THE TWO PRODUCERS SHARE ONE HIGH-WATER MARK, or the probe
+                    # rings again a minute later for mail the socket already
+                    # delivered. The socket's message frame carries the newest
+                    # fact's id; the attach `backlog` frame does not yet, so a
+                    # backlog ring followed by 60 s without an ack can still
+                    # double-ring. F8 puts newest_id on that frame and closes
+                    # it -- stated here rather than left for the next reader.
+                    mid = obj.get("id") or 0
+                    if mid > state.get("last_rung_id", 0):
+                        state["last_rung_id"] = mid
+                # THE ATTACH FRAME SAYS WHAT THE BROKER IS RUNNING (F8), and a
+                # broker restart necessarily drops every socket -- so arriving
+                # here is the deploy signal. Also the non-ringing `hello`
+                # case, which is why the frame is unconditional.
+                #
+                # AFTER THE RING, NEVER BEFORE, and the order is the whole
+                # point: convergence ends in execv, so this process is
+                # REPLACED. A ring not already in the spool would die with it,
+                # and the mail it named would wait for the next producer.
+                # The spool survives the exec; an unwritten frame does not.
+                if obj.get("version"):
+                    # The attach frame also carries `id`, so the two producers
+                    # share one high-water mark even when nothing rang.
+                    nid = obj.get("id") or 0
+                    if nid > state.get("last_rung_id", 0):
+                        state["last_rung_id"] = nid
+                    # OFF THE EVENT LOOP. _converge_inner runs uv bootstrap,
+                    # a `uv pip install` with a 600 s timeout and a --version
+                    # probe; synchronously here it starves _heartbeat (HB 300 s)
+                    # and _mail_prober, and kills the socket that just said
+                    # hello. Before F8 convergence ran BEFORE the dial, with no
+                    # socket to starve -- moving the trigger onto a frame moved
+                    # it onto the loop, which is the part that had to move back
+                    # off. execv from the worker replaces the whole process,
+                    # and the ring is already spooled: the await sits after
+                    # write_ring, so the ordering gate still holds.
+                    await asyncio.to_thread(_converge, obj["version"], state)
                 # anything else is informational (e.g. the shutdown note):
                 # hold the socket; a close leads to the reconnect loop.
         finally:
@@ -574,7 +782,7 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
             # own, so the ring is the act that finishes the recall -- without
             # it the ticket lands, the log says RECALLED, and the agent stays
             # where it was. Measured on the transporter chain, step 8.
-            spool.write_ring(agent, arrival_frame("recalled"))
+            write_ring(agent, arrival_frame("recalled"))
             print(f"reveille-waked: RECALLED -- a live credential for {agent} "
                   f"is written here and the spool is rung. This machine is not "
                   f"{agent} until a turn calls join(); the waiter stays down "
@@ -609,10 +817,22 @@ async def _park(url, agent, secret, write_env, deadline=None, read_env=None,
 # caught in review). main is normally AHEAD of the deployed broker -- it moves on
 # merge, the deploy lags -- and the install source is main's HEAD, not a version.
 # So `!=` would see a body that just installed 0.2.185 against a 0.2.184 broker,
-# call it divergent, reinstall the same 0.2.185, and do that once an hour for
-# ever. Running newer-than-broker is the ordinary state for the minutes after a
-# merge and must not be pathological. Behind: converge. Equal or ahead: nothing.
-UPGRADE_INTERVAL_S = 3600
+# call it divergent, reinstall the same 0.2.185, and do that for ever. Running
+# newer-than-broker is the ordinary state for the minutes after a merge and must
+# not be pathological. Behind: converge. Equal or ahead: nothing.
+#
+# PUSH, NOT POLL (F8, operator's own complaint: "waiting and hiding the upgrade
+# is terrible"). This used to fetch GET /version on a 3600 s rate limit, so a
+# deploy was up to an hour invisible to every body, once per body per hour,
+# for ever, recorded only in one box's waked.log. THE BROKER NOW TELLS US: its
+# attach frame carries `version`, and a broker restart necessarily drops every
+# socket -- so the reconnect IS the deploy signal, and the only moment the
+# version can have changed. No timer, no HTTP, no UPGRADE_INTERVAL_S; the
+# frame is the whole trigger, and convergence lands seconds after a deploy
+# instead of up to an hour.
+#
+# FAIL-OPEN IS UNCHANGED: a frame without `version` is an old broker, and an
+# old broker converges nothing.
 
 
 def version_tuple(text):
@@ -670,20 +890,6 @@ def _warn_profile_skew(version_string):
               file=sys.stderr)
 
 
-def _broker_version(url):
-    """The broker's version string, or "" -- unauthenticated, short timeout, and
-    every failure is silence. An unreachable broker means no upgrade, never an
-    error: the wake path matters more than the convergence."""
-    import urllib.request
-    base = url.replace("wss://", "https://").replace("ws://", "http://")
-    base = base.split("/wake")[0]
-    try:
-        with urllib.request.urlopen(base + "/version", timeout=5) as r:
-            return r.read().decode().strip()
-    except Exception:
-        return ""
-
-
 def _uv_or_bootstrap():
     """Path to uv, installing it first if this machine has none.
 
@@ -718,13 +924,14 @@ def _uv_or_bootstrap():
         if os.path.exists(os.path.expanduser("~/.local/bin/uv")) else "")
 
 
-def _converge(url, state):
+def _converge(raw, state):
     """Bring the toolchain up to the broker, then re-exec so it is RUNNING it.
 
-    Returns without doing anything unless a full hour has passed, the broker
-    answered, and this install is genuinely behind. Never raises, never exits,
-    never blocks the wake -- a failed convergence is a log line and the old code
-    keeps working, which is the whole point of doing it here.
+    `raw` is the version string the broker put in its attach frame. Returns
+    without doing anything unless it parses and this install is genuinely
+    behind. Never raises, never exits, never blocks the wake -- a failed
+    convergence is a log line and the old code keeps working, which is the
+    whole point of doing it here.
 
     THE WHOLE BODY IS SHIELDED, not just the network call. This runs inside the
     daemon's reconnect loop, so an exception escaping here would kill the wake
@@ -732,25 +939,41 @@ def _converge(url, state):
     about staying on old code is worth that.
     """
     try:
-        _converge_inner(url, state)
+        _converge_inner(raw, state)
     except Exception as e:      # noqa: BLE001 -- deliberately total
         print(f"reveille-waked: convergence check failed ({e!r}) -- staying on "
               f"{__version__}", file=sys.stderr)
 
 
-def _converge_inner(url, state):
+def _converge_inner(raw, state):
     import subprocess
-    now = time.monotonic()
-    if state.get("upgrade_checked") and now - state["upgrade_checked"] < UPGRADE_INTERVAL_S:
-        return
-    state["upgrade_checked"] = now
-
-    raw = _broker_version(url)
     _warn_profile_skew(raw)
     broker = version_tuple(raw)
     installed = version_tuple(__version__)
     if not upgrade_due(installed, broker):
         return
+
+    # ONE ATTEMPT PER BROKER VERSION PER PROCESS. The hourly limiter F8 deleted
+    # was doing TWO jobs: it paced the poll (gone with the poll, correctly) and
+    # it BOUNDED THE RETRY (not replaceable by nothing). Without this memo a
+    # body whose install cannot succeed -- git unreachable, GIT_SOURCE 404, uv
+    # broken -- reconnects on the 1-15 s ladder, is told the version again, and
+    # tries again: failing fast that is a clone attempt every 15 s per body for
+    # ever; failing slow it is a 600 s window per reconnect. Same shape as the
+    # "ahead reinstalls for ever" loop the comment above prevents, mirrored.
+    #
+    # The memo is the VERSION, not a count or a clock: a broker that moves is
+    # new information and earns a fresh attempt, and execv on success starts a
+    # process whose memo is empty, which is the right reset.
+    if state.get("converge_tried") == raw:
+        if not state.get("converge_skip_logged"):
+            state["converge_skip_logged"] = True
+            print(f"reveille-waked: already tried "
+                  f"{(raw or '').split()[0] or raw!r} -- not retrying until "
+                  f"the broker moves", file=sys.stderr)
+        return
+    state["converge_tried"] = raw
+    state.pop("converge_skip_logged", None)
 
     print(f"reveille-waked: toolchain {__version__} is behind the broker "
           f"{'.'.join(str(n) for n in broker)} -- converging", file=sys.stderr)
@@ -808,13 +1031,34 @@ def _converge_inner(url, state):
     os.execv(me, [me, *sys.argv[1:]])
 
 
+def wake_uri(url, sep, agent, token):
+    """The wake socket's address, built in ONE place.
+
+    It was four hand-built copies of one f-string -- the reconnect loop's and
+    three inside the park/recall paths -- which is the defect before it
+    happens: the next field to be added gets added to three of them. F8.4 is
+    that field. `toolchain` is what this body is RUNNING, so the broker can
+    show a fleet's versions without asking each machine, and a body sitting
+    behind the broker is one glance rather than a grep of its own log.
+    """
+    out = f"{url}{sep}name={agent}"
+    if token:
+        out += f"&token={token}"
+    return out + f"&toolchain={urllib.parse.quote(__version__)}"
+
+
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
-               write_env=None, read_env=None, wedge_n=WEDGE_REEXEC_N):
+               write_env=None, read_env=None, wedge_n=WEDGE_REEXEC_N,
+               mail_probe_s=MAIL_PROBE_S):
     sep = "&" if "?" in url else "?"
     token = os.environ.get("REVEILLE_TOKEN", "")
-    uri = f"{url}{sep}name={agent}" + (f"&token={token}" if token else "")
+    uri = wake_uri(url, sep, agent, token)
     state = {"last": time.time_ns()}   # daemon start counts as activity
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
+    # BESIDE the connect loop, like the nudger and for the same reason: the
+    # probe is worth most exactly when the socket is down.
+    prober = asyncio.create_task(
+        _mail_prober(agent, mail_probe_s, state, url, token))
     delay = 1
     first_no_rooms = None   # monotonic stamp of the FIRST refusal of a streak
     last_arrival_ring = None   # monotonic stamp of the last join-me ring
@@ -834,11 +1078,6 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     state["wedge_fails"] = 0
     try:
         while True:
-            # Before dialling, not after: a body that is behind should reach the
-            # broker already running the code the broker expects. Rate-limited
-            # and fail-open inside, so this is a no-op on all but one pass an
-            # hour and never delays a reconnect that matters.
-            _converge(url, state)
             state["spoke"] = False
             try:
                 code = await _session(uri, agent, state)
@@ -870,7 +1109,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # made a body look reachable while it was not.
                     now = time.monotonic()
                     if last_arrival_ring is None or now - last_arrival_ring >= ARRIVAL_RING_S:
-                        spool.write_ring(agent, arrival_frame("not-arrived"))
+                        write_ring(agent, arrival_frame("not-arrived"))
                         last_arrival_ring = now
                     await asyncio.sleep(RECALL_POLL_S)
                     continue
@@ -918,7 +1157,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         parked_secret = spent
                         token = got
                         tried.add(token)
-                        uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                        uri = wake_uri(url, sep, agent, token)
                         delay = 1
                         continue
                     print(f"reveille-waked: that credential never landed and the "
@@ -932,7 +1171,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                    uri = wake_uri(url, sep, agent, token)
                     delay = 1
                 elif code == PARKED:
                     # SUPERSEDED IS NOT DEAD (s14). The old shape exited here and
@@ -949,7 +1188,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = f"{url}{sep}name={agent}" + f"&token={token}"
+                    uri = wake_uri(url, sep, agent, token)
                     delay = 1
                 else:
                     first_no_rooms = None
@@ -993,6 +1232,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
             delay = min(delay * 2, 15)
     finally:
         nudger.cancel()
+        prober.cancel()
 
 
 class _Stamped:
@@ -1039,6 +1279,13 @@ def main():
                     help="write one synthetic reason=idle-nudge ring after this "
                          f"many seconds without any ring (default {IDLE_NUDGE_S}; 0 "
                          "disables). Fixed interval by ruling -- no backoff.")
+    ap.add_argument("--mail-probe", type=int, default=MAIL_PROBE_S,
+                    metavar="SECONDS",
+                    help="ask the broker for DIRECT mail this often and "
+                         "ring only on news (default "
+                         f"{MAIL_PROBE_S}; 0 disables). Rings on direct mail "
+                         "alone -- a broadcast is read on the next turn, "
+                         "never rung for.")
     ap.add_argument("--no-rooms-window", type=int, default=NO_ROOMS_WINDOW_S,
                     metavar="SECONDS",
                     help="exit (code 3) after this many seconds of consecutive "
@@ -1104,7 +1351,7 @@ def main():
     return asyncio.run(_run(a.url, a.name, a.idle_nudge,
                             no_rooms_window_s=a.no_rooms_window,
                             write_env=write_env, read_env=read_env,
-                            wedge_n=a.wedge_n))
+                            wedge_n=a.wedge_n, mail_probe_s=a.mail_probe))
 
 
 if __name__ == "__main__":

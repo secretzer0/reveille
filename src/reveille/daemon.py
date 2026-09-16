@@ -187,19 +187,26 @@ USE:
    hook or container entrypoint spawns and supervises it; you NEVER start, poll,
    or re-arm it. Each ring becomes a file in your spool
    (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). You arm ONLY the watcher, and
-   you arm it ONCE PER SESSION (a new session means a new watcher -- verify by
-   liveness, never by memory) with the Monitor tool:
-   command="wake-watch --follow $REVEILLE_AGENT_ROLE", persistent=true. --follow
-   never exits and prints each new ring ONCE, so there is no re-arm at all. On
-   each line: inbox(), ack(), act only if owed, DELETE the spool file you
-   processed -- the ring's own `spool` key is its absolute path, so `rm` that
-   and never a glob. AN ENTRY YOU LEAVE BEHIND IS REPLAYED: --follow remembers
-   what it printed in MEMORY, so the next watcher process starts empty and
-   re-prints whatever is still in new/ -- under a harness that re-arms on a
-   timeout that is an acked ring waking you forever. Where Monitor is not
-   available, fall back to the one-shot: Bash run_in_background=true,
-   `wake-watch $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended --
-   whose task completion IS one ring, re-armed after each.
+   you arm it with Bash run_in_background=true, `wake-watch
+   $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended -- whose task
+   completion IS one ring. Then: inbox(), ack(), act only if owed, DELETE the
+   spool file you processed -- the ring's own `spool` key is its absolute
+   path, so `rm` that and never a glob -- and RE-ARM, in that order and last,
+   inside a turn you are taking anyway. `reveille ack <the spool path>` does
+   the ack and the rm together, and refuses to delete a ring whose ack did
+   not land; it acks ONLY what that ring named, because acking what you did
+   not read is how mail goes missing. AN ENTRY YOU LEAVE BEHIND IS REPLAYED:
+   the next watcher process starts with no memory of what was printed and
+   re-prints whatever is still in new/, so a missed drain is an acked ring
+   waking you again at every arm.
+   THE ONE-SHOT IS PRIMARY BECAUSE THE FOLLOW COSTS BLIND TURNS. Measured
+   2026-09-16: the one-shot ran 11m06s and exited 0 on its ring, well past
+   Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
+   backgrounded task, which is why the follow was chosen over it. Meanwhile a
+   harness Monitor expires at 1800000 ms and wakes the body to re-arm: two
+   blind turns an hour, per body, that nothing on our side can tune. Use
+   Monitor with `wake-watch --follow $REVEILLE_AGENT_ROLE` (persistent) only
+   where run_in_background does not exist.
    ARMED MEANS THE HARNESS IS WATCHING IT. A `wake-watch ... &` inside a Bash
    call is an orphan process: it satisfies every check, including the Stop
    hook's, and rings nobody. Measured 2026-08-19, an architect deaf with every
@@ -318,15 +325,18 @@ then approve it: reject and redraft citing the same source.
 Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
 entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
 becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
-armed. ONCE PER SESSION, with the Monitor tool: command="wake-watch --follow
-$REVEILLE_AGENT_ROLE", persistent=true. Every line it prints is one bus ring: inbox(),
-ack() everything, act only if owed, DELETE the spool file I processed -- the ring's
-`spool` key is its absolute path; rm that, never a glob. An entry I leave behind is
-re-printed by the NEXT watcher process (--follow's memory of what it printed dies with
-it), so a missed drain becomes an acked ring replayed on every re-arm. No re-arm -- it
-does not exit. Where Monitor is not available I fall
-back to Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`, whose task
-completion is one ring and which I re-arm after every one.
+armed. I arm it with Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`,
+bare, nothing prepended or appended -- its task completion IS one bus ring. Then:
+inbox(), ack() everything, act only if owed, DELETE the spool file I processed -- the
+ring's `spool` key is its absolute path; rm that, never a glob -- and RE-ARM LAST, after
+the ack and the rm, inside a turn I am taking anyway. `reveille ack <the spool path>`
+does the ack and the rm in one call and refuses to delete a ring whose ack did not land. An entry I leave behind is
+re-printed by the NEXT watcher process, so a missed drain becomes an acked ring replayed
+at every arm. THE ONE-SHOT IS PRIMARY: measured 2026-09-16 it ran 11m06s and exited 0 on
+its ring, past Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
+backgrounded task. The Monitor tool with `wake-watch --follow` is the FALLBACK, for
+harnesses with no run_in_background: Monitor expires at 1800000 ms and the harness wakes
+me to re-arm, which is 2 blind turns an hour that nothing on our side can tune.
 The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
 and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
 lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
@@ -341,8 +351,11 @@ agent's REPLY on a thread I authored in rings me unless I already read it
 (or the room has run 40 agent messages with no human speaking). Being woken is not being asked:
 inbox(), ack(), reply only if the body names me, blocks me, or asks me directly --
 the ring carries id/from/subject and direct=0 means nothing is addressed to me.
-A reason=idle-nudge ring is the daemon restarting my parked work (15 min idle, W3): inbox,
-resume anything owed, re-ping a blocking peer once, else NOTHING -- silence stays valid.
+A reason=mail ring is the daemon's probe finding DIRECT mail (60 s, W4); broadcast-only
+unread never rings, because a parentless broadcast is read on my next turn.
+A reason=idle-nudge ring is the daemon restarting my parked work (55 min idle, W3) and it
+is BLIND -- it claims nothing about mail: inbox, resume anything owed, re-ping a blocking
+peer once, else NOTHING -- silence stays valid.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.
@@ -367,6 +380,18 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.257",
+     "0.2.257 THE SOCKET CARRIES PRESENCE (sweep C3 + D1, ruling 20403; E2\nWITHDRAWN on a measurement, below).\n\nC3. The page held a /feed socket that ALREADY pushes a `presence` frame into\nthe very renderPresence a 15 s setInterval was calling -- a second path for\ndata that already arrives, and the ONE poll with no document.hidden guard, so\na backgrounded tab asked forever. The interval is gone; the socket carries\nevery update and a reconnect repaints.\n\nAND THE FIRST PAINT ASKED TWICE, which only the browser could show: connect()'s\nonopen already calls loadPresence, and boot called it again beside connect(),\nas did pickRoom three lines before it drops the feed and reconnects. Both\nremoved -- onopen is the one to keep, because it fires on every RECONNECT too,\nso the rail recovers after a gap instead of only at boot.\n\nGATE IS A COUNT OVER A WINDOW, not a source read: scripts/ui-drive\nscene_presence_comes_by_socket counts /presence requests on both viewports --\nexactly 1 for the initial paint, ZERO more over 18 s (the old cadence was\n15 s), and a pushed frame still repaints the rail. \"We removed the timer\" is\na claim about source; how many times the page ASKS is the thing.\n\nD1. astral-sh/setup-uv ships a cache and ci.yml was not asking for it, so\nevery PR re-resolved and re-downloaded the tree. enable-cache: true, keyed on\nuv.lock. One line.\n\nE2 WITHDRAWN, AND THE WITHDRAWAL IS THE ENTRY WORTH READING. The sweep\nclaimed `playwright install chromium` sat below four floating-version\ninstallers (go, ttyd, gh, claude@latest) and was re-downloaded whenever one\nof them moved, so hoisting it would keep it cached. THAT IS NOT HOW DOCKER\nCACHES. The key for a RUN is the INSTRUCTION TEXT, not what the command\nfetches -- an unpinned installer whose command string never changes does not\nre-run and invalidates nothing below it. MEASURED 2026-09-16: a two-layer\nimage built twice, `RUN ... date > /floatstamp` -> both layers CACHED and the\nstamp IDENTICAL across builds. So the reorder buys nothing, and shipping it\nwould have been churn in an agent-image input -- forcing an image bump and a\nfleet roll -- to fix a problem that does not exist. What actually invalidates\nthe chromium layer is any TEXTUAL change above it, and then everything below\nre-runs whatever the order. E1 (--mount=type=cache) stays out for the same\nreason it always did: nobody has measured a build.\n"),
+    ("0.2.256",
+     "0.2.256 THE BODY SAYS WHAT IT RUNS (ruling 20441 F8.4). 0.2.253 made a\ndeploy reach every body in seconds. This is the other half of the operator's\ncomplaint -- \"waiting and HIDING the upgrade is terrible\" -- because a body\nsitting behind the broker was visible only in its own waked.log, on its own\nmachine. The 2026-08-19 case was a laptop six releases behind for days with\nnobody aware.\n\nwaked appends `&toolchain=<version>` to the wake URI; wake_ws records it on\nthe members row at ATTACH and only there. A body that converges execv's and\nre-attaches, so the row HEALS ITSELF -- no sweep, no TTL, and nothing has to\ndecide when a version has gone stale. presence() carries it and the agent\nrail shows it beside the body.\n\nAN ATTACH THAT SAYS NOTHING CLEARS IT, which is the case that would lie: an\nold daemon sends no param, and leaving the previous value would turn \"it has\nnot said\" into a confident claim about a version nobody observed -- a stale\nreport that reads exactly like a live one, the shape this slice exists to\nend. Gated both ways: two attaches show the second, a silent attach shows\nempty.\n\nCARRIED, NEVER COMPUTED. No colour rule and no ahead/behind flag: whether a\nbody is behind the broker is the reader's comparison, not a state this row\nasserts (14469 -- the tag marks intent, the manifest says content).\n\nTHE WAKE URI IS BUILT IN ONE PLACE NOW. It was four hand-built copies of one\nf-string -- the reconnect loop's and three in the park/recall paths -- which\nis the defect before it happens: the next field gets added to three of them,\nand F8.4 is that field. One `wake_uri()`, gated at a count of 1, with the\nversion percent-escaped so a string carrying `&` could never become a second\nparameter. The return-ticket gate that pinned the literal `uri = f` now pins\nthe BUILDER, which states the same property more exactly.\n\nSchema 45: members.toolchain, additive, '' for every existing row -- a body\nthat has not re-attached has not told us, and inventing a value would be\nworse than an empty column.\n"),
+    ("0.2.255",
+     "0.2.255 THE ACK RIDES THE RING (ruling 20404 F3, narrowed by 20441).\nEvery ring owed a session two acts: ack what it named, then delete the file\nthat carried it. That was an MCP round trip plus a hand-typed rm, on every\nring, for ever -- and the rm had to name the exact path, because a glob eats\na ring that landed between the read and the delete (spool-rm-by-name-not-glob,\na lesson this author re-earned earlier the same session).\n\n`reveille ack <ring-file> [id...]` does both: it acks the ids THAT RING named\n(`id` and/or `ids`, plus any given on the line), then removes that one file\nand prints `acked [..] rm <path>`. Over /mcp as one plain POST -- the\nstateless shape USAGE already documents -- so no new broker route exists.\n\nTHE ACK COMES FIRST AND THE rm ONLY ON SUCCESS. Deleting a ring whose ack did\nnot land loses the only local record that the mail arrived, and the message\nstays unread with nothing left to notice it; a refused ack keeps the file so\nthe next arm re-prints it. A ring naming nothing -- an idle-nudge, or text\nthat is not JSON, which I3 says is still a ring -- drains with no call at all,\nso a body that only ever gets nudges needs no credential to keep its own\nspool clean.\n\nNO ACK-EVERYTHING, and that is the narrowing rather than an omission: acking\nwhat you did not read is 23c0f823 in a new coat. The only ids it can produce\nare the ones the ring carried. Gated at the interface -- no --all, no\n--unread -- and in the parser: `True` is an int in Python and would otherwise\nack message 1, so only positive non-bool ints become ids.\n\nNAMED IN THE BOOT DOCTRINE, because a capability absent from it goes unused:\nthe usage text and the CLAUDE.md block daemon.py serves both name the command\nand say it refuses to delete a ring whose ack did not land.\n"),
+    ("0.2.254",
+     "0.2.254 THE FLOOR STOPS PAYING TWICE, AND THE WATCHER DOCTRINE FLIPS\n(rulings 20404 F4 + 20441 F5, on the efficiency sweep 20399).\n\nF4. The boot ritual is join(), lessons(), brief() -- and brief()'s first\nsection printed the newest lessons IN FULL, rule text plus detection, under a\n0.30 share. That is exactly what lessons() serves first, so every boot bought\nthe same rows twice: measured on one native body 2026-09-16, lessons() 23305\nchars and brief() 26690. lessons() STAYS the exhaustive read (13219:\ncross-body comparable, complete); brief() now emits ONE line -- `lessons: N --\nlessons() is the exhaustive read` -- and the freed 0.30 goes to doctrine,\ncontracts and decisions, which truncate on every real call (0.25/0.20/0.20 ->\n0.35/0.30/0.30). The lesson rows are COUNTED, not fetched: the old code read\nevery row to render a few and report len().\n\nA CUT THAT FREES BYTES MUST BE SEEN SPENDING THEM, so that is the gate:\ntests/test_the_floor_stops_paying_twice.py pins 15+ rendered rows across the\nthree sections on a fixed corpus and budget. Restoring the old shares gives\n12 (measured, exactly the 0.65/0.95 ratio predicted) and goes red; quoting a\nlesson again goes red on the rule text. join(brief=) NOT BUILT -- it saves a\nround trip, not bytes, and the inline wall means two floors cannot share one\npayload.\n\nF5. THE ONE-SHOT IS PRIMARY; THE FOLLOW IS THE FALLBACK. `wake-watch --follow`\nunder the harness's Monitor tool expires at its 1800000 ms cap and the harness\nwakes the body to re-arm: two blind turns an hour, per body, not tunable from\nour side -- twice what the idle nudge beside it cost. The one-shot was assumed\nto fare worse because of Bash's 600000 ms cap. MEASURED 2026-09-16: `wake-watch\n<role>` via run_in_background ran 11m06s and exited 0 on its ring, NOT killed --\nthat cap bounds a FOREGROUND call, and a backgrounded task is a different shape.\nDoctrine flipped in all three places that state it: the block `reveille init`\nwrites, the usage text and CLAUDE.md block daemon.py serves, and the Stop\nhook's verdict. Re-arm goes LAST, after ack and rm. The hook's pgrep is\nunchanged -- both shapes were always armed shapes.\n\nGATED THROUGH THE CONSUMER'S PARSER (f7142c5e): the hook's verdict is\njson.loads-ed and the ORDER asserted -- run_in_background before --follow,\nFALLBACK before --follow, ack() before RE-ARM. Red when the Monitor arm is\nnamed first again. Lesson a-30-minute-monitor-is-a-blind-turn-every-30-minutes.\n\nTESTS ADAPTED, STATED NOT HIDDEN: three brief() tests used lessons as the\nfixture for properties that belong to section() -- under-fill, carry-forward,\nand truncation marking. Their fixtures move to doctrine/contracts; the\nassertions are unchanged. The budget file's corpus was lessons-only, so after\nF4 nothing in it could overflow and its truncation gate would have gone\nVACUOUSLY GREEN -- it now seeds doctrine too. One tight-budget literal became\na fraction of the measured full size, because the freed bytes made 2000 stop\nbeing tight.\n"),
+    ("0.2.253",
+     "0.2.253 THE BROKER TELLS YOU IT MOVED (ruling 20441 F8, on the operator's\nown complaint: \"waiting and hiding the upgrade is terrible\"). The local\ntoolchain converged by POLLING GET /version behind a 3600 s rate limit, so a\ndeploy was up to an hour invisible to every body, cost one HTTP call per body\nper hour for ever, and was recorded only in one box's waked.log.\n\nTHE ATTACH FRAME WAS CONDITIONAL, which is what made a push impossible:\nwake_ws sent a frame at connect ONLY when direct backlog existed, so an attach\nwith an empty inbox was silent. It is unconditional now, composed from\nagent_activity(): {\"wake\": <ringing>, \"reason\": \"backlog\"|\"hello\", \"unread\": n,\n\"direct\": d, \"id\": newest, \"version\": <this broker>}. `backlog` keeps its name\nand its ring -- the field reads that reason (23c0f823).\n\nA BROKER RESTART NECESSARILY DROPS EVERY SOCKET, so the reconnect IS the deploy\nsignal and the only moment the version can have changed. waked converges on the\nframe; _broker_version, UPGRADE_INTERVAL_S, state[\"upgrade_checked\"] and the\nbefore-dial _converge call are DELETED. No timer, no HTTP, no new mechanism --\nconvergence lands seconds after a deploy instead of up to an hour.\n\nTHREE THINGS THE UNCONDITIONAL FRAME FIXES AT ONCE: the version reaches every\nbody when it can have changed; the wedge detector's streak resets on \"the\nbroker SPOKE\", which a HEALTHY IDLE socket never did -- indistinguishable from\na wedged one until mail happened to arrive, while the comment claimed\n\"registration and refusal both speak\"; and `id` lets the two ring producers\nshare one high-water mark, closing 0.2.252's named gap where a backlog ring\nplus 60 s without an ack double-rang.\n\nTHE VERSION CARRIES ITS TIMINGS ANNOTATION, not just the number: waked greps it\nfor the profile-skew warning, so a bare version would have retired that warning\nsilently. /version and the frame are composed from ONE helper and asserted\nEQUAL (6e493fe8), never eyeballed separately.\n\nORDER: THE RING IS WRITTEN BEFORE CONVERGENCE RUNS, asserted and not inferred\nfrom reading the handler. Convergence ends in execv -- the process is REPLACED,\nand a ring not already in the spool would die with it. BACKWARD-COMPATIBLE BY\nCONSTRUCTION: a deployed waked spools only `wake: true` frames and ignores\nwhat it cannot name, so a hello reaching an old daemon does nothing; a frame\nWITHOUT `version` is an old broker and converges nothing.\n\nTESTS DELETED, STATED NOT HIDDEN: test_the_check_is_rate_limited_and_fails_open\nand test_a_failing_probe_still_burns_the_interval asserted the rate limit, whose\nmechanism no longer exists -- deleted rather than skipped or weakened (13760).\ntest_an_unreachable_broker_does_not_raise tested _broker_version throwing; the\nhazard moved to a garbage version STRING on the frame, so it is replaced by\ntwo tests covering that and the absent-version case. Suite 1340 -> 1348.\n\nHERD, ACCEPTED AND STATED: a broker restart reconnects every body inside the\n1-15 s ladder, so N bodies may converge at once. Accepted at N<=20; if it ever\nbites the fix is jitter on the ladder, NOT a return to polling. STILL OWED, own\nlayer (F8.4): waked reporting its INSTALLED version at connect, so a body\nbehind the broker is visible in presence rather than only in its own log.\n"),
+    ("0.2.252",
+     "0.2.252 THE PROBE RINGS ON MAIL; THE NUDGE STOPS PRETENDING TO (ruling\n20404 F1 + 20421, on the efficiency sweep 20399). waked's idle nudge is\nBLIND -- it fires on a wall clock and knows nothing about mail. Measured on\none native body 2026-09-16: nine reason=idle-nudge rings in one session,\ninbox() empty on every one. Worse than waste: a parentless broadcast never\nrings (broadcast-wake-storm) and waits for the next turn, so the blind nudge\nWAS that delivery -- real mail could sit up to a full interval while empty\nnudges fired on schedule.\n\nW4, THE MAIL PROBE: every --mail-probe seconds (default 60, 0 disables) the\ndaemon asks GET /agent/activity -- the counted answer 0.2.251 built -- and\nwrites a reason=mail ring IFF direct > 0 AND newest_id > last_rung_id. Same\nkeys as a socket ring so watcher and agent code is unchanged; the reason\ndiffers because a probe ring proves HTTP + token and says nothing about WS\nrouting (7d89738a). Costs the agent nothing: the daemon spends the HTTP\ncall, the agent spends a turn only when something is addressed to it.\n\nDEDUP BY ID, NEVER BY COUNT. One fact, one ring, whatever the agent's turn\nstate -- a count changes when the agent acks, which the daemon cannot see.\nBoth producers share the high-water mark: a socket ring advances it too, or\nthe probe re-rings a minute later for mail the socket already delivered.\n\nBROADCAST-ONLY UNREAD DOES NOT RING, deliberately. Ringing every body in a\nroom within 60 s of an FYI is the storm WHO HEARS WHAT exists to prevent, at\n15x the old ceiling. Needed now means unicast. UNDECIDABLE DOES NOT RING\neither (d9245252): 401, 5xx, timeout, unparsable, and an OLD BROKER whose\n/agent/activity has no `direct` all arrive as None -- which is not zero. A\nspurious ring SPENDS A MODEL TURN and is not idempotent, so undecidable falls\nsilent; the socket stays the primary delivery. Logged once per state change,\nnever per tick.\n\n--idle-nudge KEEPS its name and its blind W3 semantics, default 900 -> 3300.\n3300 AND NOT 3600 IS THE WHOLE POINT: a blind turn at exactly the 1-hour\nprompt-cache TTL lands COLD and pays full input; at 3300 it lands warm and\npays ~10%. Idle 3 h, context C: 900 s = 12 x 0.1C = 1.2C; 3600 = 3 x 1.0C =\n3.0C (WORSE than the old default); 3300 = 3 x 0.1C = 0.3C. Raising a blind\ninterval PAST the cache TTL makes it more expensive, not cheaper. No --parked-\nnudge: one flag, new default.\n\nF6, THE COUNT EVERY FURTHER CUT IS JUDGED BY: nothing counted turns by CAUSE\n-- rings are deleted by the session that handles them and a blind nudge never\ntouches the broker. Every producer now writes one line per ring, `ring\n<reason> id=<n> direct=<d>`, DERIVED FROM THE FRAME THAT WAS WRITTEN rather\nthan from what the caller meant, so `grep -c 'ring idle-nudge' waked.log` is a\nreal number.\n\nGATE tests/test_the_probe_rings_on_mail.py, driven through the pure decision\nand a clockless tick -- no sleeps, because a probe test that waits for an\ninterval asserts whatever the machine's load allows. Proven red five ways:\ndedup by count instead of id, ringing on unread instead of direct, undecidable\nringing, the blind interval raised onto the cache TTL, and an old broker's\nanswer read as an empty inbox. DES-003 gains W4 and retunes W3; s6's 900 s\nfloor becomes 60 s for direct, 3300 s otherwise.\n\nKNOWN GAP, NAMED NOT HIDDEN: the attach `backlog` frame carries no newest_id,\nso a backlog ring followed by 60 s without an ack can still double-ring. F8\nputs newest_id on that frame.\n"),
     ("0.2.251",
      "0.2.251 THE COUNT IS A COUNT, NOT AN INBOX (ruling 20404 B1, on devops\n20399/20402). `GET /agent/activity` answered `unread` as `len(inbox(...))`,\nhydrating every unread row -- _SEL's two JOINs, the attachments and scripts\nIN queries, and two os.path.exists per row (_with_artifacts, whose own\ndocstring says \"fine at a 300-row backlog\") -- to produce one integer. That\nwas affordable while only the launcher's roll decision asked. waked's coming\nmail probe (F1, --mail-probe default 60) asks it per agent ~15x more often\nthan the 900 s idle nudge it replaces, so the hydration would have traded\nagent tokens for broker CPU -- the sweep's own finding against its own fix.\n\nagent_activity is now ONE SQL over inbox()'s predicate, both branches clause\nfor clause including the unbound branch's deliberate absence of a reads\nfilter: COUNT(*) as `unread`, SUM(recipient != '*') as `direct`, MAX(id) as\n`newest_id`. Additive -- `last_send_ns` and `unread` are unchanged for the\nlauncher -- and the two new keys are what F1 will ring on: direct mail only,\ndeduped by newest_id rather than by count.\n\nONE NUMBER IN TWO PLACES IS HELD EQUAL, NEVER EYEBALLED (lesson 6e493fe8):\ntests/test_the_count_is_a_count_not_an_inbox.py asserts the counted answer\nequals the hydrated one, and that `direct` equals the wake frame's own\nown `direct` expression in wake_ws. Proven red three ways -- sender filter dropped\n(3 counted, 2 hydrated), reads filter dropped (3 counted, 2 hydrated),\n`direct` counting the wrong side (1 counted, 0 in the frame).\n\nTHE FIRST MANUFACTURE FOUND A HOLE IN THE GATE ITSELF, which is the part\nworth keeping: a unicast I send is already excluded by the recipient clause,\nso only my own BROADCAST exercises the sender filter -- and the fixture had\nnone, so the gate stayed green with that filter deleted. The row was added\nbefore the break was believed. test_auto_roll's pinned dict moves to the new\nshape and stays a whole-dict assertion.\n\nSAME DEFECT, SECOND SITE, SAME PR (B2). wake_ws rang a just-attached client\nby calling store.inbox() and taking two len()s of it -- the same hydration --\nfor the `unread` and `direct` the backlog frame carries, ON EVERY ATTACH. A\nbroker restart reconnects the whole fleet inside the 1-15 s ladder, so that\nwas paid per agent per reconnect. It reads agent_activity() now; the frame's\nkeys are unchanged. Two properties gated, neither previously covered:\ntests/test_the_attach_ring_counts_without_hydrating.py asserts a direct backlog\nstill rings `direct:1 unread:2`, and that a BROADCAST-ONLY backlog still sends\nNOTHING -- the \"DO NOT REMOVE THE BROADCAST FILTER\" comment's own property, which\nhad stood on the comment alone. Red on both manufactures: filter removed ->\n`a broadcast-only backlog must not ring`, counts crossed -> `assert (2 == 1)`.\n"),
     ("0.2.250",
@@ -3608,7 +3633,16 @@ async def wake_ws(ws: WebSocket):
     key = tok["id"]             # the TOKEN is the waiter's key (6.1(c)), never the name
     principal = store.agent_principal(tok["agent_id"]) if tok.get("agent_id") else ""
     _seen(principal, name, rooms, tok["id"])
-    log.info("%s wake connected (%s room(s))", name, len(rooms))
+    # F8.4: the body says what it is RUNNING, here and nowhere else. A body
+    # that converges execv's and re-attaches, so the row heals itself -- no
+    # sweep, no TTL. Written even when the param is ABSENT (an old daemon):
+    # keeping the previous value would turn "it has not said" into a confident
+    # claim about a version nobody observed.
+    with contextlib.suppress(store.BusError):
+        store.set_toolchain(_conn, principal,
+                            list(rooms), ws.query_params.get("toolchain", ""))
+    log.info("%s wake connected (%s room(s), toolchain %r)", name, len(rooms),
+             ws.query_params.get("toolchain", ""))
     q: asyncio.Queue = asyncio.Queue()
     # DES-003 2.3: one wake attachment per agent -- a SECOND attachment
     # SUPERSEDES the first (supersede, not refuse: a daemon respawned after a
@@ -3637,10 +3671,30 @@ async def wake_ws(ws: WebSocket):
         # integers, ON EVERY ATTACH. Against a flapping broker that is per agent
         # per reconnect. agent_activity answers exactly these two numbers.
         act = store.agent_activity(_conn, principal, rooms)
-        if act["direct"] and _poke_ok(key):
+        ring = bool(act["direct"]) and _poke_ok(key)
+        if ring:
             _poke_pending[key] = time.time_ns()
-            await ws.send_json({"wake": True, "reason": "backlog",
-                                "unread": act["unread"], "direct": act["direct"]})
+        # ONE ATTACH FRAME, ALWAYS (F8, ruling 20441). It used to be sent only
+        # when direct backlog existed, so an attach with an empty inbox was
+        # SILENT -- and three things depended on a frame that might never come:
+        #  1. the daemon learned this broker's version by polling GET /version
+        #     once an hour, so a deploy was up to 3600 s invisible to every
+        #     body. A broker restart necessarily drops every socket, so THE
+        #     RECONNECT IS THE DEPLOY SIGNAL and the only moment the version
+        #     can have changed. Push beats poll and needs no timer.
+        #  2. the wedge detector resets its streak on "the broker SPOKE", which
+        #     a healthy IDLE socket never did -- indistinguishable from a
+        #     wedged one until mail happened to arrive.
+        #  3. `id` lets the daemon's two ring producers share one high-water
+        #     mark; without it a backlog ring plus 60 s with no ack double-rang.
+        # BACKWARD-COMPATIBLE BY CONSTRUCTION: a deployed waked writes a ring
+        # only for `wake: true`, and ignores any other frame it cannot name.
+        await ws.send_json({"wake": ring,
+                            "reason": "backlog" if ring else "hello",
+                            "unread": act["unread"], "direct": act["direct"],
+                            "id": act["newest_id"],
+                            "version": wake_version_line()})
+        if ring:
             log.info("%s wake ring (backlog %s direct of %s unread)",
                      name, act["direct"], act["unread"])
         # Then stay connected and push one frame per new message until the client drops.
@@ -3773,6 +3827,27 @@ async def health(_request):
     return PlainTextResponse("ok")
 
 
+def _timings_note():
+    """The timings annotation, or "" under production.
+
+    ONE COMPOSER, because two consumers now read it: /version and the wake
+    socket's attach frame (F8). waked greps this annotation for the
+    profile-skew warning, so a frame that carried only the bare version would
+    silently retire that warning -- and a second copy of the f-string here
+    would be two places computing one string that must match (6e493fe8).
+    """
+    return (f" (timings: {timings.PROFILE} -- REVEILLE_TIMINGS)"
+            if timings.PROFILE != "production" else "")
+
+
+def wake_version_line():
+    """What the attach frame tells a daemon about this broker: the bare
+    version every probe already parses, plus the timings annotation. NOT the
+    LAN/uploads/doors prose -- that is for a human reading /version, and a
+    wake frame is read by a program."""
+    return __version__ + _timings_note()
+
+
 async def version_http(_request):
     # The override announces itself HERE too: "which UI am I serving" must be
     # answerable from outside. Absent override, the body is exactly the bare
@@ -3787,10 +3862,10 @@ async def version_http(_request):
     # A trimmed clock that cannot be SEEN from outside is how a test-night
     # value becomes production (12415; the TTS_BATCH_SIZE lesson). production
     # says nothing -- the bare version is what every probe already parses.
-    fast = (f" (timings: {timings.PROFILE} -- REVEILLE_TIMINGS)"
-            if timings.PROFILE != "production" else "")
+    # Composed once, in _timings_note: the wake attach frame carries the same
+    # annotation and waked greps it.
     return PlainTextResponse(__version__ + (f" (ui override: {ui})" if ui else "")
-                             + fast + lan + cap + doors)
+                             + _timings_note() + lan + cap + doors)
 
 
 async def usage_http(_request):

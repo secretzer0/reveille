@@ -18,6 +18,12 @@ jobs:
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v7
+        with:
+          # D1 (ruling 20403): the action ships a cache and we were not
+          # asking for it, so every PR re-resolved and re-downloaded the
+          # whole tree. Keyed on uv.lock by the action itself.
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - run: uv sync
       # THE WIRE IS WEBM/OPUS (DES-009 section 2): the worker and audition gates
       # need an ffmpeg with libopus + aac; the runner ships none. apt, measured

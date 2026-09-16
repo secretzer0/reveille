@@ -12,8 +12,42 @@
 #
 # Usage: image-pin-check <base-ref> <head-ref>   (exit 0 ok, 1 red, 2 usage)
 set -euo pipefail
-[ $# -eq 2 ] || { echo "usage: image-pin-check <base> <head>" >&2; exit 2; }
+[ $# -eq 2 ] || { echo "usage: image-pin-check <base> <head> | tag <ref>" >&2; exit 2; }
 base="$1" head="$2"
+
+# THE PIN SITES HOLD A RESOLVED TAG; THE MAKEFILE HOLDS AN EXPRESSION. The
+# host-pulls cutover put $(REGISTRY) in front of AGENT_IMAGE, so the raw `?=`
+# line stopped being the tag itself -- and this comparison has been grepping a
+# make expression against files that carry the expanded string ever since.
+# It never went red because it only runs when an agent input MOVES, and none
+# had since the cutover: the first real bump after it (the stop hook's F5
+# verdict text) is what surfaced it. tests/conftest.py's makefile_image()
+# already resolves exactly this, for exactly this reason.
+# Only REGISTRY is resolved: any other reference survives as the literal
+# `$(VAR)` and fails the comparison, which is how an unexpanded reference
+# should fail.
+# NO EARLY-EXITING STAGE IN THIS PIPE. `grep -m1` stops at the first match,
+# `git show` keeps writing, and under `set -o pipefail` the SIGPIPE it takes
+# is reported as 141 -- a FAILURE ON SUCCESS. The header of this file warns
+# about exactly that for `grep -q`, and the first draft of this resolver
+# reintroduced it; it was caught by a manufactured break whose red came back
+# as rc=141 instead of the assertion it was aiming at. Both stages below read
+# their whole input: `sed -n p` filters, `sed -n 1p` takes the first without
+# quitting.
+make_var() {
+  git show "$1:Makefile" 2>/dev/null | sed -n "s/^$2 ?= *//p" | sed -n '1p'
+}
+tag_at() {
+  local raw reg
+  raw=$(make_var "$1" AGENT_IMAGE)
+  reg=$(make_var "$1" REGISTRY)
+  printf '%s' "${raw//\$(REGISTRY)/$reg}"
+}
+if [ "$base" = "tag" ]; then
+  tag_at "$head"; echo
+  exit 0
+fi
+
 
 # ONE DEFINITION OF WHAT AN IMAGE IS MADE OF, read from the publisher that
 # also acts on it. Kept as two hand-copied arrays these drifted, silently and
@@ -84,7 +118,6 @@ fi
 
 # An input moved: the tag literal must differ between base and head in EVERY
 # pin site, or two different images answer to one name.
-tag_at() { git show "$1:Makefile" 2>/dev/null | grep -m1 '^AGENT_IMAGE ?=' | cut -d= -f2- | tr -d ' '; }
 b_tag=$(tag_at "$base"); h_tag=$(tag_at "$head")
 if [ -z "$h_tag" ]; then
   echo "image-pin-check: cannot read AGENT_IMAGE at $head" >&2; exit 2

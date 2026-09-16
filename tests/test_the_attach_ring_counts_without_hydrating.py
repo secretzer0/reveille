@@ -22,7 +22,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from conftest import sit  # noqa: E402,F401
-from reveille import store  # noqa: E402
+from reveille import daemon, store  # noqa: E402
 
 
 def world(broker):
@@ -39,8 +39,9 @@ def world(broker):
 def test_a_direct_backlog_rings_with_its_counts(broker):
     u, room, tok = world(broker)
     person = store.user_principal(u["id"])
-    store.send(broker.conn, person, "arch", "for you", room=room["id"])
-    store.send(broker.conn, person, store.BROADCAST, "for the room", room=room["id"])
+    mid = store.send(broker.conn, person, "arch", "for you", room=room["id"])["id"]
+    bid = store.send(broker.conn, person, store.BROADCAST, "for the room",
+                     room=room["id"])["id"]
 
     with broker.websocket_connect(
             "/wake?name=arch",
@@ -50,26 +51,56 @@ def test_a_direct_backlog_rings_with_its_counts(broker):
     # The broadcast is unread too, so `unread` counts it and `direct` does not.
     # These are the numbers a woken agent applies the reply test to.
     assert frame["direct"] == 1 and frame["unread"] == 2
+    # F8: `id` is the newest unread fact -- the broadcast here, since it landed
+    # last. It is the SAME key the message frame uses, so waked's high-water
+    # line needs no special case, and without it a backlog ring plus 60 s with
+    # no ack double-rang through the mail probe.
+    assert frame["id"] == max(mid, bid) == bid
+    assert frame["version"].startswith(daemon.__version__)
 
 
-def test_a_broadcast_only_backlog_sends_nothing(broker):
-    """The DO NOT REMOVE comment's property, asserted rather than trusted.
+def test_a_broadcast_only_backlog_says_hello_and_does_not_ring(broker):
+    """The DO NOT REMOVE comment's property, asserted rather than trusted --
+    and restated for F8, which is why this test changed name.
 
-    "Nothing was sent" is proven by what arrives FIRST: connect with only a
-    broadcast waiting, then send a real unicast and assert the first frame is
-    THAT message. A backlog frame would have arrived ahead of it.
+    Before F8 the property was "sends nothing". Now every attach sends ONE
+    frame, so the property is "does not RING": `wake` false, reason `hello`.
+    A ring is what spends a model turn; a frame the daemon reads and does not
+    spool costs nobody anything. Ringing a broadcast backlog would wake every
+    agent holding any unread broadcast on every broker restart.
     """
     u, room, tok = world(broker)
     person = store.user_principal(u["id"])
-    store.send(broker.conn, person, store.BROADCAST, "for the room", room=room["id"])
+    bid = store.send(broker.conn, person, store.BROADCAST, "for the room",
+                     room=room["id"])["id"]
 
     with broker.websocket_connect(
             "/wake?name=arch",
             headers={"Authorization": "Bearer " + tok["secret"]}) as ws:
+        hello = ws.receive_json()
+        assert hello["wake"] is False, "a broadcast-only backlog must not ring"
+        assert hello["reason"] == "hello"
+        assert hello["unread"] == 1 and hello["direct"] == 0
+        assert hello["id"] == bid, "the hello still carries the high-water mark"
+        # A real unicast rings normally, right behind it.
         r = broker.post("/send?room=" + room["id"],
                         json={"to": "arch", "body": "now this one", "subject": "s"})
         assert r.status_code == 200, r.text
         frame = ws.receive_json()
-    assert frame["reason"] != "backlog", "a broadcast-only backlog must not ring"
     assert frame["wake"] is True and frame["from"] == "travis"
     assert frame["direct"] == 1
+
+
+def test_an_empty_inbox_still_gets_a_hello_carrying_the_version(broker):
+    """THE FRAME IS UNCONDITIONAL, and that is the whole of F8: an attach with
+    nothing waiting used to be SILENT. Three things depended on a frame that
+    might never come -- the daemon's only notice of a new broker version, the
+    wedge detector's "the broker SPOKE", and the shared high-water mark."""
+    _u, _room, tok = world(broker)
+    with broker.websocket_connect(
+            "/wake?name=arch",
+            headers={"Authorization": "Bearer " + tok["secret"]}) as ws:
+        hello = ws.receive_json()
+    assert hello == {"wake": False, "reason": "hello", "unread": 0,
+                     "direct": 0, "id": 0,
+                     "version": daemon.wake_version_line()}

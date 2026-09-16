@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 45
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -370,6 +370,12 @@ CREATE TABLE IF NOT EXISTS members (
     token_id  TEXT REFERENCES tokens(id),
     joined_ns INTEGER NOT NULL,
     seen_ns   INTEGER NOT NULL,
+    -- What TOOLCHAIN this body is running (F8.4). Written at ATTACH and only
+    -- there: a body that converges execv's and re-attaches, so the row heals
+    -- itself -- no sweep, no TTL. '' means the body did not say, which is an
+    -- old daemon, and it must read as UNKNOWN rather than as the last value
+    -- anyone saw.
+    toolchain TEXT NOT NULL DEFAULT '',
     -- Set when the agent LEFT deliberately (DIRECTIVE:LEAVE). The row stays so
     -- that a departure is distinguishable from a reap: the reaper DELETES, and
     -- readmit() only fills a gap where no row exists. Without this column the
@@ -2071,6 +2077,20 @@ def _upgrade_v41(conn, db_path):
         conn.execute("PRAGMA user_version=42")
 
 
+def _upgrade_v44(conn, db_path):
+    """v44 -> v45 (ruling 20441 F8.4): members.toolchain -- what version of the
+    local toolchain each attached body is running. Additive; '' is correct for
+    every existing row, because a body that has not re-attached since this
+    shipped has not told us, and inventing a value would be worse than an
+    empty column. Every row fills itself on the next attach."""
+    with tx(conn):
+        have = {r[1] for r in conn.execute("PRAGMA table_info(members)")}
+        if "toolchain" not in have:
+            conn.execute("ALTER TABLE members ADD COLUMN toolchain TEXT NOT NULL "
+                         "DEFAULT ''")
+        conn.execute("PRAGMA user_version=45")
+
+
 def _upgrade_v43(conn, db_path):
     """v43 -> v44 (ruling 14434): messages.send_group -- the composer-minted
     id tying one submit's N unicasts together for the feed's render. Additive;
@@ -2334,7 +2354,7 @@ def _upgrade_v0(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43)}
+              37, 38, 39, 40, 41, 42, 43, 44)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -5631,6 +5651,28 @@ def agent_owner_moniker(conn, agent_id):
     return (r["name"], moniker_of(r)) if r else None
 
 
+def set_toolchain(conn, principal, rooms, toolchain):
+    """Record what this body is running, in every room it is attached to.
+
+    WRITTEN AT ATTACH AND ONLY THERE (F8.4). A body that converges execv's and
+    re-attaches, so the row heals itself -- no sweep and no TTL, and nothing
+    has to decide when a version has gone stale.
+
+    ALWAYS WRITES, including the empty string. An attach that says nothing is
+    an OLD daemon, and leaving the previous value in place would turn "I do not
+    know" into a confident claim about a body that never made it -- the exact
+    shape of a stale report that reads as a live one.
+    """
+    if not rooms:
+        return 0
+    rooms = list(rooms)
+    cur = conn.execute(
+        f"UPDATE members SET toolchain=? WHERE principal=? AND "
+        f"room_id IN ({_ph(rooms)}) AND left_ns IS NULL",
+        [(toolchain or "").strip()[:64], principal] + rooms)
+    return cur.rowcount
+
+
 def presence(conn, rooms):
     """Everyone across the caller's rooms. Each entry carries its room: names are
     per-room now, so a flat list would be ambiguous."""
@@ -5647,6 +5689,11 @@ def presence(conn, rooms):
          "principal": r["principal"], "owner": r["owner"],
          "live": _is_live(r["seen_ns"], now),
          "seen_ns": r["seen_ns"], "joined_ns": r["joined_ns"],
+         # F8.4: what this body's LOCAL TOOLCHAIN is running, as it said at its
+         # last attach. A plain string and nothing computed from it -- whether
+         # it is behind the broker is the reader's comparison to make, not a
+         # state this row asserts (14469). '' means the body has not said.
+         "toolchain": (r["toolchain"] if "toolchain" in r.keys() else "") or "",
          # 14048: the resolved address rides presence, walked once broker-side.
          # A human row carries their own; an agent row carries its OWNER's --
          # either way it answers "what do I call the person here".
@@ -6993,9 +7040,12 @@ def _sealed(payload):
 
 
 def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
-    """The onboarding pack (DES-001 section 7): lessons, then doctrine ranked by
-    entity overlap with the caller's role, then live contracts, then decisions
-    (recent weighted up), then own state, then a presence digest. Budget is the
+    """The onboarding pack (DES-001 section 7): a pointer to the lesson floor,
+    then doctrine ranked by entity overlap with the caller's role, then live
+    contracts, then decisions (recent weighted up), then own state, then a
+    presence digest. LESSONS ARE COUNTED, NEVER QUOTED (F4): lessons() is the
+    exhaustive read and the boot ritual already calls it, so quoting them here
+    made every boot pay for the same rows twice. Budget is the
     BYTES THAT LEAVE (wire_chars: the JSON-escaped tool result, ~4/token,
     approximate by construction: the broker has no tokenizer, G4), so the
     number a caller picks against its harness cap is the number it receives.
@@ -7081,20 +7131,32 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
                     else f"recall(kind='{title.rstrip('s')}')")
             emit(f"[{shown} of {len(rows)} shown -- {more} for the rest]")
 
-    # 1. lessons -- the rules the fleet already paid for, all of them if they fit
-    lrows = conn.execute(
-        f"SELECT * FROM memories WHERE kind='lesson' AND status='live' AND "
-        f"scope IN ({_ph(room_scopes())}) ORDER BY created_ns DESC", room_scopes()
-    ).fetchall()
-    section("lessons", lrows,
-            lambda r, _: f"- {r['slug']}: {r['rule']} [detect: {r['detection']}]", 0.30)
+    # 1. LESSONS ARE COUNTED HERE, NOT QUOTED (F4, ruling 20404). This section
+    # used to print the newest lessons in FULL -- rule text plus detection --
+    # under a 0.30 share. But the boot ritual is join(), lessons(), brief(),
+    # and lessons() serves those same newest rows FIRST, so every boot bought
+    # them twice: measured on one body 2026-09-16, lessons() 23305 chars and
+    # brief() 26690, of which the overlap was the same newest rows.
+    #
+    # lessons() STAYS the exhaustive read (13219: it is cross-body comparable
+    # and complete), so what belongs here is a POINTER and a count -- enough to
+    # know the floor exists and how big it is. The freed 0.30 goes to the three
+    # sections that were truncating on every call; a cut that frees bytes must
+    # be seen spending them.
+    #
+    # Counted, not fetched: the old code read every lesson row to render a few
+    # and report len(). The count is the only part that survives.
+    n_lessons = conn.execute(
+        f"SELECT count(*) FROM memories WHERE kind='lesson' AND status='live' "
+        f"AND scope IN ({_ph(room_scopes())})", room_scopes()).fetchone()[0]
+    emit(f"lessons: {n_lessons} -- lessons() is the exhaustive read")
     # 2. doctrine, role-relevant first
     drows = sorted(mem_rows("doctrine"), key=lambda r: (-overlap(r), -r["created_ns"]))
-    section("doctrine", drows, lambda r, _: f"- {r['fact']}", 0.25)
+    section("doctrine", drows, lambda r, _: f"- {r['fact']}", 0.35)
     # 3. live contracts (supersession already resolved by status='live')
     section("contracts", mem_rows("contract"),
             lambda r, _: f"- {r['fact']}" + src(r),
-            0.20)
+            0.30)
     # 4. decisions -- last 30d first, older by role relevance
     cutoff = time.time_ns() - 30 * 24 * 3600 * 10**9
     dec = mem_rows("decision")
@@ -7102,7 +7164,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
                                      -r["created_ns"]))
     section("decisions", dec,
             lambda r, _: f"- {r['fact']}" + src(r),
-            0.20)
+            0.30)
     # 5. own state (restart case) -- only ever the caller's own bucket
     srows = conn.execute(
         "SELECT * FROM memories WHERE kind='state' AND status='live' AND scope=? "
@@ -7140,7 +7202,7 @@ def brief(conn, *, rooms, token_id, role="", budget=28000, agent_id=""):
     # never silently -- a dropped line is a truncation like any other.
     def payload():
         return {"text": "\n".join(parts),
-                "sections": {"lessons": len(lrows), "doctrine": len(drows),
+                "sections": {"lessons": n_lessons, "doctrine": len(drows),
                              "contracts": len(mem_rows('contract')),
                              "decisions": len(dec), "state": len(srows)},
                 "truncated": truncated}

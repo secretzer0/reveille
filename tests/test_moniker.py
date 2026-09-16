@@ -182,6 +182,11 @@ def test_the_ring_carries_the_address(broker):
         r = broker.post("/send?room=" + room["id"],
                         json={"to": "arch", "body": "fix it", "subject": "s"})
         assert r.status_code == 200, r.text
+        # F8: every attach opens with one frame. With an empty inbox it is the
+        # non-ringing `hello`, and the message ring follows it. Read in order,
+        # not searched for: the order is part of the contract.
+        hello = ws.receive_json()
+        assert hello["reason"] == "hello" and hello["wake"] is False
         frame = ws.receive_json()
         assert frame["wake"] is True and frame["from"] == "travis"
         assert frame["from_moniker"] == "secretzer0"

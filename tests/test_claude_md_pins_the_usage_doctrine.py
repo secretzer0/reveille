@@ -25,7 +25,15 @@ CLAUDE_MD = REPO / "CLAUDE.md"
 # carries a second-person copy of the same rules in its numbered init block,
 # and this anchor must not select that one.
 OPEN = "Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop"
-CLOSE = "skipped one costs every ring."
+# THE CLOSE MOVED OUT (2026-09-16). It used to stop at the ARM paragraph, so the
+# two paragraphs after it -- WHO HEARS WHAT, and the nudge/mail ring paragraph --
+# were copied into CLAUDE.md but pinned by nothing. A rewrite of the ARM
+# paragraph in the F5 flip replaced a span by its surrounding anchors and DELETED
+# both neighbours; this pin stayed green, because the block it checked was still
+# there. A move is an edit of every comment it carries (a2cd5bd3), and here it
+# was an edit of every paragraph it sat beside. The span now runs to the end of
+# the ring-reason paragraph, so the same mistake is red.
+CLOSE = "silence stays valid."
 
 
 def usage_text():
