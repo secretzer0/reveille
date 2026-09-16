@@ -1581,6 +1581,101 @@ def post_knock(url, token, machine=None, timeout=10):
         raise RuntimeError(said)
 
 
+def ring_ids(text):
+    """The message ids a ring names: `id` and/or `ids`, deduped, in order.
+
+    A ring that is not a JSON object is still a ring (I3), and an idle-nudge
+    names nothing at all -- both yield no ids, which is not an error. What is
+    NOT here is any notion of "everything unread": acking what you did not
+    read is 23c0f823 in a new coat, so the only ids this can produce are the
+    ones the ring itself carried.
+    """
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(obj, dict):
+        return []
+    out = []
+    for v in [obj.get("id")] + list(obj.get("ids") or []):
+        if isinstance(v, bool) or not isinstance(v, int):
+            continue
+        if v > 0 and v not in out:
+            out.append(v)
+    return out
+
+
+def post_ack(url, token, role, message_ids, timeout=15):
+    """ack over /mcp -- stateless JSON, one plain POST, the shape USAGE already
+    documents. No new broker route: the tool exists and this is the escape
+    hatch the doctrine points at when a client is down."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "ack",
+                                  "arguments": {"message_ids": message_ids}}}).encode()
+    req = urllib.request.Request(
+        url.rstrip("/") + "/mcp", data=body, method="POST",
+        headers={"Authorization": f"Bearer {token}", "X-Agent": role or "unset-agent",
+                 "Accept": "application/json, text/event-stream",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode()
+    except urllib.error.HTTPError as e:
+        try:
+            said = json.loads(e.read().decode()).get("detail") or str(e)
+        except Exception:
+            said = str(e)
+        raise RuntimeError(said)
+
+
+def cmd_ack(a):
+    """One ring, handled: ack what it named, then delete the file that carried
+    it -- the two acts a session owed after every ring, in one call instead of
+    an MCP round trip plus a hand-typed rm.
+
+    THE ACK COMES FIRST AND THE rm ONLY ON SUCCESS. Deleting a ring whose ack
+    did not land loses the only local record that the mail arrived, and the
+    message stays unread with nothing left to notice it. A failed ack keeps
+    the file, so the next arm re-prints it.
+
+    Never a glob, ever: the path named on the line is the only thing removed
+    (spool-rm-by-name-not-glob).
+    """
+    ring = pathlib.Path(a.ring_file)
+    try:
+        text = ring.read_text()
+    except OSError as e:
+        print(f"reveille ack: cannot read {ring}: {e}", file=sys.stderr)
+        return 1
+    ids = ring_ids(text)
+    for extra in a.ids:
+        if extra not in ids:
+            ids.append(extra)
+
+    if ids:
+        env = directory_env(os.path.abspath(a.dir or os.getcwd()))
+        url, token = env["REVEILLE_URL"], env["REVEILLE_TOKEN"]
+        if not url or not token:
+            print("reveille ack: no credential here -- run this in the agent's "
+                  "directory, or set $REVEILLE_URL and $REVEILLE_TOKEN",
+                  file=sys.stderr)
+            return 1
+        try:
+            post_ack(url, token, env["REVEILLE_AGENT_ROLE"], ids)
+        except (RuntimeError, OSError) as e:
+            print(f"reveille ack: the broker refused -- {e}. Keeping {ring} so "
+                  f"the next arm re-prints it.", file=sys.stderr)
+            return 1
+    try:
+        ring.unlink()
+    except OSError as e:
+        print(f"reveille ack: acked {ids} but could not remove {ring}: {e}",
+              file=sys.stderr)
+        return 1
+    print(f"acked {ids} rm {ring}")
+    return 0
+
+
 def cmd_knock(a):
     """THE CLEAN BODY MAY ASK TO BE BEAMED; IT MAY NEVER BEAM ITSELF (DES-012
     s18). Presents THIS directory's credential -- the dead one join() just
@@ -1816,6 +1911,17 @@ def main(argv=None):
     lo = sub.add_parser("logout", help="end this machine's sign-in and remove it "
                                        "from disk")
     lo.set_defaults(fn=cmd_logout)
+    ak = sub.add_parser("ack", help="ack what a ring named and delete that ring "
+                                    "file -- the two acts every ring owes, in "
+                                    "one call instead of an MCP round trip")
+    ak.add_argument("ring_file", help="the ring's own `spool` path, exactly as "
+                                      "the watcher printed it")
+    ak.add_argument("ids", nargs="*", type=int,
+                    help="extra message ids to ack alongside the ring's own. "
+                         "There is deliberately no ack-everything: acking what "
+                         "you did not read is how mail goes missing")
+    ak.add_argument("--dir", help="the agent's directory (default: the current one)")
+    ak.set_defaults(fn=cmd_ack)
     a = ap.parse_args(argv)
     return a.fn(a)
 

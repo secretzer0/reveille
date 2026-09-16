@@ -24,7 +24,8 @@ armed. I arm it with Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_RO
 bare, nothing prepended or appended -- its task completion IS one bus ring. Then:
 inbox(), ack() everything, act only if owed, DELETE the spool file I processed -- the
 ring's `spool` key is its absolute path; rm that, never a glob -- and RE-ARM LAST, after
-the ack and the rm, inside a turn I am taking anyway. An entry I leave behind is
+the ack and the rm, inside a turn I am taking anyway. `reveille ack <the spool path>`
+does the ack and the rm in one call and refuses to delete a ring whose ack did not land. An entry I leave behind is
 re-printed by the NEXT watcher process, so a missed drain becomes an acked ring replayed
 at every arm. THE ONE-SHOT IS PRIMARY: measured 2026-09-16 it ran 11m06s and exited 0 on
 its ring, past Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
