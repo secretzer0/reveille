@@ -8,6 +8,7 @@ import importlib.util
 import json
 import pathlib
 import sqlite3
+import threading
 import types
 import urllib.error
 
@@ -324,6 +325,66 @@ def test_already_on_means_same_image_id_not_same_tag_string(tmp_path, monkeypatc
                         raising=False)
     with pytest.raises(RuntimeError, match="PAST-THE-CHECK"):
         rl.upgrade_agent(conn, "tmel", "a", "reveille-agent:0.2.22")
+
+
+def test_two_rollers_serialise_on_one_data_root(world, monkeypatch):
+    """RULED 20635, from the 18:41Z collision: the operator's /agents Upgrade
+    clicks and autodeploy's `make up` walked the same fleet at once, and the
+    second roller read the first's rename->run window as `no container` while
+    its own `docker rename` exited 1. Three callers reach upgrade_agent and
+    none of them held a lock; _singleton guards the SERVER, not the act.
+
+    THE MANUFACTURE IS AN EVENT, NOT A SLEEP: the first roller parks inside the
+    critical section (past the already-on check, before any mutation) until the
+    second has entered upgrade_agent. With the lock the second sets that event
+    and then BLOCKS on the flock, so the first resumes at once and finishes --
+    no wall-clock margin anywhere, nothing to go load-dependent. Without the
+    lock the second walks straight into the window and the assertions below
+    break: two UPGRADE lines, or a rename that finds the name already moved.
+    """
+    w = world
+    first_inside, second_started = threading.Event(), threading.Event()
+    real_alive = rl._token_alive
+
+    def _alive(health_url, agent, token, **kw):
+        first_inside.set()
+        second_started.wait(30)
+        return real_alive(health_url, agent, token, **kw)
+    monkeypatch.setattr(rl, "_token_alive", _alive)
+
+    outs, errs = [], []
+
+    def roll(is_second):
+        conn = rl._db(str(w.tmp / "launcher.db"))   # its own handle, as a second CLI would have
+        if is_second:
+            second_started.set()
+        try:
+            outs.append(rl.upgrade_agent(conn, "ana", "scout", "reveille-agent:0.2.19",
+                                         health_url="http://h", timeout=5))
+        except Exception as e:                       # noqa: BLE001 -- the test IS the classifier
+            errs.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=roll, args=(False,))
+    t1.start()
+    assert first_inside.wait(30), "the first roller never reached the critical section"
+    t2 = threading.Thread(target=roll, args=(True,))
+    t2.start()
+    for t in (t1, t2):
+        t.join(60)
+        assert not t.is_alive(), "a roller never returned -- the lock did not release"
+
+    # ONE roll happened, and the loser said the ordinary thing rather than
+    # failing the deploy: it waited, looked again, and found nothing to do.
+    audit = (w.tmp / "audit.log").read_text()
+    assert audit.count("UPGRADE user=ana agent=scout") == 1, audit
+    assert len(outs) == 1 and outs[0]["to"] == "reveille-agent:0.2.19"
+    assert len(errs) == 1 and "already on reveille-agent:0.2.19" in str(errs[0])
+    assert "rename" not in str(errs[0]), f"the loser hit the rename window: {errs[0]!r}"
+    assert w.d.c["rev-ana-scout"]["image"] == "reveille-agent:0.2.19"
+    assert "rev-ana-scout.prev" not in w.d.c
+    assert (w.tmp / ".roll.lock").exists(), "the lock lands beside the db the caller opened"
 
 
 def test_the_heal_owns_existing_root_owned_sources(world, monkeypatch):
