@@ -76,7 +76,7 @@ def test_auto_roll_skips_the_busy_and_never_fails_the_deploy():
     next `make up` -- the deploy does not kill work in progress to make a
     version number tidy."""
     fn = SRC[SRC.index("def roll_idle("):SRC.index("def mint_grant(")]
-    assert "busy.append" in fn and "continue" in fn
-    assert "return rolled, busy" in fn
+    assert "skipped.append" in fn and "continue" in fn
+    assert "return rolled, skipped" in fn
     up = SRC[SRC.index("def cmd_upgrade("):]
     assert "left for the next deploy" in up

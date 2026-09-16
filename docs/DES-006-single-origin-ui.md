@@ -428,14 +428,43 @@ answers WORK, not transport: a heartbeat says "up", which a container about to
 be replaced also is.
 
 **An unknown is never an idle.** A stale record, a container with no token to
-carry, a spool that cannot be read, a broker that does not answer: each is
-BUSY, listed with its reason, rolled on some later deploy. A container that is
-not running is idle by construction.
+carry, a spool that cannot be read, a broker that does not answer: none of them
+is rolled. A container that is not running is idle by construction.
 
-**Busy is skipped and LISTED** -- `<user>/<agent>: behind, busy: <why>` -- and
-retried on the next `make up`. Nothing is ever killed mid-task, and a busy
-agent never fails the deploy (the line ends in `|| true`). Force one by name
-with `reveille-launch upgrade <user> <agent>`, unchanged.
+**The reason carries its own class word, set where it is born** (amended
+2026-09-16, ruling 20631). `roll_reason` returns one of three things, and the
+caller prints it whole rather than prefixing a word of its own:
+
+| class | means | who clears it |
+|---|---|---|
+| `busy: <why>` | a LIVE body mid-task -- the property `--idle` exists to respect | the next `make up`, by itself |
+| `stale: <why>` | the record no longer describes anything: no container, no token to carry, unreadable spool, silent broker | a human, by re-provisioning |
+| `FAILED: <err>` | the roll was ATTEMPTED and RAISED (dead token, `docker rename` exit 1) | a human, by investigating |
+| `""` | idle -- roll it | — |
+
+`FAILED:` is set by `roll_idle` at the raise, the other two by `roll_reason`.
+Before the amendment all three printed `behind, busy:`: a real roll list called
+13 bodies busy while 8 had 401 tokens, 4 had no container and 1 had a docker
+error, which reads as a healthy fleet declining politely. The summary counts
+only `busy:` as left-for-the-next-deploy; the rest are reported as needing a
+hand, because nothing about them changes by waiting.
+
+**Skipped is LISTED, never killed** -- `<user>/<agent>: behind, <classed why>`
+-- and a busy one is retried on the next `make up`. Nothing is ever killed
+mid-task, and no skip fails the deploy (the line ends in `|| true`). Force one
+by name with `reveille-launch upgrade <user> <agent>`, unchanged.
+
+**Rolls serialise: one `upgrade_agent` per launcher data root** (added
+2026-09-16, ruling 20635). `upgrade_agent` takes a BLOCKING `flock` on
+`<dirname(launcher.db)>/.roll.lock` for its whole duration. Three callers reach
+it -- `upgrade --all --idle`, `upgrade <user> <agent>`, and serve's
+`agent_lifecycle` -- and `_singleton` guards only the last, because it protects
+the SERVER and not the act. Two rollers overlapped at 18:41Z on 2026-09-16 (the
+operator's /agents Upgrade clicks against autodeploy's `make up`) and the second
+read the first's rename->run window as `no container` while its own
+`docker rename` exited 1. Blocking, not `LOCK_NB`: a second launcher serving is
+a mistake and exits, while a second ROLL is ordinary and merely early -- it
+waits, looks again, and finds the container `already on <image>`.
 
 **The scheduler is named here, in the same slice** (lesson
 `periodic-task-proven-correct-never-scheduled`): `make up` runs

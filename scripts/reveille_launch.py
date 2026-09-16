@@ -2015,6 +2015,44 @@ def restore_found_state(conn, user, agent, was_running):
     return "running" if was_running else "stopped as found"
 
 
+def _conn_path(conn):
+    """The file this connection is open on. PRAGMA, not a global: the lock must
+    land beside the db the CALLER opened, so a test fixture's scratch root
+    serialises on itself and never on the operator's real one."""
+    for _, name, path in conn.execute("PRAGMA database_list"):
+        if name == "main":
+            return path or ""
+    return ""
+
+
+@contextlib.contextmanager
+def _roll_lock(conn):
+    """ROLLS SERIALISE: at most one upgrade_agent per launcher data root
+    (ruled 20635, from the 18:41Z collision). Three callers reach this path --
+    `upgrade --all --idle`, `upgrade <user> <agent>`, and serve's
+    agent_lifecycle -- and only the last was guarded, by _singleton, which
+    protects the SERVER and not the act. The operator clicking Upgrade while
+    autodeploy's `make up` walked the same fleet put two rollers inside one
+    rename->run window: the second read the first's absence as `no container`
+    and its rename exited 1.
+
+    BLOCKING, NOT LOCK_NB, and that is the whole difference from _singleton:
+    a second launcher serving is a mistake and exits, while a second ROLL is
+    ordinary and merely early -- it waits, then finds the container already on
+    the image and says so. Refusing it would turn a race into a failed deploy.
+    A caller that dies releases the lock with its fd, so a crash cannot wedge
+    the fleet."""
+    import fcntl
+    path = os.path.join(os.path.dirname(_conn_path(conn)) or ".", ".roll.lock")
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as fd:      # noqa: SIM115 -- the with IS the lifetime
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH,
                   timeout=120, live_elsewhere=False):
     """Re-provision an agent's container on `image`, carrying the bound token
@@ -2030,138 +2068,144 @@ def upgrade_agent(conn, user, agent, image=DEFAULT_IMAGE, *, health_url=DEFAULT_
 
     The token exists here, in the docker-run child's env, and in the old
     container's env -- never in argv, launcher.db, the audit line, the log or
-    the HTTP answer. Raises LaunchError; returns {"from", "to", "was_running"}."""
-    _known_agent(conn, user, agent)
-    name = container_name(user, agent)
-    old = _inspect_container(name)
-    if old is None or not old["env"].get("REVEILLE_TOKEN"):
-        raise LaunchError(
-            f"{user}/{agent} has no container to carry a token from -- re-provision it "
-            f"(reveille-launch new {user} {agent} <repo_url> --replace, or the Agents "
-            f"form), which asks for the token")
-    # IDENTITY, NOT NAME (found 2026-08-19). Two builds raced onto one tag: a
-    # container rolled from the stale build could not be rolled again, because
-    # this check compared the tag STRING it was created with against the tag
-    # string requested -- equal, while the image underneath had moved. The 8433
-    # ambiguity living inside the check meant to enforce 8433. A container is
-    # "already on" an image only when the ID it runs is the ID the tag names.
-    if old.get("image_id") and old["image_id"] == image_id_of(image):
-        raise LaunchError(f"{user}/{agent} is already on {image}")
-    token = old["env"]["REVEILLE_TOKEN"]
-    why = _token_alive(health_url, agent, token, live_elsewhere=live_elsewhere)
-    if why:
-        raise LaunchError(f"not upgrading {user}/{agent}: {why}")
-    broker = old["env"].get("REVEILLE_URL") or DEFAULT_BROKER
-    repo_url = old["env"].get("REVEILLE_REPO_URL", "")
-    prof = load_profile(user)
-    creds = resolve_credentials(prof, agent, repo_url)
-    cred_names, cred_env, kind = credential_env(creds)
-    boot_cmd = boot_cmd_of(old["cmd"], _image_cmd(old["image"]))
-    if kind == "none" and not boot_cmd:
-        raise LaunchError(
-            f"no claude credential for {user}/{agent} in the profile -- the upgraded "
-            f"container would boot to a login prompt nobody is watching; save one first")
-    env = dict(os.environ, REVEILLE_AGENT_ROLE=agent, REVEILLE_URL=broker,
-               REVEILLE_REPO_URL=repo_url, REVEILLE_TOKEN=token,
-               REVEILLE_GATE_SECRET=old["env"].get("REVEILLE_GATE_SECRET") or secrets.token_hex(32),
-               **cred_env)
-    extra_env = list(cred_names)
-    for k in ("REVEILLE_ROLE_PROMPT", "ANTHROPIC_MODEL"):
-        if old["env"].get(k):
-            extra_env.append(k)
-            env[k] = old["env"][k]
-    root = data_root(user, agent)
-    _ensure_mount_dirs(root, image)
-    ino_before = os.stat(root).st_ino if os.path.isdir(root) else None
-    quotas = _quotas_for(conn, user)
-    if kind == "home-login" and not boot_cmd:
-        # A ROLL must NEVER downgrade a live credential: place the better of the
-        # agent's own and the shared seed, keep the agent's when it is newer.
-        # creating=False -- a healthy body comes up even if the shared seed is
-        # dead. The report is a FILE, not a REVEILLE_ env var: an env var here
-        # joins the carried-env contract and makes carried_env_diff fail the roll.
-        sync_agent_credential(user, agent, image, creating=False)
-    argv = docker_run_argv(user, agent, image, old["network"] or DEFAULT_NETWORK, quotas,
-                           boot_cmd=boot_cmd, extra_env=extra_env)
-    record_found_state(conn, user, agent, old["running"], timeout)
-    prev = f"{name}.prev"
-    _docker("rm", "-f", prev, check=False, capture=True)      # a leftover from a crashed upgrade
-    leave_roll_record(user, agent, to_image=image, why="upgrade (image roll)")
-    if old["running"]:
-        _docker("stop", name, check=False, capture=True)         # never two containers with driver state
-    _docker("rename", name, prev, check=True, capture=True)
+    the HTTP answer. Raises LaunchError; returns {"from", "to", "was_running"}.
 
-    started = False   # flips once the NEW container ran: only then is the
-                      # boot report on disk ITS report and worth quoting
-
-    def rollback(reason):
-        # THE REASON QUOTES THE BODY'S OWN REPORT (ruled 14698; lesson
-        # 360d38ff): twelve rollbacks said `not present on the broker within
-        # 120s` while every failed body's boot report held `reveille: command
-        # not found` -- the diagnosis sat on disk and nothing made anyone read
-        # it. The report at this moment is the NEW body's (its entrypoint
-        # rotated the old one to .prev at boot), so quote its last **FAILED**
-        # line -- but only after the new container actually STARTED: a
-        # docker-run refusal never booted anything, and quoting the OLD
-        # body's leftover report there would pin the wrong diagnosis on it.
-        if started:
-            report = read_boot_report(user, agent) or ""
-            failed = [ln.strip() for ln in report.splitlines()
-                      if "**FAILED**" in ln]
-            if failed:
-                reason += " -- its boot report says: " + failed[-1]
-        _docker("rm", "-f", name, check=False, capture=True)
-        _docker("rename", prev, name, check=False, capture=True)
+    SERIALISED (20635): the whole body runs under `.roll.lock`, so at most one
+    roll per launcher data root -- see _roll_lock. The lock is taken HERE and
+    not at each of the three call sites, because a caller that has to remember
+    it is the caller that will not."""
+    with _roll_lock(conn):
+        _known_agent(conn, user, agent)
+        name = container_name(user, agent)
+        old = _inspect_container(name)
+        if old is None or not old["env"].get("REVEILLE_TOKEN"):
+            raise LaunchError(
+                f"{user}/{agent} has no container to carry a token from -- re-provision it "
+                f"(reveille-launch new {user} {agent} <repo_url> --replace, or the Agents "
+                f"form), which asks for the token")
+        # IDENTITY, NOT NAME (found 2026-08-19). Two builds raced onto one tag: a
+        # container rolled from the stale build could not be rolled again, because
+        # this check compared the tag STRING it was created with against the tag
+        # string requested -- equal, while the image underneath had moved. The 8433
+        # ambiguity living inside the check meant to enforce 8433. A container is
+        # "already on" an image only when the ID it runs is the ID the tag names.
+        if old.get("image_id") and old["image_id"] == image_id_of(image):
+            raise LaunchError(f"{user}/{agent} is already on {image}")
+        token = old["env"]["REVEILLE_TOKEN"]
+        why = _token_alive(health_url, agent, token, live_elsewhere=live_elsewhere)
+        if why:
+            raise LaunchError(f"not upgrading {user}/{agent}: {why}")
+        broker = old["env"].get("REVEILLE_URL") or DEFAULT_BROKER
+        repo_url = old["env"].get("REVEILLE_REPO_URL", "")
+        prof = load_profile(user)
+        creds = resolve_credentials(prof, agent, repo_url)
+        cred_names, cred_env, kind = credential_env(creds)
+        boot_cmd = boot_cmd_of(old["cmd"], _image_cmd(old["image"]))
+        if kind == "none" and not boot_cmd:
+            raise LaunchError(
+                f"no claude credential for {user}/{agent} in the profile -- the upgraded "
+                f"container would boot to a login prompt nobody is watching; save one first")
+        env = dict(os.environ, REVEILLE_AGENT_ROLE=agent, REVEILLE_URL=broker,
+                   REVEILLE_REPO_URL=repo_url, REVEILLE_TOKEN=token,
+                   REVEILLE_GATE_SECRET=old["env"].get("REVEILLE_GATE_SECRET") or secrets.token_hex(32),
+                   **cred_env)
+        extra_env = list(cred_names)
+        for k in ("REVEILLE_ROLE_PROMPT", "ANTHROPIC_MODEL"):
+            if old["env"].get(k):
+                extra_env.append(k)
+                env[k] = old["env"][k]
+        root = data_root(user, agent)
+        _ensure_mount_dirs(root, image)
+        ino_before = os.stat(root).st_ino if os.path.isdir(root) else None
+        quotas = _quotas_for(conn, user)
+        if kind == "home-login" and not boot_cmd:
+            # A ROLL must NEVER downgrade a live credential: place the better of the
+            # agent's own and the shared seed, keep the agent's when it is newer.
+            # creating=False -- a healthy body comes up even if the shared seed is
+            # dead. The report is a FILE, not a REVEILLE_ env var: an env var here
+            # joins the carried-env contract and makes carried_env_diff fail the roll.
+            sync_agent_credential(user, agent, image, creating=False)
+        argv = docker_run_argv(user, agent, image, old["network"] or DEFAULT_NETWORK, quotas,
+                               boot_cmd=boot_cmd, extra_env=extra_env)
+        record_found_state(conn, user, agent, old["running"], timeout)
+        prev = f"{name}.prev"
+        _docker("rm", "-f", prev, check=False, capture=True)      # a leftover from a crashed upgrade
+        leave_roll_record(user, agent, to_image=image, why="upgrade (image roll)")
         if old["running"]:
-            _docker("start", name, check=False, capture=True)
-        # The old world is back exactly as found -- the in-flight record is
-        # satisfied, not orphaned (13457 property 1).
-        conn.execute("UPDATE containers SET roll_desired_running=NULL, "
-                     "roll_deadline_ns=NULL WHERE user=? AND agent=?",
-                     (user, agent))
-        conn.commit()
-        _audit("UPGRADE-ROLLBACK", user=user, agent=agent, image=image, reason=reason)
-        raise LaunchError(f"upgrade of {user}/{agent} to {image} failed: {reason} -- "
-                          f"the old container ({old['image']}) is back"
-                          + (" and running" if old["running"] else ""))
+            _docker("stop", name, check=False, capture=True)         # never two containers with driver state
+        _docker("rename", name, prev, check=True, capture=True)
 
-    try:
-        subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, OSError) as e:
-        rollback(f"docker run refused ({e})")
-    started = True
-    if resolve_multi_driver(prof, agent) == "on":
-        # Same re-copy as provision: the upgrade's rm is a path that loses
-        # the marker, and the idle auto-roll reaches HERE with no human
-        # present to notice a silent revert (13448).
-        r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
-                    check=False, capture=True)
-        if r.returncode != 0:
-            print(f"multi-driver declaration did NOT land on {user}/{agent} "
-                  f"(exec rc={r.returncode}) -- flip it by hand: "
-                  f"reveille-launch flip {user} {agent} on", file=sys.stderr)
-    # HEALTH BEFORE DESTROY (11600 s3): running, boot report written, presence shows it.
-    if not wait_healthy(health_url, agent, token, timeout):
-        rollback(f"not present on the broker within {timeout}s")
-    if read_boot_report(user, agent) is None:
-        rollback("no boot report")
-    new = _inspect_container(name)
-    if new is None or not new["running"]:
-        rollback("new container not running")
-    # THE SAME AGENT (11600 s4): carried env set-equal, same data root.
-    diff = carried_env_diff(old["env"], new["env"])
-    if diff:
-        rollback("carried env differs: " + ", ".join(diff))
-    if ino_before is not None and os.stat(root).st_ino != ino_before:
-        rollback("data root moved")
-    _docker("rm", "-f", prev, check=False, capture=True)
-    conn.execute("UPDATE containers SET image=? WHERE user=? AND agent=?", (image, user, agent))
-    conn.commit()
-    final = restore_found_state(conn, user, agent, old["running"])
-    _audit("UPGRADE", user=user, agent=agent, image_from=old["image"],
-           image_to=image, final=final)
-    return {"from": old["image"], "to": image, "was_running": old["running"],
-            "final": final}
+        started = False   # flips once the NEW container ran: only then is the
+                          # boot report on disk ITS report and worth quoting
+
+        def rollback(reason):
+            # THE REASON QUOTES THE BODY'S OWN REPORT (ruled 14698; lesson
+            # 360d38ff): twelve rollbacks said `not present on the broker within
+            # 120s` while every failed body's boot report held `reveille: command
+            # not found` -- the diagnosis sat on disk and nothing made anyone read
+            # it. The report at this moment is the NEW body's (its entrypoint
+            # rotated the old one to .prev at boot), so quote its last **FAILED**
+            # line -- but only after the new container actually STARTED: a
+            # docker-run refusal never booted anything, and quoting the OLD
+            # body's leftover report there would pin the wrong diagnosis on it.
+            if started:
+                report = read_boot_report(user, agent) or ""
+                failed = [ln.strip() for ln in report.splitlines()
+                          if "**FAILED**" in ln]
+                if failed:
+                    reason += " -- its boot report says: " + failed[-1]
+            _docker("rm", "-f", name, check=False, capture=True)
+            _docker("rename", prev, name, check=False, capture=True)
+            if old["running"]:
+                _docker("start", name, check=False, capture=True)
+            # The old world is back exactly as found -- the in-flight record is
+            # satisfied, not orphaned (13457 property 1).
+            conn.execute("UPDATE containers SET roll_desired_running=NULL, "
+                         "roll_deadline_ns=NULL WHERE user=? AND agent=?",
+                         (user, agent))
+            conn.commit()
+            _audit("UPGRADE-ROLLBACK", user=user, agent=agent, image=image, reason=reason)
+            raise LaunchError(f"upgrade of {user}/{agent} to {image} failed: {reason} -- "
+                              f"the old container ({old['image']}) is back"
+                              + (" and running" if old["running"] else ""))
+
+        try:
+            subprocess.run(argv, env=env, check=True, stdout=subprocess.DEVNULL)
+        except (subprocess.CalledProcessError, OSError) as e:
+            rollback(f"docker run refused ({e})")
+        started = True
+        if resolve_multi_driver(prof, agent) == "on":
+            # Same re-copy as provision: the upgrade's rm is a path that loses
+            # the marker, and the idle auto-roll reaches HERE with no human
+            # present to notice a silent revert (13448).
+            r = _docker("exec", name, "sh", "-c", 'touch "$HOME/.multi-driver"',
+                        check=False, capture=True)
+            if r.returncode != 0:
+                print(f"multi-driver declaration did NOT land on {user}/{agent} "
+                      f"(exec rc={r.returncode}) -- flip it by hand: "
+                      f"reveille-launch flip {user} {agent} on", file=sys.stderr)
+        # HEALTH BEFORE DESTROY (11600 s3): running, boot report written, presence shows it.
+        if not wait_healthy(health_url, agent, token, timeout):
+            rollback(f"not present on the broker within {timeout}s")
+        if read_boot_report(user, agent) is None:
+            rollback("no boot report")
+        new = _inspect_container(name)
+        if new is None or not new["running"]:
+            rollback("new container not running")
+        # THE SAME AGENT (11600 s4): carried env set-equal, same data root.
+        diff = carried_env_diff(old["env"], new["env"])
+        if diff:
+            rollback("carried env differs: " + ", ".join(diff))
+        if ino_before is not None and os.stat(root).st_ino != ino_before:
+            rollback("data root moved")
+        _docker("rm", "-f", prev, check=False, capture=True)
+        conn.execute("UPDATE containers SET image=? WHERE user=? AND agent=?", (image, user, agent))
+        conn.commit()
+        final = restore_found_state(conn, user, agent, old["running"])
+        _audit("UPGRADE", user=user, agent=agent, image_from=old["image"],
+               image_to=image, final=final)
+        return {"from": old["image"], "to": image, "was_running": old["running"],
+                "final": final}
 
 
 def behind_image(conn, image=DEFAULT_IMAGE):
@@ -2212,6 +2256,12 @@ def roll_block(*, grants, spool, unread, last_send_ns, now_ns, window_ns):
     return ""
 
 
+def _busy(why):
+    """roll_block's sentence wearing its class. Empty stays empty: "" is idle,
+    and a class word on an empty reason would read as a refusal."""
+    return f"busy: {why}" if why else ""
+
+
 def live_grants(conn, user, agent, now_ns):
     """Attach grants still good: not revoked, not expired. A live grant means a
     human may be at that terminal RIGHT NOW -- the sweep is what expires them,
@@ -2253,32 +2303,41 @@ def roll_reason(conn, user, agent, *, health_url=DEFAULT_HEALTH, now_ns=None,
     """Why NOT to roll this behind container, or "" if it is idle. Every input
     is read: grants from launcher.db, rings from the container's spool, unread
     and last-send from the broker. A container that is not running is idle by
-    construction -- nothing is at its keyboard and nothing is mid-task."""
+    construction -- nothing is at its keyboard and nothing is mid-task.
+
+    THE REASON CARRIES ITS OWN CLASS WORD, SET WHERE IT IS BORN (ruled 20631):
+    "busy: ..." for a live body mid-task, "stale: ..." for a record that no
+    longer describes anything, "" for idle. The two are OPPOSITE FACTS about
+    the fleet and every caller printed one word over both -- a roll list that
+    said `behind, busy:` 13 times while eight of those bodies had dead tokens
+    and four had no container at all reads as a healthy fleet declining
+    politely. Only `busy:` means "come back next deploy"; `stale:` means a
+    human must re-provision, and nothing will change by waiting."""
     now_ns = now_ns or time.time_ns()
     window_ns = int(ROLL_IDLE_MIN * 60 * 10**9) if window_ns is None else window_ns
     g = live_grants(conn, user, agent, now_ns)
     if g:
-        return roll_block(grants=g, spool=0, unread=0, last_send_ns=0,
-                          now_ns=now_ns, window_ns=window_ns)
+        return _busy(roll_block(grants=g, spool=0, unread=0, last_send_ns=0,
+                                now_ns=now_ns, window_ns=window_ns))
     c = _inspect_container(container_name(user, agent))
     if c is None:
-        return "no container (the record is stale -- re-provision it)"
+        return "stale: no container (the record is stale -- re-provision it)"
     if not c["running"]:
         return ""
     token = c["env"].get("REVEILLE_TOKEN")
     if not token:
-        return "no token to carry (re-provision it instead)"
+        return "stale: no token to carry (re-provision it instead)"
     spool = _spool_pending(user, agent)
     if spool is None:
-        return "could not read its spool"
+        return "stale: could not read its spool"
     act = _broker_activity(c["env"].get("REVEILLE_URL") or DEFAULT_BROKER, agent, token)
     if act is None:
         act = _broker_activity(health_url, agent, token)
     if act is None:
-        return "the broker did not answer for it"
-    return roll_block(grants=0, spool=spool, unread=act.get("unread") or 0,
-                      last_send_ns=act.get("last_send_ns") or 0,
-                      now_ns=now_ns, window_ns=window_ns)
+        return "stale: the broker did not answer for it"
+    return _busy(roll_block(grants=0, spool=spool, unread=act.get("unread") or 0,
+                            last_send_ns=act.get("last_send_ns") or 0,
+                            now_ns=now_ns, window_ns=window_ns))
 
 
 def refuse_unless_forced(conn, user, agent, force, *, doing):
@@ -2296,8 +2355,11 @@ def refuse_unless_forced(conn, user, agent, force, *, doing):
         return
     r = roll_reason(conn, user, agent)
     if r and not force:
+        # The class word comes from roll_reason now (20631) -- saying "busy"
+        # here too would print `busy -- stale: ...` and re-make the very
+        # conflation the class word exists to end.
         raise LaunchError(
-            f"not {doing} {user}/{agent}: busy -- {r}. A roll of a live body "
+            f"not {doing} {user}/{agent}: {r}. A roll of a live body "
             f"is a body swap (12959); pass --force to do it anyway.")
 
 
@@ -2387,19 +2449,31 @@ def leave_roll_record(user, agent, *, to_image, why):
 
 
 
+def _say(line):
+    """The deploy's console, unbuffered. `make up` pipes this, and a pipe makes
+    stdout block-buffered: the whole roll list then lands after the command has
+    already exited, which is the opposite of a progress report."""
+    print(line, flush=True)
+
+
 def roll_idle(conn, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH, timeout=120,
-              window_ns=None, out=print):
+              window_ns=None, out=_say):
     """Roll every BEHIND container that is idle; skip the rest and LIST them.
     A skipped container is retried on the next `make up` -- the deploy never
     kills work in progress to make a version number tidy. Returns
-    (rolled, busy)."""
-    rolled, busy = [], []
+    (rolled, skipped), each skip carrying the classed reason roll_reason gave
+    it, or `FAILED: ...` where the roll was ATTEMPTED AND RAISED -- a third
+    class again, and the one a deploy report must never file under "busy":
+    nobody is working, the act broke. flush=True because this is the deploy's
+    own console and a buffered list that arrives after the exit code is not a
+    running commentary."""
+    rolled, skipped = [], []
     for r in behind_image(conn, image):
         user, agent = r["user"], r["agent"]
         why = roll_reason(conn, user, agent, health_url=health_url, window_ns=window_ns)
         if why:
-            busy.append((user, agent, why))
-            out(f"  {user}/{agent}: behind, busy: {why}")
+            skipped.append((user, agent, why))
+            out(f"  {user}/{agent}: behind, {why}")
             continue
         try:
             res = upgrade_agent(conn, user, agent, image, health_url=health_url,
@@ -2408,9 +2482,9 @@ def roll_idle(conn, image=DEFAULT_IMAGE, *, health_url=DEFAULT_HEALTH, timeout=1
             out(f"  {user}/{agent}: rolled {res['from']} -> {res['to']}, "
                 f"{res['final']}")
         except (LaunchError, subprocess.CalledProcessError) as e:
-            busy.append((user, agent, str(e)))
-            out(f"  {user}/{agent}: behind, busy: {e}")
-    return rolled, busy
+            skipped.append((user, agent, f"FAILED: {e}"))
+            out(f"  {user}/{agent}: behind, FAILED: {e}")
+    return rolled, skipped
 
 
 def mint_grant(conn, user, agent, grantee, mode, ttl):
@@ -2541,14 +2615,25 @@ def cmd_upgrade(a):
             # THE DEPLOY'S OWN VERB (DES-006 s7.2): roll what is idle, say what
             # is busy, exit 0 either way -- a busy agent is not a deploy failure.
             print(f"rolling agent containers behind {a.image} (idle rule: "
-                  f"{ROLL_IDLE_MIN:g} min)")
-            rolled, busy = roll_idle(conn, a.image, health_url=a.health_url,
-                                     timeout=a.timeout)
-            if not rolled and not busy:
+                  f"{ROLL_IDLE_MIN:g} min)", flush=True)
+            rolled, skipped = roll_idle(conn, a.image, health_url=a.health_url,
+                                        timeout=a.timeout)
+            if not rolled and not skipped:
                 print(f"  nothing behind {a.image}")
-            elif busy:
-                print(f"  {len(busy)} left for the next deploy; force one now with "
-                      f"`reveille-launch upgrade <user> <agent>`")
+            # ONLY `busy:` COMES BACK BY ITSELF (20631). A stale record and a
+            # FAILED roll are not waiting for the next deploy -- they are
+            # waiting for a human -- and counting them as "left for the next
+            # deploy" is the sentence that made a broken fleet read as a busy
+            # one. Each class gets its own line, and the ones needing a hand
+            # say so.
+            busy = [s for s in skipped if s[2].startswith("busy:")]
+            stuck = [s for s in skipped if not s[2].startswith("busy:")]
+            if busy:
+                print(f"  {len(busy)} busy, left for the next deploy; force one now "
+                      f"with `reveille-launch upgrade <user> <agent>`")
+            if stuck:
+                print(f"  {len(stuck)} will NOT come back on their own (stale record "
+                      f"or failed roll) -- re-provision or investigate by name")
             return
         if a.all:
             todo = [(r["user"], r["agent"]) for r in behind_image(conn, a.image)]

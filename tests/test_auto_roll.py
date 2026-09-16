@@ -12,6 +12,7 @@ import os
 import pathlib
 import sqlite3
 import sys
+import types
 
 import pytest
 
@@ -77,18 +78,18 @@ def test_an_unknown_is_not_an_idle(tmp_path, monkeypatch):
     conn.row_factory = sqlite3.Row
     rl._launcher_tables(conn)
     monkeypatch.setattr(rl, "_inspect_container", lambda name: None)
-    assert "stale" in rl.roll_reason(conn, "tmel", "arch")
+    assert rl.roll_reason(conn, "tmel", "arch").startswith("stale: ")
     live = {"running": True, "env": {"REVEILLE_TOKEN": "t", "REVEILLE_URL": "http://b"},
             "image": "i", "network": "n", "cmd": None}
     monkeypatch.setattr(rl, "_inspect_container", lambda name: live)
     monkeypatch.setattr(rl, "_spool_pending", lambda u, a: None)
-    assert rl.roll_reason(conn, "tmel", "arch") == "could not read its spool"
+    assert rl.roll_reason(conn, "tmel", "arch") == "stale: could not read its spool"
     monkeypatch.setattr(rl, "_spool_pending", lambda u, a: 0)
     monkeypatch.setattr(rl, "_broker_activity", lambda *a, **k: None)
-    assert rl.roll_reason(conn, "tmel", "arch") == "the broker did not answer for it"
+    assert rl.roll_reason(conn, "tmel", "arch") == "stale: the broker did not answer for it"
     # ...and a container with nothing to carry is a re-provision, not a roll
     monkeypatch.setattr(rl, "_inspect_container", lambda name: dict(live, env={}))
-    assert "no token to carry" in rl.roll_reason(conn, "tmel", "arch")
+    assert rl.roll_reason(conn, "tmel", "arch").startswith("stale: no token to carry")
     # a STOPPED container is idle by construction: nobody is at its keyboard
     monkeypatch.setattr(rl, "_inspect_container", lambda name: dict(live, running=False))
     assert rl.roll_reason(conn, "tmel", "arch") == ""
@@ -103,7 +104,7 @@ def test_busy_is_skipped_and_listed_never_killed(tmp_path, monkeypatch):
                      "broker_url, created_ns) VALUES('tmel',?,?,'','old:1','',0)",
                      (agent, f"rev-tmel-{agent}"))
     monkeypatch.setattr(rl, "roll_reason",
-                        lambda c, u, a, **k: "2 unread messages waiting" if a == "busy" else "")
+                        lambda c, u, a, **k: "busy: 2 unread messages waiting" if a == "busy" else "")
     done = []
     monkeypatch.setattr(rl, "upgrade_agent",
                         lambda c, u, a, img, **k: done.append((u, a)) or
@@ -112,8 +113,61 @@ def test_busy_is_skipped_and_listed_never_killed(tmp_path, monkeypatch):
     said = []
     rolled, busy = rl.roll_idle(conn, "new:2", out=said.append)
     assert rolled == [("tmel", "quiet")] and done == [("tmel", "quiet")]
-    assert busy == [("tmel", "busy", "2 unread messages waiting")]
+    assert busy == [("tmel", "busy", "busy: 2 unread messages waiting")]
     assert any("behind, busy: 2 unread messages waiting" in s for s in said)
+
+
+def test_a_stale_record_and_a_failed_roll_never_read_as_busy(tmp_path, monkeypatch, capsys):
+    """RULED 20631, from a real roll list: 13 bodies printed `behind, busy:`
+    while 8 had a dead token, 4 had no container at all, and 1 hit a docker
+    error. BUSY IS THE WORD FOR MID-TASK -- the property `--idle` exists to
+    respect -- and it is the only class that comes back by itself. A stale
+    record and a raised roll are both waiting for a human, so neither may wear
+    the word, and neither may be counted as left-for-the-next-deploy."""
+    db = str(tmp_path / "l.db")
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    rl._launcher_tables(conn)
+    for agent in ("mid-task", "no-container", "explodes", "quiet"):
+        conn.execute("INSERT INTO containers(user, agent, container, repo_url, image, "
+                     "broker_url, created_ns) VALUES('tmel',?,?,'','old:1','',0)",
+                     (agent, f"rev-tmel-{agent}"))
+    reasons = {"mid-task": "busy: 2 unread messages waiting",
+               "no-container": "stale: no container (the record is stale -- re-provision it)"}
+    monkeypatch.setattr(rl, "roll_reason", lambda c, u, a, **k: reasons.get(a, ""))
+
+    def _roll(c, u, a, img, **k):
+        if a == "explodes":
+            raise rl.LaunchError("Command '['docker', 'rename', ...]' returned "
+                                 "non-zero exit status 1")
+        return {"from": "old:1", "to": img, "was_running": True, "final": "running"}
+    monkeypatch.setattr(rl, "upgrade_agent", _roll)
+
+    said = []
+    rolled, skipped = rl.roll_idle(conn, "new:2", out=said.append)
+    assert rolled == [("tmel", "quiet")]
+    classes = {a: why.split(":")[0] for _, a, why in skipped}
+    assert classes == {"mid-task": "busy", "no-container": "stale", "explodes": "FAILED"}
+    # THE LINE A HUMAN READS. Each names its own class; only one says busy.
+    assert "  tmel/mid-task: behind, busy: 2 unread messages waiting" in said
+    assert ("  tmel/no-container: behind, stale: no container "
+            "(the record is stale -- re-provision it)") in said
+    assert [s for s in said if "explodes" in s][0].startswith(
+        "  tmel/explodes: behind, FAILED: Command ")
+    for line in said:
+        if "mid-task" not in line:
+            assert "busy" not in line, f"a non-busy skip wearing the word: {line!r}"
+
+    # ...AND THE SUMMARY COUNTS ONLY BUSY. "13 left for the next deploy" was
+    # the sentence that made a broken fleet read as a working one.
+    monkeypatch.setenv("REVEILLE_LAUNCH_DB", db)
+    monkeypatch.setattr(rl, "_db", lambda *a, **k: conn)
+    rl.cmd_upgrade(types.SimpleNamespace(all=True, idle=True, image="new:2",
+                                         health_url="h", timeout=1, force=False,
+                                         user=None, agent=None))
+    out = capsys.readouterr().out
+    assert "1 busy, left for the next deploy" in out
+    assert "2 will NOT come back on their own" in out
 
 
 def test_the_deploy_is_what_invokes_it():
