@@ -988,19 +988,30 @@ def test_the_rail_selection_is_repainted_wherever_the_active_tab_moves():
 # ---- DES-009 commit 3: the play queue ----------------------------------------
 
 def _voice_fns():
-    """vWant and vTake, extracted from the served page. Executed rather than
-    re-implemented: a copy in the test drifts from the page, which is the whole
-    reason the behind-predicate gate reads the page too."""
+    """The voice's pure decisions, extracted from the served page and EXECUTED
+    rather than re-implemented: a copy in the test drifts from the page, which
+    is the whole reason the behind-predicate gate reads the page too."""
     out = []
-    for name in ("function vWant(", "function vTake("):
+    for name in ("function vWant(", "function vStepNext(", "function vStepPrev(",
+                 "function vBehind("):
         start = PAGE.index(name)
-        out.append(PAGE[start:start + PAGE[start:].index("\n}\n") + 2])
+        nl = PAGE[start:].index("\n")
+        body = PAGE[start:start + nl] if PAGE[start:start + nl].rstrip().endswith("}") \
+            else PAGE[start:start + PAGE[start:].index("\n}\n") + 2]
+        out.append(body)
     return "\n".join(out)
 
 
-def test_the_voice_queue_plays_in_id_order_and_skips_when_it_falls_behind():
-    """The product requirement is that everyone hears the same voices in the same
-    ORDER, so the ordering is the thing to gate, given arrival that is not ordered.
+def test_the_voice_cursor_walks_in_id_order_and_drops_nothing():
+    """Everyone in a room hears the same voices in the same ORDER, and the order
+    is the message id (DES-009 s2).
+
+    0.2.261 REPLACED THE CONSUMING QUEUE WITH A CURSOR. What died with vTake is
+    the V_MAX=8 drop: past eight pending it threw the whole backlog away, kept
+    the newest and rang a tone. Those ids were then unreachable except one click
+    at a time, because a listener could not see where the voice was. The cursor
+    keeps the escape (jump to the newest) as an ACT and destroys nothing to
+    offer it -- so the property to gate is now that stepping NEVER loses an id.
     """
     import shutil
     import subprocess
@@ -1012,28 +1023,32 @@ def test_the_voice_queue_plays_in_id_order_and_skips_when_it_falls_behind():
 const eq=(got,want,what)=>{const g=JSON.stringify(got),w=JSON.stringify(want);
   if(g!==w)throw new Error(what+': '+g+' != '+w);};
 
-// ORDER. Arrival 7,5,9,6 must play 5,6,7,9 -- id order, not arrival order.
-let q=[{id:7},{id:5},{id:9},{id:6}], played=[];
-for(let i=0;i<4;i++){const t=vTake(q,8);played.push(t.id);
-  if(t.dropped)throw new Error('dropped with a queue of 4');}
-eq(played,[5,6,7,9],'play order');
-eq(vTake(q,8),null,'an empty queue yields nothing');
+// ORDER, AND NOTHING LOST. Whatever order they arrived in, the cursor walks the
+// ids ascending and visits EVERY one -- the old queue skipped to the newest past
+// eight and the rest were gone for good.
+const ids=[5,6,7,9];
+let cur=0,played=[];
+for(;;){const n=vStepNext(ids,cur);if(!n)break;played.push(n);cur=n;}
+eq(played,[5,6,7,9],'every id, in id order');
+eq(vStepNext(ids,9),0,'past the newest there is nothing next');
 
-// A GAP IS NOT WAITED FOR. 5 then 9 with no 6,7,8 plays both rather than stalling:
-// a message may have no audio at all, and waiting on an id that never comes is the
-// stall DES-009 section 2 forbids.
-q=[{id:9},{id:5}];
-eq([vTake(q,8).id, vTake(q,8).id],[5,9],'a gap must not stall the queue');
+// A GAP IS NOT WAITED FOR: 5 then 9 with no 6,7,8 steps straight across, because
+// a message may have no audio and waiting on an id that never comes is the stall
+// DES-009 section 2 forbids.
+eq(vStepNext([5,9],5),9,'a gap must not stall the walk');
 
-// FALLING BEHIND IS VISIBLE. Past the bound, skip to the NEWEST and report how many
-// went -- not the oldest, and never silently.
-q=[];for(let i=1;i<=12;i++)q.push({id:i});
-const t=vTake(q,8);
-eq([t.id,t.dropped],[12,11],'skip to newest, count what was dropped');
-eq(q.length,0,'the skipped queue is cleared, not left to replay');
+// BACKWARDS IS THE NEW HALF (operator: Next/Previous, not Stop).
+eq(vStepPrev(ids,7),6,'previous steps back one');
+eq(vStepPrev(ids,5),0,'there is nothing before the oldest loaded');
+eq(vStepPrev(ids,0),9,'with no cursor, previous means the newest');
 
-// OFF ISSUES NOTHING, and nobody hears themselves. vWant is the only gate before a
-// fetch, so both properties are one function.
+// HOW FAR BEHIND, which is what the chip shows and what the old tone announced.
+eq(vBehind(ids,0),4,'nothing played yet: everything is ahead');
+eq(vBehind(ids,6),2,'two newer than the one sounding');
+eq(vBehind(ids,9),0,'at the newest, nothing is behind');
+
+// OFF ISSUES NOTHING, and nobody hears themselves. vWant is the only gate before
+// a fetch, so both properties are one function.
 const m={id:1,from:'architect'};
 eq(vWant(m,'me',false),false,'off must queue nothing');
 eq(vWant({id:1,from:'me'},'me',true),false,'a listener must not hear themselves');
@@ -1116,8 +1131,13 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     assert "if(ctx.state!=='running')return vRefused();" in player
     toggle = PAGE[PAGE.index("function toggleVoice()"):PAGE.index("function clearFeed()")]
     assert "vCtxUp()" in toggle, "the toggle's click must resume the AudioContext -- it is the gesture"
-    assert "vStop()" in toggle and "vQ.length=0" in toggle, \
-        "toggle off must abort the utterance in flight and empty the queue"
+    assert "vStop()" in toggle and "vBusy=false" in toggle, \
+        "toggle off must abort the utterance in flight"
+    # AND TOGGLE ON PARKS THE CURSOR AT THE NEWEST (0.2.261): with a cursor over
+    # everything loaded, the "late joiners are not blasted" invariant stopped
+    # being a property of what vPush was fed and became a thing this says.
+    assert "const ids=vSpeakable();if(ids.length)vCursor=ids[ids.length-1];" in toggle, \
+        "turning voice on must not speak the backlog"
     # 4b. Underrun is a GAP, not a stall: a late batch re-anchors to now + lead.
     #     THE BUFFER IS FILLED BEFORE THE FIRST SOUND (0.2.259, operator's LTE
     #     stutter), not grown after the first gap: decoded batches are HELD until
@@ -1384,7 +1404,7 @@ def test_the_page_fits_a_phone():
     assert ".row{grid-template-columns:1.6rem 1fr;gap:.5rem;" in mobile and \
         ".row.active .mid,.row.active .del{display:inline;opacity:1}" in mobile and \
         ".row:not(.cont){border-top:1px solid var(--line)}" in mobile
-    for sel in ("#roomBtn{", "#voice,#vstop,#toolsBtn,#meBtn{", "#mic,#listen,#attachBtn,#send,#moreBtn{",
+    for sel in ("#roomBtn{", "#voice,#toolsBtn,#meBtn{", "#mic,#listen,#attachBtn,#send,#moreBtn{",
                 "#phMenu .mi{", "#phRooms .phRoom{"):
         rule = mobile[mobile.index(sel):]
         rule = rule[:rule.index("}")]

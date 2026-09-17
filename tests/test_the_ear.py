@@ -385,7 +385,7 @@ def test_the_earcon_rings_once_when_words_land_in_listen_mode_only():
     assert "earconRing" not in talk, "no bell in push-to-talk"
     assert "function earconRing(){if(earListening())earcon('ding');}" in page
     assert " if(vBusy){earconQ.push(name);return;}" in page, "never over an utterance"
-    assert "function vDone(){vCtl=null;vBusy=false;paintStop();earconDrain();vPump();}" in page
+    assert "function vDone(){vCtl=null;vBusy=false;paintNow();earconDrain();vPump();}" in page
     assert "fetch('/ui/earcon.wav'" in page
     routes = {r.path for r in daemon.build_app().routes if hasattr(r, "path")}
     assert "/ui/earcon.wav" in routes

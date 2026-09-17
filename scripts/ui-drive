@@ -670,6 +670,68 @@ SEED = """()=>{{
           firstId,follow}};}}"""
 
 
+VOICE_SEED = """()=>{
+ myName='me';
+ for(let i=0;i<5;i++){const id=500+i;
+  add({id,from:'architect',to:'*',ts_ns:Date.now()*1e6+i*1e9,body:'message number '+i,
+       subject:'',attachments:[],thread_id:id,send_group:null,has_audio:true});}
+ add({id:600,from:'me',to:'*',ts_ns:Date.now()*1e6,body:'mine',subject:'',
+      attachments:[],thread_id:600,send_group:null,has_audio:true});
+ voiceOn=true;const ids=vSpeakable();if(ids.length)vCursor=ids[ids.length-1];
+ paintNow();
+ return {speakable:vSpeakable(),cursor:vCursor,chipHidden:$('vnow').hidden,
+         text:$('vnowtxt').textContent,behindHidden:$('vbehind').hidden,
+         nextDisabled:$('vnext').disabled,prevDisabled:$('vprev').disabled};}"""
+
+VOICE_BACK = """()=>{
+ vCursor=vStepPrev(vSpeakable(),vCursor);
+ vCursor=vStepPrev(vSpeakable(),vCursor);
+ paintNow();
+ return {cursor:vCursor,text:$('vnowtxt').textContent,
+         behind:$('vbehind').textContent,behindHidden:$('vbehind').hidden,
+         nextDisabled:$('vnext').disabled};}"""
+
+
+def scene_the_voice_says_where_it_is(ctx, url, out, tag, phone):
+    """Which message is speaking, and how to walk the stream.
+
+    Operator 2026-09-16: "one of the GREATEST lacking features is knowing WHICH
+    message is being played ... being able to click/go to the talking voice
+    would be amazing ... I would really prefer a Next/Previous rather than a
+    Stop button."
+
+    THE CHIP, NOT A ROW HIGHLIGHT, IS THE MECHANISM: with the feed bounded
+    (0.2.260) the message being spoken may not be in the DOM at all, and a row
+    class alone would then have nothing to mark. The row class is a bonus on
+    top of it.
+
+    AND TURNING VOICE ON MUST NOT SPEAK THE BACKLOG. That invariant used to be
+    a property of vPush being fed by the live socket only; with a cursor over
+    everything loaded it has to be stated, so it is gated.
+    """
+    print(f"THE VOICE SAYS WHERE IT IS ({tag})")
+    p = open_page(ctx, url)
+
+    at_newest = p.evaluate(VOICE_SEED)
+    check("a listener never hears themselves", 600 not in at_newest["speakable"],
+          f"speakable={at_newest['speakable']}")
+    check("voice on parks at the newest, so no backlog is blasted",
+          at_newest["cursor"] == 504, f"cursor={at_newest['cursor']}")
+    check("the chip says which message is speaking", not at_newest["chipHidden"]
+          and "message number 4" in at_newest["text"], f"{at_newest}")
+    check("nothing is behind at the newest", at_newest["behindHidden"], f"{at_newest}")
+    check("and there is nothing to skip forward to", at_newest["nextDisabled"],
+          f"{at_newest}")
+
+    back = p.evaluate(VOICE_BACK)
+    check("previous walks back", back["cursor"] == 502, f"{back}")
+    check("the chip follows it", "message number 2" in back["text"], f"{back}")
+    check("and says how far behind the voice is",
+          not back["behindHidden"] and back["behind"].startswith("2 behind"), f"{back}")
+    check("with a way forward again", not back["nextDisabled"], f"{back}")
+    shoot(p, out, f"{tag}-voice-cursor")
+
+
 def scene_the_feed_is_bounded(ctx, url, out, tag, phone):
     """The feed stops growing while you are at the tail, and never while you are not.
 
@@ -798,7 +860,8 @@ def main():
                               scene_presence_comes_by_socket,
                               scene_the_feed_keeps_its_gutter,
                               scene_the_link_earns_its_buffer,
-                              scene_the_feed_is_bounded):
+                              scene_the_feed_is_bounded,
+                              scene_the_voice_says_where_it_is):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)
