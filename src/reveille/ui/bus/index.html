@@ -1924,6 +1924,70 @@ function render(m){
  return frag;
 }
 
+// THE FEED IS BOUNDED, AND THE TOP ASKS FOR MORE (0.2.260, operator: "the
+// longer I have stayed online without a CTRL-R the worse it gets ... we don't
+// need all history at once ... as we scroll back, get paged windows").
+//
+// NOTHING WAS LEAKING. Measured 2026-09-16: 1 document, 460 listeners, 4 MB
+// heap at 10 min uptime. `add()` appended and nothing ever trimmed, so the ONE
+// thing that grew was the feed -- and every cost that scales with it grew too.
+// A reload looked like a fix because it reset the feed to backlog size.
+//
+// TRIM ONLY WHILE FOLLOWING THE TAIL. A reader who scrolled up put themselves
+// there; dropping rows under them is the one thing this must never do. That is
+// also what keeps the trimmer and the pager off each other: scrolling up clears
+// `follow` (the scroll handler below), so only one of them is ever active.
+const FEED_MAX=500;        // rows kept in the DOM while following
+const PAGE_BACK=100;       // and the window fetched when the top is reached
+let firstId=0;             // oldest id currently rendered -- the pager's cursor
+let paging=false,atOldest=false;
+function trimFeed(){
+ if(!follow)return;
+ const inner=$('inner');
+ let over=inner.querySelectorAll('.row').length-FEED_MAX;
+ if(over<=0)return;
+ for(const el of [...inner.children]){
+  if(over<=0)break;
+  if(el.id==='histInfo')continue;
+  if(el.classList.contains('row')){
+   const id=+el.dataset.id||0;
+   if(id)msgs.delete(id);        // the Map grew with the DOM; it shrinks with it
+   over--;
+  }
+  el.remove();                   // a .day separator above a dropped row goes with it
+ }
+ const top=inner.querySelector('.row');
+ if(top)firstId=+top.dataset.id||firstId;
+ atOldest=false;                 // there is more above us again by construction
+}
+// A PREPEND MOVES EVERYTHING DOWN, so the reader has to be moved with it or the
+// act of asking for history throws them out of the place they were reading.
+async function loadOlder(){
+ if(paging||atOldest||mode!=='live'||!firstId)return;
+ paging=true;
+ try{
+  const r=await fetch('/messages'+qs()+'&limit='+PAGE_BACK+'&before_id='+firstId);
+  if(!r.ok)return;
+  const older=(await r.json()).messages.filter(m=>!msgs.has(m.id));
+  if(!older.length){atOldest=true;return;}
+  const el=$('feed'),before=el.scrollHeight;
+  const anchor=$('inner').querySelector('.row');
+  // render() groups against prevMsg, which tracks the LIVE tail. A prepended
+  // window is its own run, so it renders from a clean slate and the tail's
+  // value is put back. ponytail: the row that used to be topmost keeps the day
+  // separator it was given when it WAS the top -- cosmetic, and the alternative
+  // is re-rendering a row to delete a line.
+  const keep=prevMsg;prevMsg=null;
+  const frag=document.createDocumentFragment();
+  for(const m of older){msgs.set(m.id,m);frag.appendChild(render(m));}
+  prevMsg=keep;
+  $('inner').insertBefore(frag,anchor);
+  firstId=older[0].id;
+  el.scrollTop+=el.scrollHeight-before;
+ }catch(e){}
+ finally{paging=false;}
+}
+
 function add(m){
  if(m.id>lastId)lastId=m.id;
  if(mode!=='live'||msgs.has(m.id))return;   // history view: live frames wait for "back to live"
@@ -1933,6 +1997,8 @@ function add(m){
  if(!voiceOn&&m.from&&m.from!==myName&&(m.to===myName||(m.to==='*'&&humanNames.has(m.from))))earcon('pop');
  $('empty')?.remove();
  $('inner').appendChild(render(m));
+ if(!firstId)firstId=m.id;
+ trimFeed();
  if(follow)$('feed').scrollTop=$('feed').scrollHeight;
 }
 
@@ -2303,7 +2369,7 @@ function toggleVoice(){
 function clearFeed(){
  for(const el of [...$('inner').children])
   if(el.id!=='histInfo')el.remove();
- msgs.clear();prevMsg=null;
+ msgs.clear();prevMsg=null;firstId=0;atOldest=false;
 }
 
 function toLive(){
@@ -2350,11 +2416,17 @@ async function loadBacklog(reset){
  if(mode!=='live')return;
  if(reset)busy(true);
  try{
-  const r=await fetch('/messages'+qs()+'&limit=300'+(reset?'':'&since_id='+lastId));
+  // THE OPENING WINDOW IS SMALL; the rest arrives as the reader asks for it.
+  // The reconnect gap-fill keeps its old reach -- that one is bounded by how
+  // long the socket was down, not by how much history exists.
+  const r=await fetch('/messages'+qs()+(reset?'&limit='+PAGE_BACK
+                                              :'&limit=300&since_id='+lastId));
   if(r.status===401){showLogin('session expired -- sign in again');return;}
   if(!r.ok)return;
   if(reset)clearFeed();
   for(const m of (await r.json()).messages)add(m);
+  if(reset){const top=$('inner').querySelector('.row');
+            firstId=top?(+top.dataset.id||0):0;atOldest=false;}
  }catch(e){
   setTimeout(()=>loadBacklog(reset),1500);   // broker restarting; keep trying until live
  }finally{busy(false);}
@@ -2663,6 +2735,9 @@ $('feed').addEventListener('scroll',()=>{
  const el=$('feed');
  follow=el.scrollTop+el.clientHeight>=el.scrollHeight-40;
  $('jump').style.display=follow?'none':'block';
+ // Reaching the top IS the request for more. One screen of slack, so the next
+ // window is already landing by the time the reader gets there.
+ if(el.scrollTop<el.clientHeight)loadOlder();
 });
 $('jump').onclick=()=>{follow=true;$('feed').scrollTop=$('feed').scrollHeight;$('jump').style.display='none';};
 $('filter').addEventListener('input',refilter);
