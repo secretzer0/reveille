@@ -658,6 +658,48 @@ def scene_presence_comes_by_socket(ctx, url, out, tag, phone):
     shoot(p, out, f"{tag}-presence-socket")
 
 
+def scene_the_link_earns_its_buffer(ctx, url, out, tag, phone):
+    """The jitter buffer is filled BEFORE the first sound, and only ever grows.
+
+    Operator 2026-09-16: "on LTE and even 5g with full bars the audio stutters
+    constantly ... local lan doing the same web based interface is amazing". An
+    in-flight utterance arrives at roughly speaking speed, and the old shape
+    allowed it 50 ms of slack -- less than LTE jitter -- then HALVED the lead
+    after every clean utterance, so a jittery link oscillated across the
+    threshold for ever.
+
+    THE DECISIONS ARE PURE so this gate needs no network and no sound: vPrebuf
+    sizes the buffer from the fetch's own time-to-first-byte, and vLeadRaise is
+    the only thing that moves the floor.
+    """
+    print(f"THE LINK EARNS ITS BUFFER ({tag})")
+    p = open_page(ctx, url)
+
+    lan = p.evaluate("()=>vPrebuf(2,0.05)")
+    lte = p.evaluate("()=>vPrebuf(150,0.05)")
+    bad = p.evaluate("()=>vPrebuf(300,0.05)")
+    check("a LAN round trip buys the old tiny lead", abs(lan - 0.05) < 1e-9, f"{lan}")
+    check("an LTE round trip buys a real buffer", lte >= 0.45, f"{lte}")
+    check("and a worse one buys more", bad > lte, f"{bad} !> {lte}")
+    check("but never past the ceiling", p.evaluate("()=>vPrebuf(999999,0)") == 4.0,
+          str(p.evaluate("()=>vPrebuf(999999,0)")))
+
+    # A floor already learned is never undercut by a fast round trip: that is
+    # exactly the case the halving used to lose.
+    held = p.evaluate("()=>vPrebuf(2,1.6)")
+    check("a learned floor survives a fast round trip", abs(held - 1.6) < 1e-9, f"{held}")
+
+    ratchet = p.evaluate(
+        """()=>{const before=vLead;const a=vLeadRaise();const b=vLeadRaise();
+             return {before,a,b,saved:parseFloat(localStorage.revLead)}}""")
+    check("an underrun doubles the floor", ratchet["a"] == ratchet["before"] * 2,
+          f"{ratchet}")
+    check("and doubles it again", ratchet["b"] == ratchet["a"] * 2, f"{ratchet}")
+    check("and it is remembered per browser", ratchet["saved"] == ratchet["b"],
+          f"{ratchet}")
+    shoot(p, out, f"{tag}-link-buffer")
+
+
 def scene_the_feed_keeps_its_gutter(ctx, url, out, tag, phone):
     """The feed's scrollbar is decided ONCE, not on every forced layout.
 
@@ -708,7 +750,8 @@ def main():
                               scene_one_agent_one_color,
                               scene_toolchain_in_the_rail,
                               scene_presence_comes_by_socket,
-                              scene_the_feed_keeps_its_gutter):
+                              scene_the_feed_keeps_its_gutter,
+                              scene_the_link_earns_its_buffer):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)

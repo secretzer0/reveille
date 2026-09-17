@@ -1999,9 +1999,43 @@ function vMark(n){
 // the one in flight; a refusal to sound turns the toggle back off and says so; late
 // joiners are not blasted (vPush is fed by the live socket only).
 const V_LEAD=0.05;         // seconds ahead of "now" a late chunk is re-anchored to
-const V_LEAD_MAX=2.0;      // a link that keeps arriving late earns a jitter buffer up to this (operator 11408, LTE)
-let vLead=V_LEAD;          // the lead the LINK has earned, carried across utterances (architect 11419): doubles on an
-                           // underrun, halves (floor V_LEAD) after an utterance with none -- a message never re-learns it
+const V_LEAD_MAX=4.0;      // the most jitter buffer a link can earn (operator 11408, LTE)
+// THE BUFFER IS FILLED BEFORE THE FIRST SOUND, NOT AFTER THE FIRST GAP
+// (operator 2026-09-16: "on LTE and even 5g with full bars the audio stutters
+// constantly ... local lan doing the same web based interface is amazing").
+//
+// The old shape scheduled the first decoded batch at now+0.05 s and every batch
+// after it back to back, so the playback clock and the ARRIVAL clock ran at the
+// same rate with 50 ms of slack between them. A complete file cannot starve --
+// measured 2026-09-16 at 300 ms RTT / 2 Mbps, 0 underruns, because 27 s of
+// speech is 117 KB and arrives ~50x faster than it plays. An IN-FLIGHT
+// utterance is different: /audio tails a file the synthesizer is still writing,
+// so it arrives at roughly speaking speed and 50 ms is all the jitter the link
+// is allowed. LAN jitter is sub-millisecond; LTE jitter is 50-500 ms.
+//
+// AND IT COULD NEVER LEARN. vLead doubled only AFTER a gap you already heard,
+// then HALVED after every clean utterance -- so on a link that always jitters
+// it oscillated across the threshold for ever: grow, stutter, shrink, stutter.
+// The halving is gone. The floor only ever rises within a session, and it is
+// remembered per browser.
+//
+// The first utterance of a session does not have to stutter to learn, either:
+// the fetch's own time-to-first-byte is an upper bound on the round trip (it
+// includes the broker's think time, which is the safe direction to be wrong in),
+// so the buffer is sized from it before a single sample is scheduled.
+const V_PREBUF_K=3;        // headroom over one round trip
+let vLead=V_LEAD;          // the jitter allowance this link has earned, carried across utterances
+try{vLead=Math.min(V_LEAD_MAX,Math.max(V_LEAD,parseFloat(localStorage.revLead)||V_LEAD));}catch(e){}
+// PURE, so a gate can drive it without a network: what this link must hold
+// before the first sample sounds.
+function vPrebuf(ttfbMs,floor){
+ return Math.min(V_LEAD_MAX,Math.max(V_LEAD,(ttfbMs||0)*V_PREBUF_K/1000,floor||0));
+}
+function vLeadRaise(){
+ vLead=Math.min(V_LEAD_MAX,vLead*2);
+ try{localStorage.revLead=String(vLead);}catch(e){}
+ return vLead;
+}
 let vCtl=null;             // the utterance in flight: {srcs, ab(AbortController)}
 let vLast=null;            // {id, firstAt}: when the utterance first sounded (a gate reads it)
 let vDec=null;             // the one Opus decoder (WASM), reset per utterance
@@ -2107,8 +2141,10 @@ async function vPlay(id,url){
  if(ctx.state!=='running'){try{await ctx.resume();}catch(e){}}
  if(ctx.state!=='running')return vRefused();
  let res;
+ const tFetch=performance.now();
  try{res=await fetch(url,{credentials:'same-origin',signal:ctl.ab.signal});}
  catch(e){return vCtl===ctl?vDone():undefined;}
+ const ttfb=performance.now()-tFetch;
  if(!res.ok||!res.body){                     // 404 = a silent message (section 7)
   if(res.status!==404)res.json().then(j=>toast(j.error||('audio: '+res.status))).catch(()=>{});
   return vDone();}
@@ -2123,6 +2159,7 @@ async function vPlay(id,url){
  // V_LEAD -- a jitter buffer the link earns once, one gap at a time, and gives
  // back as it improves (architect 11419).
  const demux=vDemuxer();let dec=null,next=0,pending=0,ended=false,started=false;
+ const prebuf=vPrebuf(ttfb,vLead);const hold=[];let held=0;
  vDiag.lib=!!window['opus-decoder'];vDiag.frames=vDiag.decoded=vDiag.scheduled=vDiag.errors=vDiag.underruns=0;vDiag.lead=vLead;
  vDiag.ctx=ctx.state;vDiag.rate=ctx.sampleRate;
  const finish=()=>{if(vCtl===ctl&&ended&&pending===0){
@@ -2142,18 +2179,46 @@ async function vPlay(id,url){
    if(vCtl!==ctl)return;
    vDiag.decoded+=samplesDecoded;vDiag.errors+=(errors||[]).length;
    if(!samplesDecoded)continue;
-   vDiag.scheduled++;
    const ab=ctx.createBuffer(1,samplesDecoded,sampleRate);ab.copyToChannel(channelData[0],0);
-   const src=ctx.createBufferSource();src.buffer=ab;src.connect(ctx.destination);
-   const now=ctx.currentTime;
-   if(next<now){if(started){vLead=Math.min(V_LEAD_MAX,vLead*2);vDiag.underruns++;vDiag.lead=vLead;}next=now+vLead;}
-   src.onended=()=>{pending--;finish();};
-   pending++;ctl.srcs.push(src);src.start(next);
-   if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}
-   next+=ab.duration;
+   // FILL, THEN SOUND. Until the first sample is scheduled the decoded audio is
+   // HELD, not played; once it is sounding every later batch goes straight out,
+   // because by then the buffer is the gap between the two clocks.
+   hold.push(ab);held+=ab.duration;
+   if(!started&&held<prebuf)continue;
+   while(hold.length){
+    const buf=hold.shift();
+    vDiag.scheduled++;
+    const src=ctx.createBufferSource();src.buffer=buf;src.connect(ctx.destination);
+    const now=ctx.currentTime;
+    // An underrun now means the SYNTHESIZER stalled past the whole buffer, not
+    // that the link hiccuped -- so it raises the floor for good, and the floor
+    // is never given back inside a session.
+    if(next<now){if(started){vDiag.underruns++;vDiag.lead=vLeadRaise();}next=now+vLead;}
+    src.onended=()=>{pending--;finish();};
+    pending++;ctl.srcs.push(src);src.start(next);
+    if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}
+    next+=buf.duration;
+   }
+   held=0;
   }
  }catch(e){if(vCtl===ctl){toast('audio: '+(e.message||e));return vDone();}return;}
- if(started&&!vDiag.underruns){vLead=Math.max(V_LEAD,vLead/2);vDiag.lead=vLead;}   // a clean utterance gives lead back
+ // THE STREAM ENDED WITH THE BUFFER UNDER TARGET -- a short utterance, or a
+ // complete file that fit inside one batch. What is held still has to sound, or
+ // the message is silently swallowed by its own pre-buffer.
+ while(hold.length){
+  const buf=hold.shift();
+  vDiag.scheduled++;
+  const src=ctx.createBufferSource();src.buffer=buf;src.connect(ctx.destination);
+  const now=ctx.currentTime;
+  if(next<now)next=now+V_LEAD;
+  src.onended=()=>{pending--;finish();};
+  pending++;ctl.srcs.push(src);src.start(next);
+  if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}
+  next+=buf.duration;
+ }
+ // NO HALVING. A clean utterance used to give the lead back, which is what made
+ // a jittery link re-learn and re-stutter for ever (operator, LTE).
+ vDiag.lead=vLead;
  ended=true;finish();
 }
 

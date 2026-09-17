@@ -1118,17 +1118,28 @@ def test_the_voice_toggle_defaults_off_and_advances_on_events_not_timers():
     assert "vCtxUp()" in toggle, "the toggle's click must resume the AudioContext -- it is the gesture"
     assert "vStop()" in toggle and "vQ.length=0" in toggle, \
         "toggle off must abort the utterance in flight and empty the queue"
-    # 4b. Underrun is a GAP, not a stall: a late batch re-anchors to now + lead;
-    #     first sound is the first decoded batch, not the whole stream. The lead
-    #     ADAPTS (operator 11408, LTE): starts at V_LEAD, doubles on every underrun
-    #     after the first buffer, capped at V_LEAD_MAX -- a jitter buffer that grows
-    #     only where the link earns it, and never taxes first sound on a good link.
-    assert "const V_LEAD=0.05;" in player and "const V_LEAD_MAX=2.0;" in player and "let vLead=V_LEAD;" in player
-    assert "if(next<now){if(started){vLead=Math.min(V_LEAD_MAX,vLead*2);vDiag.underruns++;vDiag.lead=vLead;}next=now+vLead;}" in player
-    # Carried across utterances (architect 11419): a bad link earns it once, a
-    # clean utterance halves it back toward V_LEAD -- never re-learned per message.
-    assert "if(started&&!vDiag.underruns){vLead=Math.max(V_LEAD,vLead/2);vDiag.lead=vLead;}" in player
-    assert "lead=V_LEAD;" not in player.replace("let vLead=V_LEAD;", ""), "no per-utterance reset"
+    # 4b. Underrun is a GAP, not a stall: a late batch re-anchors to now + lead.
+    #     THE BUFFER IS FILLED BEFORE THE FIRST SOUND (0.2.259, operator's LTE
+    #     stutter), not grown after the first gap: decoded batches are HELD until
+    #     they total the target, and only then does anything sound.
+    assert "const V_LEAD=0.05;" in player and "const V_LEAD_MAX=4.0;" in player and "let vLead=V_LEAD;" in player
+    assert "if(!started&&held<prebuf)continue;" in player, \
+        "the pre-buffer must fill before the first sample is scheduled"
+    assert "const prebuf=vPrebuf(ttfb,vLead);" in player and "const ttfb=performance.now()-tFetch;" in player, \
+        "the buffer is sized from the round trip, so the FIRST utterance need not stutter to learn"
+    assert "if(next<now){if(started){vDiag.underruns++;vDiag.lead=vLeadRaise();}next=now+vLead;}" in player
+    # SUPERSEDED, AND WHY IT IS WORTH REMEMBERING (0.2.259 replaces 11419's
+    # give-it-back half): the lead used to HALVE after every clean utterance, so
+    # a link that always jitters oscillated across the threshold for ever --
+    # grow, stutter, shrink, stutter. The floor now only rises within a session.
+    # This is a NEGATIVE: it goes red if the oscillation is ever reintroduced.
+    assert "vLead=Math.max(V_LEAD,vLead/2)" not in player, \
+        "the halving is the defect, not the policy (0.2.259)"
+    assert "localStorage.revLead" in player, "a floor the link earned is remembered per browser"
+    # A stream that ends under target must still sound, or the pre-buffer
+    # swallows a short utterance whole -- the failure this shape invites.
+    assert player.count("while(hold.length){") == 2, \
+        "the tail flushes whatever the pre-buffer is still holding"
     assert "if(!started){started=true;if(!vLast||vLast.id!==id)vLast={id:id,firstAt:performance.now()};}" in player
     # 5. Live arrivals only: the speak call hangs off the socket's AUDIO case (the
     #    frame that says a first byte exists -- DES-009 section 2 as amended, ruling
