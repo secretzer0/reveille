@@ -477,6 +477,8 @@
  #vnowtxt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   cursor:pointer}
  #vbehind{border:1px solid var(--gold)!important;white-space:nowrap;font-size:.72rem}
+ .arts .dl{color:var(--dim,#7d8794);text-decoration:none;cursor:pointer}
+ .arts .dl:hover{color:var(--gold)}
  .row.cont .arts{float:right;margin-left:.5rem;line-height:1.2}
  .row.scripted .scr{color:var(--gold)}
  .row.scripted .body{border-left:2px solid var(--gold);padding-left:.5rem}
@@ -1827,7 +1829,15 @@ function artIcons(m){
    (m.has_audio?'play audio':m.gen_pending?'writing the script, then the audio...':'generate the audio, then play it')+
    '" aria-label="play audio">'+(m.has_audio?'&#9654;':'&#9655;')+'</span>'
   +(m.has_script?'<span class="scr" data-scr="'+m.id+'" title="view the script" '+
-   'aria-label="view the script">&#9998;</span>':'');
+   'aria-label="view the script">&#9998;</span>':'')
+  // KEEP THE AUDIO (operator 2026-09-16), admins only. A plain <a download> --
+  // the browser already does this, so there is no handler and no fetch. Hiding
+  // it is NOT the gate: /audio/<id>/download refuses a non-admin on its own,
+  // and that route is separate from the streaming ones precisely so a mistake
+  // in its condition can never silence the room.
+  +((m.has_audio&&me&&me.is_admin)
+    ?'<a class="dl" href="'+vBase(m.id)+'/download'+qs()+'" download '+
+     'title="download this audio" aria-label="download this audio">&#11015;</a>':'');
 }
 function paintIcons(m){
  const arts=document.querySelector('.row[data-id="'+m.id+'"] .arts');
@@ -1930,6 +1940,7 @@ function render(m){
   // A message that HAS audio is a play point: the cursor moves there and the
   // stream carries on forward from it. One that has none still has to be made
   // first, and the audio frame plays it through the same cursor.
+  if(e.target.closest('.dl'))return;          // the anchor downloads; not a row selection
   if(e.target.closest('.play')){if(m.has_audio)vPlayAt(m.id);else genOne(m);return;}
   if(e.target.closest('.scr')){toggleScript(row,m);return;}
   const cp=e.target.closest('.clipPlay');

@@ -744,7 +744,15 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
     # interpolates `safe`, which is attUrl()'s return, checked at the sink
     # rather than inherited from the feed: a modal is a new sink for a foreign
     # url (8816) and a new sink is where an old gate gets skipped.
-    assert sites == {"esc": 1, "safe": 9, "tile": 1, "u": 1}, \
+    # vBase 0 -> 1 at the admin download anchor (0.2.261). The review this gate
+    # exists to force: the value interpolated is `vBase(m.id)`, and vBase is
+    # `id=>'/audio/'+encodeURIComponent(id)` -- a FIXED site-relative prefix
+    # plus one encoded integer id, never a string the page did not author. It
+    # is the same builder the player already uses, which is why there is one
+    # builder (the '/audio/' count below pins that there is still only one).
+    # The anchor also carries `download`, so the sink is a save, not a
+    # navigation -- but that is a bonus, not the reason it is safe.
+    assert sites == {"esc": 1, "safe": 9, "tile": 1, "u": 1, "vBase": 1}, \
         f"a URL interpolation appeared or moved: {sites} -- every one needs a check"
     # AND THE SINKS THAT ARE NOT BUILT STRINGS. The regex above sees only
     # concatenation, so a URL set by PROPERTY ASSIGNMENT was invisible to it --
