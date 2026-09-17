@@ -1384,7 +1384,12 @@ def test_nothing_in_the_feed_is_wider_than_the_feed():
     """0.2.135 (rulings 11480/11483 B): the fluid rules that keep a long token,
     subject or code block from panning the feed sideways -- pinned as strings,
     measured by scripts/mobile-shots (feed scrollWidth == clientWidth)."""
-    assert "#feed{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;" in PAGE
+    # overflow-y is SCROLL as of 0.2.258 (the gutter is decided once, or every
+    # forced layout re-decides it and relayouts the feed). This gate is about the
+    # HORIZONTAL axis -- overflow-x:hidden and min-width:0 below it -- and pins
+    # the whole declaration, so the literal moves with the vertical change while
+    # the property it asserts is untouched.
+    assert "#feed{flex:1;overflow-y:scroll;overflow-x:hidden;min-height:0;" in PAGE
     assert "touch-action:pan-y" in PAGE and ".msgcol{min-width:0}" in PAGE
     assert ".body{color:#c3ccd8;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;" in PAGE
     assert ".mdview pre{overflow-x:auto;max-width:100%}" in PAGE

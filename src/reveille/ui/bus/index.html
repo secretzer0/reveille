@@ -423,7 +423,19 @@
     Fluid, no device pixels: the cell may shrink (min-width:0), any token may
     break (overflow-wrap:anywhere), code scrolls inside its own box, and the
     feed itself never scrolls sideways. */
- #feed{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;padding:1rem 0 1.4rem;touch-action:pan-y}
+ /* SCROLL, NEVER AUTO, AND THE REASON IS TYPING. With `auto`, whether this
+    box has a scrollbar is a layout OUTPUT, so every forced layout re-decides it
+    -- and a keystroke in the composer forces one (Blink's editing path scrolls
+    the caret into view). The re-decision relayouts the whole feed. MEASURED
+    2026-09-16 in the OverSiteAI room: median keystroke 48 ms at 293 rows and
+    392 ms at 2930, LINEAR in history, which is why a long-lived tab got slower
+    and a reload fixed it. The trace named it: `Layout dirty:10 total:7702
+    forcedBy:keypress` beside `LayoutInvalidationTracking DIV id='feed'
+    Scrollbar changed`. With `scroll` the gutter is decided once: 16 ms, and the
+    per-keystroke Layout goes to 0.00 ms with zero scrollbar invalidations.
+    `scrollbar-gutter:stable` also works (24 ms) and buys nothing here; contain
+    on the feed or the rows does nothing at all (176 ms, unchanged). */
+ #feed{flex:1;overflow-y:scroll;overflow-x:hidden;min-height:0;padding:1rem 0 1.4rem;touch-action:pan-y}
  .msgcol{min-width:0}
  #feed>.inner{max-width:none;margin:0;padding:0 2.2rem}
  .day{display:flex;align-items:center;gap:.9rem;color:var(--faint);

@@ -658,6 +658,27 @@ def scene_presence_comes_by_socket(ctx, url, out, tag, phone):
     shoot(p, out, f"{tag}-presence-socket")
 
 
+def scene_the_feed_keeps_its_gutter(ctx, url, out, tag, phone):
+    """The feed's scrollbar is decided ONCE, not on every forced layout.
+
+    With `overflow-y:auto` whether this box has a scrollbar is a layout OUTPUT,
+    so every forced layout re-decides it -- and a keystroke in the composer
+    forces one. The re-decision relayouts the whole feed, which is why typing
+    got linearly slower with history and a reload fixed it (measured 2026-09-16:
+    48 ms/keystroke at 293 rows, 392 ms at 2930, `Layout forcedBy:keypress`
+    beside `LayoutInvalidationTracking DIV id='feed' Scrollbar changed`).
+
+    THE GATE READS THE RENDERED ARTIFACT, never the stylesheet: what decides
+    the layout is the COMPUTED value on the live node. It deliberately asserts
+    no timing -- a test whose result depends on machine load asserts nothing.
+    """
+    print(f"THE FEED KEEPS ITS GUTTER ({tag})")
+    p = open_page(ctx, url)
+    got = p.evaluate("()=>getComputedStyle(document.getElementById('feed')).overflowY")
+    check("the feed's gutter is permanent", got == "scroll", f"overflow-y={got!r}")
+    shoot(p, out, f"{tag}-feed-gutter")
+
+
 def main():
     out = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "shots/ui")
     out.mkdir(parents=True, exist_ok=True)
@@ -686,7 +707,8 @@ def main():
                               scene_boot_wait, scene_boot_refused,
                               scene_one_agent_one_color,
                               scene_toolchain_in_the_rail,
-                              scene_presence_comes_by_socket):
+                              scene_presence_comes_by_socket,
+                              scene_the_feed_keeps_its_gutter):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)

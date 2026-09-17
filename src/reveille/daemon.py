@@ -32,6 +32,7 @@ import base64
 import binascii
 import contextlib
 import hashlib
+import gzip
 import html
 import ipaddress
 import io
@@ -380,6 +381,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.258",
+     "0.2.258 THE PAGE ARRIVES SMALL, AND THE FEED STOPS RELAYOUTING ON EVERY\nKEYSTROKE (operator: \"typing and interactivity is so slow\"; \"the longer I\nstay online without a CTRL-R the worse it gets\").\n\nTWO DEFECTS, ONE SYMPTOM, BOTH MEASURED IN THE LIVE PAGE RATHER THAN READ OFF\nTHE SOURCE.\n\nFIRST, THE FEED. `#feed` was `overflow-y:auto`, which makes scrollbar presence\na layout OUTPUT -- so every forced layout re-decides it, and a keystroke in the\ncomposer forces one (Blink's editing path scrolls the caret into view). The\nre-decision relayouts the whole feed. The trace named it exactly: `Layout\ndirty:10 total:7702 forcedBy:keypress`, 20-27 ms each, beside\n`LayoutInvalidationTracking DIV id='feed' Scrollbar changed`, 12 of them in\nfive keystrokes.\n\nAND THAT IS THE \"LEAK\" THE OPERATOR FELT. Median keystroke measured in the\nOverSiteAI room: 48 ms at 293 rows, 168 ms at 1172, 392 ms at 2930 -- LINEAR\nin history. `add()` appends and nothing ever trims, so a tab gets slower for as\nlong as it lives and a reload resets it to backlog size. Nothing is actually\nleaking: 1 document, 460 listeners, 4 MB heap at 10 min uptime. The feed is\nthe only thing growing. With `overflow-y:scroll` the gutter is decided once:\n16 ms, per-keystroke Layout 0.00 ms, zero scrollbar invalidations, and FLAT in\nhistory (32 ms at 2930 rows). Bounding the feed itself is a separate slice.\n\nALTERNATIVES MEASURED, NOT ARGUED, all at 1172 rows: `scrollbar-gutter:stable`\n24 ms (works, buys nothing here); `contain:strict` on #feed 24 ms but imposes\nsize containment; `contain:layout` on #feed and `contain:content` on the rows\n176 ms, i.e. no effect at all; `content-visibility:auto` on the rows 32 ms\nalone and 24 ms beside `scroll` -- inside the 8 ms Event Timing floor, so it is\nNOT taken: one word beats two rules that cannot be told apart from it.\n\nSECOND, DELIVERY. Measured over the wire against the live broker: `/ui`\nanswered 396226 bytes with `content-encoding: none` AND `cache-control: none`.\nThe entire app, uncompressed, re-downloaded on every load, every tab, every\nreconnect -- which on a phone is the first-paint cost paid again and again.\nOne `_static_response` now serves the page and the three vendored assets:\nETag first so a repeat load is a 304 with no body, gzip second so a first load\nis roughly a fifth of the bytes. The ETag is over the bytes that LEAVE, so the\npage's env substitutions are inside it and a deploy invalidates it by\nconstruction -- nothing has to remember to bump a string.\n\nDELIBERATELY NOT MIDDLEWARE, and that is the load-bearing decision.\nStarlette's GZipMiddleware has no content-type filter, so mounting it would\nalso wrap the tailing `/audio/<id>.webm` stream -- a compressor between the\nsynthesizer and an ear that is already starving on a mobile link (DES-009\nsection 7), spent re-compressing Opus, which does not compress. The gate that\nsays so is a NEGATIVE: /version and /health must come back unencoded even when\nthe client asks, and no GZip middleware may be mounted on the app.\n\nGATES. tests/test_the_page_arrives_small.py: compressed when asked and only\nthen, the wire size read off Content-Length (httpx decodes the body, so the\nbody cannot report it), a second load is 304 with an empty body, a stale\nvalidator still gets the page, each asset validates as itself. Three of the\nfour are RED on the unfixed head; the fourth is the scoping negative, which\nwas green before and exists to stay green. scripts/ui-drive\nscene_the_feed_keeps_its_gutter reads the COMPUTED overflow-y off the live\nnode -- the rendered artifact, never the stylesheet -- and asserts no timing,\nbecause a test whose result depends on machine load asserts nothing.\n"),
     ("0.2.257",
      "0.2.257 THE SOCKET CARRIES PRESENCE (sweep C3 + D1, ruling 20403; E2\nWITHDRAWN on a measurement, below).\n\nC3. The page held a /feed socket that ALREADY pushes a `presence` frame into\nthe very renderPresence a 15 s setInterval was calling -- a second path for\ndata that already arrives, and the ONE poll with no document.hidden guard, so\na backgrounded tab asked forever. The interval is gone; the socket carries\nevery update and a reconnect repaints.\n\nAND THE FIRST PAINT ASKED TWICE, which only the browser could show: connect()'s\nonopen already calls loadPresence, and boot called it again beside connect(),\nas did pickRoom three lines before it drops the feed and reconnects. Both\nremoved -- onopen is the one to keep, because it fires on every RECONNECT too,\nso the rail recovers after a gap instead of only at boot.\n\nGATE IS A COUNT OVER A WINDOW, not a source read: scripts/ui-drive\nscene_presence_comes_by_socket counts /presence requests on both viewports --\nexactly 1 for the initial paint, ZERO more over 18 s (the old cadence was\n15 s), and a pushed frame still repaints the rail. \"We removed the timer\" is\na claim about source; how many times the page ASKS is the thing.\n\nD1. astral-sh/setup-uv ships a cache and ci.yml was not asking for it, so\nevery PR re-resolved and re-downloaded the tree. enable-cache: true, keyed on\nuv.lock. One line.\n\nE2 WITHDRAWN, AND THE WITHDRAWAL IS THE ENTRY WORTH READING. The sweep\nclaimed `playwright install chromium` sat below four floating-version\ninstallers (go, ttyd, gh, claude@latest) and was re-downloaded whenever one\nof them moved, so hoisting it would keep it cached. THAT IS NOT HOW DOCKER\nCACHES. The key for a RUN is the INSTRUCTION TEXT, not what the command\nfetches -- an unpinned installer whose command string never changes does not\nre-run and invalidates nothing below it. MEASURED 2026-09-16: a two-layer\nimage built twice, `RUN ... date > /floatstamp` -> both layers CACHED and the\nstamp IDENTICAL across builds. So the reorder buys nothing, and shipping it\nwould have been churn in an agent-image input -- forcing an image bump and a\nfleet roll -- to fix a problem that does not exist. What actually invalidates\nthe chromium layer is any TEXTUAL change above it, and then everything below\nre-runs whatever the order. E1 (--mount=type=cache) stays out for the same\nreason it always did: nobody has measured a build.\n"),
     ("0.2.256",
@@ -6341,15 +6344,58 @@ def nav_link_html(label, path):
             f'{html.escape(label.strip())}</a>')
 
 
-async def opus_decoder_http(_request):
+# ONE PLACE TURNS A STATIC PAYLOAD INTO A RESPONSE. MEASURED over the wire
+# 2026-09-16, against the live broker: `/ui` answered 396226 bytes with
+# `content-encoding: none` AND `cache-control: none` -- the whole app
+# re-downloaded uncompressed on every load, every tab, every reconnect, which
+# on LTE is the first-paint cost paid again and again.
+#
+# ETAG FIRST, GZIP SECOND: a repeat load should cost a 304 and no body at all,
+# and only a first load should pay a compressor. The ETag is over the bytes
+# that actually leave, so the page's env substitutions are inside it and a
+# deploy changes it by construction -- nothing has to remember to bump a
+# version string.
+#
+# NOT MIDDLEWARE, AND THAT IS THE LOAD-BEARING PART. Starlette's GZipMiddleware
+# has no content-type filter, so mounting it would also wrap the tailing
+# /audio/<id>.webm stream -- putting a compressor between the synthesizer and
+# an ear that is already starving on a mobile link (DES-009 section 7), to
+# re-compress Opus, which does not compress. Four static payloads want this;
+# nothing else does.
+_GZ_CACHE = {}
+
+
+def _static_response(request, body, media_type, *, max_age=86400):
+    """ETag/304/gzip for the page and the vendored assets. max_age=0 means
+    revalidate every time (the page: it changes on every deploy, and the ETag
+    is what makes that cheap)."""
+    if isinstance(body, str):
+        body = body.encode()
+    etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+    headers = {"Cache-Control": f"public, max-age={max_age}" if max_age else "no-cache",
+               "ETag": etag, "Vary": "Accept-Encoding"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    if len(body) >= 1024 and "gzip" in request.headers.get("accept-encoding", "").lower():
+        gz = _GZ_CACHE.get(etag)
+        if gz is None:
+            if len(_GZ_CACHE) > 16:
+                _GZ_CACHE.clear()          # keyed by CONTENT: a handful of live payloads, bounded by hand
+            gz = _GZ_CACHE[etag] = gzip.compress(body, 6)
+        headers["Content-Encoding"] = "gzip"
+        return Response(gz, media_type=media_type, headers=headers)
+    return Response(body, media_type=media_type, headers=headers)
+
+
+async def opus_decoder_http(request):
     """GET /ui/opus-decoder.js -> the vendored Opus decoder (opus-decoder 0.7.11,
     MIT, Ethan Halsall; libopus compiled to WASM, inlined). The page decodes the
     WebM/Opus stream itself and plays PCM through its AudioContext, so every
     browser with Web Audio hears the same wire -- iPhone Safari included, which
     has no MediaSource (operator, 2026-08-17). Fixed name from the route table,
     same serving rules as index.html."""
-    return PlainTextResponse(_ui_read("opus-decoder.min.js"), media_type="application/javascript",
-                             headers={"Cache-Control": "public, max-age=86400"})
+    return _static_response(request, _ui_read("opus-decoder.min.js"),
+                            "application/javascript")
 
 
 # The page-side VAD (DES-014 slice 2, ruling 11355: ships WITH the page, no
@@ -6366,12 +6412,12 @@ _VAD_FILES = {
 }
 
 
-async def earcon_http(_request):
+async def earcon_http(request):
     """GET /ui/earcon.wav -> the listen-mode bell (ruling 11465): the operator's
     pick from four synthesized samples (11471), 44.1 kHz mono, -12 dBFS, faded.
     Ships with the page like the VAD assets; the page decodes it once."""
     data = pathlib.Path(_ui_override() or _UI_PACKAGED, "earcon.wav").read_bytes()
-    return Response(data, media_type="audio/wav", headers={"Cache-Control": "public, max-age=86400"})
+    return _static_response(request, data, "audio/wav")
 
 
 async def vad_asset_http(request):
@@ -6381,10 +6427,10 @@ async def vad_asset_http(request):
     if media is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     data = pathlib.Path(_ui_override() or _UI_PACKAGED, "vad", name).read_bytes()
-    return Response(data, media_type=media, headers={"Cache-Control": "public, max-age=86400"})
+    return _static_response(request, data, media)
 
 
-async def chat_http(_request):
+async def chat_http(request):
     page = _ui_read("index.html").replace(
         "<!--NAVLINK-->", nav_link_html(os.environ.get("REVEILLE_NAV_LABEL", ""),
                                         os.environ.get("REVEILLE_NAV_PATH", ""))
@@ -6400,7 +6446,9 @@ async def chat_http(_request):
             f'<body><div style="position:fixed;bottom:4px;right:8px;'
             f'z-index:99;opacity:.6;font:11px monospace;color:#e0a44c">'
             f'UI OVERRIDE: {html.escape(ui)}</div>', 1)
-    return HTMLResponse(page)
+    # max_age=0: the page changes on every deploy, so it revalidates every load
+    # -- and the ETag turns that revalidation into a 304 instead of 396 KB.
+    return _static_response(request, page, "text/html; charset=utf-8", max_age=0)
 
 
 async def _pending_sweeper():
