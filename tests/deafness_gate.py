@@ -22,6 +22,7 @@ so this gate asserts the READING, end to end, on a real broker:
 
 REVEILLE_DEAF_AFTER is the env knob (seconds, default 900); the gate runs at 2.
 """
+import httpx2
 import asyncio
 import contextlib
 import json
@@ -75,15 +76,19 @@ def main():
         conn.close()
 
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client.streamable_http import streamable_http_client
 
         async def call(tool, args=None, secret=tok["secret"], agent=ROLE):
             hdrs = {"Authorization": f"Bearer {secret}", "X-Agent": agent}
-            async with streamablehttp_client(f"{base}/mcp", headers=hdrs) as (r_, w_, _):
+            async with streamable_http_client(
+                    f"{base}/mcp",
+                    http_client=httpx2.AsyncClient(
+                        headers=hdrs,
+                        timeout=httpx2.Timeout(30, read=300))) as (r_, w_):
                 async with ClientSession(r_, w_) as s:
                     await s.initialize()
                     res = await s.call_tool(tool, args or {})
-                    return res.structuredContent or json.loads(res.content[0].text)
+                    return res.structured_content or json.loads(res.content[0].text)
 
         def mcp_row(name):
             out = asyncio.run(call("presence", secret=adm["secret"], agent="ana"))

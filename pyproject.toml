@@ -1,11 +1,11 @@
 [project]
 name = "reveille"
-version = "0.2.263"
+version = "0.2.265"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "mcp>=1.2",
+    "mcp>=2.2,<3",
     "websockets>=13",
     "uvicorn>=0.30",
     "authlib==1.7.2",
@@ -21,12 +21,20 @@ reveille-install-hook = "reveille.install:main"
 reveille = "reveille.cli:main"
 reveille-headers = "reveille.headers:main"
 reveille-upload = "reveille.upload:main"
+symbol-rename = "reveille.symbol_rename:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "pytest-xdist>=3",
     "ruff>=0.6",
+    "rope>=1.13",
+    # A TRANSITIVE DEP YOU IMPORT IS YOUR DEP. tests/conftest.py imports httpx
+    # directly and got away with it while mcp 1.x pulled it in; mcp 2 carries
+    # httpx2 only, so the import went red on a runner the moment the lock
+    # stopped carrying it. Declared here rather than ported to httpx2, because
+    # starlette's TestClient is built on httpx and that port is its own subject.
+    "httpx>=0.28",
 ]
 
 [build-system]
