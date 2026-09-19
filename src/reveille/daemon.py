@@ -397,6 +397,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.281",
+     "0.2.281 THE DIGEST YIELDS TO THE VOICE (field defect 2026-09-19 22:14Z, devops\n24223; the operator heard it first: `I have to click play on each new\nmessage`). The first healthy 87-batch fold ran on the ONE writer the voice\nscripts share -- ~6k-token prompts into 2k-token outputs, back to back, a\nminute each -- and from 22:14Z every script `falls to terse: timed out`\n(24196, 24201, 24202, 24203, 24208, 24211, 24212). The digest was working;\nthe product was silent.\n\nTwo rules. ONE FOLD AT A TIME, FLEET-WIDE: a semaphore around the fold, so N\nagents' first folds after a deploy queue instead of stacking on one GPU; a\nqueued body's verb says so. THE FOLD YIELDS TO THE VOICE: no step starts\nwhile a script is being written, while one is queued, or within\nDIGEST_YIELD_S (15 s) of the last -- the voice is the product, the digest is\nidle-time work by definition, and a fold that takes longer in a busy room is\nthe correct price -- bounded: a step that cannot get the writer within\nDIGEST_TIMEOUT_S gives the run up as `yielded to voice`, prior digest live. A\nsecond agent asking while one folds is refused by that agent's name, never\nqueued in memory: its next hook turn asks again. And a KILL SWITCH:\n`REVEILLE_DIGEST=off` in the broker's environment answers every verb and\nhook ask with `digest is off on this broker` and says so at boot. The 0.2.279\nkeep-alive change was not the cause and stays.\n"),
     ("0.2.280",
      "0.2.280 A VERB STARTS; REHYDRATE READS (architect 24173 on devops 24172, from\nthe third live fold on 0.2.278). The fold itself was finally healthy -- 85\nbatches after the 7-day window, a dropped tag stripped and the step kept --\nand the CLIENT died at ~110 s: `Server disconnected without sending a\nresponse` on the held POST /mcp, while the fold ran on for its 85 minutes\nunheard. INVARIANT: NO VERB HOLDS A REQUEST OPEN FOR A MODEL -- the same\nfamily as 12750. digest() now prepares on a worker thread (refusals,\nmentor, extraction: store-only, sub-second), spawns the fold on its own\nthread, and answers at once: {started, batches, since, first_run}; while\none is in flight, {started: false, why: ... (step k/K)}; after a failed\nattempt, the reason itself until DIGEST_MIN_INTERVAL passes, so a body can\nsee why it has no digest without journalctl. The verb and POST /agent/digest\nare ONE path. The result is read where it was always going to be read:\nrehydrate() page 1 row 1, whose header carries id, chars, batches and what\nwas stripped. {id, chars, inputs} on return is dead.\n"),
     ("0.2.279",
@@ -1269,6 +1271,8 @@ class _ScriptQueue:
         self._lock = threading.Lock()
 
     def put(self, item, asked=False):
+        global _script_last_ns
+        _script_last_ns = time.time_ns()       # the voice wants the writer (24223)
         with self._lock:
             self._n += 1
             n = self._n
@@ -1295,6 +1299,8 @@ class _ScriptQueue:
 
 
 _script_q = _ScriptQueue()
+_script_last_ns = 0        # when the voice last asked for or finished a script
+_script_active = False     # a script is being written right now
 SCRIPT_ASKED_BUDGET_S = 20.0   # a click is not first-sound (11528); a terse click is waste (11476)
 _script_on = False
 _script_url = ""
@@ -1412,6 +1418,12 @@ def digest_prompt(text, protege=False, cap=DIGEST_MAX_TOKENS):
 
 
 _digest_lock = threading.Lock()
+_digest_active = None                   # (name, scope) of THE fold in flight (24227 b):
+                                        # one at a time fleet-wide -- the writer is one
+                                        # GPU; a second scope is refused by name, never
+                                        # queued in memory (its next hook turn asks again)
+DIGEST_YIELD_S = 15                     # the writer must be this idle before a step
+_digest_off = ""                        # the kill switch's reason, when set at boot
 _digest_running = {}             # scope -> [step, steps] of the fold in flight (24173)
 _digest_last_try = {}            # scope -> (ns, reason) of the last attempt, landed
                                  # ("") or failed (why) -- 24049: a refusal is not an
@@ -1473,15 +1485,24 @@ def _digest_prepare(conn, p, mentor_name=""):
     if not _script_on:
         raise store.BusError("digest needs the script writer -- REVEILLE_SCRIPT_URL is unset "
                              "on this broker, so there is no model to fold the hive with")
+    if _digest_off:
+        raise store.BusError(_digest_off)
     if not _digest_out:
         raise store.BusError(f"the script writer's context ({_digest_ctx} tokens) is too small "
                              f"to fold a digest -- see the broker's boot line")
     scope = store.agent_scope(conn, p.token_id, p.agent_id)
+    global _digest_active
     with _digest_lock:
         if scope in _digest_running:
             k, n = _digest_running[scope]
             raise store.BusError(f"a digest is being written for you (step {k}/{n})")
+        if _digest_active is not None:
+            other, oscope = _digest_active
+            k, n = _digest_running.get(oscope, [0, 0])
+            raise store.BusError(f"{other}'s digest is folding (step {k}/{n}) -- one fold at a "
+                                 f"time on this broker; ask again later")
         _digest_running[scope] = [0, 0]
+        _digest_active = (p.name, scope)
     try:
         mentor = None
         if mentor_name:
@@ -1499,6 +1520,7 @@ def _digest_prepare(conn, p, mentor_name=""):
     except (store.BusError, store.AccessError, store.AuthError) as e:
         with _digest_lock:
             _digest_running.pop(scope, None)
+            _digest_active = None
             _digest_last_try[scope] = (time.time_ns(), str(e))
         raise
     except Exception as e:
@@ -1506,6 +1528,7 @@ def _digest_prepare(conn, p, mentor_name=""):
         log.exception("%s digest failed inside the broker", p.name)
         with _digest_lock:
             _digest_running.pop(scope, None)
+            _digest_active = None
             _digest_last_try[scope] = (time.time_ns(), reason)
         raise store.BusError(f"digest failed inside the broker: {reason} -- the prior "
                              f"digest stays live")
@@ -1529,8 +1552,10 @@ def _digest_run(conn, p, scope, mentor, inputs):
         raise store.BusError(f"digest failed inside the broker: {reason} -- the prior "
                              f"digest stays live")
     finally:
+        global _digest_active
         with _digest_lock:
             _digest_running.pop(scope, None)
+            _digest_active = None
             _digest_last_try[scope] = (time.time_ns(), reason)
 
 
@@ -1548,11 +1573,17 @@ def _digest_start(conn, p, mentor_name=""):
     batches, since, first_run} or {started: false, why}: in flight names
     the step; a failed attempt inside DIGEST_MIN_INTERVAL names its reason,
     so a body can see why it has no digest without journalctl."""
+    if _digest_off:
+        return {"started": False, "why": _digest_off}
     scope = store.agent_scope(conn, p.token_id, p.agent_id)
     with _digest_lock:
         if scope in _digest_running:
             k, n = _digest_running[scope]
             return {"started": False, "why": f"a digest is being written for you (step {k}/{n})"}
+        if _digest_active is not None:
+            other, oscope = _digest_active
+            k, n = _digest_running.get(oscope, [0, 0])
+            return {"started": False, "why": f"{other}'s digest is folding (step {k}/{n})"}
         tried, reason = _digest_last_try.get(scope, (0, ""))
     if reason and (time.time_ns() - tried) / 1e9 < DIGEST_MIN_INTERVAL:
         return {"started": False, "why": f"last attempt failed: {reason}"}
@@ -1570,14 +1601,37 @@ def _digest_start(conn, p, mentor_name=""):
             "first_run": bool(inputs["first_window_ns"])}
 
 
+def _digest_yield(step, steps):
+    """THE FOLD YIELDS TO THE VOICE (field defect 2026-09-19 22:14Z, devops
+    24223, ruled 24227 c): one 87-batch fold on the shared writer timed out
+    every voice script for an hour -- `falls to terse: timed out` -- and the
+    operator heard silence. A digest is idle-time work by definition; the
+    voice is the product. So no fold step starts while a script is being
+    written, while one is queued, or within DIGEST_YIELD_S of the last one.
+    The wait is bounded by DIGEST_TIMEOUT_S per step; past it the run gives
+    up with its reason and the prior digest stays live."""
+    deadline = time.monotonic() + DIGEST_TIMEOUT_S
+    while True:
+        idle = (time.time_ns() - _script_last_ns) / 1e9
+        if not _script_active and _script_q.empty() and idle >= DIGEST_YIELD_S:
+            return
+        if time.monotonic() >= deadline:
+            raise store.BusError(f"yielded to voice: the writer stayed busy for "
+                                 f"{DIGEST_TIMEOUT_S:.0f}s at step {step}/{steps} -- the prior "
+                                 f"digest stays live")
+        time.sleep(1)
+
+
 def _digest_fold(conn, p, scope, mentor, inputs):
     """The SEQUENTIAL FOLD (24015): each writer call sees the running digest
     beside ONE batch and hands back the next running digest, verified and
     normalized before the next batch. Progress is written to _digest_running
-    so a concurrent asker is told the step."""
+    so a concurrent asker is told the step. ONE fold holds the writer at a
+    time fleet-wide, and every step yields to the voice first (24223)."""
     steps = max(1, len(inputs["batches"]))
     running, why, stripped_total, unsectioned_total = "", "", 0, 0
     for step in range(1, steps + 1):
+        _digest_yield(step, steps)
         with _digest_lock:
             _digest_running[scope] = [step, steps]
         batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
@@ -1833,8 +1887,14 @@ def _script_worker(url, model, token, first_timeout):
                         _script_q.qsize())
             _tts_q.put((mid, room, speaker, text, assigned, False))  # heard, not kept (11476)
             continue
-        _script_one(item, url, model, token, SCRIPT_ASKED_BUDGET_S if asked else first_timeout,
-                    asked=asked)
+        global _script_active, _script_last_ns
+        _script_active = True
+        try:
+            _script_one(item, url, model, token, SCRIPT_ASKED_BUDGET_S if asked else first_timeout,
+                        asked=asked)
+        finally:
+            _script_active = False
+            _script_last_ns = time.time_ns()
 
 
 def _lan_host(host):
@@ -7281,7 +7341,7 @@ def _plaintext_banner(url, lan_ok, what):
 
 def main():
     global _conn, _files_dir, _voices_dir, _db_path, _tts_on, _tts_url, _tts_token
-    global _script_on, _script_url, _script_model, _script_token, _digest_batch, _digest_out, _digest_ctx
+    global _script_on, _script_url, _script_model, _script_token, _digest_batch, _digest_out, _digest_ctx, _digest_off
     global _stt_on, _stt_url, _stt_token, _stt_model, _stt_timeout
     import uvicorn
     _setup_logging()
@@ -7332,6 +7392,11 @@ def main():
             _script_url, _script_token = s_url, s_token
             _script_model = os.environ.get("REVEILLE_SCRIPT_MODEL", "")
             _digest_ctx = _writer_context(s_url, s_token)
+            if os.environ.get("REVEILLE_DIGEST", "").lower() == "off":
+                # THE KILL SWITCH (24227 a): one env line stops every fold at
+                # the door while the voice is the thing that must work.
+                _digest_off = "digest is off on this broker (REVEILLE_DIGEST=off)"
+                print(f"DIGEST OFF: {_digest_off}", flush=True)
             try:
                 b, _digest_out = digest_budget(_digest_ctx, os.environ.get("REVEILLE_DIGEST_INPUT_TOKENS", ""))
                 _digest_batch = b * store.CHARS_PER_TOKEN
