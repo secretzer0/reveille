@@ -6095,13 +6095,24 @@ def thread(conn, thread_id, rooms):
     return _with_attachments(conn, [_msg(r) for r in rows])
 
 
-def tail(conn, since_id=0, limit=200, rooms=()):
+def tail(conn, since_id=0, limit=200, rooms=(), before_id=0):
     """Feed backlog: messages with id > since_id, oldest-first (or the most recent
-    `limit` when since_id=0). The web feed uses this to fill reconnect gaps."""
+    `limit` when since_id=0). The web feed uses this to fill reconnect gaps.
+
+    before_id walks the OTHER way -- the `limit` messages immediately older than
+    it, still oldest-first -- which is what a feed scrolled to its top asks for.
+    It exists so the page can open on a small window and fetch backwards on
+    demand instead of holding every message it has ever seen (0.2.260).
+    """
     if not rooms:
         return []
     rooms = list(rooms)
     limit = max(1, min(int(limit), 1000))
+    if before_id:
+        rows = conn.execute(
+            f"{_SEL} WHERE m.room IN ({_ph(rooms)}) AND m.id<? ORDER BY m.id DESC LIMIT ?",
+            rooms + [before_id, limit]).fetchall()
+        return _with_attachments(conn, [_msg(r) for r in reversed(rows)])
     if since_id:
         rows = conn.execute(
             f"{_SEL} WHERE m.room IN ({_ph(rooms)}) AND m.id>? ORDER BY m.id LIMIT ?",

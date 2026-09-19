@@ -658,6 +658,152 @@ def scene_presence_comes_by_socket(ctx, url, out, tag, phone):
     shoot(p, out, f"{tag}-presence-socket")
 
 
+# The seed carries its own id BASE: the second run must not collide with the
+# first, or `msgs.has(m.id)` drops every message and the gate goes red for a
+# reason that has nothing to do with trimming. Formatted rather than passed as
+# an argument -- the same no-arg shape the other scenes here use.
+SEED = """()=>{{
+ for(let i=0;i<{n};i++){{const id={base}+i;
+  add({{id,from:'{who}',to:'*',ts_ns:Date.now()*1e6+i*1e9,body:'row '+i,
+       subject:'',attachments:[],thread_id:id,send_group:null}});}}
+ return {{rows:document.querySelectorAll('#inner .row').length,msgs:msgs.size,
+          firstId,follow}};}}"""
+
+
+VOICE_SEED = """()=>{
+ myName='me';
+ for(let i=0;i<5;i++){const id=500+i;
+  add({id,from:'architect',to:'*',ts_ns:Date.now()*1e6+i*1e9,body:'message number '+i,
+       subject:'',attachments:[],thread_id:id,send_group:null,has_audio:true});}
+ add({id:600,from:'me',to:'*',ts_ns:Date.now()*1e6,body:'mine',subject:'',
+      attachments:[],thread_id:600,send_group:null,has_audio:true});
+ voiceOn=true;const ids=vSpeakable();if(ids.length)vCursor=ids[ids.length-1];
+ paintNow();
+ return {speakable:vSpeakable(),cursor:vCursor,chipHidden:$('vnow').hidden,
+         text:$('vnowtxt').textContent,behindHidden:$('vbehind').hidden,
+         nextDisabled:$('vnext').disabled,prevDisabled:$('vprev').disabled};}"""
+
+VOICE_BACK = """()=>{
+ vCursor=vStepPrev(vSpeakable(),vCursor);
+ vCursor=vStepPrev(vSpeakable(),vCursor);
+ paintNow();
+ return {cursor:vCursor,text:$('vnowtxt').textContent,
+         behind:$('vbehind').textContent,behindHidden:$('vbehind').hidden,
+         nextDisabled:$('vnext').disabled};}"""
+
+
+def scene_the_voice_libraries_wait_to_be_needed(ctx, url, out, tag, phone):
+    """204 KB of JavaScript is not parsed for a session that never uses it.
+
+    The Opus decoder and the VAD pair were blocking tags in the head on EVERY
+    load, for features a session may never touch -- the decoder only matters
+    once voice is on, the VAD only in listen mode. Their big assets (an 11 MB
+    wasm, a 2.3 MB onnx) were already lazy; only the shims were eager.
+
+    THE GATE IS A REQUEST COUNT, not a source read, for the same reason the
+    presence one is: "we removed the tags" is a claim about the page text, and
+    what matters is what the browser ASKS FOR.
+    """
+    print(f"THE VOICE LIBRARIES WAIT ({tag})")
+    asked = []
+    ctx.on("request", lambda r: asked.append(r.url)
+           if ("/ui/opus-decoder" in r.url or "/ui/vad/" in r.url) else None)
+    p = open_page(ctx, url)
+    check("a page load fetches none of them", not asked, f"asked for {asked}")
+    check("and none of them is on the page", p.evaluate(
+        "()=>document.querySelectorAll('script[src]').length") == 0,
+        "a blocking script tag is back")
+    check("the decoder is genuinely absent until used",
+          p.evaluate("()=>typeof window['opus-decoder']") == "undefined", "already loaded")
+
+    got = p.evaluate("""async()=>{try{await vLib('/ui/opus-decoder.js');}catch(e){return 'x';}
+                         return typeof window['opus-decoder'];}""")
+    check("first use fetches it", got == "object" and len(asked) == 1, f"{got}, asked={asked}")
+    p.evaluate("()=>vLib('/ui/opus-decoder.js')")
+    check("and asking again does not fetch again", len(asked) == 1, f"asked={asked}")
+
+    # A FAILURE MUST NOT BE CACHED: a flaky link is the reason the voice path is
+    # careful at all, and a cached rejection would make one bad moment permanent.
+    kept = p.evaluate("""async()=>{try{await vLib('/ui/nope.js');return 'resolved';}
+                           catch(e){return typeof vLibs['/ui/nope.js'];}}""")
+    check("a failed load is not remembered as a failure", kept == "undefined", f"{kept}")
+    shoot(p, out, f"{tag}-voice-libs-lazy")
+
+
+def scene_the_voice_says_where_it_is(ctx, url, out, tag, phone):
+    """Which message is speaking, and how to walk the stream.
+
+    Operator 2026-09-16: "one of the GREATEST lacking features is knowing WHICH
+    message is being played ... being able to click/go to the talking voice
+    would be amazing ... I would really prefer a Next/Previous rather than a
+    Stop button."
+
+    THE CHIP, NOT A ROW HIGHLIGHT, IS THE MECHANISM: with the feed bounded
+    (0.2.260) the message being spoken may not be in the DOM at all, and a row
+    class alone would then have nothing to mark. The row class is a bonus on
+    top of it.
+
+    AND TURNING VOICE ON MUST NOT SPEAK THE BACKLOG. That invariant used to be
+    a property of vPush being fed by the live socket only; with a cursor over
+    everything loaded it has to be stated, so it is gated.
+    """
+    print(f"THE VOICE SAYS WHERE IT IS ({tag})")
+    p = open_page(ctx, url)
+
+    at_newest = p.evaluate(VOICE_SEED)
+    check("a listener never hears themselves", 600 not in at_newest["speakable"],
+          f"speakable={at_newest['speakable']}")
+    check("voice on parks at the newest, so no backlog is blasted",
+          at_newest["cursor"] == 504, f"cursor={at_newest['cursor']}")
+    check("the chip says which message is speaking", not at_newest["chipHidden"]
+          and "message number 4" in at_newest["text"], f"{at_newest}")
+    check("nothing is behind at the newest", at_newest["behindHidden"], f"{at_newest}")
+    check("and there is nothing to skip forward to", at_newest["nextDisabled"],
+          f"{at_newest}")
+
+    back = p.evaluate(VOICE_BACK)
+    check("previous walks back", back["cursor"] == 502, f"{back}")
+    check("the chip follows it", "message number 2" in back["text"], f"{back}")
+    check("and says how far behind the voice is",
+          not back["behindHidden"] and back["behind"].startswith("2 behind"), f"{back}")
+    check("with a way forward again", not back["nextDisabled"], f"{back}")
+    shoot(p, out, f"{tag}-voice-cursor")
+
+
+def scene_the_feed_is_bounded(ctx, url, out, tag, phone):
+    """The feed stops growing while you are at the tail, and never while you are not.
+
+    Operator 2026-09-16: "the longer I have stayed online without a CTRL-R the
+    worse it gets". NOTHING WAS LEAKING -- 1 document, 460 listeners, 4 MB heap
+    at 10 min uptime. `add()` appended and nothing ever trimmed, so the feed was
+    the only thing growing, and every cost that scales with it grew too.
+
+    THE SECOND HALF IS THE ONE THAT MATTERS: a reader who scrolled up put
+    themselves there, and dropping rows under them is the one thing this must
+    never do. A gate that only proved the trimming would be green on a feed
+    that eats the page you are reading.
+    """
+    print(f"THE FEED IS BOUNDED ({tag})")
+    p = open_page(ctx, url)
+    cap = p.evaluate("()=>FEED_MAX")
+
+    p.evaluate("()=>{follow=true;}")
+    at_cap = p.evaluate(SEED.format(base=1000, n=cap + 50, who="someone"))
+    check("following the tail, the feed stops at the cap",
+          at_cap["rows"] == cap, f"{at_cap['rows']} rows, cap {cap}")
+    check("and the message Map shrinks with the DOM",
+          at_cap["msgs"] <= cap, f"msgs={at_cap['msgs']}")
+    check("and the pager's cursor follows the new top",
+          at_cap["firstId"] > 1000, f"firstId={at_cap['firstId']}")
+
+    # Scrolled up: the trimmer must be inert, whatever arrives.
+    p.evaluate("()=>{follow=false;}")
+    parked = p.evaluate(SEED.format(base=90000, n=60, who="someone-else"))
+    check("scrolled up, nothing is taken from under the reader",
+          parked["rows"] == cap + 60, f"{parked['rows']} rows, expected {cap + 60}")
+    shoot(p, out, f"{tag}-feed-bounded")
+
+
 def scene_the_link_earns_its_buffer(ctx, url, out, tag, phone):
     """The jitter buffer is filled BEFORE the first sound, and only ever grows.
 
@@ -751,7 +897,10 @@ def main():
                               scene_toolchain_in_the_rail,
                               scene_presence_comes_by_socket,
                               scene_the_feed_keeps_its_gutter,
-                              scene_the_link_earns_its_buffer):
+                              scene_the_link_earns_its_buffer,
+                              scene_the_feed_is_bounded,
+                              scene_the_voice_says_where_it_is,
+                              scene_the_voice_libraries_wait_to_be_needed):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)
