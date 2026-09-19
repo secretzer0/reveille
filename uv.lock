@@ -547,10 +547,11 @@ wheels = [
 
 [[package]]
 name = "reveille"
-version = "0.2.265"
+version = "0.2.266"
 source = { editable = "." }
 dependencies = [
     { name = "authlib" },
+    { name = "httpx" },
     { name = "mcp" },
     { name = "uvicorn" },
     { name = "websockets" },
@@ -558,7 +559,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-xdist" },
     { name = "rope" },
@@ -568,6 +568,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "authlib", specifier = "==1.7.2" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "mcp", specifier = ">=2.2,<3" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "websockets", specifier = ">=13" },
@@ -575,7 +576,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-xdist", specifier = ">=3" },
     { name = "rope", specifier = ">=1.13" },
