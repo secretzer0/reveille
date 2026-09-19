@@ -154,7 +154,13 @@ def test_every_act_tool_and_mutating_route_wears_the_gate():
     src = open(daemon.__file__).read()
     import re
     tools = {}
-    for m in re.finditer(r"@mcp\.tool\(\)\nasync def (\w+)\(.*?\n(?=@mcp\.tool\(\)|\n\n\S)", src, re.S):
+    # The decorator is `@tool()`, daemon.py's own wrapper around `@mcp.tool()`:
+    # it registers a version that translates reveille's anticipated exceptions
+    # into mcp 2.x's ToolError (without which a refusal reaches the caller as
+    # the bare string "Error executing tool <name>"), and returns the ORIGINAL
+    # function so in-process callers still see store.AuthError. This gate reads
+    # the source, so it matches the spelling the source actually carries.
+    for m in re.finditer(r"@tool\(\)\nasync def (\w+)\(.*?\n(?=@tool\(\)|\n\n\S)", src, re.S):
         tools[m.group(1)] = m.group(0)
     acts = {"lesson_add", "memory_add", "memory_retract", "ratify", "reject", "send",
             "ack", "upload", "leave", "presence"}

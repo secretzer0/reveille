@@ -12,12 +12,13 @@ import os
 import sys
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+import httpx2
+from mcp.client.streamable_http import streamable_http_client
 
 
 def data(result):
-    if result.structuredContent is not None:
-        return result.structuredContent
+    if result.structured_content is not None:
+        return result.structured_content
     return json.loads(result.content[0].text)
 
 
@@ -25,7 +26,11 @@ async def main():
     base = os.environ.get("REVEILLE_URL", "http://127.0.0.1:8765")
     name = os.environ["REVEILLE_AGENT_ROLE"]
     headers = {"X-Agent": name, "Authorization": f"Bearer {os.environ['REVEILLE_TOKEN']}"}
-    async with streamablehttp_client(f"{base}/mcp", headers=headers) as (r, w, _), \
+    async with streamable_http_client(
+            f"{base}/mcp",
+            http_client=httpx2.AsyncClient(
+                headers=headers,
+                timeout=httpx2.Timeout(30, read=300))) as (r, w), \
                ClientSession(r, w) as s:
         await s.initialize()
 

@@ -14,18 +14,22 @@ set -euo pipefail
 : "${REVEILLE_URL:?}" "${REVEILLE_AGENT_ROLE:?}" "${REVEILLE_TOKEN:?}"
 
 # join over MCP -- mcp is not in the system python (reveille is a uv tool), so borrow
-# it. PINNED to the version reveille is built against (uv.lock): unpinned `--with mcp`
-# pulls a newer mcp that moved streamablehttp_client and the import dies.
-uv run --quiet --with 'mcp==1.28.1' python - <<'PY'
+# it. The bound lives at the source now (pyproject `mcp>=2`), so this borrows whatever
+# the resolver gives and the v2 spelling is the only spelling.
+uv run --quiet --with 'mcp>=2.2,<3' python - <<'PY'
 import asyncio, os
+import httpx2
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 async def main():
     base = os.environ["REVEILLE_URL"]
     name = os.environ["REVEILLE_AGENT_ROLE"]
     headers = {"X-Agent": name, "Authorization": f"Bearer {os.environ['REVEILLE_TOKEN']}"}
-    async with streamablehttp_client(f"{base}/mcp", headers=headers) as (r, w, _), \
+    async with streamable_http_client(
+            f"{base}/mcp",
+            http_client=httpx2.AsyncClient(
+                headers=headers, timeout=httpx2.Timeout(30, read=300))) as (r, w), \
                ClientSession(r, w) as s:
         await s.initialize()
         await s.call_tool("join", {"url": base})
