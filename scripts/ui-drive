@@ -692,6 +692,44 @@ VOICE_BACK = """()=>{
          nextDisabled:$('vnext').disabled};}"""
 
 
+def scene_the_voice_libraries_wait_to_be_needed(ctx, url, out, tag, phone):
+    """204 KB of JavaScript is not parsed for a session that never uses it.
+
+    The Opus decoder and the VAD pair were blocking tags in the head on EVERY
+    load, for features a session may never touch -- the decoder only matters
+    once voice is on, the VAD only in listen mode. Their big assets (an 11 MB
+    wasm, a 2.3 MB onnx) were already lazy; only the shims were eager.
+
+    THE GATE IS A REQUEST COUNT, not a source read, for the same reason the
+    presence one is: "we removed the tags" is a claim about the page text, and
+    what matters is what the browser ASKS FOR.
+    """
+    print(f"THE VOICE LIBRARIES WAIT ({tag})")
+    asked = []
+    ctx.on("request", lambda r: asked.append(r.url)
+           if ("/ui/opus-decoder" in r.url or "/ui/vad/" in r.url) else None)
+    p = open_page(ctx, url)
+    check("a page load fetches none of them", not asked, f"asked for {asked}")
+    check("and none of them is on the page", p.evaluate(
+        "()=>document.querySelectorAll('script[src]').length") == 0,
+        "a blocking script tag is back")
+    check("the decoder is genuinely absent until used",
+          p.evaluate("()=>typeof window['opus-decoder']") == "undefined", "already loaded")
+
+    got = p.evaluate("""async()=>{try{await vLib('/ui/opus-decoder.js');}catch(e){return 'x';}
+                         return typeof window['opus-decoder'];}""")
+    check("first use fetches it", got == "object" and len(asked) == 1, f"{got}, asked={asked}")
+    p.evaluate("()=>vLib('/ui/opus-decoder.js')")
+    check("and asking again does not fetch again", len(asked) == 1, f"asked={asked}")
+
+    # A FAILURE MUST NOT BE CACHED: a flaky link is the reason the voice path is
+    # careful at all, and a cached rejection would make one bad moment permanent.
+    kept = p.evaluate("""async()=>{try{await vLib('/ui/nope.js');return 'resolved';}
+                           catch(e){return typeof vLibs['/ui/nope.js'];}}""")
+    check("a failed load is not remembered as a failure", kept == "undefined", f"{kept}")
+    shoot(p, out, f"{tag}-voice-libs-lazy")
+
+
 def scene_the_voice_says_where_it_is(ctx, url, out, tag, phone):
     """Which message is speaking, and how to walk the stream.
 
@@ -861,7 +899,8 @@ def main():
                               scene_the_feed_keeps_its_gutter,
                               scene_the_link_earns_its_buffer,
                               scene_the_feed_is_bounded,
-                              scene_the_voice_says_where_it_is):
+                              scene_the_voice_says_where_it_is,
+                              scene_the_voice_libraries_wait_to_be_needed):
                     ctx = browser.new_context(**opts)
                     try:
                         scene(ctx, url, out, tag, phone)

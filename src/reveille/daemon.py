@@ -381,6 +381,10 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.263",
+     "0.2.263 THE VOICE LIBRARIES WAIT TO BE NEEDED (the mobile half of the\noperator's 2026-09-16 sweep).\n\nMEASURED over the wire: the page pulled /ui/opus-decoder.js (87585 B),\n/ui/vad/ort.wasm.min.js (48327 B) and /ui/vad/vad.bundle.min.js (69143 B) as\nBLOCKING tags in the head, on every load, in every tab -- 204 KB of JavaScript\nparsed before first paint for features a session may never touch. The decoder\nonly matters once voice is ON; the VAD pair only in listen mode. Their own big\nassets (an 11 MB wasm, a 2.3 MB onnx) were ALREADY lazy: only the shims in\nfront of them were eager, which is the shape worth noticing -- the expensive\nthing was handled and the cheap thing in front of it was not.\n\nvLib(src) fetches one on first use and caches the PROMISE, so a second caller\nwhile the first is in flight waits rather than fetching twice. A FAILURE IS NOT\nCACHED: a flaky link is the entire reason the voice path is careful, and a\nremembered rejection would make one bad moment permanent; the caller already\nhas a refusal path for \"did not load\". The VAD pair is awaited IN SEQUENCE,\nnot in parallel, because the bundle expects onnxruntime to be on the page\nalready.\n\nWHAT THE PAGE LOOKS LIKE NOW: zero script src tags. The property the old gate\nprotected -- a fixed, site-relative path this broker serves from its own route\ntable, never a CDN, never built from anything foreign -- did not go away, it\nmoved to vLib, and the gate moved with it rather than being deleted.\n\nTHE URL GATE CAUGHT IT, WHICH IS WHY IT EXISTS.\ntest_every_url_this_page_builds_is_checked_not_just_escaped went red on\n`el.src=src` -- a URL set by PROPERTY ASSIGNMENT, exactly the sink its own\ndocstring says was invisible before. It is accounted for with the review, not a\nbumped tally: every vLib call site is a STRING LITERAL in this page, pinned by\nname in the same test, so if one ever takes a variable the pin fails first and\nthe assignment count fails second.\n\nAND A COMMENT NEARLY BROKE A SCANNER: the first draft explained the change\nusing the literal text of a script tag, which any tool looking for script tags\nreads as one (a-gate-must-not-grep-the-prose-that-names-the-rule, re-earned\nhere). Reworded.\n\nGATE: scripts/ui-drive scene_the_voice_libraries_wait_to_be_needed is a REQUEST\nCOUNT, not a source read, for the same reason the presence one is -- \"we\nremoved the tags\" is a claim about page text, and what matters is what the\nbrowser asks for. VERIFIED against a scratch broker serving this tree: 0 script\ntags, 0 requests at load, decoder undefined; first use fetches exactly one and\nthe decoder appears; a second call fetches nothing; a bad url refuses and\nleaves no cached failure; zero page errors. The page itself came back in\n137 KB on the wire.\n"),
+    ("0.2.262",
+     "0.2.262 AN ADMIN CAN KEEP THE AUDIO (operator 2026-09-16: \"I would like to\nbe able to download the audio clip so I can play it later (I want the download\nfeature to be available only to admin level roles)\").\n\nGET /audio/<mid>/download hands the utterance back as an attachment -- the m4a\nwhen the pair exists, because \"play it later\" means a file a phone will open,\nelse the .webm that is always there once a message has spoken.\n\nA SEPARATE ROUTE, NEVER A FLAG ON audio_http, and that is the whole design\ndecision. The streaming routes are what every listener in the room plays\nthrough: an is_admin branch in one of them turns a mistaken condition into a\nSILENT ROOM, while a mistake in this one can only ever refuse a download. It\nfails closed because nobody plays through it.\n\nADMIN IS A SECOND GATE ON TOP OF THE FIRST, NEVER A WAY AROUND IT: room\nmembership is checked exactly as the .webm checks it, and an agent token can\nnever reach the route at all because _principal sets is_admin False on that\nplane always (S3 review F3). The control is a plain <a download> -- the browser\nalready does this, so there is no handler and no fetch -- and hiding it when\nme.is_admin is false is a courtesy, NOT the gate.\n\nTHE NEGATIVES ARE THE TEST. A room member who may PLAY this audio all day is\nrefused the file (404) while the route they listen through still answers them\n(200); a missing rendition, an unknown id and a non-numeric id are 404 for an\nadmin too.\n\nAND THE PAGE'S URL GATE GAINED A SINK WITH ITS REASONING, not a bumped tally:\ntest_every_url_this_page_builds_is_checked_not_just_escaped exists to force a\nreview of every new href, so the entry says why vBase is safe -- a FIXED\nsite-relative prefix plus one encodeURIComponent'd integer id, from the same\nsingle builder the player uses, never a string the page did not author.\n\nONE DEFECT FOUND IN THIS SLICE'S OWN TEST, worth recording because it is a\nclass: daemon._files_dir is a module global, and pointing it somewhere only\nwhen it was None left a later test aimed at a dead broker's directory -- a\nresult that depends on what ran before it, under a suite that randomises order.\nIt is re-pointed every time now.\n"),
     ("0.2.261",
      "0.2.261 THE VOICE HAS A CURSOR AND SAYS WHERE IT IS (operator 2026-09-16:\n\"one of the GREATEST lacking features is knowing WHICH message is being played\n... being able to click/go to the talking voice would be amazing ... I would\nreally prefer a Next/Previous rather than a Stop button ... when I select a\nplay point in the stream it should continue from that point and play each one\nforward\").\n\nWHAT THE OPERATOR COULD NOT TELL, AND WHY. `vTake` drained a CONSUMING queue,\nand past V_MAX=8 pending it threw the entire backlog away, kept the newest, and\nrang a 660 Hz tone with \"N messages skipped -- audio was falling behind\". The\nskipped ids were already in vHeard, so they could never be spoken again: the\nonly way back to one was its own play icon, one click at a time. That existed\nbecause a listener could not SEE where the voice was, so falling behind had to\nbe escaped automatically.\n\nSO THE DROP IS NOT DELETED, IT IS REPLACED BY AN ACT. The chip shows \"N behind\"\nand pressing it jumps to the newest -- exactly what the drop used to perform by\nitself -- and nothing is destroyed to offer it. vTake, V_MAX, vMark, its tone\nand vHeard are gone.\n\nTHE CURSOR IS AN ID, NOT AN INDEX, so trimming the feed under it (0.2.260)\ncannot move it or invalidate it, and the order stays the message id DES-009\nsection 2 always said it was. What can be heard is DERIVED from `msgs` rather\nthan kept as a second list, so it cannot drift from what is on screen.\nHAS_AUDIO IS THE LOAD-BEARING FILTER there: a 404 is a silent message that\nadvances the cursor (section 7), so auto-advancing across ids with no audio\nwould spin the whole feed in one frame.\n\nSTOP IS GONE BECAUSE IT WAS NEVER A STOP. `$('vstop').onclick` was\n`vStop();vDone();` -- abort this one and immediately start the next, a skip\nwearing the wrong name. Voice off was always the real stop (it aborts and\nempties), and it still is. In its place: previous, next, and the chip.\n\nTHE CHIP, NOT A ROW HIGHLIGHT, IS THE MECHANISM. With the feed bounded the\nmessage being spoken may not be in the DOM at all, and a row class alone would\nhave nothing to mark; the chip reads the cursor, names the speaker, carries the\nfirst words in that speaker's own colour, and scrolls to the row when there is\none. `.row.speaking` is a bonus on top.\n\nA PLAY ICON IS NOW A PLAY POINT: a message that has audio moves the cursor and\nthe stream carries on forward from it; one that has none is still generated\nfirst and then plays through the same cursor. playOne stopped meaning \"play\nexactly one\".\n\nAND TURNING VOICE ON PARKS THE CURSOR AT THE NEWEST. \"Late joiners are not\nblasted\" used to be a property of vPush being fed by the live socket only; with\na cursor over everything loaded it had to become a statement, so toggleVoice\nmakes it and the gate holds it.\n\nGATES. test_the_voice_cursor_walks_in_id_order_and_drops_nothing keeps the\nEXECUTED-JS shape of the queue gate it replaces -- the page's own pure\ndecisions run under node, never a copy that can drift -- and asserts what the\nredesign is for: stepping visits EVERY id in order and loses none, a gap does\nnot stall the walk, previous steps back, and vBehind counts what the tone used\nto announce. scripts/ui-drive scene_the_voice_says_where_it_is drives the chip.\nVERIFIED against a scratch broker serving this tree: own messages excluded,\nvoice-on parked at the newest with nothing behind, two steps back showing\n\"2 behind\", zero page errors.\n"),
     ("0.2.260",
@@ -4827,6 +4831,46 @@ async def audio_m4a_http(request):
 
 
 @_guard
+async def audio_download_http(request):
+    """GET /audio/<msg-id>/download -> the utterance as a FILE, for an admin
+    (operator 2026-09-16: "I would like to be able to download the audio clip so
+    I can play it later ... available only to admin level roles").
+
+    A SEPARATE ROUTE, NEVER A FLAG ON audio_http. The streaming routes are what
+    every listener in the room plays through; putting an is_admin branch in one
+    of them means a mistake in that condition silences the room. This route can
+    only ever fail closed -- nobody plays through it.
+
+    An agent token can never reach it: _principal sets is_admin False on that
+    plane always (S3 review F3), so "admin" here means a signed-in person who is
+    one. Room membership is still checked exactly as the .webm does -- being an
+    admin is a second gate on top of the first, never a way around it.
+
+    m4a when the pair exists, because "play it later" means a file a phone will
+    open; the .webm otherwise, which is always there once a message has spoken.
+    """
+    p = _principal(request)
+    if not p.is_admin:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    raw = request.path_params["mid"]
+    if not raw.isdigit():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    mid = int(raw)
+    row = _conn.execute("SELECT room FROM messages WHERE id=?", (mid,)).fetchone()
+    if row is None or row["room"] not in p.rooms:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    for ext, media in (("m4a", "audio/mp4"), ("webm", "audio/webm")):
+        path = _files_dir / f"tts-{mid}.{ext}"
+        if path.is_file():
+            return FileResponse(
+                path, media_type=media,
+                headers={"Content-Disposition": f'attachment; filename="reveille-{mid}.{ext}"',
+                         "X-Content-Type-Options": "nosniff",
+                         "Content-Security-Policy": "default-src 'none'; sandbox"})
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
+@_guard
 async def audio_http(request):
     """GET /audio/<msg-id>.webm -> the spoken form of that message (WebM/Opus,
     ruling 11211), if you are in its room.
@@ -6610,6 +6654,7 @@ def build_app():
             Route("/rooms/{rid}/voices/{speaker}", room_voice_http, methods=["PUT", "DELETE"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
+            Route("/audio/{mid}/download", audio_download_http),
             Route("/audio/{mid}.webm", audio_http),
             Route("/audio/{mid}.m4a", audio_m4a_http),
             Route("/audio/{mid}", audio_make_http, methods=["POST"]),
