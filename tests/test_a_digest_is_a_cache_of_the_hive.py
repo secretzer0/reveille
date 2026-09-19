@@ -194,7 +194,7 @@ def test_the_hook_trigger_answers_before_the_writer_does(tmp_path, writer, monke
     t0 = time.monotonic()
     r = web.post("/agent/digest", headers=hdrs)
     took = time.monotonic() - t0
-    assert r.status_code == 202 and r.json() == {"started": True}, r.text
+    assert r.status_code == 202 and r.json()["started"] is True and r.json()["batches"] >= 1, r.text
     assert took < 1.0, f"the hook route waited {took:.1f}s on the writer"
     # a second ask while the first is in flight, or right after: not due
     r2 = web.post("/agent/digest", headers=hdrs)
@@ -321,6 +321,7 @@ def test_a_refusal_is_not_an_invitation_to_retry_every_turn(tmp_path, writer, mo
     monkeypatch.setattr(daemon, "_db_path", db)
     monkeypatch.setattr(daemon, "_worker_local", threading.local())
     monkeypatch.setattr(daemon, "_digest_last_try", {})
+    monkeypatch.setattr(daemon, "_digest_running", {})
     daemon._oidc_boot({})
     web = TestClient(daemon.build_app())
     hdrs = {"authorization": f"Bearer {ana['secret']}", "x-agent": "ana"}
@@ -335,7 +336,7 @@ def test_a_refusal_is_not_an_invitation_to_retry_every_turn(tmp_path, writer, mo
     assert len(writer.calls) == 2, "one retry, then give up"
     r2 = web.post("/agent/digest", headers=hdrs)
     assert r2.status_code == 200 and r2.json()["started"] is False, r2.text
-    assert "attempt" in r2.json()["why"], r2.json()
+    assert "attempt" in r2.json()["why"] and "not a digest" in r2.json()["why"], r2.json()
     assert len(writer.calls) == 2, "the second turn re-asked the writer"
 
 
@@ -392,14 +393,14 @@ def test_the_verb_makes_its_connection_on_the_thread_that_uses_it(monkeypatch):
         seen["conn_thread"] = threading.get_ident()
         return object()
 
-    def fake_job(conn, p, mentor):
+    def fake_start(conn, p, mentor):
         seen["job_thread"] = threading.get_ident()
-        return {"id": "x"}
+        return {"started": True}
     monkeypatch.setattr(daemon, "_conn_for_worker", fake_conn)
-    monkeypatch.setattr(daemon, "_digest_job", fake_job)
+    monkeypatch.setattr(daemon, "_digest_start", fake_start)
     ctx = SimpleNamespace(request_context=SimpleNamespace(request=None))
     out = asyncio.run(daemon.digest(mentor="", ctx=ctx))
-    assert out == {"id": "x"}
+    assert out == {"started": True}
     assert seen["conn_thread"] == seen["job_thread"], "connection made on a different thread than the job"
     assert seen["conn_thread"] != threading.get_ident(), "the job ran on the caller's thread"
 
@@ -493,3 +494,54 @@ def test_section_shape_is_normalized_never_refused(tmp_path, writer):
     writer.default = "no headings here, only opinions"
     with pytest.raises(store.BusError, match="not a digest"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
+
+
+def test_the_verb_starts_and_never_waits_and_rehydrate_reads(tmp_path, writer, monkeypatch):
+    """24173: no verb holds a request open for a model. The verb answers under
+    a second with a 3 s stub writer; a second call names the step in flight;
+    the row lands after; a failed run's reason is what the next call says."""
+    import asyncio
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    ids = _seed(conn, room, ana, bob)
+    conn.close()
+    conn = sqlite3.connect(db, timeout=10, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    monkeypatch.setattr(daemon, "_conn", conn)
+    monkeypatch.setattr(daemon, "_db_path", db)
+    monkeypatch.setattr(daemon, "_worker_local", threading.local())
+    monkeypatch.setattr(daemon, "_digest_last_try", {})
+    monkeypatch.setattr(daemon, "_digest_running", {})
+    monkeypatch.setattr(daemon, "_acting", lambda req: _principal(ana, room, "ana"))
+    ctx = SimpleNamespace(request_context=SimpleNamespace(request=None))
+    writer.delay = 3.0
+    writer.default = _good_digest(conn, ids)
+    t0 = time.monotonic()
+    out = asyncio.run(daemon.digest(mentor="", ctx=ctx))
+    took = time.monotonic() - t0
+    assert out["started"] is True and out["batches"] == 1 and out["first_run"] is True, out
+    assert took < 1.0, f"the verb waited {took:.1f}s on the writer"
+    again = asyncio.run(daemon.digest(mentor="", ctx=ctx))
+    assert again["started"] is False and "step 1/1" in again["why"], again
+    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
+    deadline = time.monotonic() + 10
+    while store.digest_prior(conn, scope) is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert store.digest_prior(conn, scope) is not None, "the fold never landed"
+    page = store.rehydrate(conn, rooms={room["id"]: "hive"}, token_id=ana["id"],
+                           agent_id=ana["agent_id"], budget=10**6)
+    assert page["items"][0]["kind"] == "digest"
+    # a failed run: the next call carries the reason, not a bare refusal
+    monkeypatch.setattr(daemon, "_digest_last_try", {})
+    writer.delay = 0.0
+    writer.default = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
+                                                     "[decision:deadbeef 2026-09-19]")
+    out2 = asyncio.run(daemon.digest(mentor="", ctx=ctx))
+    assert out2["started"] is True
+    deadline = time.monotonic() + 10
+    while daemon._digest_running and time.monotonic() < deadline:
+        time.sleep(0.05)
+    out3 = asyncio.run(daemon.digest(mentor="", ctx=ctx))
+    assert out3["started"] is False and "last attempt failed" in out3["why"] \
+        and "resolves to no live row" in out3["why"], out3
