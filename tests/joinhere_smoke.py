@@ -11,6 +11,23 @@ broker with the token on STDIN, then the gate's two halves are asserted --
    join-here wrote (claude config, hook settings, bashrc, launcher db, spool)
    is scanned and must not contain it; the MCP registration must carry the
    ${REVEILLE_TOKEN} template, not a value.
+
+STUBBED BINARIES, named here because a harness that stubs some binaries runs
+the rest for real and the reader must know which is which: `claude` ONLY.
+Everything else -- reveille-daemon, reveille_launch.py, reveille.install, the
+symlinked console scripts -- runs for real.
+
+WHY, and what it costs. cmd_join_here shells out to `claude mcp remove` and
+`claude mcp add`, and a hosted runner has no claude: this file was green on a
+developer box for the one reason that makes a gate a liar, the thing it needs
+happening to be installed there. The stub RECORDS ITS ARGV and the gate
+asserts it -- a stub that only exits 0 is a bypass, one that records is a gate
+on the launcher's side effect. The argv is where the real property lives: that
+the registration carries ${REVEILLE_TOKEN} as a TEMPLATE and never a value.
+WEAKER THAN IT WAS, deliberately and stated: `claude mcp add` is what writes
+.claude.json, so under the stub the later assertions on that file check the
+stub's own transcription of the argv it was handed, not claude's behaviour.
+The token-leak scan over every other file is unaffected and still real.
 """
 import asyncio
 import contextlib
@@ -97,6 +114,36 @@ def main():
         jenv = dict(os.environ, HOME=home,
                     REVEILLE_LAUNCH_DB=os.path.join(home, "launcher.db"))
         jenv.pop("REVEILLE_SPOOL", None)   # the clean user has no overrides
+
+        # -- the recording `claude` stub, first on PATH --------------------
+        binv = os.path.join(home, "stubbin")
+        os.makedirs(binv, exist_ok=True)
+        argv_log = os.path.join(home, "claude-argv.jsonl")
+        stub = os.path.join(binv, "claude")
+        with open(stub, "w") as f:
+            f.write(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "with open(os.environ['CLAUDE_ARGV_LOG'], 'a') as g:\n"
+                "    g.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "# `claude mcp add` is what writes ~/.claude.json, so the stub\n"
+                "# transcribes EXACTLY the headers it was handed -- inventing a\n"
+                "# value here would forge the very thing the gate checks for.\n"
+                "a = sys.argv[1:]\n"
+                "if a[:2] == ['mcp', 'add']:\n"
+                "    hdrs = [a[i + 1] for i, x in enumerate(a) if x == '--header']\n"
+                "    url = a[a.index('reveille') + 1]\n"
+                "    cfg = os.path.join(os.environ['HOME'], '.claude.json')\n"
+                "    doc = json.load(open(cfg)) if os.path.exists(cfg) else {}\n"
+                "    doc.setdefault('mcpServers', {})['reveille'] = {\n"
+                "        'type': 'http', 'url': url,\n"
+                "        'headers': dict(h.split(': ', 1) for h in hdrs)}\n"
+                "    json.dump(doc, open(cfg, 'w'), indent=2)\n"
+                "sys.exit(0)\n")
+        os.chmod(stub, 0o755)
+        jenv["PATH"] = binv + os.pathsep + jenv["PATH"]
+        jenv["CLAUDE_ARGV_LOG"] = argv_log
+
         r = subprocess.run(
             [sys.executable, str(REPO / "scripts" / "reveille_launch.py"),
              "join-here", ROLE, "--broker", f"http://127.0.0.1:{port}"],
@@ -105,6 +152,19 @@ def main():
         assert r.returncode == 0, f"join-here failed: {r.stderr!r}"
         for step in ("env", "register", "hook", "path", "spool"):
             assert f"[ok] {step}" in r.stdout, f"checklist step {step} missing"
+
+        # -- what the launcher actually ASKED claude to do -------------------
+        calls = [json.loads(ln) for ln in open(argv_log) if ln.strip()]
+        assert ["mcp", "remove", "reveille", "--scope", "user"] in calls, calls
+        add = next((c for c in calls if c[:2] == ["mcp", "add"]), None)
+        assert add, f"join-here never registered the server: {calls}"
+        assert "--transport" in add and add[add.index("--transport") + 1] == "http"
+        assert add[add.index("--scope") + 1] == "user"
+        hdrs = [add[i + 1] for i, x in enumerate(add) if x == "--header"]
+        assert "Authorization: Bearer ${REVEILLE_TOKEN:-}" in hdrs, hdrs
+        assert "X-Agent: ${REVEILLE_AGENT_ROLE:-unset-agent}" in hdrs, hdrs
+        # THE POINT OF THE WHOLE STEP: a template reached claude, not a value.
+        assert not any(secret in h for h in hdrs), "the TOKEN was passed to claude"
 
         # -- the token lives in exactly one file, and that file is 0600 -------
         frag = os.path.join(home, ".reveille", f"{ROLE}.env")
@@ -125,7 +185,12 @@ def main():
         assert "${REVEILLE_TOKEN" in cfg and secret not in cfg
         # hook installed in the clean user's settings
         hooks = open(os.path.join(home, ".claude", "settings.json")).read()
-        assert "agent-stop-hook" in hooks
+        # The installed command is the CONSOLE SCRIPT, `reveille-stop-hook`
+        # (install.py HOOK), not the baked container path `agent-stop-hook`
+        # this line was written against. install.py still RECOGNISES both when
+        # deciding whether an entry already exists, but only one gets written,
+        # and asserting the other is how this file sat red unnoticed.
+        assert "reveille-stop-hook" in hooks, hooks
         # PATH links exist and resolve
         for tool in ("wake", "wake-watch", "reveille-waked"):
             assert os.path.exists(os.path.join(home, ".local", "bin", tool))

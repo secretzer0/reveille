@@ -221,6 +221,18 @@ def test_the_synth_worker_appends_sentences_under_one_header(monkeypatch, tmp_pa
     monkeypatch.setattr(daemon, "_tts_get", lambda *a, **k: None)
     monkeypatch.setattr(daemon, "_db_path", None)
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
+    # `daemon._tts_q` IS A MODULE GLOBAL, shared by every test that lands in
+    # this worker process, and _tts_worker drains it until the None sentinel --
+    # so an item another test left behind is spoken by THIS one and lands in
+    # `spoken` ahead of the sentences under test. It went red on CI exactly
+    # that way (`['Slow start ...', ... 'gap.', 'Two.']`) the first time the
+    # suite's xdist grouping changed which tests share a worker. The fixture
+    # above already drains defensively for the same reason; this test did not.
+    # Not a timing fix and not a widened tolerance: the queue is emptied so the
+    # assertion is about what this test enqueued and nothing else.
+    while not daemon._tts_q.empty():
+        daemon._tts_q.get_nowait()
+
     st = daemon._SentenceStream()
     for x in ("One.", "gap.", "Two.", None):
         st.q.put(x)

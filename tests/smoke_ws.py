@@ -13,6 +13,7 @@ server-side, never from anything the agent says about itself.
 """
 import asyncio
 import contextlib
+import http.cookiejar
 import json
 import os
 import socket
@@ -92,7 +93,18 @@ async def run(port, secrets):
         # arm alice's WS wake, THEN bob sends -> the daemon pushes the ring
         wake_uri = f"{j['wake_url']}?name=alice&token={secrets['alice']}"
         async with websockets.connect(wake_uri) as ws:
-            await asyncio.sleep(0.3)  # let the daemon register the waiter
+            # THE ATTACH FRAME IS UNCONDITIONAL since 0.2.253 -- every connect
+            # is answered with {"wake": ..., "reason": "backlog"|"hello", ...}
+            # before any mail exists, which is what lets a body converge on a
+            # deploy the moment its socket comes back. So the first frame here
+            # is the greeting, not the wake, and reading one frame and calling
+            # it the wake is how this line sat red from that release until
+            # something finally ran the file.
+            hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            assert hello["reason"] in ("hello", "backlog"), hello
+            assert hello["unread"] == 0 and not hello["wake"], \
+                f"nothing has been sent yet, so the greeting must not ring: {hello}"
+
             sent = data(await bob.call_tool("send", {"to": "alice", "body": "yo", "subject": "hi"}))
             assert sent["delivered_to"] == ["alice"], sent
             frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -134,29 +146,63 @@ async def run(port, secrets):
             await asyncio.sleep(0.3)
             await alice.call_tool("send", {"to": "*", "body": "agent broadcast",
                                            "subject": "fyi"})
+            # A FRAME IS NOT A RING. Since 0.2.253 every attach is answered with
+            # an unconditional greeting (`reason: hello`, `wake: false`), so
+            # "the socket said anything at all" stopped meaning "the socket was
+            # rung" -- and this check, which treats any frame as the storm,
+            # reported the greeting as an N^2 storm from that release onward.
+            # What the rule is about is `wake`, so that is what is read.
             for who, ws in (("alice", wsa), ("bob", wsb)):
-                with contextlib.suppress(asyncio.TimeoutError):
-                    frame = await asyncio.wait_for(ws.recv(), timeout=2)
-                    raise SystemExit(
-                        f"agent broadcast RANG {who} -- that is the N^2 storm "
-                        f"this rule exists to prevent: {frame}")
+                while True:
+                    try:
+                        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                    except asyncio.TimeoutError:
+                        break          # silence is the pass: nothing rang
+                    if frame.get("wake"):
+                        raise SystemExit(
+                            f"agent broadcast RANG {who} -- that is the N^2 storm "
+                            f"this rule exists to prevent: {frame}")
             got = data(await bob.call_tool("inbox", {}))["messages"]
             assert any(m["body"] == "agent broadcast" for m in got), got
             print("agent broadcast: delivered to inbox, rang nobody")
 
             # Same shape, human plane: the web composer's broadcast.
-            urllib.request.urlopen(urllib.request.Request(
+            #
+            # AS A REAL SESSION, not a bearer token wearing from:"operator".
+            # This used to post with ALICE'S AGENT TOKEN, which worked back
+            # when the plane was inferred from the `from` string. Since unbound
+            # tokens went read-only (11252) a human IS a session principal --
+            # an unbound token on /send answers 401, measured -- so the old
+            # shape quietly became an AGENT's parentless broadcast, which
+            # correctly rings nobody, and this half asserted the opposite of
+            # what it was exercising. Logging in is what makes it the human
+            # plane, and the anti-storm rule above keeps its only coverage.
+            jar = http.cookiejar.CookieJar()
+            web = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            web.open(urllib.request.Request(
+                f"{base}/login",
+                data=json.dumps({"name": "smoke",
+                                 "password": "smoke-pw-not-a-real-secret"}).encode(),
+                headers={"Content-Type": "application/json"}), timeout=10)
+            web.open(urllib.request.Request(
                 f"{base}/send", method="POST",
-                data=json.dumps({"from": "operator", "to": "*",
-                                 "subject": "page", "body": "human broadcast"}).encode(),
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {secrets['alice']}"}), timeout=5)
+                data=json.dumps({"to": "*", "subject": "page",
+                                 "body": "human broadcast"}).encode(),
+                headers={"Content-Type": "application/json"}), timeout=5)
             for who, ws in (("alice", wsa), ("bob", wsb)):
                 frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                 assert frame["wake"], (who, frame)
                 # the ring carries the facts, so a woken agent can apply the
                 # reply test without a round trip
-                assert frame["from"] == "operator", (who, frame)
+                # THE BROKER NAMES THE REAL SENDER, not what the client typed.
+                # This asked for "operator" because the old shape PASSED that
+                # string in the body and the broker echoed it. Since 14056 the
+                # sender is resolved server-side from the authenticated
+                # principal, so it is the logged-in user -- a strictly stronger
+                # property than the one this line used to check, and the reason
+                # the body no longer carries a `from` at all.
+                assert frame["from"] == "smoke", (who, frame)
+                assert frame["from_moniker"] == "smoke", (who, frame)
                 assert frame["subject"] == "page", (who, frame)
                 assert frame["direct"] == 0, (who, frame)   # nothing addressed to me
                 assert frame["unread"] >= 1, (who, frame)
