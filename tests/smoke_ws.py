@@ -13,6 +13,7 @@ server-side, never from anything the agent says about itself.
 """
 import asyncio
 import contextlib
+import http.cookiejar
 import json
 import os
 import socket
@@ -166,18 +167,42 @@ async def run(port, secrets):
             print("agent broadcast: delivered to inbox, rang nobody")
 
             # Same shape, human plane: the web composer's broadcast.
-            urllib.request.urlopen(urllib.request.Request(
+            #
+            # AS A REAL SESSION, not a bearer token wearing from:"operator".
+            # This used to post with ALICE'S AGENT TOKEN, which worked back
+            # when the plane was inferred from the `from` string. Since unbound
+            # tokens went read-only (11252) a human IS a session principal --
+            # an unbound token on /send answers 401, measured -- so the old
+            # shape quietly became an AGENT's parentless broadcast, which
+            # correctly rings nobody, and this half asserted the opposite of
+            # what it was exercising. Logging in is what makes it the human
+            # plane, and the anti-storm rule above keeps its only coverage.
+            jar = http.cookiejar.CookieJar()
+            web = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            web.open(urllib.request.Request(
+                f"{base}/login",
+                data=json.dumps({"name": "smoke",
+                                 "password": "smoke-pw-not-a-real-secret"}).encode(),
+                headers={"Content-Type": "application/json"}), timeout=10)
+            web.open(urllib.request.Request(
                 f"{base}/send", method="POST",
-                data=json.dumps({"from": "operator", "to": "*",
-                                 "subject": "page", "body": "human broadcast"}).encode(),
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {secrets['alice']}"}), timeout=5)
+                data=json.dumps({"to": "*", "subject": "page",
+                                 "body": "human broadcast"}).encode(),
+                headers={"Content-Type": "application/json"}), timeout=5)
             for who, ws in (("alice", wsa), ("bob", wsb)):
                 frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
                 assert frame["wake"], (who, frame)
                 # the ring carries the facts, so a woken agent can apply the
                 # reply test without a round trip
-                assert frame["from"] == "operator", (who, frame)
+                # THE BROKER NAMES THE REAL SENDER, not what the client typed.
+                # This asked for "operator" because the old shape PASSED that
+                # string in the body and the broker echoed it. Since 14056 the
+                # sender is resolved server-side from the authenticated
+                # principal, so it is the logged-in user -- a strictly stronger
+                # property than the one this line used to check, and the reason
+                # the body no longer carries a `from` at all.
+                assert frame["from"] == "smoke", (who, frame)
+                assert frame["from_moniker"] == "smoke", (who, frame)
                 assert frame["subject"] == "page", (who, frame)
                 assert frame["direct"] == 0, (who, frame)   # nothing addressed to me
                 assert frame["unread"] >= 1, (who, frame)

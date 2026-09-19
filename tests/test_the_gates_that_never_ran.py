@@ -54,6 +54,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GATES = [
     # the bus over a real client against a real broker
     "joinhere_smoke.py",
+    "smoke_ws.py",
     "waiter_smoke.py",
     "upload_gate.py",
     "readmit_gate.py",
@@ -72,16 +73,6 @@ GATES = [
 # a reason so the next person inherits a diagnosis instead of a surprise.
 # Each line is what was MEASURED on this host, with docker live.
 NOT_WIRED = {
-    # Diagnosed. Its "human broadcast rings both waiters" half posts to /send
-    # with an AGENT's bearer token and the string from:"operator". Since
-    # unbound tokens went read-only (11252) the human plane is a SESSION
-    # principal, so that half now exercises an agent's parentless broadcast,
-    # which correctly rings nobody. Fixing it means DECIDING what it should
-    # assert -- authenticate a real user, or drop the human half and let the
-    # web-plane gates carry it. A wrong guess silently retires the only
-    # coverage of the rule that stops agent broadcasts becoming an N^2 storm.
-    "smoke_ws.py": "human-broadcast half needs a ruling, not a patch",
-
     # These drive `docker run` / `make` against CONTAINER IMAGES. docker being
     # reachable is not enough; the image has to exist on the host, which is a
     # runner question of the same shape as ui-drive needing chromium.
