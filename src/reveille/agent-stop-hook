@@ -134,6 +134,18 @@ if [ -f "$lenv" ]; then
     fi ) &
 fi
 
+# THE DIGEST TRIGGER (DES-001 s16, ruled 23979 s6): a turn ended, so tell the
+# broker -- it decides whether a digest is DUE (activity since the last one
+# and DIGEST_MIN_INTERVAL elapsed) and writes it from its own script LLM off
+# this path. Fire-and-forget: a backgrounded curl with a short timeout, so
+# the hook never waits on a model and a down broker costs nothing here. This
+# block probes the remote INSIDE itself and fails open, per the rule above.
+# It carries the token only as a bearer header on the wire; nothing is logged.
+if [ -n "${REVEILLE_TOKEN:-}" ] && command -v curl >/dev/null 2>&1; then
+  ( curl -sS -m 5 -X POST -H "authorization: Bearer $REVEILLE_TOKEN" \
+      -H "x-agent: $role" "$url/agent/digest" >/dev/null 2>&1 & )
+fi
+
 # Watcher armed? wake-watch takes no secret, so a cmdline match is safe. This
 # block is the LAST thing and blocks the stop when unarmed -- including while the
 # broker is down, because wake-watch reads a local directory and an armed watcher
