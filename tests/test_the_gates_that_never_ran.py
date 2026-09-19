@@ -1,6 +1,6 @@
 """The standalone gate scripts, run by the suite that actually gates a PR.
 
-Twenty-one files under tests/ end in _gate.py or _smoke.py. They speak the bus
+Twenty-two files under tests/ wear _gate or _smoke in their name. They speak the bus
 over a real client, or drive a real broker, or stand up the launcher -- the
 only coverage of the wire that the in-process suite cannot give. Every one of
 them was a Makefile target and NOTHING ELSE: ci.yml runs
@@ -25,12 +25,22 @@ one by hand while diagnosing is the point of them. This module only makes the
 suite run them too. The pattern is the repo's own: tests/test_the_bank_travels
 _between_installs.py drives scripts/voice-bank.py by subprocess the same way.
 
-COST: about 16 s of wall clock under xdist (34 s serial), all of it a scratch broker starting and
-stopping. ci.yml budgets "about a minute" for a healthy gate and ten for a
-hung runner, so this fits with room. They need NOTHING a runner lacks -- no
-docker, no chromium, no network: scratch.py is `subprocess.Popen(["reveille-
-daemon"])` on a free port, which is why they did not have to wait for the
-ui-drive CI work to be wired in.
+COST: about 16 s of wall clock under xdist (34 s serial), most of it scratch
+brokers starting and stopping. ci.yml budgets "about a minute" for a healthy
+gate and ten for a hung runner, so this fits with room.
+
+WHAT THEY REACH FOR, because "they need nothing a runner lacks" was written
+here first and was FALSE. Thirteen of the fourteen need only a free port:
+scratch.py is `subprocess.Popen(["reveille-daemon"])`, no docker, no chromium,
+no network -- which is why they did not have to wait for the ui-drive CI work.
+single_origin_smoke.py is the exception and needs a DOCKER SOCKET: it
+`docker run`s a caddy in front of a scratch broker to prove one origin serves
+both planes. It is green on ubuntu-latest and on a developer box, and would be
+RED inside an agent container, which has no socket by design. Named rather
+than dropped, because the claim was the defect: a gate whose requirements are
+described wrongly is how the next person picks the wrong runner.
+(sigterm_gate.py only TALKS about docker -- every hit is prose about what
+docker would report, never a call. Counted by grep, corrected by reading.)
 """
 
 import subprocess
@@ -41,16 +51,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# smoke_ws is deliberately ABSENT, and its absence is not a skip: it is still
-# red, on a question that is not mine to answer. Its "human broadcast rings
-# both waiters" half posts to /send carrying an AGENT's bearer token and the
-# string `from: "operator"`. Since unbound tokens went read-only (11252) the
-# human plane is a SESSION principal, not a token, so what that half now
-# exercises is an agent's parentless broadcast -- which correctly rings nobody.
-# Making it pass means deciding what it should assert: authenticate a real user
-# and keep the claim, or drop the human half and let the web-plane gates carry
-# it. That is a ruling, and a wrong guess here would silently retire coverage
-# of the one rule that keeps agent broadcasts from becoming an N^2 storm.
 GATES = [
     # the bus over a real client against a real broker
     "joinhere_smoke.py",
