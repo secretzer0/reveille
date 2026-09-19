@@ -395,6 +395,28 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.277",
+     """0.2.277 THE PHONE CAN READ ITS OWN AUDIO NUMBERS (operator 24098, architect
+24109). On his mobile device the speech stutters constantly every session and
+goes smooth the moment listen is pressed once. Two candidates explain that --
+the jitter buffer still learning (vLead, doubled per heard gap, floored per
+browser in localStorage.revLead) and an audio session that the getUserMedia
+gesture changes -- and the two numbers that separate them, `underruns` and
+`lead`, were already counted per utterance. They were just unreadable: the
+page put them in the voice button's `title=`, and a phone has no hover and no
+console. The on-screen toast that used to carry them went away in 0.2.117.
+
+TAP THE VERSION in the header and the last utterance's line comes back as a
+toast, on the device that has the defect: frames, samples, buffers, errors,
+underruns, the lead in seconds, and the AudioContext's state and rate.
+
+THIS IS AN INSTRUMENT, NOT A FIX. No audio path moves: vDiagPaint records the
+same line it already composed, the tap is wired where the version is painted
+so it answers before anything has played, and the gate freezes the ratchet's
+constants and the scheduler's underrun arithmetic so a later diagnostic cannot
+quietly change what it measures. The mechanism PR waits on what the operator
+reads here.
+"""),
     ("0.2.276",
      """0.2.276 A TAP ON TALK IS NOT A BROKEN MICROPHONE (operator screenshot,
 ruled 23980). The page classified every take by its peak alone, so a tap --
