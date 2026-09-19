@@ -395,6 +395,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.278",
+     "0.2.278 A CLAIM WEARING NOTHING IS STRIPPED; A FIRST RUN IS A WINDOW (architect\n24138 on devops 24136, from the first live fold on 0.2.275). Measured: the\nhook fired my first digest, 371 batches on the 6144-token writer (~1 min a\nstep, ~6 h), and step 2 was refused because the writer dropped ONE tag.\nOne retry per step over 371 steps is a run that cannot finish.\n\nTWO FAILURE CLASSES, TWO VERDICTS. An INVENTED ID is a claim wearing a\ncitation nobody can recall -- a hallucination -- and still refuses the\nstep. An UNTAGGED line under RULES/DECISIONS/LESSONS is a claim wearing\nnothing: the store's verdict is already `no backing`, so the line is\nSTRIPPED and the step kept, each one logged at INFO with its text, the\nheader counting them `[stripped: N untagged]`. Under WORK/OPEN untagged\nlines were always legal. The invariant holds: a digest line licenses a\nrecall, never a citation.\n\nA FIRST RUN (no prior digest, no mentor) folds the last DIGEST_FIRST_WINDOW_S\n(7 days) of the agent's messages plus ALL live rows it may read -- rows are\nthe small, load-bearing part; messages are the bulk, and the operator's own\nwords were the last stretch of high activity. Header `since <date> (first\nrun window)`. Later runs fold since the prior, unchanged; a protege's mentor\nrows are never windowed. A second retry was REFUSED: with the systematic\nclass gone, it would only double the cost of the class a retry rarely cures.\n\nTHE THIRD CLASS, measured on deployment-dev's first fold (497 batches, dead\nat step 1 twice: `sections must be exactly RULES/DECISIONS/LESSONS/WORK/OPEN\nin order, got LESSONS/RULES`): SECTION SHAPE IS NORMALIZED, NEVER REFUSED\n(architect 24144). Section names and order are ours, not the writer's:\nheadings in any order, case-insensitive, duplicates merged, a missing\nsection emitted as `(none)`, prose before the first heading stripped and\ncounted (`[stripped: N untagged, M unsectioned]`), and the text re-serialized\ncanonical -- so every next step sees the canonical shape. ONE INVARIANT now\ncovers all three classes: the store keeps what it can license, drops what it\ncannot, and refuses only what lies (an invented id, a [msg:N] outside the\ncaller's rooms) or is not a digest (no recognized heading at all).\n"),
     ("0.2.277",
      """0.2.277 THE PHONE CAN READ ITS OWN AUDIO NUMBERS (operator 24098, architect
 24109). On his mobile device the speech stutters constantly every session and
@@ -1475,7 +1477,7 @@ def _digest_job_inner(conn, p, mentor_name=""):
         # batch. A first run with nothing to fold still writes a digest from
         # the base alone (a mentor's, or an empty one).
         steps = max(1, len(inputs["batches"]))
-        running, why = "", ""
+        running, why, stripped_total, unsectioned_total = "", "", 0, 0
         for step in range(1, steps + 1):
             batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
             data = store.digest_batch_text(running, inputs["base"], batch, step, steps)
@@ -1498,8 +1500,15 @@ def _digest_job_inner(conn, p, mentor_name=""):
                     raise store.BusError(f"the script writer is unreachable: {e} -- the prior "
                                          f"digest stays live")
                 try:
-                    store.digest_verify(conn, text, p.rooms, scope)
-                    out = text
+                    out, stripped, unsectioned = store.digest_verify(conn, text, p.rooms, scope)
+                    for line in stripped:      # a body can look (24138)
+                        log.info("%s digest step %d/%d stripped untagged: %s",
+                                 p.name, step, steps, line[:200])
+                    for line in unsectioned:   # 24144: prose before the first heading
+                        log.info("%s digest step %d/%d stripped unsectioned: %s",
+                                 p.name, step, steps, line[:200])
+                    stripped_total += len(stripped)
+                    unsectioned_total += len(unsectioned)
                     break
                 except store.BusError as e:
                     why = str(e)
@@ -1512,7 +1521,8 @@ def _digest_job_inner(conn, p, mentor_name=""):
         body = running
         writer = f"{_script_model or 'server default'} ctx {_digest_ctx or '?'} out {_digest_out}"
         fact = store.digest_header(name=p.name, inputs=inputs, model=writer,
-                                   batches=steps, mentor=mentor) + "\n" + body
+                                   batches=steps, mentor=mentor, stripped=stripped_total,
+                                   unsectioned=unsectioned_total) + "\n" + body
         uid = store.digest_store(conn, scope=scope, author=p.name, fact=fact)
         log.info("%s digest -> %s (%d chars, %d rows in %d batches, %d dropped)", p.name, uid,
                  len(fact), inputs["rows"], steps, len(inputs["dropped"]))

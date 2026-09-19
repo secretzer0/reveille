@@ -7486,6 +7486,11 @@ DIGEST_INPUT_TOKENS = 24000   # fallback batch size in TOKENS when the writer's
                               # context cannot be read at boot (24015); the
                               # daemon derives the live value from /v1/models
 CHARS_PER_TOKEN = 4           # the fleet's working ratio (12944/13014)
+DIGEST_FIRST_WINDOW_S = 7 * 86400   # a FIRST run folds this much message history
+                                    # (24138): the operator's "last XX hrs of high
+                                    # activity", not since ever -- measured, since
+                                    # ever was 371 batches (~6 h) on a 6144 writer.
+                                    # Live hive ROWS are never windowed.
 DIGEST_SECTIONS = ("RULES", "DECISIONS", "LESSONS", "WORK", "OPEN")
 DIGEST_TAGGED = ("RULES", "DECISIONS", "LESSONS")
 _TAG_END = re.compile(r"\[(doctrine|contract|decision|lesson|state|digest):([0-9a-f]{8}) "
@@ -7611,6 +7616,7 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
     scopes = rooms + [scope]
     prior = digest_prior(conn, scope)
     items, since, base = [], 0, ""          # items: (ns, line), time order
+    first_window = False
     if mentor is not None:
         mprior = digest_prior(conn, f"agent:{mentor['id']}")
         if mprior is None:
@@ -7639,16 +7645,23 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
                     _block("THE STORE'S VERDICT ON EVERY TAG ABOVE", _verdicts(conn, prior["fact"])))
         for r in _readable_live(conn, scopes, since):
             items.append((r["created_ns"], _mem_line(r)))
+        # A FIRST RUN WINDOWS THE MESSAGES, NEVER THE ROWS (24138): rows are
+        # the small, load-bearing part; messages are the bulk, and the
+        # operator asked for the last stretch of high activity, not history.
+        msg_since = since
+        if prior is None:
+            msg_since = time.time_ns() - DIGEST_FIRST_WINDOW_S * 10**9
+            first_window = True
         aid = agent_id or ""
         mine = [r["thread_id"] for r in conn.execute(
             f"SELECT DISTINCT thread_id FROM messages WHERE (sender_agent_id=? OR "
             f"recipient_agent_id=?) AND room IN ({_ph(rooms)}) AND ts_ns > ?",
-            [aid, aid] + rooms + [since])] if rooms and aid else []
+            [aid, aid] + rooms + [msg_since])] if rooms and aid else []
         if mine:
             for m in conn.execute(
                     f"SELECT id, thread_id, sender, recipient, subject, body, ts_ns FROM messages "
                     f"WHERE thread_id IN ({_ph(mine)}) AND room IN ({_ph(rooms)}) AND ts_ns > ? "
-                    f"ORDER BY ts_ns", mine + rooms + [since]):
+                    f"ORDER BY ts_ns", mine + rooms + [msg_since]):
                 items.append((m["ts_ns"], _msg_line(m)))
     items.sort(key=lambda t: t[0])
     total = len(items)
@@ -7668,11 +7681,14 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
         size += len(line) + 1
     if cur:
         batches.append(cur)
-    label = f"SINCE {_d8(since)}" if since else "SINCE THE BEGINNING"
+    label = (f"SINCE {_d8(since)}" if since else
+             f"ROWS SINCE THE BEGINNING, MESSAGES SINCE {_d8(msg_since)} (FIRST RUN WINDOW)"
+             if first_window else "SINCE THE BEGINNING")
     texts = [_block(f"BATCH {i + 1} OF {len(batches)}: HIVE ROWS AND MESSAGES {label}, IN TIME ORDER",
                     [ln for _, ln in b]) for i, b in enumerate(batches)]
     return {"base": base, "batches": texts, "rows": total, "dropped": dropped,
-            "since_ns": since, "prior": prior["uid"] if prior else "", "scope": scope}
+            "since_ns": since, "prior": prior["uid"] if prior else "", "scope": scope,
+            "first_window_ns": msg_since if first_window else 0}
 
 
 def digest_batch_text(running, base, batch, step, steps):
@@ -7691,27 +7707,38 @@ def _section_name(s):
 
 
 def digest_verify(conn, text, rooms, scope):
-    """The fidelity check a store can do without a model (23979 s3): the five
-    sections, in order; every line under RULES/DECISIONS/LESSONS ends with a
-    tag that resolves to a LIVE row the caller may read; every [msg:N] under
-    WORK/OPEN names a message in the caller's rooms. Anything else refuses the
-    whole digest -- an invented id is a hallucination wearing a citation."""
+    """The fidelity check a store can do without a model (23979 s3, amended
+    24138 and 24144). ONE INVARIANT: THE STORE KEEPS WHAT IT CAN LICENSE,
+    DROPS WHAT IT CANNOT, AND REFUSES ONLY WHAT LIES OR IS NOT A DIGEST.
+
+    Section names and order are OURS, not the writer's: headings are
+    recognized case-insensitively in any order, duplicates merged in order
+    of appearance, a missing section emitted as `(none)`, and the text is
+    re-serialized RULES/DECISIONS/LESSONS/WORK/OPEN -- so the running digest
+    the next step sees is always the canonical shape. Lines before the first
+    heading are stripped (unsectioned), as are untagged lines under the three
+    tagged sections (a claim wearing nothing). REFUSED: zero recognized
+    headings (not a digest); a tag resolving to no live readable row (a
+    claim wearing a citation nobody can recall); a [msg:N] outside the
+    caller's rooms. Returns (clean_text, stripped_lines, unsectioned_lines)."""
     rooms = list(rooms or [])
-    seen, section = [], None
+    section, sections, stripped, unsectioned = None, {k: [] for k in DIGEST_SECTIONS}, [], []
     for raw in text.splitlines():
         s = raw.strip()
         if not s:
             continue
-        if _section_name(s) in DIGEST_SECTIONS:
-            section = _section_name(s)
-            seen.append(section)
+        name = _section_name(s)
+        if name in DIGEST_SECTIONS:
+            section = name
             continue
         if section is None:
-            raise BusError(f"digest: text before the first section: {s[:80]!r}")
+            unsectioned.append(s)
+            continue
         if section in DIGEST_TAGGED:
             m = _TAG_END.search(s)
             if not m:
-                raise BusError(f"digest: untagged line under {section}: {s[:80]!r}")
+                stripped.append(f"{section}: {s}")
+                continue
             kind, id8, _ = m.groups()
             live = conn.execute(
                 f"SELECT 1 FROM memories WHERE kind=? AND uid LIKE ? AND status='live' "
@@ -7725,17 +7752,22 @@ def digest_verify(conn, text, rooms, scope):
                         f"SELECT 1 FROM messages WHERE id=? AND room IN ({_ph(rooms)})",
                         [int(mid)] + rooms).fetchone():
                     raise BusError(f"digest: [msg:{mid}] is not a message in your rooms")
-    if seen != list(DIGEST_SECTIONS):
-        raise BusError(f"digest: sections must be exactly {'/'.join(DIGEST_SECTIONS)} in order, "
-                       f"got {'/'.join(seen) or '(none)'}")
+        sections[section].append(s)
+    if section is None:
+        raise BusError(f"digest: not a digest -- none of {'/'.join(DIGEST_SECTIONS)} appears")
+    clean = "\n".join(f"{k}\n" + ("\n".join(v) if v else "- (none)") for k, v in sections.items())
+    return clean, stripped, unsectioned
 
 
-def digest_header(*, name, inputs, model, batches, mentor=None):
+def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0, unsectioned=0):
     """The provenance lines, written by the STORE, never the model (24015):
     window, rows shown, batches folded, the prior, the writer; a second line
-    for a protege's lineage; a third naming any row too large for a batch."""
+    for a protege's lineage; a third naming any row too large for a batch;
+    a fourth counting untagged lines stripped (24138)."""
     when = _d8(time.time_ns())
-    since = _d8(inputs["since_ns"]) if inputs["since_ns"] else "the beginning"
+    since = (_d8(inputs["since_ns"]) if inputs["since_ns"] else
+             f"{_d8(inputs['first_window_ns'])} (first run window)"
+             if inputs.get("first_window_ns") else "the beginning")
     head = (f"[digest:{name} {when} | since {since} | input: {inputs['rows']} rows, "
             f"{batches} batches | prior: {inputs['prior'][:8] or 'none'} | "
             f"writer: {model or 'server default'}]")
@@ -7743,6 +7775,8 @@ def digest_header(*, name, inputs, model, batches, mentor=None):
         head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
     if inputs["dropped"]:
         head += "\n[dropped: " + ", ".join(inputs["dropped"]) + "]"
+    if stripped or unsectioned:
+        head += f"\n[stripped: {stripped} untagged, {unsectioned} unsectioned]"
     return head
 
 

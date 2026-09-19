@@ -798,3 +798,13 @@ The hook POSTs `/agent/digest` after each turn, fire-and-forget (a backgrounded 
 ### 16.5 Delta from the ruling, named
 
 23979 s3 asked that `trace()` carry the digest's inputs. `trace()` is a message walk; the inputs live in the digest's own header line instead, where every reader of the row sees them without a second call.
+
+### 16.6 Amendments from the first live fold (architect 24138 on devops 24136, 2026-09-19)
+
+The first hook-triggered digest on the live broker was 371 batches on a 6144-token writer, about a minute a step, and its second step was refused because the writer dropped one tag. Two amendments:
+
+**A claim wearing nothing is stripped, never a refusal.** An invented id is a claim wearing a citation nobody can recall — a hallucination — and still refuses the step. An untagged line under `RULES / DECISIONS / LESSONS` is a claim wearing nothing: the store's verdict on it is already "no backing", so `digest_verify` strips it and keeps the step, logs each stripped line at INFO with its text, and the header counts them `[stripped: N untagged]`. Under `WORK / OPEN` untagged lines were always legal. The invariant of 16.1 holds: a digest line licenses a recall, never a citation. A second retry was refused: with the systematic class gone it would only double the cost of the class a retry rarely cures.
+
+**Section shape is normalized, never refused** (architect 24144, from deployment-dev's first fold dying at step 1 on `got LESSONS/RULES`). One invariant covers all three field classes: **the store keeps what it can license, drops what it cannot, and refuses only what lies or is not a digest.** Section names and order are ours, not the writer's: headings are recognized in any order, duplicates merged, a missing section emitted as `(none)`, prose before the first heading stripped and counted (`[stripped: N untagged, M unsectioned]`), and the text re-serialized canonical, so each next step sees the canonical shape. Refused: no recognized heading at all, an invented id, a `[msg:N]` outside the caller's rooms.
+
+**A first run is a window.** With no prior digest and no mentor, the fold takes the last `DIGEST_FIRST_WINDOW_S` (7 days, a plain constant) of the agent's messages plus **all** live rows it may read: rows are the small, load-bearing part; messages are the bulk, and the operator's own words were the last stretch of high activity. Header `since <date> (first run window)`. Later runs fold since the prior; a protégé's mentor rows are never windowed.
