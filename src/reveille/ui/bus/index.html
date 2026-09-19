@@ -2180,10 +2180,12 @@ function vCtxUp(){
 // samples decoded, buffers scheduled, decoder errors. Read it in the voice
 // button's title, or `vDiag` in a console; a stream that decoded nothing says
 // so in a toast rather than ending in silence.
+let vDiagLine='';
 const vDiag={lib:false,frames:0,decoded:0,scheduled:0,errors:0,underruns:0,lead:0,ctx:'',rate:0};
 function vDiagPaint(){const line='last: '+vDiag.frames+' frames, '+vDiag.decoded+
  ' samples, '+vDiag.scheduled+' buffers, '+vDiag.errors+' errors, '+vDiag.underruns+' underruns (lead '+
  vDiag.lead.toFixed(2)+' s); ctx '+vDiag.ctx+' @'+vDiag.rate+(vDiag.lib?'':'; NO DECODER');
+ vDiagLine=line;
  const b=$('voice');if(b)b.title=line;   // iOS sounds since 0.2.117: the on-screen toast is gone (operator 11401)
 }
 // Refusal is the failure mode worth naming: without this the queue drains into
@@ -7155,6 +7157,14 @@ async function pruneAgent(name,rid){
 }
 
 fetch('/version').then(r=>r.text()).then(v=>{bootVer=v;$('ver').textContent='v'+v;});
+// A PHONE CANNOT READ A title= -- no hover, no console -- and the numbers that
+// separate a jitter-buffer fault from an audio-session one live only in vDiag
+// (operator 24098: playback stutters every session until listen is pressed
+// once). TAP THE VERSION in the header and the last utterance's line comes
+// back as a toast, on the device that has the defect.
+(()=>{const v=$('ver');if(!v)return;
+ v.style.cursor='pointer';v.title="tap for the last utterance's audio numbers";
+ v.addEventListener('click',()=>toast(vDiagLine||'audio: nothing has played yet'));})();
 (async function boot(){
  let d;
  try{d=await api('/me');}
