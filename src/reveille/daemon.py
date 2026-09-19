@@ -32,6 +32,7 @@ import base64
 import binascii
 import contextlib
 import hashlib
+import gzip
 import html
 import ipaddress
 import io
@@ -380,6 +381,18 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.263",
+     "0.2.263 THE VOICE LIBRARIES WAIT TO BE NEEDED (the mobile half of the\noperator's 2026-09-16 sweep).\n\nMEASURED over the wire: the page pulled /ui/opus-decoder.js (87585 B),\n/ui/vad/ort.wasm.min.js (48327 B) and /ui/vad/vad.bundle.min.js (69143 B) as\nBLOCKING tags in the head, on every load, in every tab -- 204 KB of JavaScript\nparsed before first paint for features a session may never touch. The decoder\nonly matters once voice is ON; the VAD pair only in listen mode. Their own big\nassets (an 11 MB wasm, a 2.3 MB onnx) were ALREADY lazy: only the shims in\nfront of them were eager, which is the shape worth noticing -- the expensive\nthing was handled and the cheap thing in front of it was not.\n\nvLib(src) fetches one on first use and caches the PROMISE, so a second caller\nwhile the first is in flight waits rather than fetching twice. A FAILURE IS NOT\nCACHED: a flaky link is the entire reason the voice path is careful, and a\nremembered rejection would make one bad moment permanent; the caller already\nhas a refusal path for \"did not load\". The VAD pair is awaited IN SEQUENCE,\nnot in parallel, because the bundle expects onnxruntime to be on the page\nalready.\n\nWHAT THE PAGE LOOKS LIKE NOW: zero script src tags. The property the old gate\nprotected -- a fixed, site-relative path this broker serves from its own route\ntable, never a CDN, never built from anything foreign -- did not go away, it\nmoved to vLib, and the gate moved with it rather than being deleted.\n\nTHE URL GATE CAUGHT IT, WHICH IS WHY IT EXISTS.\ntest_every_url_this_page_builds_is_checked_not_just_escaped went red on\n`el.src=src` -- a URL set by PROPERTY ASSIGNMENT, exactly the sink its own\ndocstring says was invisible before. It is accounted for with the review, not a\nbumped tally: every vLib call site is a STRING LITERAL in this page, pinned by\nname in the same test, so if one ever takes a variable the pin fails first and\nthe assignment count fails second.\n\nAND A COMMENT NEARLY BROKE A SCANNER: the first draft explained the change\nusing the literal text of a script tag, which any tool looking for script tags\nreads as one (a-gate-must-not-grep-the-prose-that-names-the-rule, re-earned\nhere). Reworded.\n\nGATE: scripts/ui-drive scene_the_voice_libraries_wait_to_be_needed is a REQUEST\nCOUNT, not a source read, for the same reason the presence one is -- \"we\nremoved the tags\" is a claim about page text, and what matters is what the\nbrowser asks for. VERIFIED against a scratch broker serving this tree: 0 script\ntags, 0 requests at load, decoder undefined; first use fetches exactly one and\nthe decoder appears; a second call fetches nothing; a bad url refuses and\nleaves no cached failure; zero page errors. The page itself came back in\n137 KB on the wire.\n"),
+    ("0.2.262",
+     "0.2.262 AN ADMIN CAN KEEP THE AUDIO (operator 2026-09-16: \"I would like to\nbe able to download the audio clip so I can play it later (I want the download\nfeature to be available only to admin level roles)\").\n\nGET /audio/<mid>/download hands the utterance back as an attachment -- the m4a\nwhen the pair exists, because \"play it later\" means a file a phone will open,\nelse the .webm that is always there once a message has spoken.\n\nA SEPARATE ROUTE, NEVER A FLAG ON audio_http, and that is the whole design\ndecision. The streaming routes are what every listener in the room plays\nthrough: an is_admin branch in one of them turns a mistaken condition into a\nSILENT ROOM, while a mistake in this one can only ever refuse a download. It\nfails closed because nobody plays through it.\n\nADMIN IS A SECOND GATE ON TOP OF THE FIRST, NEVER A WAY AROUND IT: room\nmembership is checked exactly as the .webm checks it, and an agent token can\nnever reach the route at all because _principal sets is_admin False on that\nplane always (S3 review F3). The control is a plain <a download> -- the browser\nalready does this, so there is no handler and no fetch -- and hiding it when\nme.is_admin is false is a courtesy, NOT the gate.\n\nTHE NEGATIVES ARE THE TEST. A room member who may PLAY this audio all day is\nrefused the file (404) while the route they listen through still answers them\n(200); a missing rendition, an unknown id and a non-numeric id are 404 for an\nadmin too.\n\nAND THE PAGE'S URL GATE GAINED A SINK WITH ITS REASONING, not a bumped tally:\ntest_every_url_this_page_builds_is_checked_not_just_escaped exists to force a\nreview of every new href, so the entry says why vBase is safe -- a FIXED\nsite-relative prefix plus one encodeURIComponent'd integer id, from the same\nsingle builder the player uses, never a string the page did not author.\n\nONE DEFECT FOUND IN THIS SLICE'S OWN TEST, worth recording because it is a\nclass: daemon._files_dir is a module global, and pointing it somewhere only\nwhen it was None left a later test aimed at a dead broker's directory -- a\nresult that depends on what ran before it, under a suite that randomises order.\nIt is re-pointed every time now.\n"),
+    ("0.2.261",
+     "0.2.261 THE VOICE HAS A CURSOR AND SAYS WHERE IT IS (operator 2026-09-16:\n\"one of the GREATEST lacking features is knowing WHICH message is being played\n... being able to click/go to the talking voice would be amazing ... I would\nreally prefer a Next/Previous rather than a Stop button ... when I select a\nplay point in the stream it should continue from that point and play each one\nforward\").\n\nWHAT THE OPERATOR COULD NOT TELL, AND WHY. `vTake` drained a CONSUMING queue,\nand past V_MAX=8 pending it threw the entire backlog away, kept the newest, and\nrang a 660 Hz tone with \"N messages skipped -- audio was falling behind\". The\nskipped ids were already in vHeard, so they could never be spoken again: the\nonly way back to one was its own play icon, one click at a time. That existed\nbecause a listener could not SEE where the voice was, so falling behind had to\nbe escaped automatically.\n\nSO THE DROP IS NOT DELETED, IT IS REPLACED BY AN ACT. The chip shows \"N behind\"\nand pressing it jumps to the newest -- exactly what the drop used to perform by\nitself -- and nothing is destroyed to offer it. vTake, V_MAX, vMark, its tone\nand vHeard are gone.\n\nTHE CURSOR IS AN ID, NOT AN INDEX, so trimming the feed under it (0.2.260)\ncannot move it or invalidate it, and the order stays the message id DES-009\nsection 2 always said it was. What can be heard is DERIVED from `msgs` rather\nthan kept as a second list, so it cannot drift from what is on screen.\nHAS_AUDIO IS THE LOAD-BEARING FILTER there: a 404 is a silent message that\nadvances the cursor (section 7), so auto-advancing across ids with no audio\nwould spin the whole feed in one frame.\n\nSTOP IS GONE BECAUSE IT WAS NEVER A STOP. `$('vstop').onclick` was\n`vStop();vDone();` -- abort this one and immediately start the next, a skip\nwearing the wrong name. Voice off was always the real stop (it aborts and\nempties), and it still is. In its place: previous, next, and the chip.\n\nTHE CHIP, NOT A ROW HIGHLIGHT, IS THE MECHANISM. With the feed bounded the\nmessage being spoken may not be in the DOM at all, and a row class alone would\nhave nothing to mark; the chip reads the cursor, names the speaker, carries the\nfirst words in that speaker's own colour, and scrolls to the row when there is\none. `.row.speaking` is a bonus on top.\n\nA PLAY ICON IS NOW A PLAY POINT: a message that has audio moves the cursor and\nthe stream carries on forward from it; one that has none is still generated\nfirst and then plays through the same cursor. playOne stopped meaning \"play\nexactly one\".\n\nAND TURNING VOICE ON PARKS THE CURSOR AT THE NEWEST. \"Late joiners are not\nblasted\" used to be a property of vPush being fed by the live socket only; with\na cursor over everything loaded it had to become a statement, so toggleVoice\nmakes it and the gate holds it.\n\nGATES. test_the_voice_cursor_walks_in_id_order_and_drops_nothing keeps the\nEXECUTED-JS shape of the queue gate it replaces -- the page's own pure\ndecisions run under node, never a copy that can drift -- and asserts what the\nredesign is for: stepping visits EVERY id in order and loses none, a gap does\nnot stall the walk, previous steps back, and vBehind counts what the tone used\nto announce. scripts/ui-drive scene_the_voice_says_where_it_is drives the chip.\nVERIFIED against a scratch broker serving this tree: own messages excluded,\nvoice-on parked at the newest with nothing behind, two steps back showing\n\"2 behind\", zero page errors.\n"),
+    ("0.2.260",
+     "0.2.260 THE FEED IS BOUNDED, AND THE TOP ASKS FOR MORE (operator\n2026-09-16: \"the longer I have stayed online without a CTRL-R the worse it\ngets ... we don't need all history at once ... as we scroll back, get paged\nwindows\").\n\nNOTHING WAS LEAKING, and that is worth saying because it looked exactly like a\nleak. Measured on the live page at 10 min uptime: 1 document, 460 listeners,\n4 MB heap, nothing detached and no runaway interval. `add()` appended and\nNOTHING EVER TRIMMED -- no cap anywhere in the file -- so the one thing that\ngrew for the life of a tab was the feed, and every cost that scales with it\ngrew too. A reload looked like a cure because it reset the feed to backlog\nsize. 0.2.258 made the per-keystroke cost flat; this makes the thing itself\nstop growing.\n\nTHREE STRUCTURES GREW, ALL THREE ARE BOUNDED NOW: the DOM rows, the `msgs`\nMap, and (untouched here, ids only) vHeard. FEED_MAX = 500 rows while\nFOLLOWING; trimFeed drops from the top and deletes the same ids from the Map,\nso the two can never drift.\n\nTRIM ONLY AT THE TAIL, AND THAT IS THE HALF THAT MATTERS. A reader who\nscrolled up put themselves there, and dropping rows under them is the one\nthing this must never do. It is also what keeps the trimmer and the pager off\neach other: scrolling up clears `follow`, so exactly one of them is ever\nactive. The gate proves both directions -- at the cap while following, and\nUNTOUCHED while parked -- because a gate that only proved the trimming would\nbe green on a feed that eats the page you are reading.\n\nPAGING BACK. store.tail gained a third direction: before_id returns the\n`limit` messages immediately OLDER than an id, still oldest-first, mirroring\nthe since_id branch it sits beside; /messages carries it. The opening window\ndrops from 300 to 100 and the rest arrives as the reader asks for it. The\nreconnect gap-fill KEEPS its old reach -- that one is bounded by how long the\nsocket was down, not by how much history exists, which is a different\nquestion.\n\nA PREPEND MOVES THE READER unless something moves them back: loadOlder records\nscrollHeight, inserts above the top row, and adds the difference to scrollTop,\nso asking for history does not throw you out of the place you were reading.\nrender() groups against prevMsg, which tracks the LIVE tail, so a prepended\nwindow renders as its own run and the tail's value is restored after.\n\nPAGING BACK CANNOT REWIND THE READ MARK, and it needed no guard to say so:\nmark_room_seen is MAX-monotonic by construction and the ids in an older page\nare lower than the mark. The gate exercises the case anyway -- read to the\nend, then page back, unread stays 0 -- because an invariant nobody tests is a\ncomment.\n\nGATES. tests/test_the_feed_pages_backwards.py: the window walks back one page\nat a time, before_id is EXCLUSIVE, history runs out to an empty page (which is\nhow the pager learns to stop asking), the route parses an empty value as 0\nrather than handing a string to the store, and the read mark holds.\nscripts/ui-drive scene_the_feed_is_bounded drives add() directly, the way the\npresence scene drives renderPresence. VERIFIED against a scratch broker\nserving this tree: cap 500 holds at 550 appended, Map 500, cursor moved to the\nnew top, and 60 more while parked leave 560 rows untouched, zero page errors.\n"),
+    ("0.2.259",
+     "0.2.259 THE LINK EARNS ITS BUFFER BEFORE THE FIRST SOUND, NOT AFTER THE\nFIRST GAP (operator 2026-09-16: \"on LTE and even 5g with full bars the audio\nstutters constantly ... local lan doing the same web based interface is\namazing\").\n\nWHAT WAS MEASURED FIRST, because it moved the diagnosis. Emulated 150 ms and\n300 ms round trips at 5 and 2 Mbps against a CACHED utterance: 0 underruns,\nthree runs, identical. A complete file cannot starve -- 27 s of speech is\n117384 bytes, 35 kbit/s, and even the throttled link delivers it ~50x faster\nthan it plays. So the stutter is not the link being slow, and it is not the\nreplay path at all.\n\nIT IS THE IN-FLIGHT PATH ONLY. audio_http has three states (section 7): a\ncomplete file, or a TAIL of the .part the synthesizer is still writing. The\ntail arrives at roughly speaking speed, and the page's entire slack against it\nwas V_LEAD = 50 ms. LAN jitter is sub-millisecond, so it never misses; LTE\njitter is 50-500 ms, so it misses constantly, and every miss is `next<now`, a\nre-anchor, an audible gap.\n\nAND IT COULD NEVER LEARN ITS WAY OUT. The lead doubled only AFTER a gap you\nhad already heard, then `vLead=Math.max(V_LEAD,vLead/2)` HALVED it after every\nclean utterance -- so on a link that always jitters it oscillated across the\nthreshold for ever: grow, stutter, shrink, stutter. That line is gone. The\nfloor now only rises within a session and is remembered per browser\n(localStorage.revLead).\n\nTHE BUFFER IS FILLED BEFORE THE FIRST SAMPLE SOUNDS. Decoded batches are HELD\nuntil they total the target; then they go out back to back and every later\nbatch goes straight out, because by then the buffer IS the gap between the\narrival clock and the playback clock. At 35 kbit/s a second of buffer costs a\nsecond of delay once per utterance and then the link runs ~50x ahead of\nconsumption -- after which an underrun can only mean the SYNTHESIZER stalled,\nwhich is the only thing it should ever have meant.\n\nAND THE FIRST UTTERANCE OF A SESSION DOES NOT HAVE TO STUTTER TO LEARN: the\nfetch's own time-to-first-byte is an upper bound on the round trip -- it\nincludes the broker's think time, which is the safe direction to be wrong in --\nso vPrebuf sizes the buffer from it before anything is scheduled. LAN keeps the\nold 0.05 s and is not taxed; 150 ms buys 0.45 s; 300 ms buys 0.9 s; the ceiling\nis 4.0 s (V_LEAD_MAX, up from 2.0).\n\nTHE STREAM THAT ENDS UNDER TARGET STILL SOUNDS. A short utterance, or a\ncomplete file that fits in one batch, would otherwise be swallowed by its own\npre-buffer -- so the tail flushes whatever is held. This is the failure the\nshape invites and it is gated.\n\nGATE: scripts/ui-drive scene_the_link_earns_its_buffer. The two decisions are\nPURE (vPrebuf, vLeadRaise) in the style vWant/vTake already set, so the gate\nneeds no network and no sound: LAN round trip keeps 0.05, LTE buys >= 0.45,\nworse buys more, the ceiling holds, A LEARNED FLOOR SURVIVES A FAST ROUND TRIP\n(the case the halving used to lose), the ratchet doubles, and the floor is\nremembered. VERIFIED additionally against a scratch broker serving this tree:\nzero page errors, values as above.\n\nNOT VERIFIED, AND SAID SO: no in-flight utterance was played over a degraded\nlink, because reproducing one means spending the GPU this work is meant to\nprotect. The starvation mechanism is read from the code plus the cached-file\nmeasurement above; the operator can confirm in one move when it next stutters\n-- `vDiag` in the console, or hover the voice button, which already paints\nunderruns and lead.\n"),
+    ("0.2.258",
+     "0.2.258 THE PAGE ARRIVES SMALL, AND THE FEED STOPS RELAYOUTING ON EVERY\nKEYSTROKE (operator: \"typing and interactivity is so slow\"; \"the longer I\nstay online without a CTRL-R the worse it gets\").\n\nTWO DEFECTS, ONE SYMPTOM, BOTH MEASURED IN THE LIVE PAGE RATHER THAN READ OFF\nTHE SOURCE.\n\nFIRST, THE FEED. `#feed` was `overflow-y:auto`, which makes scrollbar presence\na layout OUTPUT -- so every forced layout re-decides it, and a keystroke in the\ncomposer forces one (Blink's editing path scrolls the caret into view). The\nre-decision relayouts the whole feed. The trace named it exactly: `Layout\ndirty:10 total:7702 forcedBy:keypress`, 20-27 ms each, beside\n`LayoutInvalidationTracking DIV id='feed' Scrollbar changed`, 12 of them in\nfive keystrokes.\n\nAND THAT IS THE \"LEAK\" THE OPERATOR FELT. Median keystroke measured in the\nOverSiteAI room: 48 ms at 293 rows, 168 ms at 1172, 392 ms at 2930 -- LINEAR\nin history. `add()` appends and nothing ever trims, so a tab gets slower for as\nlong as it lives and a reload resets it to backlog size. Nothing is actually\nleaking: 1 document, 460 listeners, 4 MB heap at 10 min uptime. The feed is\nthe only thing growing. With `overflow-y:scroll` the gutter is decided once:\n16 ms, per-keystroke Layout 0.00 ms, zero scrollbar invalidations, and FLAT in\nhistory (32 ms at 2930 rows). Bounding the feed itself is a separate slice.\n\nALTERNATIVES MEASURED, NOT ARGUED, all at 1172 rows: `scrollbar-gutter:stable`\n24 ms (works, buys nothing here); `contain:strict` on #feed 24 ms but imposes\nsize containment; `contain:layout` on #feed and `contain:content` on the rows\n176 ms, i.e. no effect at all; `content-visibility:auto` on the rows 32 ms\nalone and 24 ms beside `scroll` -- inside the 8 ms Event Timing floor, so it is\nNOT taken: one word beats two rules that cannot be told apart from it.\n\nSECOND, DELIVERY. Measured over the wire against the live broker: `/ui`\nanswered 396226 bytes with `content-encoding: none` AND `cache-control: none`.\nThe entire app, uncompressed, re-downloaded on every load, every tab, every\nreconnect -- which on a phone is the first-paint cost paid again and again.\nOne `_static_response` now serves the page and the three vendored assets:\nETag first so a repeat load is a 304 with no body, gzip second so a first load\nis roughly a fifth of the bytes. The ETag is over the bytes that LEAVE, so the\npage's env substitutions are inside it and a deploy invalidates it by\nconstruction -- nothing has to remember to bump a string.\n\nDELIBERATELY NOT MIDDLEWARE, and that is the load-bearing decision.\nStarlette's GZipMiddleware has no content-type filter, so mounting it would\nalso wrap the tailing `/audio/<id>.webm` stream -- a compressor between the\nsynthesizer and an ear that is already starving on a mobile link (DES-009\nsection 7), spent re-compressing Opus, which does not compress. The gate that\nsays so is a NEGATIVE: /version and /health must come back unencoded even when\nthe client asks, and no GZip middleware may be mounted on the app.\n\nGATES. tests/test_the_page_arrives_small.py: compressed when asked and only\nthen, the wire size read off Content-Length (httpx decodes the body, so the\nbody cannot report it), a second load is 304 with an empty body, a stale\nvalidator still gets the page, each asset validates as itself. Three of the\nfour are RED on the unfixed head; the fourth is the scoping negative, which\nwas green before and exists to stay green. scripts/ui-drive\nscene_the_feed_keeps_its_gutter reads the COMPUTED overflow-y off the live\nnode -- the rendered artifact, never the stylesheet -- and asserts no timing,\nbecause a test whose result depends on machine load asserts nothing.\n"),
     ("0.2.257",
      "0.2.257 THE SOCKET CARRIES PRESENCE (sweep C3 + D1, ruling 20403; E2\nWITHDRAWN on a measurement, below).\n\nC3. The page held a /feed socket that ALREADY pushes a `presence` frame into\nthe very renderPresence a 15 s setInterval was calling -- a second path for\ndata that already arrives, and the ONE poll with no document.hidden guard, so\na backgrounded tab asked forever. The interval is gone; the socket carries\nevery update and a reconnect repaints.\n\nAND THE FIRST PAINT ASKED TWICE, which only the browser could show: connect()'s\nonopen already calls loadPresence, and boot called it again beside connect(),\nas did pickRoom three lines before it drops the feed and reconnects. Both\nremoved -- onopen is the one to keep, because it fires on every RECONNECT too,\nso the rail recovers after a gap instead of only at boot.\n\nGATE IS A COUNT OVER A WINDOW, not a source read: scripts/ui-drive\nscene_presence_comes_by_socket counts /presence requests on both viewports --\nexactly 1 for the initial paint, ZERO more over 18 s (the old cadence was\n15 s), and a pushed frame still repaints the rail. \"We removed the timer\" is\na claim about source; how many times the page ASKS is the thing.\n\nD1. astral-sh/setup-uv ships a cache and ci.yml was not asking for it, so\nevery PR re-resolved and re-downloaded the tree. enable-cache: true, keyed on\nuv.lock. One line.\n\nE2 WITHDRAWN, AND THE WITHDRAWAL IS THE ENTRY WORTH READING. The sweep\nclaimed `playwright install chromium` sat below four floating-version\ninstallers (go, ttyd, gh, claude@latest) and was re-downloaded whenever one\nof them moved, so hoisting it would keep it cached. THAT IS NOT HOW DOCKER\nCACHES. The key for a RUN is the INSTRUCTION TEXT, not what the command\nfetches -- an unpinned installer whose command string never changes does not\nre-run and invalidates nothing below it. MEASURED 2026-09-16: a two-layer\nimage built twice, `RUN ... date > /floatstamp` -> both layers CACHED and the\nstamp IDENTICAL across builds. So the reorder buys nothing, and shipping it\nwould have been churn in an agent-image input -- forcing an image bump and a\nfleet roll -- to fix a problem that does not exist. What actually invalidates\nthe chromium layer is any TEXTUAL change above it, and then everything below\nre-runs whatever the order. E1 (--mount=type=cache) stays out for the same\nreason it always did: nobody has measured a build.\n"),
     ("0.2.256",
@@ -3914,19 +3927,25 @@ def _scope(request, p):
 
 @_guard
 async def messages_http(request):
-    """GET /messages?since_id=N&limit=M[&room=] -> {"messages": [...]} oldest-first.
-    since_id=0 (default) returns the most recent `limit`; the UI uses since_id to
-    fill the gap after a feed reconnect."""
+    """GET /messages?since_id=N&limit=M[&before_id=N][&room=] -> {"messages": [...]}
+    oldest-first. since_id=0 (default) returns the most recent `limit`; the UI
+    uses since_id to fill the gap after a feed reconnect, and before_id to walk
+    BACKWARDS from the top of a feed that no longer holds everything."""
     p = _principal(request)
     since_id = int(request.query_params.get("since_id") or 0)
+    before_id = int(request.query_params.get("before_id") or 0)
     limit = int(request.query_params.get("limit") or 200)
     rooms = _scope(request, p)
-    msgs = store.tail(_conn, since_id=since_id, limit=limit, rooms=rooms)
+    msgs = store.tail(_conn, since_id=since_id, limit=limit, rooms=rooms,
+                      before_id=before_id)
     # READING THE ROOM IS THE MARK (EPIC-001 #6). A person fetches a backlog
     # only for the room they are looking at, so the newest id handed over here
     # is exactly how far they have read -- no second call, nothing to forget
     # to send. Agents keep per-message receipts; they ack what was addressed
     # to them, which is a different question from "how far have I read".
+    # Paging BACKWARDS cannot walk the read mark back: the ids in that page are
+    # older than the mark by construction and mark_room_seen takes the MAX. The
+    # invariant lives there; this is a note, not a second guard.
     if p.kind == "user" and msgs and len(rooms) == 1:
         store.mark_room_seen(_conn, store.user_principal(p.user_id), next(iter(rooms)),
                              max(m["id"] for m in msgs))
@@ -4809,6 +4828,46 @@ async def audio_m4a_http(request):
                         headers={"Content-Disposition": f'inline; filename="tts-{mid}.m4a"',
                                  "X-Content-Type-Options": "nosniff",
                                  "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+
+@_guard
+async def audio_download_http(request):
+    """GET /audio/<msg-id>/download -> the utterance as a FILE, for an admin
+    (operator 2026-09-16: "I would like to be able to download the audio clip so
+    I can play it later ... available only to admin level roles").
+
+    A SEPARATE ROUTE, NEVER A FLAG ON audio_http. The streaming routes are what
+    every listener in the room plays through; putting an is_admin branch in one
+    of them means a mistake in that condition silences the room. This route can
+    only ever fail closed -- nobody plays through it.
+
+    An agent token can never reach it: _principal sets is_admin False on that
+    plane always (S3 review F3), so "admin" here means a signed-in person who is
+    one. Room membership is still checked exactly as the .webm does -- being an
+    admin is a second gate on top of the first, never a way around it.
+
+    m4a when the pair exists, because "play it later" means a file a phone will
+    open; the .webm otherwise, which is always there once a message has spoken.
+    """
+    p = _principal(request)
+    if not p.is_admin:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    raw = request.path_params["mid"]
+    if not raw.isdigit():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    mid = int(raw)
+    row = _conn.execute("SELECT room FROM messages WHERE id=?", (mid,)).fetchone()
+    if row is None or row["room"] not in p.rooms:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    for ext, media in (("m4a", "audio/mp4"), ("webm", "audio/webm")):
+        path = _files_dir / f"tts-{mid}.{ext}"
+        if path.is_file():
+            return FileResponse(
+                path, media_type=media,
+                headers={"Content-Disposition": f'attachment; filename="reveille-{mid}.{ext}"',
+                         "X-Content-Type-Options": "nosniff",
+                         "Content-Security-Policy": "default-src 'none'; sandbox"})
+    return JSONResponse({"error": "not found"}, status_code=404)
 
 
 @_guard
@@ -6341,15 +6400,58 @@ def nav_link_html(label, path):
             f'{html.escape(label.strip())}</a>')
 
 
-async def opus_decoder_http(_request):
+# ONE PLACE TURNS A STATIC PAYLOAD INTO A RESPONSE. MEASURED over the wire
+# 2026-09-16, against the live broker: `/ui` answered 396226 bytes with
+# `content-encoding: none` AND `cache-control: none` -- the whole app
+# re-downloaded uncompressed on every load, every tab, every reconnect, which
+# on LTE is the first-paint cost paid again and again.
+#
+# ETAG FIRST, GZIP SECOND: a repeat load should cost a 304 and no body at all,
+# and only a first load should pay a compressor. The ETag is over the bytes
+# that actually leave, so the page's env substitutions are inside it and a
+# deploy changes it by construction -- nothing has to remember to bump a
+# version string.
+#
+# NOT MIDDLEWARE, AND THAT IS THE LOAD-BEARING PART. Starlette's GZipMiddleware
+# has no content-type filter, so mounting it would also wrap the tailing
+# /audio/<id>.webm stream -- putting a compressor between the synthesizer and
+# an ear that is already starving on a mobile link (DES-009 section 7), to
+# re-compress Opus, which does not compress. Four static payloads want this;
+# nothing else does.
+_GZ_CACHE = {}
+
+
+def _static_response(request, body, media_type, *, max_age=86400):
+    """ETag/304/gzip for the page and the vendored assets. max_age=0 means
+    revalidate every time (the page: it changes on every deploy, and the ETag
+    is what makes that cheap)."""
+    if isinstance(body, str):
+        body = body.encode()
+    etag = '"' + hashlib.sha256(body).hexdigest()[:32] + '"'
+    headers = {"Cache-Control": f"public, max-age={max_age}" if max_age else "no-cache",
+               "ETag": etag, "Vary": "Accept-Encoding"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    if len(body) >= 1024 and "gzip" in request.headers.get("accept-encoding", "").lower():
+        gz = _GZ_CACHE.get(etag)
+        if gz is None:
+            if len(_GZ_CACHE) > 16:
+                _GZ_CACHE.clear()          # keyed by CONTENT: a handful of live payloads, bounded by hand
+            gz = _GZ_CACHE[etag] = gzip.compress(body, 6)
+        headers["Content-Encoding"] = "gzip"
+        return Response(gz, media_type=media_type, headers=headers)
+    return Response(body, media_type=media_type, headers=headers)
+
+
+async def opus_decoder_http(request):
     """GET /ui/opus-decoder.js -> the vendored Opus decoder (opus-decoder 0.7.11,
     MIT, Ethan Halsall; libopus compiled to WASM, inlined). The page decodes the
     WebM/Opus stream itself and plays PCM through its AudioContext, so every
     browser with Web Audio hears the same wire -- iPhone Safari included, which
     has no MediaSource (operator, 2026-08-17). Fixed name from the route table,
     same serving rules as index.html."""
-    return PlainTextResponse(_ui_read("opus-decoder.min.js"), media_type="application/javascript",
-                             headers={"Cache-Control": "public, max-age=86400"})
+    return _static_response(request, _ui_read("opus-decoder.min.js"),
+                            "application/javascript")
 
 
 # The page-side VAD (DES-014 slice 2, ruling 11355: ships WITH the page, no
@@ -6366,12 +6468,12 @@ _VAD_FILES = {
 }
 
 
-async def earcon_http(_request):
+async def earcon_http(request):
     """GET /ui/earcon.wav -> the listen-mode bell (ruling 11465): the operator's
     pick from four synthesized samples (11471), 44.1 kHz mono, -12 dBFS, faded.
     Ships with the page like the VAD assets; the page decodes it once."""
     data = pathlib.Path(_ui_override() or _UI_PACKAGED, "earcon.wav").read_bytes()
-    return Response(data, media_type="audio/wav", headers={"Cache-Control": "public, max-age=86400"})
+    return _static_response(request, data, "audio/wav")
 
 
 async def vad_asset_http(request):
@@ -6381,10 +6483,10 @@ async def vad_asset_http(request):
     if media is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     data = pathlib.Path(_ui_override() or _UI_PACKAGED, "vad", name).read_bytes()
-    return Response(data, media_type=media, headers={"Cache-Control": "public, max-age=86400"})
+    return _static_response(request, data, media)
 
 
-async def chat_http(_request):
+async def chat_http(request):
     page = _ui_read("index.html").replace(
         "<!--NAVLINK-->", nav_link_html(os.environ.get("REVEILLE_NAV_LABEL", ""),
                                         os.environ.get("REVEILLE_NAV_PATH", ""))
@@ -6400,7 +6502,9 @@ async def chat_http(_request):
             f'<body><div style="position:fixed;bottom:4px;right:8px;'
             f'z-index:99;opacity:.6;font:11px monospace;color:#e0a44c">'
             f'UI OVERRIDE: {html.escape(ui)}</div>', 1)
-    return HTMLResponse(page)
+    # max_age=0: the page changes on every deploy, so it revalidates every load
+    # -- and the ETag turns that revalidation into a 304 instead of 396 KB.
+    return _static_response(request, page, "text/html; charset=utf-8", max_age=0)
 
 
 async def _pending_sweeper():
@@ -6550,6 +6654,7 @@ def build_app():
             Route("/rooms/{rid}/voices/{speaker}", room_voice_http, methods=["PUT", "DELETE"]),
             Route("/message/{mid:int}", delete_http, methods=["DELETE"]),
             Route("/files/{fname}", files_http),
+            Route("/audio/{mid}/download", audio_download_http),
             Route("/audio/{mid}.webm", audio_http),
             Route("/audio/{mid}.m4a", audio_m4a_http),
             Route("/audio/{mid}", audio_make_http, methods=["POST"]),
