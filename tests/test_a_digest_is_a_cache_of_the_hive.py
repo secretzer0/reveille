@@ -370,3 +370,42 @@ def test_a_writers_refusal_surfaces_with_its_text(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "_digest_out", 0)
     with pytest.raises(store.BusError, match="too small"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
+
+
+def test_the_verb_makes_its_connection_on_the_thread_that_uses_it(monkeypatch):
+    """Field defect on 0.2.273: the verb evaluated _conn_for_worker() on the
+    loop thread and handed the connection to the pool thread -- sqlite
+    refuses that. Drive the VERB, not the job, and watch where the
+    connection is made."""
+    import asyncio
+    seen = {}
+    monkeypatch.setattr(daemon, "_acting", lambda req: SimpleNamespace(
+        name="ana", token_id="t", agent_id="a", rooms={}))
+
+    def fake_conn():
+        seen["conn_thread"] = threading.get_ident()
+        return object()
+
+    def fake_job(conn, p, mentor):
+        seen["job_thread"] = threading.get_ident()
+        return {"id": "x"}
+    monkeypatch.setattr(daemon, "_conn_for_worker", fake_conn)
+    monkeypatch.setattr(daemon, "_digest_job", fake_job)
+    ctx = SimpleNamespace(request_context=SimpleNamespace(request=None))
+    out = asyncio.run(daemon.digest(mentor="", ctx=ctx))
+    assert out == {"id": "x"}
+    assert seen["conn_thread"] == seen["job_thread"], "connection made on a different thread than the job"
+    assert seen["conn_thread"] != threading.get_ident(), "the job ran on the caller's thread"
+
+
+def test_an_unforeseen_failure_is_reported_not_withheld(tmp_path, monkeypatch):
+    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
+    monkeypatch.setattr(daemon, "_script_on", True)
+    monkeypatch.setattr(daemon, "_digest_out", 1972)
+    monkeypatch.setattr(daemon, "_digest_ctx", 6144)
+
+    def boom(*a, **k):
+        raise RuntimeError("something the broker did not foresee")
+    monkeypatch.setattr(store, "digest_inputs", boom)
+    with pytest.raises(store.BusError, match="RuntimeError: something the broker did not foresee"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
