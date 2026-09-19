@@ -182,9 +182,15 @@ USE:
    join(room=<id>), which clears the leave; the bare call never undoes a directive.
    join returns them. Join replays only the last 15 min of backlog; recall further back
    ONLY when explicitly asked, via history(since=...). Then the KNOWLEDGE floor before
-   you work: rehydrate() (step 5), paged to next=="" -- the COMPLETE hive: your own
-   state, doctrine, contracts, decisions, lessons in full. brief(role=...) still
-   exists and fits one turn; rehydrate() fits a body, and nothing in it is elided.
+   you work: rehydrate() (step 5), PAGE 1 -- row 1 is your DIGEST, the broker's
+   own fold of everything you worked on and everything the hive learned since
+   the last one; the rest (state, doctrine, contracts, decisions, lessons in
+   full) waits behind `next` for reaching back. brief(role=...) still exists and
+   fits one turn; rehydrate() fits a body, and nothing in it is elided. No digest
+   yet? digest() writes one from the hive; a NEW body starts with
+   digest(mentor="<agent>") and inherits ONE agent's skills, not every agent's
+   memory. The Stop hook asks the broker for a digest after each turn; the broker
+   writes one only when it is due.
    join() returns brief_available so you know the pack is worth pulling. The 15-min
    replay is the conversation floor; brief() is the knowledge floor -- boot both.
 2. Reachability (DES-003): reveille-waked holds THE wake socket -- your Stop
@@ -317,11 +323,13 @@ Startup: join(url="http://<broker-host>:8765") -- I join every room my token hol
 any I deliberately left (returned as `skipped`, named -- rejoin with join(room=<id>), which
 is the ONLY thing that clears a leave); replays
 last 15 min only; older mail via history(since=...) ONLY when explicitly asked. Then
-rehydrate(), paged to next=="" -- the COMPLETE knowledge floor: my saved state,
-doctrine, contracts, decisions, every lesson in full. Nothing elided; brief() is the
-one-turn pack, rehydrate() is the body. On exit / swap-pending: distill(task,
-branch_sha, next_step, open_threads, undone) -- the five fields as parameters, the
-raw form memory_add(kind="state") stays for the swap window.
+rehydrate() PAGE 1 -- row 1 is my DIGEST (the broker's fold of my work and the
+hive's changes since the last one); the rest of the hive (state, doctrine, contracts,
+decisions, every lesson in full) stays behind `next` for reaching back. Nothing
+elided; brief() is the one-turn pack, rehydrate() is the body. No digest yet:
+digest(); a new body: digest(mentor="$REVEILLE_MENTOR") first. On exit / swap-pending:
+distill(task, branch_sha, next_step, open_threads, undone) -- the five fields as
+parameters, the raw form memory_add(kind="state") stays for the swap window.
 Hive memory: recall() before I re-derive a decision or re-litigate a ruling;
 memory_add(source=<msg id>) in the same turn as any ruling I send or receive (draft below
 my tier is the gate working). Contract = an invariant a peer could break; decision = a
@@ -387,6 +395,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.271",
+     "0.2.271 A DIGEST IS A CACHE OF THE HIVE, NEVER A FACT IN IT (operator direction\n23944-23963, architect ruling 23979). The operator's ask: keep the CLI model\nout of the loop when a LARGE hive is folded for FAST rehydration; keep the\nlast stretch of high activity fresh; give a NEW agent a mentor, not every\nagent's memory.\n\ndigest(mentor=\"\"): the broker EXTRACTS deterministically -- the agent's own\nmessages since its last digest with the rest of their threads, every hive row\nthat arrived, the prior digest with THE STORE'S VERDICT on every tag it carried\n(KEEP / RETIRED -> the row that replaced it) -- and its script LLM folds that\ninto one note: RULES / DECISIONS / LESSONS / WORK / OPEN, at most 5000 tokens.\nEvery line under the first three ends [kind:id8 date], and THE STORE RESOLVES\nEVERY TAG TO A LIVE ROW or refuses the whole digest: the model composes, the\nstore decides truth (12750 holds -- this is the read side, offline and\nregenerable). One retry; a refusal leaves the prior digest live and never a\nfallback. THE WRITER'S CONTEXT MAY BE SMALLER THAN THE HIVE (operator 24003,\nruled 24015): the fold is SEQUENTIAL, never a truncation. The material since\nthe last digest is cut, oldest first, into batches sized to the writer's own\ncontext (read from its /v1/models at boot, minus the 5000-token output and\nthe running digest; REVEILLE_DIGEST_INPUT_TOKENS overrides; 24000 when the\nwriter does not say), and each call sees the running digest beside ONE\nbatch, verified before the next. Nothing drops by size; the one drop is a\nsingle row larger than a whole batch, named by tag in the header. New kind `digest` (schema v46): broker-only\nwriter, one live per agent, supersedes only its prior, never a source and\nnever ratified. Its header carries the provenance: window, rows shown, rows\ndropped and before when, the prior it folds, the writer. rehydrate() serves it as PAGE 1 ROW 1;\nboot is join() -> rehydrate() page 1 -> arm, and the rest of the hive waits\nbehind `next`.\n\nA PROTEGE: digest(mentor=<agent>) for a body with no digest yet -- input is\nthe mentor's digest, the rows the mentor authored, the rows it cites, and the\nrules that bind everyone. Same owner or refused by name; the mentor's raw\nstate never crosses the wire. REVEILLE_MENTOR names it at provisioning.\n\nTHE STOP HOOK ASKS, THE BROKER DECIDES: POST /agent/digest after each turn,\nfire-and-forget with a 5 s curl; the broker writes one only when there has\nbeen activity since the last and DIGEST_MIN_INTERVAL (3600 s) has passed,\nand answers before the writer does. The swap ritual is unchanged -- the\nfive-field distill() stays procedural, because the digest is what exists\nBEFORE the swap and the window never waits on a model. The hook is a baked\ninput, so reveille-agent moves 0.2.42 -> 0.2.43.\n"),
     ("0.2.269",
      "0.2.269 THE HIVE MIND HAS TWO VERBS (operator direction; architect decision\nc6c4bb45; names the operator's -- both already fleet prose).\n\nrehydrate(cursor, budget): THE COMPLETE READ. brief() fits a turn and truncates\nby construction; a body arriving needs the whole hive, and assembled it by hand\n-- recall() per kind plus lessons(budget=400000). Measured on the architect's\nown boot: 251,587 tokens, a quarter of a 1M window, to read 176 lessons, 32\ndoctrine, 69 contracts, 148 decisions, 20 state notes, the lessons twice.\nrehydrate() serves every live row the caller may read, COMPLETE, BY PAGINATION,\nnever one payload (12944). Own state, doctrine, contracts, decisions, lessons in\nfull, newest first within kind. The page is bounded by WIRE bytes (13014 seam);\na row over budget lands WHOLE and ALONE -- never split, never elided, no\ntruncation marks. The cursor is a KEYSET, never an offset: every row live when\nits page was cut, exactly once, while other bodies keep writing. The first\npage quotes total and total_chars so the cost is a number before paging.\njoin() stays the arrival; boot is join() -> rehydrate() to next==\"\" -> arm.\n\ndistill(task, branch_sha, next_step, open_threads, undone): THE SHAPED WRITE.\nThe five fields were doctrine over a free string. Now they are REQUIRED\nPARAMETERS composed from a constant template -- five labels, five newlines --\nso the shape is enforced and the caller pays for content, not scaffolding.\nEmpty is refused BY NAME. Same path as memory_add(kind=state): the handover\nprincipal, so it works in the swap window; the same procedural nudge (12750).\nmemory_add(kind=state) is UNTOUCHED and gains no refusal, ever. THE RESULT\nNEVER ECHOES THE NOTE: the operator's grant is 5000 tokens on the whole act,\naiming lower, at high fidelity -- a maximal distill measures ~2100 tokens,\ngated, and the echo that would double it is gated out. The Stop hook never\ncalls it: a replayed next_step is stale with full confidence.\n\nMutation-proved: an off-by-one cursor reds the exactly-once gate; an echoing\nresult reds the grant gate. Terse docstrings on purpose -- a tool's docstring\nships in the schema every turn for every body, paid for by bodies that never\ncall it.\n"),
     ("0.2.268",
@@ -1269,6 +1279,160 @@ def split_sentences(buf):
 def strip_think(text):
     """A think block is the model's, not the script's."""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).lstrip()
+
+
+# ---- THE DIGEST (DES-001 s16, ruled 23979): the broker's fold of the hive ----
+# for one agent. Extraction and verification are store.py's and deterministic;
+# only the prose in between is a model's, and it runs on the script writer's
+# endpoint -- never on the agent's own CLI model, which was the operator's
+# whole point.
+DIGEST_MIN_INTERVAL = 3600      # s between hook-triggered digests (23979 s6); a
+                                # plain constant, not a REVEILLE_TIMINGS member
+DIGEST_MAX_TOKENS = 5000        # the operator's ceiling on the note itself
+DIGEST_TIMEOUT_S = 300.0        # the writer gets this long; past it, no note
+_DIGEST_FRAME = (
+    "You maintain ONE agent's working memory of a shared engineering bus. You are given "
+    "DATA: the agent's previous digest (if any) with the store's VERDICT on every tag in it, "
+    "rows the hive learned since, and the agent's own messages since. Produce the NEW digest: "
+    "FOLD, never append -- keep what still holds, update what changed, drop what the verdicts "
+    "retired. Aim for the fewest tokens that keep every fact, id, number and name exact; hard "
+    "ceiling {cap} tokens. OUTPUT FORMAT, exactly these five section headings on their own "
+    "lines, in this order, each followed by `- ` bullet lines:\n"
+    "RULES\nDECISIONS\nLESSONS\nWORK\nOPEN\n"
+    "Every bullet under RULES, DECISIONS and LESSONS ENDS with the tag of the row it "
+    "restates, copied EXACTLY from the data: [kind:id8 date]. Never invent a tag, never "
+    "alter one, never write an untagged bullet in those three sections; a fact with no "
+    "row to tag does not go there. RULES = doctrine and contracts; DECISIONS = decisions; "
+    "LESSONS = lessons. WORK = what this agent did and shipped, OPEN = what it still owes "
+    "and who owes it, citing messages as [msg:N] where one applies. Plain text only: no "
+    "markdown beyond `- `, no code fences, no preamble, no closing remarks.")
+_DIGEST_FRAME_PROTEGE = (
+    " THIS IS A FIRST DIGEST FOR A NEW AGENT: the MENTOR DIGEST is its baseline -- restate "
+    "it, fold in the mentor's rows and the rules that bind everyone, and leave WORK empty "
+    "except `- (new body, nothing shipped yet)` and OPEN with what the mentor left open.")
+
+
+def digest_prompt(text, protege=False):
+    """The two messages the writer is sent. Pure. Data rides in the USER turn."""
+    system = _DIGEST_FRAME.format(cap=DIGEST_MAX_TOKENS) + (_DIGEST_FRAME_PROTEGE if protege else "")
+    return [{"role": "system", "content": system}, {"role": "user", "content": text}]
+
+
+_digest_lock = threading.Lock()
+_digest_running = set()          # scopes with a writer call in flight
+_digest_batch = store.DIGEST_INPUT_TOKENS * store.CHARS_PER_TOKEN   # chars per batch
+
+
+def _writer_context(url, token):
+    """The writer's context length, read from its own /v1/models (vLLM
+    `max_model_len`, llama-server `meta.n_ctx_train`), or 0 when it does not
+    say. A boot-time read; a writer that cannot answer gets the fallback."""
+    try:
+        req = urllib.request.Request(url.rstrip("/") + "/v1/models")
+        if token:
+            req.add_header("authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            d = json.load(r)
+        m = (d.get("data") or [{}])[0]
+        return int(m.get("max_model_len") or (m.get("meta") or {}).get("n_ctx_train") or 0)
+    except Exception:
+        return 0
+
+
+def digest_input_tokens(ctx, env=""):
+    """Batch size in tokens (24015): the env override, else the writer's
+    context minus the 5000-token output, minus the running digest it is
+    shown beside (another 5000), minus ~1000 of directive; never under 4000;
+    the fallback constant when the context is unknown. Pure."""
+    if env:
+        return max(4000, int(env))
+    if ctx:
+        return max(4000, ctx - 2 * DIGEST_MAX_TOKENS - 1000)
+    return store.DIGEST_INPUT_TOKENS
+
+
+def _digest_job(conn, p, mentor_name=""):
+    """Extract -> write -> verify -> store, for one agent. Runs on the caller's
+    thread with the caller's connection (the tool: the loop's; the hook route:
+    a worker thread's own). Returns {id, chars, inputs} -- never the text."""
+    if not _script_on:
+        raise store.BusError("digest needs the script writer -- REVEILLE_SCRIPT_URL is unset "
+                             "on this broker, so there is no model to fold the hive with")
+    scope = store.agent_scope(conn, p.token_id, p.agent_id)
+    mentor = None
+    if mentor_name:
+        if store.digest_prior(conn, scope) is not None:
+            raise store.BusError("you already have a digest -- a mentor seeds the FIRST one only")
+        m = store.mentor_agent(conn, p.token_id, mentor_name)
+        mp = store.digest_prior(conn, f"agent:{m['id']}")
+        mentor = {"id": m["id"], "name": m["name"], "digest_uid": mp["uid"] if mp else ""}
+    with _digest_lock:
+        if scope in _digest_running:
+            raise store.BusError("a digest is already being written for you -- wait for it")
+        _digest_running.add(scope)
+    try:
+        inputs = store.digest_inputs(conn, name=p.name, agent_id=p.agent_id,
+                                     token_id=p.token_id, rooms=p.rooms, mentor=mentor,
+                                     batch_chars=_digest_batch)
+        # SEQUENTIAL FOLD (operator 24003): the writer's context may be smaller
+        # than the hive, so each call sees the running digest beside ONE batch
+        # and hands back the next running digest, verified before the next
+        # batch. A first run with nothing to fold still writes a digest from
+        # the base alone (a mentor's, or an empty one).
+        steps = max(1, len(inputs["batches"]))
+        running, why = "", ""
+        for step in range(1, steps + 1):
+            batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
+            data = store.digest_batch_text(running, inputs["base"], batch, step, steps)
+            messages = digest_prompt(data, protege=mentor is not None)
+            out = None
+            for attempt in (1, 2):
+                text = strip_think("".join(_llm_stream(
+                    _script_url, _script_model, _script_token, messages,
+                    timeout=DIGEST_TIMEOUT_S, max_tokens=DIGEST_MAX_TOKENS))).strip()
+                try:
+                    store.digest_verify(conn, text, p.rooms, scope)
+                    out = text
+                    break
+                except store.BusError as e:
+                    why = str(e)
+                    log.warning("%s digest step %d/%d attempt %d refused: %s",
+                                p.name, step, steps, attempt, why)
+            if out is None:
+                raise store.BusError(f"digest refused twice at step {step}/{steps}: {why} "
+                                     f"-- the prior digest stays live")
+            running = out
+        body = running
+        fact = store.digest_header(name=p.name, inputs=inputs, model=_script_model,
+                                   batches=steps, mentor=mentor) + "\n" + body
+        uid = store.digest_store(conn, scope=scope, author=p.name, fact=fact)
+        log.info("%s digest -> %s (%d chars, %d rows in %d batches, %d dropped)", p.name, uid,
+                 len(fact), inputs["rows"], steps, len(inputs["dropped"]))
+        return {"id": uid, "chars": len(fact), "batches": steps,
+                "inputs": {k: inputs[k] for k in ("rows", "dropped", "since_ns", "prior")}}
+    finally:
+        with _digest_lock:
+            _digest_running.discard(scope)
+
+
+def _digest_due(conn, p):
+    """The hook asks every turn; this says whether a digest is DUE (23979 s6):
+    activity since the last one AND DIGEST_MIN_INTERVAL elapsed. Pure over
+    the store: no model is consulted to decide whether to consult a model."""
+    scope = store.agent_scope(conn, p.token_id, p.agent_id)
+    with _digest_lock:
+        if scope in _digest_running:
+            return "a digest is being written for you now"
+    prior = store.digest_prior(conn, scope)
+    if prior is None:
+        return ""
+    age = (time.time_ns() - prior["created_ns"]) / 1e9
+    if age < DIGEST_MIN_INTERVAL:
+        return f"last digest is {age:.0f}s old; interval is {DIGEST_MIN_INTERVAL}s"
+    act = store.agent_activity(conn, store.agent_principal(p.agent_id), p.rooms)
+    if act["last_send_ns"] <= prior["created_ns"] and not act["unread"]:
+        return "no activity since the last digest"
+    return ""
 
 
 def _llm_stream(url, model, token, messages, timeout, max_tokens=300):
@@ -3153,6 +3317,23 @@ async def distill(task: str, branch_sha: str, next_step: str, open_threads: str,
         owned_rooms=owned, fact=fact, kind="state")
     log.info("%s distill -> %s (%d chars)", p.name, out["id"], len(fact))
     return out
+
+
+@tool()
+async def digest(mentor: str = "", ctx: Context = None) -> dict:
+    """Ask the broker to write your DIGEST: its own fold of your work and the
+    hive's changes since your last one, verified against the store, landed as
+    kind=digest (page 1 row 1 of rehydrate). mentor=<agent> seeds a NEW body's
+    first digest from that agent's. Returns {id, chars, inputs} -- never the
+    text; rehydrate() reads it. Blocks while the broker's writer works."""
+    # The docstring is terse on purpose (it ships in every schema). The
+    # reasoning: A DIGEST IS A CACHE OF THE HIVE, NEVER A FACT IN IT (23979).
+    # The broker extracts, its script LLM folds, the store verifies every tag
+    # and refuses an invented one -- so no CLI model is in this loop, which is
+    # what the operator asked for, and 12750 holds because the model here is
+    # on the READ side: offline, regenerable, the hive authoritative behind it.
+    p = _acting(ctx.request_context.request)
+    return await asyncio.to_thread(_digest_job, _conn_for_worker(), p, mentor)
 
 
 @tool()
@@ -6002,6 +6183,26 @@ async def activity_http(request):
     return JSONResponse(out)
 
 
+async def digest_http(request):
+    """POST /agent/digest (the AGENT's own bearer token + X-Agent): the Stop
+    hook's fire-and-forget trigger (23979 s6). Answers BEFORE the writer does:
+    {"started": true} when a digest is due and a worker thread is folding it,
+    {"started": false, "why": ...} otherwise. The hook never waits on a model."""
+    p = _acting(request)
+    why = _digest_due(_conn, p)
+    if why:
+        return JSONResponse({"started": False, "why": why})
+    threading.Thread(target=_digest_bg, args=(p,), name="digest", daemon=True).start()
+    return JSONResponse({"started": True}, status_code=202)
+
+
+def _digest_bg(p):
+    try:
+        _digest_job(_conn_for_worker(), p)
+    except Exception as e:                       # a background fold reports, never raises
+        log.warning("%s digest (hook) not written: %s", p.name, e)
+
+
 # ---- DES-012: a visit is a body swap (EPIC-001 #8) -----------------------
 # The bus carries the REQUEST and the DECISION; it never carries the credential
 # (s11.1). The accept answers the secret to the accepting SCREEN once -- from
@@ -6745,6 +6946,7 @@ def build_app():
             Route("/rooms/ownerless", rooms_ownerless_http),
             Route("/rooms/{rid}/owner", room_owner_http, methods=["PATCH"]),
             Route("/agent/activity", activity_http),
+            Route("/agent/digest", digest_http, methods=["POST"]),
             Route("/visits", visits_http, methods=["GET", "POST"]),
             Route("/recalls", recalls_http, methods=["GET", "POST"]),
             Route("/recalls/claim", recall_claim_http, methods=["POST"]),
@@ -6835,7 +7037,7 @@ def _plaintext_banner(url, lan_ok, what):
 
 def main():
     global _conn, _files_dir, _voices_dir, _db_path, _tts_on, _tts_url, _tts_token
-    global _script_on, _script_url, _script_model, _script_token
+    global _script_on, _script_url, _script_model, _script_token, _digest_batch
     global _stt_on, _stt_url, _stt_token, _stt_model, _stt_timeout
     import uvicorn
     _setup_logging()
@@ -6885,6 +7087,11 @@ def main():
             _script_on = True
             _script_url, _script_token = s_url, s_token
             _script_model = os.environ.get("REVEILLE_SCRIPT_MODEL", "")
+            _digest_batch = digest_input_tokens(_writer_context(s_url, s_token),
+                                                os.environ.get("REVEILLE_DIGEST_INPUT_TOKENS", "")
+                                                ) * store.CHARS_PER_TOKEN
+            print(f"digest ON: {_digest_batch // store.CHARS_PER_TOKEN} input tokens per batch",
+                  flush=True)
             first = float(os.environ.get("REVEILLE_SCRIPT_TIMEOUT") or "2.5")   # 11549: measured, see DES-013 s5
             _plaintext_banner(s_url, lan_ok, "the script writer")
             threading.Thread(target=_script_worker, args=(s_url, _script_model, s_token, first),

@@ -770,3 +770,31 @@ It rides the same path as `memory_add(kind="state")`: the handover principal, so
 The result never echoes the note. The operator's grant is a ceiling of 5000 tokens on the whole act, always aiming lower, at high fidelity; a maximal distill is gated under it, and the echo — which would double the cost for nothing the caller did not already have — is gated out.
 
 The Stop hook **never** calls `distill()`. A hook replaying fields the agent gave earlier writes a `next_step` that is stale with full confidence. It may print the age of the last state note — a read — so staleness is visible.
+
+## 16. Amendment — a digest is a cache of the hive, never a fact in it (operator direction 23944–23963 and 24003, architect ruling 23979, 2026-09-19)
+
+Section 15 gave the hive a complete read and a shaped write. Both still cost the agent's own model: `rehydrate()` to `next==""` is the whole hive through the agent's context, and `distill()` is composed by the agent. The operator's direction was to keep the CLI model out of the loop when a large hive is folded for fast rehydration, to keep the last stretch of high activity fresh, and to give a new agent one mentor rather than every agent's memory.
+
+### 16.1 The invariant
+
+A digest is a **cache of the hive, never a fact in it**. Section 4's G4 ("the broker never runs a model") is amended, not repealed: the model here is on the **read side** — offline, regenerable, the hive authoritative behind it — which is the classification 12750 already draws. Structurally: a new kind `digest` (schema v46); `memory_add(kind="digest")` from any client is refused by name; the broker's `digest_store` is the one writer; a digest is never a `source`, never ratified, and supersedes only the prior digest, so exactly one is live per agent and the chain keeps history. `memory_retract` works on it; the next run regenerates. A digest line licenses a `recall()`, never a citation: a body ruling on a digest line recalls the tagged row first.
+
+### 16.2 `digest(mentor="")` — the broker's fold
+
+Extraction is deterministic and the store's: the prior digest with **the store's verdict on every tag it carried** (`KEEP`, or `RETIRED -> the row that replaced it`), every live row the caller may read that arrived since, and the caller's own messages since with the rest of their threads. No `since`, no peak window: folding means nothing is lost between runs. The script LLM (the same endpoint as the voice writer, `REVEILLE_SCRIPT_URL`) folds that into five fixed sections — `RULES / DECISIONS / LESSONS / WORK / OPEN` — at most 5000 tokens. Every line under the first three ends `[kind:id8 date]`, and **the store resolves every tag to a live row the caller may read or refuses the whole digest**; `[msg:N]` under the last two must name a message in the caller's rooms. One retry; a refusal leaves the prior live and never writes a fallback (a-fallback-rendition-must-not-be-cached). The model composes; the store decides truth.
+
+**The writer's context may be smaller than the hive** (operator 24003, ruled 24015). The material is cut, oldest first, into batches sized to the writer's own context — read from its `/v1/models` at boot (`max_model_len`), minus the 5000-token output and the running digest it is shown beside; `REVEILLE_DIGEST_INPUT_TOKENS` overrides; 24000 tokens when the writer does not say — and folded **sequentially**: each call sees the running digest beside one batch and returns the next running digest, verified before the next batch; the last one lands. Nothing drops by size. The one drop is a single row larger than a whole batch, which no call could carry; the header names it by tag. The header is written by the store, never the model: window, rows shown, batches folded, the prior, the writer.
+
+The result is `{id, chars, batches, inputs}` — never the text. `rehydrate()` ranks `digest` first, so page 1 row 1 is the digest; the boot ritual becomes `join()` → `rehydrate()` page 1 → arm, with the rest of the hive behind `next` for reaching back.
+
+### 16.3 A protégé
+
+`digest(mentor="<agent>")` seeds a body that has no digest yet from one agent's: the mentor's live digest as the base, then the rows the mentor authored, the rows that digest cites, and every rule that binds everyone (doctrine and contracts the protégé may read, global lessons). No messages — a new body has said nothing. Same owner or refused by name; the mentor's raw digest is read by the broker and never crosses the wire. `REVEILLE_MENTOR` names the mentor at provisioning.
+
+### 16.4 The Stop hook asks, the broker decides
+
+The hook POSTs `/agent/digest` after each turn, fire-and-forget (a backgrounded 5 s curl, inside its own block, failing open). The broker writes one only when there has been activity since the last and `DIGEST_MIN_INTERVAL` (3600 s) has elapsed, on a worker thread, and answers before the writer does. The swap-pending ritual is unchanged: the five-field `distill()` stays procedural, because the digest is what exists **before** the swap and the window never waits on a model. The hook is a baked agent-image input, so the agent tag moves with it.
+
+### 16.5 Delta from the ruling, named
+
+23979 s3 asked that `trace()` carry the digest's inputs. `trace()` is a message walk; the inputs live in the digest's own header line instead, where every reader of the row sees them without a second call.

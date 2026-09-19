@@ -81,7 +81,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 45
+SCHEMA_VERSION = 46
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -633,7 +633,7 @@ CREATE TABLE IF NOT EXISTS memories (
     id            INTEGER PRIMARY KEY,
     uid           TEXT NOT NULL UNIQUE,
     kind          TEXT NOT NULL CHECK (kind IN
-                    ('doctrine','contract','decision','lesson','state')),
+                    ('doctrine','contract','decision','lesson','state','digest')),
     scope         TEXT NOT NULL,
     -- NO LENGTH CHECK, DELIBERATELY (12759; operator 12754/12756/12758). The
     -- original 1000 was a distillation POLICY wearing a schema constraint's
@@ -2351,10 +2351,38 @@ def _upgrade_v0(conn, db_path):
 # remember to extend, which is what made the v9-v13 arms short of _upgrade_v15 with
 # nothing able to say so. v1 has no entry (it never shipped) and v6 is reachable
 # only from v5's rebuild; the loop steps over a gap by stamping forward one.
+def _upgrade_v45(conn, db_path):
+    """v45 -> v46 (ruled 23979, DES-001 s16): the memories kind CHECK admits
+    'digest' -- the broker-written cache of the hive, one live per agent.
+    SQLite cannot ALTER a CHECK, so this is the v40 table rebuild: snapshot,
+    rename, relay the canonical schema, copy by name, drop, rebuild FTS,
+    verify FKs. Named columns for the same reason v41 gives."""
+    snapshot(conn, f"{db_path}.pre-v46-{time.time_ns()}.bak")
+    with tx(conn):
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute("ALTER TABLE memories RENAME TO memories_old")
+        _exec_script(conn, _MEMORIES_SCHEMA)
+        cols = ("id, uid, kind, scope, fact, entities, source_msg_id, "
+                "author_agent_id, supersedes_id, slug, symptom, root_cause, "
+                "rule, detection, author, status, occurred_ns, created_ns, "
+                "expires_ns")
+        conn.execute(f"INSERT INTO memories({cols}) "
+                     f"SELECT {cols} FROM memories_old")
+        conn.execute("DROP TABLE memories_old")
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, fact, entities, symptom, root_cause, "
+            "rule, detection) SELECT id, fact, entities, symptom, root_cause, "
+            "rule, detection FROM memories")
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise BusError(f"v46 migration left {len(bad)} FK violations")
+        conn.execute("PRAGMA user_version=46")
+
+
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43, 44)}
+              37, 38, 39, 40, 41, 42, 43, 44, 45)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -6516,7 +6544,7 @@ def _orphaned_uploads(conn, name, room_id):
 
 # ---- hive memory (DES-001 S3) --------------------------------------------------
 
-KINDS = ("doctrine", "contract", "decision", "lesson", "state")
+KINDS = ("doctrine", "contract", "decision", "lesson", "state", "digest")
 TIERS = ("state", "write", "ratify")
 STATE_TTL_NS = 30 * 24 * 3600 * 10**9   # Q2 resolved: stale open_tasks mislead
 
@@ -6583,6 +6611,11 @@ def memory_add(conn, *, author, token_id, agent_bound, tier, is_admin, rooms,
     kind='lesson' goes through lesson_add(), never here -- one path per behavior."""
     if kind not in KINDS:
         raise BusError(f"bad kind {kind!r}")
+    if kind == "digest":
+        # A DIGEST IS A CACHE OF THE HIVE, NEVER A FACT IN IT (23979): the
+        # broker writes it from the hive; a client writing one would be a
+        # model's summary entering the store as if it were a source.
+        raise AccessError("kind='digest' is written by the broker only -- call digest()")
     if kind == "lesson":
         raise BusError("lessons go through lesson_add(), which owns their gate")
     if not (fact or "").strip():
@@ -7334,7 +7367,8 @@ def lessons(conn, rooms=(), slug=None, budget=24000):
 # body. recall() is unchanged too, and deliberately not reused here -- it is a
 # RANKED view over a bounded pool (limit*4, capped 200), which is exactly the
 # wrong instrument for "every live row exactly once".
-_REHYDRATE_RANK = {"state": 0, "doctrine": 1, "contract": 2, "decision": 3, "lesson": 4}
+_REHYDRATE_RANK = {"digest": 0, "state": 1, "doctrine": 2, "contract": 3,
+                   "decision": 4, "lesson": 5}
 
 
 def _rehydrate_row(r):
@@ -7347,8 +7381,9 @@ def _rehydrate_row(r):
 
 def rehydrate(conn, *, rooms, token_id, agent_id="", cursor="", budget=24000):
     """Every LIVE row the caller may read, complete, by PAGINATION -- never one
-    payload. Order: own state, doctrine, contracts, decisions, lessons (full
-    record), newest-first within kind. Returns {"items", "next", "total",
+    payload. Order: own digest (23979: page 1 row 1 is the machine digest),
+    own state, doctrine, contracts, decisions, lessons (full record),
+    newest-first within kind. Returns {"items", "next", "total",
     "remaining", "total_chars", "chars"}; loop until `next` is "".
 
     Read scoping is recall()'s invariant verbatim: global OR the caller's rooms
@@ -7369,8 +7404,8 @@ def rehydrate(conn, *, rooms, token_id, agent_id="", cursor="", budget=24000):
     where = ["(m.scope='global' OR m.scope IN (%s))" % _ph(scopes),
              "(m.expires_ns IS NULL OR m.expires_ns > ?)", "m.status='live'"]
     args = list(scopes) + [time.time_ns()]
-    rank = ("CASE m.kind WHEN 'state' THEN 0 WHEN 'doctrine' THEN 1 "
-            "WHEN 'contract' THEN 2 WHEN 'decision' THEN 3 ELSE 4 END")
+    rank = ("CASE m.kind WHEN 'digest' THEN 0 WHEN 'state' THEN 1 WHEN 'doctrine' THEN 2 "
+            "WHEN 'contract' THEN 3 WHEN 'decision' THEN 4 ELSE 5 END")
     if cursor:
         try:
             crank, cns, cid = cursor.split(":")
@@ -7436,6 +7471,293 @@ def distill_compose(**fields):
         if not (fields.get(k) or "").strip():
             raise BusError(f"distill: {k!r} is empty -- all five fields are required")
     return _DISTILL_TEMPLATE.format(**{k: fields[k].strip() for k in DISTILL_FIELDS})
+
+
+# A DIGEST IS A CACHE OF THE HIVE, NEVER A FACT IN IT (ruled 23979, DES-001
+# s16). The broker EXTRACTS deterministically -- the agent's messages and
+# their threads, the hive rows that arrived, the prior digest with a verdict
+# on every tag it carried -- and a script LLM folds that into one bounded
+# note. The model composes; the STORE decides truth: every tag in the output
+# must resolve to a live row here or the whole digest is refused. kind=digest
+# has one writer (digest_store), one live row per agent, and never becomes a
+# source, a ratified fact or a supersede of any other kind.
+DIGEST_MSG_CHARS = 600        # of one message body
+DIGEST_INPUT_TOKENS = 24000   # fallback batch size in TOKENS when the writer's
+                              # context cannot be read at boot (24015); the
+                              # daemon derives the live value from /v1/models
+CHARS_PER_TOKEN = 4           # the fleet's working ratio (12944/13014)
+DIGEST_SECTIONS = ("RULES", "DECISIONS", "LESSONS", "WORK", "OPEN")
+DIGEST_TAGGED = ("RULES", "DECISIONS", "LESSONS")
+_TAG_END = re.compile(r"\[(doctrine|contract|decision|lesson|state|digest):([0-9a-f]{8}) "
+                      r"(\d{4}-\d{2}-\d{2})\]\s*$")
+_TAG_ANY = re.compile(r"\[(doctrine|contract|decision|lesson|state|digest):([0-9a-f]{8}) "
+                      r"\d{4}-\d{2}-\d{2}\]")
+_MSG_TAG = re.compile(r"\[msg:(\d+)\]")
+
+
+def _d8(ns):
+    return time.strftime("%Y-%m-%d", time.gmtime((ns or 0) / 1e9))
+
+
+def _tag(r):
+    return f"[{r['kind']}:{r['uid'][:8]} {_d8(r['created_ns'])}]"
+
+
+def _mem_line(r):
+    if r["kind"] == "lesson":
+        return f"{_tag(r)} {r['slug']}: {r['rule']}"
+    return f"{_tag(r)} {r['fact']}"
+
+
+def _msg_line(m):
+    body = (m["body"] or "").replace("\n", " ")
+    if len(body) > DIGEST_MSG_CHARS:
+        body = body[:DIGEST_MSG_CHARS] + "..."
+    subj = f" {m['subject']} |" if m["subject"] else ""
+    return f"[msg:{m['id']} {_d8(m['ts_ns'])} {m['sender']}->{m['recipient']}]{subj} {body}"
+
+
+def digest_prior(conn, scope):
+    """The one live digest at a scope, or None."""
+    return conn.execute(
+        "SELECT * FROM memories WHERE kind='digest' AND scope=? AND status='live' "
+        "ORDER BY created_ns DESC LIMIT 1", (scope,)).fetchone()
+
+
+def mentor_agent(conn, token_id, name):
+    """The mentor's agent row -- iff it is a live agent of the CALLER'S OWNER
+    (23979 s11: same owner, else refused by name; the raw digest of someone
+    else's agent never leaves the broker)."""
+    own = conn.execute("SELECT owner_id FROM tokens WHERE id=?", (token_id,)).fetchone()
+    rows = conn.execute(
+        "SELECT id, name, owner_id FROM agents WHERE name=? AND retired_ns IS NULL "
+        "AND merged_into IS NULL", (name,)).fetchall()
+    rows = [a for a in rows if own is not None and a["owner_id"] == own["owner_id"]]
+    if not rows:
+        raise AccessError(f"mentor {name!r} not yours")
+    return rows[0]
+
+
+def _readable_live(conn, scopes, since_ns=0, kinds=None):
+    kinds = kinds or [k for k in KINDS if k != "digest"]
+    return conn.execute(
+        f"SELECT * FROM memories WHERE status='live' AND kind IN ({_ph(kinds)}) "
+        f"AND (scope='global' OR scope IN ({_ph(scopes)})) AND created_ns > ? "
+        f"AND (expires_ns IS NULL OR expires_ns > ?) ORDER BY created_ns",
+        list(kinds) + list(scopes) + [since_ns, time.time_ns()]).fetchall()
+
+
+def _rows_for_tags(conn, text, scopes):
+    out, seen = [], set()
+    for kind, id8 in _TAG_ANY.findall(text):
+        for r in conn.execute(
+                f"SELECT * FROM memories WHERE kind=? AND uid LIKE ? AND status='live' "
+                f"AND (scope='global' OR scope IN ({_ph(scopes)}))",
+                [kind, id8 + "%"] + list(scopes)):
+            if r["uid"] not in seen:
+                seen.add(r["uid"])
+                out.append(r)
+    return out
+
+
+def _verdicts(conn, prior_text):
+    """The STORE's ruling on every tag the prior digest carried, so the model
+    rewrites prose under a verdict it did not make: KEEP, RETIRED -> the row
+    that superseded it (with its text), or RETIRED (retracted/expired)."""
+    lines = []
+    for kind, id8 in dict.fromkeys(_TAG_ANY.findall(prior_text)):
+        r = conn.execute("SELECT * FROM memories WHERE kind=? AND uid LIKE ? "
+                         "ORDER BY created_ns DESC LIMIT 1", (kind, id8 + "%")).fetchone()
+        if r is None:
+            lines.append(f"RETIRED {kind}:{id8} (no such row)")
+        elif r["status"] == "live":
+            lines.append(f"KEEP {kind}:{id8}")
+        else:
+            nxt = conn.execute("SELECT * FROM memories WHERE supersedes_id=? AND status='live'",
+                               (r["id"],)).fetchone()
+            if nxt is None:
+                lines.append(f"RETIRED {kind}:{id8} ({r['status']})")
+            else:
+                lines.append(f"RETIRED {kind}:{id8} -> {_mem_line(nxt)}")
+    return lines
+
+
+def _block(heading, lines):
+    return f"== {heading} ==\n" + ("\n".join(lines) if lines else "(none)")
+
+
+def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
+                  batch_chars=DIGEST_INPUT_TOKENS * CHARS_PER_TOKEN):
+    """Deterministic extraction (23979 s2/s8'), cut into BATCHES for a writer
+    whose context is smaller than the hive (operator 24003): the caller folds
+    them in order, each call = the running digest + one batch.
+
+    OWN: `base` = the prior digest + the store's verdict on each of its tags;
+    `batches` = every live row the caller may read that arrived since it and
+    the caller's own messages since it with the rest of their threads, in time
+    order, sliced at batch_chars. First run = since ever.
+    PROTEGE (mentor given): `base` = the mentor's live digest; `batches` = the
+    rows the mentor authored, the rows that digest cites, and every rule that
+    binds everyone (doctrine + contracts the protege may read, global lessons).
+    No messages: a new body has said nothing yet.
+
+    NOTHING DROPS BY SIZE (24015): a run folds as many batches as it takes.
+    The one drop is a SINGLE ROW larger than a whole batch, which no call
+    could carry; `dropped` names each as "kind:id8 (N chars)" for the header.
+    Returns {"base", "batches", "rows", "dropped", "since_ns", "prior",
+    "scope"}."""
+    rooms = list(rooms or [])
+    scope = agent_scope(conn, token_id, agent_id)
+    scopes = rooms + [scope]
+    prior = digest_prior(conn, scope)
+    items, since, base = [], 0, ""          # items: (ns, line), time order
+    if mentor is not None:
+        mprior = digest_prior(conn, f"agent:{mentor['id']}")
+        if mprior is None:
+            raise BusError(f"mentor {mentor['name']!r} has no digest yet -- a protege "
+                           f"inherits a digest, not a history")
+        base = _block("MENTOR DIGEST -- your baseline: inherit it, then fold the rows below",
+                      [mprior["fact"]])
+        authored = conn.execute(
+            f"SELECT * FROM memories WHERE author=? AND status='live' AND kind!='digest' "
+            f"AND (scope='global' OR scope IN ({_ph(rooms)})) ORDER BY created_ns",
+            [mentor["name"]] + rooms).fetchall()
+        binding = conn.execute(
+            f"SELECT * FROM memories WHERE status='live' AND ((kind IN ('doctrine','contract') "
+            f"AND (scope='global' OR scope IN ({_ph(rooms)}))) OR (kind='lesson' AND "
+            f"scope='global')) ORDER BY created_ns", rooms).fetchall()
+        seen = set()
+        for r in list(authored) + _rows_for_tags(conn, mprior["fact"], rooms) + list(binding):
+            if r["uid"] not in seen:
+                seen.add(r["uid"])
+                items.append((r["created_ns"], _mem_line(r)))
+    else:
+        if prior is not None:
+            since = prior["created_ns"]
+            base = (_block("PRIOR DIGEST -- fold it: keep, update, drop; never append",
+                           [prior["fact"]]) + "\n\n" +
+                    _block("THE STORE'S VERDICT ON EVERY TAG ABOVE", _verdicts(conn, prior["fact"])))
+        for r in _readable_live(conn, scopes, since):
+            items.append((r["created_ns"], _mem_line(r)))
+        aid = agent_id or ""
+        mine = [r["thread_id"] for r in conn.execute(
+            f"SELECT DISTINCT thread_id FROM messages WHERE (sender_agent_id=? OR "
+            f"recipient_agent_id=?) AND room IN ({_ph(rooms)}) AND ts_ns > ?",
+            [aid, aid] + rooms + [since])] if rooms and aid else []
+        if mine:
+            for m in conn.execute(
+                    f"SELECT id, thread_id, sender, recipient, subject, body, ts_ns FROM messages "
+                    f"WHERE thread_id IN ({_ph(mine)}) AND room IN ({_ph(rooms)}) AND ts_ns > ? "
+                    f"ORDER BY ts_ns", mine + rooms + [since]):
+                items.append((m["ts_ns"], _msg_line(m)))
+    items.sort(key=lambda t: t[0])
+    total = len(items)
+    # SLICE into batches by chars, in time order; the writer sees one at a time
+    # beside the running digest, so no single call outgrows a small context.
+    batches, cur, size, dropped = [], [], 0, []
+    for ns, line in items:
+        if len(line) > batch_chars:
+            m = _TAG_ANY.match(line)
+            dropped.append(f"{m.group(1)}:{m.group(2)} ({len(line)} chars)" if m
+                           else f"row ({len(line)} chars)")
+            continue
+        if cur and size + len(line) + 1 > batch_chars:
+            batches.append(cur)
+            cur, size = [], 0
+        cur.append((ns, line))
+        size += len(line) + 1
+    if cur:
+        batches.append(cur)
+    label = f"SINCE {_d8(since)}" if since else "SINCE THE BEGINNING"
+    texts = [_block(f"BATCH {i + 1} OF {len(batches)}: HIVE ROWS AND MESSAGES {label}, IN TIME ORDER",
+                    [ln for _, ln in b]) for i, b in enumerate(batches)]
+    return {"base": base, "batches": texts, "rows": total, "dropped": dropped,
+            "since_ns": since, "prior": prior["uid"] if prior else "", "scope": scope}
+
+
+def digest_batch_text(running, base, batch, step, steps):
+    """One writer call's data: the RUNNING digest (the prior's base on the
+    first step, the model's last output after) beside ONE batch. Pure."""
+    if running:
+        head = _block(f"RUNNING DIGEST AFTER STEP {step - 1} OF {steps} -- fold the batch into it",
+                      [running])
+    else:
+        head = base or _block("NO PRIOR DIGEST -- this batch starts one", [])
+    return head + "\n\n" + batch
+
+
+def _section_name(s):
+    return s.strip().strip("#*: ").upper()
+
+
+def digest_verify(conn, text, rooms, scope):
+    """The fidelity check a store can do without a model (23979 s3): the five
+    sections, in order; every line under RULES/DECISIONS/LESSONS ends with a
+    tag that resolves to a LIVE row the caller may read; every [msg:N] under
+    WORK/OPEN names a message in the caller's rooms. Anything else refuses the
+    whole digest -- an invented id is a hallucination wearing a citation."""
+    rooms = list(rooms or [])
+    seen, section = [], None
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if _section_name(s) in DIGEST_SECTIONS:
+            section = _section_name(s)
+            seen.append(section)
+            continue
+        if section is None:
+            raise BusError(f"digest: text before the first section: {s[:80]!r}")
+        if section in DIGEST_TAGGED:
+            m = _TAG_END.search(s)
+            if not m:
+                raise BusError(f"digest: untagged line under {section}: {s[:80]!r}")
+            kind, id8, _ = m.groups()
+            live = conn.execute(
+                f"SELECT 1 FROM memories WHERE kind=? AND uid LIKE ? AND status='live' "
+                f"AND (scope='global' OR scope IN ({_ph(rooms + [scope])}))",
+                [kind, id8 + "%"] + rooms + [scope]).fetchone()
+            if live is None:
+                raise BusError(f"digest: tag [{kind}:{id8}] resolves to no live row")
+        else:
+            for mid in _MSG_TAG.findall(s):
+                if not rooms or not conn.execute(
+                        f"SELECT 1 FROM messages WHERE id=? AND room IN ({_ph(rooms)})",
+                        [int(mid)] + rooms).fetchone():
+                    raise BusError(f"digest: [msg:{mid}] is not a message in your rooms")
+    if seen != list(DIGEST_SECTIONS):
+        raise BusError(f"digest: sections must be exactly {'/'.join(DIGEST_SECTIONS)} in order, "
+                       f"got {'/'.join(seen) or '(none)'}")
+
+
+def digest_header(*, name, inputs, model, batches, mentor=None):
+    """The provenance lines, written by the STORE, never the model (24015):
+    window, rows shown, batches folded, the prior, the writer; a second line
+    for a protege's lineage; a third naming any row too large for a batch."""
+    when = _d8(time.time_ns())
+    since = _d8(inputs["since_ns"]) if inputs["since_ns"] else "the beginning"
+    head = (f"[digest:{name} {when} | since {since} | input: {inputs['rows']} rows, "
+            f"{batches} batches | prior: {inputs['prior'][:8] or 'none'} | "
+            f"writer: {model or 'server default'}]")
+    if mentor is not None:
+        head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
+    if inputs["dropped"]:
+        head += "\n[dropped: " + ", ".join(inputs["dropped"]) + "]"
+    return head
+
+
+def digest_store(conn, *, scope, author, fact):
+    """The ONE writer of kind=digest: lands live at the agent's own scope and
+    supersedes the prior digest, so exactly one is live per agent and the
+    chain keeps history (memory_retract works on it like any row)."""
+    with tx(conn):
+        prior = digest_prior(conn, scope)
+        out = _memory_insert(conn, kind="digest", scope=scope, fact=fact, author=author,
+                             status="live", supersedes_id=prior["id"] if prior else None)
+        if prior is not None:
+            conn.execute("UPDATE memories SET status='superseded' WHERE id=? AND status='live'",
+                         (prior["id"],))
+    return out["uid"]
 
 
 def _displace_lesson_tips(conn, scope, slug, keep_id):
