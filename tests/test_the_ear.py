@@ -216,7 +216,9 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     # a pointer, tap-toggle on touch, 60 s at a time, silence refused before the wire.
     assert "await vRecStart();" in ear and "const r=vRecStop();" in ear, "the shared recorder"
     assert UI.count("function vRecStart(){") == 1 and UI.count("function vRecStop(){") == 1
-    assert "if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}" in ear
+    # 0.2.270: the verdict is decided on LENGTH before SIGNAL (a tap is not a hold)
+    assert "const why=talkVerdict(r);" in ear
+    assert "if(why){$('micState').textContent='';toast(why);return;}" in ear
     assert "if(e.pointerType==='touch'){touchToggle=true;return;}" in ear
     assert "m.setPointerCapture(e.pointerId);talkStart();" in ear
     assert "if(sec>=60){talkStop();return;}" in ear, "the ear takes 60 s at a time"

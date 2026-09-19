@@ -1473,3 +1473,41 @@ def test_nothing_in_the_feed_is_wider_than_the_feed():
     sized = re.findall(r"(?<![-a-z])(?:width|height|left|right|top|bottom|inset|gap|padding|margin):[^;}]*\dpx",
                        mobile.replace("(max-width:640px),(max-height:480px)", ""))
     assert not sized, f"no device pixels in the phone LAYOUT rules (11483 B): {sized}"
+
+
+def test_a_tap_is_not_a_hold_and_never_reads_as_a_missing_microphone():
+    """Operator 23971, with a screenshot: a mouse CLICK on talk is pointerdown
+    and pointerup ~100 ms apart, so the take is empty, its peak is zero, and
+    the silence refusal sent them to check the OS input device -- which was
+    fine. The verdict is decided on LENGTH before SIGNAL, and it is pure, so
+    it is extracted from the served page and run rather than re-implemented.
+    """
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not on PATH -- served-JS gates need it")
+    lines = PAGE.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("const REC_SILENT_MSG="))
+    end = next(i for i in range(start, len(lines)) if lines[i].startswith("function talkVerdict("))
+    src = "\n".join(lines[start:end + 1])
+    prog = src + """
+const tap = talkVerdict({seconds:0.11, peak:0, silent:true});
+if (!tap.includes('HOLD')) throw new Error('a tap must say to hold, got: ' + tap);
+if (tap.includes('no input device')) throw new Error('a tap was blamed on the microphone');
+const dead = talkVerdict({seconds:3.2, peak:0, silent:true});
+if (!dead.includes('no input device')) throw new Error('a held silent take must still name the device, got: ' + dead);
+const ok = talkVerdict({seconds:2.0, peak:0.4, silent:false});
+if (ok !== '') throw new Error('a spoken take was refused: ' + ok);
+console.log('ok');
+"""
+    res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr or res.stdout
+    assert "ok" in res.stdout
+    # The release-before-open race is not pure enough to run here: pointerup
+    # arriving while getUserMedia is still pending found no recorder and
+    # returned, and the mic stayed on until the 60 s cap. The gesture's own
+    # flag decides, and this pins that the re-check sits after the await.
+    body = PAGE[PAGE.index("async function talkStart("):PAGE.index("async function talkResample(")]
+    assert body.index("await vRecStart()") < body.index("if(!talkHeld){talkStop();return;}")

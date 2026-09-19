@@ -6049,6 +6049,16 @@ function vRecStop(){
 }
 const REC_SILENT_MSG='the microphone recorded silence -- no input device or no permission in this '+
  'browser window (check the OS input and the mic permission; a normal Chrome tab works)';
+// A TAP IS NOT A HOLD (operator 23971, screenshot): a mouse click is pointerdown
+// and pointerup a hundred milliseconds apart, so the take is empty, its peak is
+// zero, and the SILENCE refusal above sent the operator to check the OS input
+// device -- which was fine. The verdict is decided on LENGTH first: a take
+// shorter than a spoken syllable was not held, and says so. Pure, so the gate
+// runs it.
+const TALK_MIN_S=0.5;
+const TALK_SHORT_MSG='talk was released after under half a second -- press and HOLD it while you speak '+
+ '(on touch: tap to start, tap again to stop)';
+function talkVerdict(r){return r.seconds<TALK_MIN_S?TALK_SHORT_MSG:r.silent?REC_SILENT_MSG:'';}
 // A canonical 44-byte RIFF/WAVE header + s16le mono -- what the stdlib `wave`
 // on the broker reads and what voice_clip_refusal measures.
 function wavBlob(pcm,rate){
@@ -6085,12 +6095,18 @@ function micWhy(e){
  return 'microphone: '+((e&&e.message)||e);
 }
 let talkBusy=false;
+let talkHeld=false;   // the gesture's own state: set on pointerdown, cleared on release
 async function talkStart(){
  if(vRec||talkBusy)return;
+ talkHeld=true;
  if(typeof listenStop==='function')listenStop();   // one ear at a time: holding talk ends hands-free
  try{vCtxUp();}catch(e){}
  try{await vRecStart();}
  catch(e){toast(micWhy(e));return;}
+ // Released while the device was still opening: pointerup ran talkStop before
+ // vRec existed and it returned on nothing, which left the mic ON until the
+ // 60 s cap. The gesture's own state decides, not the recorder's.
+ if(!talkHeld){talkStop();return;}
  for(const t of vRec.stream.getAudioTracks())t.addEventListener('ended',()=>talkStop());   // a dead mic ends the take
  $('mic').classList.add('on');$('mic').setAttribute('aria-pressed','true');
  const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
@@ -6116,11 +6132,13 @@ async function talkResample(blob,rate){
  return wavBlob(pcm,16000);
 }
 async function talkStop(){
+ talkHeld=false;
  if(!vRec)return;
  const rate=vRec.rate;
  const r=vRecStop();
  $('mic').classList.remove('on');$('mic').setAttribute('aria-pressed','false');
- if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}
+ const why=talkVerdict(r);
+ if(why){$('micState').textContent='';toast(why);return;}   // talkVerdict(): info, not a refusal
  talkBusy=true;$('mic').classList.add('busy');$('micState').textContent='hearing...';
  try{
   let take=r.blob;

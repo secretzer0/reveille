@@ -30,7 +30,9 @@ CLEAR_THEN_TOAST = re.compile(r"\.textContent\s*=\s*''\s*;[\s\S]{0,120}?\btoast\
 # a recording that captured only silence clears the mic's own state line and says
 # so in a toast. It is an INFO path, not a refusal -- nothing is pending, nothing
 # is left half-filled, and there is no dialog to keep words in.
-ALLOWED = ("REC_SILENT_MSG",)
+# talkVerdict() is that same info path with a second sentence (0.2.270: a take
+# released under half a second was not held, and says so) -- one site, two words.
+ALLOWED = ("REC_SILENT_MSG", "talkVerdict")
 
 
 def _hits(text):
