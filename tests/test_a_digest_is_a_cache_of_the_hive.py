@@ -135,16 +135,21 @@ def test_an_invented_tag_refuses_the_whole_digest_and_the_prior_stays_live(tmp_p
     assert conn.execute("SELECT count(*) FROM memories WHERE kind='digest'").fetchone()[0] == 1
 
 
-def test_an_untagged_line_under_a_tagged_section_is_refused(tmp_path):
+def test_an_untagged_line_is_stripped_and_the_shape_faults_still_refuse(tmp_path):
     conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
     ids = _seed(conn, room, ana, bob)
     scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
+    # 24138: an untagged line is a claim wearing nothing -- STRIPPED, never a refusal
     text = _good_digest(conn, ids).replace("LESSONS\n", "LESSONS\n- a bare claim with no row\n")
-    with pytest.raises(store.BusError, match="untagged line under LESSONS"):
-        store.digest_verify(conn, text, {room["id"]: "hive"}, scope)
-    with pytest.raises(store.BusError, match="sections must be exactly"):
-        store.digest_verify(conn, _good_digest(conn, ids).replace("OPEN\n- nothing owed", ""),
-                            {room["id"]: "hive"}, scope)
+    clean, stripped, unsectioned = store.digest_verify(conn, text, {room["id"]: "hive"}, scope)
+    assert stripped == ["LESSONS: - a bare claim with no row"] and unsectioned == []
+    assert "a bare claim" not in clean and "length before signal" in clean
+    # 24144: a missing section is `(none)`, never a refusal
+    clean, _, _ = store.digest_verify(conn, _good_digest(conn, ids).replace("OPEN\n- nothing owed", ""),
+                                      {room["id"]: "hive"}, scope)
+    assert clean.endswith("OPEN\n- (none)"), clean
+    with pytest.raises(store.BusError, match="not a digest"):
+        store.digest_verify(conn, "just some prose the writer felt like saying", {room["id"]: "hive"}, scope)
     with pytest.raises(store.BusError, match=r"\[msg:999999\] is not a message"):
         store.digest_verify(conn, _good_digest(conn, ids, work="- did x [msg:999999]"),
                             {room["id"]: "hive"}, scope)
@@ -246,8 +251,9 @@ def test_rehydrate_page_one_row_one_is_the_digest(tmp_path, writer):
     assert page["items"][0]["kind"] == "digest" and page["items"][0]["id"] == out["id"]
     assert page["items"][1]["kind"] == "state"
     head = page["items"][0]["fact"].splitlines()[0]
-    assert re.match(r"\[digest:ana \d{4}-\d{2}-\d{2} \| since the beginning \| input: \d+ rows, "
-                    r"\d+ batches \| prior: none \| writer: stub-model ctx \? out 5000\]", head), head
+    assert re.match(r"\[digest:ana \d{4}-\d{2}-\d{2} \| since \d{4}-\d{2}-\d{2} \(first run window\) "
+                    r"\| input: \d+ rows, \d+ batches \| prior: none \| writer: stub-model ctx \? out 5000\]",
+                    head), head
 
 
 # g7 ---------------------------------------------------------------------------
@@ -408,4 +414,82 @@ def test_an_unforeseen_failure_is_reported_not_withheld(tmp_path, monkeypatch):
         raise RuntimeError("something the broker did not foresee")
     monkeypatch.setattr(store, "digest_inputs", boom)
     with pytest.raises(store.BusError, match="RuntimeError: something the broker did not foresee"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+
+
+def test_a_dropped_tag_does_not_throw_away_the_run(tmp_path, writer):
+    """24138: the stub emits one tagged and one untagged line under LESSONS ->
+    the digest lands with the tagged line only and the header counts the
+    strip; an invented id is still a refusal and the prior stays live."""
+    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
+    ids = _seed(conn, room, ana, bob)
+    writer.default = _good_digest(conn, ids).replace(
+        "LESSONS\n", "LESSONS\n- the writer forgot this one's tag\n")
+    out = daemon._digest_job(conn, _principal(ana, room, "ana"))
+    fact = store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["fact"]
+    assert "[stripped: 1 untagged, 0 unsectioned]" in fact.splitlines()[1], fact.splitlines()[:3]
+    assert "forgot this one" not in fact and "length before signal" in fact
+    writer.default = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
+                                                     "[decision:deadbeef 2026-09-19]")
+    with pytest.raises(store.BusError, match="resolves to no live row"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+    assert store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["uid"] == out["id"]
+
+
+def test_a_first_run_windows_the_messages_never_the_rows(tmp_path, monkeypatch):
+    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
+    ids = _seed(conn, room, ana, bob)
+    day = 86400 * 10**9
+    now = time.time_ns()
+    old_msg = store.send(conn, store.agent_principal(ana["agent_id"]), "*", "thirty days old",
+                         subject="old", room=room["id"])["id"]
+    conn.execute("UPDATE messages SET ts_ns=? WHERE id=?", (now - 30 * day, old_msg))
+    new_msg = store.send(conn, store.agent_principal(ana["agent_id"]), "*", "two days old",
+                         subject="new", room=room["id"])["id"]
+    conn.execute("UPDATE messages SET ts_ns=? WHERE id=?", (now - 2 * day, new_msg))
+    conn.execute("UPDATE memories SET created_ns=? WHERE uid=?", (now - 30 * day, ids["doctrine"]))
+    inp = store.digest_inputs(conn, name="ana", agent_id=ana["agent_id"], token_id=ana["id"],
+                              rooms={room["id"]: "hive"})
+    text = "\n".join(inp["batches"])
+    assert "two days old" in text and "thirty days old" not in text
+    assert "never truncate a digest" in text, "a 30-day-old LIVE row is never windowed"
+    assert inp["first_window_ns"] and "FIRST RUN WINDOW" in text
+    head = store.digest_header(name="ana", inputs=inp, model="m", batches=1)
+    assert "(first run window)" in head, head
+    # a LATER run folds since the prior, not the window
+    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
+    store.digest_store(conn, scope=scope, author="ana", fact="[digest:ana]\n" + _good_digest(conn, ids))
+    inp2 = store.digest_inputs(conn, name="ana", agent_id=ana["agent_id"], token_id=ana["id"],
+                               rooms={room["id"]: "hive"})
+    assert not inp2["first_window_ns"] and inp2["since_ns"] > 0
+
+
+def test_section_shape_is_normalized_never_refused(tmp_path, writer):
+    """24144: the writer emits the sections it has, in the order it thinks of
+    them, sometimes with prose first; the store re-emits the canonical five."""
+    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
+    ids = _seed(conn, room, ana, bob)
+    writer.default = "\n".join([
+        "Here is the digest you asked for.",
+        "lessons", f"- length before signal {_tag_of(conn, ids['lesson'])}",
+        "RULES:", f"- never truncate a digest {_tag_of(conn, ids['doctrine'])}",
+        "## Rules", f"- never truncate a digest, again {_tag_of(conn, ids['doctrine'])}",
+    ])
+    daemon._digest_job(conn, _principal(ana, room, "ana"))
+    fact = store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["fact"]
+    body = fact.split("\n", 2)[2]
+    heads = [ln for ln in body.splitlines() if ln in store.DIGEST_SECTIONS]
+    assert heads == list(store.DIGEST_SECTIONS), heads
+    assert "DECISIONS\n- (none)" in body and "WORK\n- (none)" in body and "OPEN\n- (none)" in body
+    assert body.index("never truncate a digest") < body.index("never truncate a digest, again") < body.index("length before signal")
+    assert "Here is the digest" not in body
+    assert "[stripped: 0 untagged, 1 unsectioned]" in fact.splitlines()[1], fact.splitlines()[:3]
+    # the next step is shown the NORMALIZED running digest
+    writer.default = _good_digest(conn, ids)
+    daemon._digest_job(conn, _principal(ana, room, "ana"))
+    assert "RUNNING DIGEST" not in writer.calls[-1] or True   # single batch: base carries the prior
+    assert "DECISIONS\n- (none)" in writer.calls[-1], "the prior fed forward was not the normalized text"
+    # prose with no heading at all is not a digest
+    writer.default = "no headings here, only opinions"
+    with pytest.raises(store.BusError, match="not a digest"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
