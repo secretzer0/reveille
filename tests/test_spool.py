@@ -216,7 +216,8 @@ def test_the_watch_backend_is_chosen_per_os_and_kqueue_is_wired(tmp_path, monkey
     poll. Linux CI cannot RUN kqueue (select has no kqueue here, which is
     itself the dispatch test), so the kqueue branch is proven WIRED under a
     fake select: armed with EV_ADD|EV_CLEAR on VNODE writes, wait() drains
-    with the 30s timeout, close() closes both the kq and the dirfd. The
+    with the TICK_S timeout (2 s since 24202: the parent check rides on it),
+    close() closes both the kq and the dirfd. The
     macOS field run stays honestly unverified until a Mac runs a body."""
     from reveille import watch
     real_kqueue_pair = watch._kqueue_pair
@@ -263,8 +264,8 @@ def test_the_watch_backend_is_chosen_per_os_and_kqueue_is_wired(tmp_path, monkey
     monkeypatch.setattr(watch, "_kqueue_pair", lambda p: pair)
     wait, close = watch._arm(str(tmp_path))
     wait()
-    assert calls["control"][-1] == (None, 4, 30), (
-        "wait() drains up to 4 events with the 30s timeout")
+    assert calls["control"][-1] == (None, 4, watch.TICK_S), (
+        "wait() drains up to 4 events with the TICK_S timeout")
     close()
     assert calls["closed"] == ["kq"], "close() closed the kq (dirfd proof below)"
     try:
