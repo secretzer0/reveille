@@ -395,6 +395,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.272",
+     "0.2.272 A REFUSAL IS NOT AN INVITATION TO RETRY (architect 24049, the\nnon-blocking gap named on #306). The hook's digest trigger counted its\ninterval from the last DIGEST, so a body with no digest yet and a writer\nthat refused twice was asked again by every turn's Stop hook -- two times\nK writer calls a turn, until one landed. The interval now also counts from\nthe last ATTEMPT, landed or refused; the MCP verb digest() is unaffected,\nbecause an agent asking by hand is not a hook asking by reflex.\n"),
     ("0.2.271",
      "0.2.271 A DIGEST IS A CACHE OF THE HIVE, NEVER A FACT IN IT (operator direction\n23944-23963, architect ruling 23979). The operator's ask: keep the CLI model\nout of the loop when a LARGE hive is folded for FAST rehydration; keep the\nlast stretch of high activity fresh; give a NEW agent a mentor, not every\nagent's memory.\n\ndigest(mentor=\"\"): the broker EXTRACTS deterministically -- the agent's own\nmessages since its last digest with the rest of their threads, every hive row\nthat arrived, the prior digest with THE STORE'S VERDICT on every tag it carried\n(KEEP / RETIRED -> the row that replaced it) -- and its script LLM folds that\ninto one note: RULES / DECISIONS / LESSONS / WORK / OPEN, at most 5000 tokens.\nEvery line under the first three ends [kind:id8 date], and THE STORE RESOLVES\nEVERY TAG TO A LIVE ROW or refuses the whole digest: the model composes, the\nstore decides truth (12750 holds -- this is the read side, offline and\nregenerable). One retry; a refusal leaves the prior digest live and never a\nfallback. THE WRITER'S CONTEXT MAY BE SMALLER THAN THE HIVE (operator 24003,\nruled 24015): the fold is SEQUENTIAL, never a truncation. The material since\nthe last digest is cut, oldest first, into batches sized to the writer's own\ncontext (read from its /v1/models at boot, minus the 5000-token output and\nthe running digest; REVEILLE_DIGEST_INPUT_TOKENS overrides; 24000 when the\nwriter does not say), and each call sees the running digest beside ONE\nbatch, verified before the next. Nothing drops by size; the one drop is a\nsingle row larger than a whole batch, named by tag in the header. New kind `digest` (schema v46): broker-only\nwriter, one live per agent, supersedes only its prior, never a source and\nnever ratified. Its header carries the provenance: window, rows shown, rows\ndropped and before when, the prior it folds, the writer. rehydrate() serves it as PAGE 1 ROW 1;\nboot is join() -> rehydrate() page 1 -> arm, and the rest of the hive waits\nbehind `next`.\n\nA PROTEGE: digest(mentor=<agent>) for a body with no digest yet -- input is\nthe mentor's digest, the rows the mentor authored, the rows it cites, and the\nrules that bind everyone. Same owner or refused by name; the mentor's raw\nstate never crosses the wire. REVEILLE_MENTOR names it at provisioning.\n\nTHE STOP HOOK ASKS, THE BROKER DECIDES: POST /agent/digest after each turn,\nfire-and-forget with a 5 s curl; the broker writes one only when there has\nbeen activity since the last and DIGEST_MIN_INTERVAL (3600 s) has passed,\nand answers before the writer does. The swap ritual is unchanged -- the\nfive-field distill() stays procedural, because the digest is what exists\nBEFORE the swap and the window never waits on a model. The hook is a baked\ninput, so reveille-agent moves 0.2.42 -> 0.2.43.\n"),
     ("0.2.269",
@@ -1320,6 +1322,9 @@ def digest_prompt(text, protege=False):
 
 _digest_lock = threading.Lock()
 _digest_running = set()          # scopes with a writer call in flight
+_digest_last_try = {}            # scope -> ns of the last attempt, landed or
+                                 # refused (architect 24049): a refusal is not an
+                                 # invitation to retry on every Stop-hook turn
 _digest_batch = store.DIGEST_INPUT_TOKENS * store.CHARS_PER_TOKEN   # chars per batch
 
 
@@ -1413,6 +1418,7 @@ def _digest_job(conn, p, mentor_name=""):
     finally:
         with _digest_lock:
             _digest_running.discard(scope)
+            _digest_last_try[scope] = time.time_ns()
 
 
 def _digest_due(conn, p):
@@ -1423,6 +1429,13 @@ def _digest_due(conn, p):
     with _digest_lock:
         if scope in _digest_running:
             return "a digest is being written for you now"
+        tried = _digest_last_try.get(scope, 0)
+    # THE INTERVAL COUNTS FROM THE LAST TRY, NOT ONLY THE LAST DIGEST (24049):
+    # a body with no digest and a writer refusing twice was otherwise asked
+    # again by every turn's hook -- 2 x K writer calls a turn until one landed.
+    since_try = (time.time_ns() - tried) / 1e9
+    if tried and since_try < DIGEST_MIN_INTERVAL:
+        return f"last digest attempt was {since_try:.0f}s ago; interval is {DIGEST_MIN_INTERVAL}s"
     prior = store.digest_prior(conn, scope)
     if prior is None:
         return ""

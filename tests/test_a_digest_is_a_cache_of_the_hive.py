@@ -296,3 +296,36 @@ def test_a_broker_without_a_writer_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon, "_script_on", False)
     with pytest.raises(store.BusError, match="REVEILLE_SCRIPT_URL is unset"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
+
+
+def test_a_refusal_is_not_an_invitation_to_retry_every_turn(tmp_path, writer, monkeypatch):
+    """Architect 24049: a body with NO digest and a writer that refuses twice
+    must not be re-asked by every Stop-hook turn. The interval counts from
+    the last ATTEMPT, landed or refused."""
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    _seed(conn, room, ana, bob)
+    conn.close()
+    conn = sqlite3.connect(db, timeout=10, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    monkeypatch.setattr(daemon, "_conn", conn)
+    monkeypatch.setattr(daemon, "_db_path", db)
+    monkeypatch.setattr(daemon, "_worker_local", threading.local())
+    monkeypatch.setattr(daemon, "_digest_last_try", {})
+    daemon._oidc_boot({})
+    web = TestClient(daemon.build_app())
+    hdrs = {"authorization": f"Bearer {ana['secret']}", "x-agent": "ana"}
+    writer.default = "not a digest at all"          # refuses every time
+    r = web.post("/agent/digest", headers=hdrs)
+    assert r.status_code == 202, r.text
+    deadline = time.monotonic() + 10
+    while len(writer.calls) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    while daemon._digest_running and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert len(writer.calls) == 2, "one retry, then give up"
+    r2 = web.post("/agent/digest", headers=hdrs)
+    assert r2.status_code == 200 and r2.json()["started"] is False, r2.text
+    assert "attempt" in r2.json()["why"], r2.json()
+    assert len(writer.calls) == 2, "the second turn re-asked the writer"
