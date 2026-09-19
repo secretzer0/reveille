@@ -29,6 +29,12 @@ dev = [
     "pytest-xdist>=3",
     "ruff>=0.6",
     "rope>=1.13",
+    # A TRANSITIVE DEP YOU IMPORT IS YOUR DEP. tests/conftest.py imports httpx
+    # directly and got away with it while mcp 1.x pulled it in; mcp 2 carries
+    # httpx2 only, so the import went red on a runner the moment the lock
+    # stopped carrying it. Declared here rather than ported to httpx2, because
+    # starlette's TestClient is built on httpx and that port is its own subject.
+    "httpx>=0.28",
 ]
 
 [build-system]

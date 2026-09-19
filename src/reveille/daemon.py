@@ -31,6 +31,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import functools
 import hashlib
 import gzip
 import html
@@ -59,6 +60,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -382,7 +384,7 @@ CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED
 
 CHANGES_ENTRIES = (
     ("0.2.265",
-     "0.2.265 THE DAEMON SPEAKS MCP 2 (operator direction: \"I want to make sure we\nare using the LATEST MCP tools\"; ruled 23639, renumbered 23656). A CLEAN\nCUTOVER, not a bound: `\"mcp>=2.2,<3\"`. The `<3` is not a legacy shim -- a MAJOR\narrives by RULING, never by resolve, which is the defect class this closes.\n\nWHAT WAS BROKEN. pyproject carried `\"mcp>=1.2\"` with no upper bound, so\n`uv tool install` and waked's converge -- neither of which reads uv.lock --\ntook mcp 2.2.0 the moment it published, and daemon.py died at import:\n`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. uv.lock pinned\n1.28.1, so the repo venv, CI and `make up` were all green and BLIND to it.\nExposure was the fresh native BROKER install; bodies were never at risk --\ndaemon.py is the only module in src/ that imports mcp, and a body reaches MCP\nover HTTP.\n\nSERVER. `from mcp.server.mcpserver import Context, MCPServer`;\ntransport_security keeps its path. v2 moved stateless_http, json_response and\ntransport_security OFF the constructor ONTO streamable_http_app(), so\n`MCPServer(\"reveille\")` is bare and build_app() carries all three -- and the\nsix-line comment explaining why DNS-rebinding validation is off MOVED WITH\nTHEM, because a reason parked away from its argument is a reason nobody\nreads. `mcp_app.router.lifespan_context` still works under v2 and is KEPT;\nthe guide's `session_manager.run()` form is not needed and was not adopted on\nspeculation. Context is annotation-only here, so v2's message=/data= rename\nand the client_id removal cost nothing.\n\nTHE WEBSOCKET PLANE IS UNTOUCHED, asserted because it is the question a\nreader will have: /wake and /feed are starlette WebSocketRoutes sitting BESIDE\nthe mcp Mount, waked imports websockets and never mcp, and the lifespan was\ndriven under 2.2.0 with both routes still mounted on the way out.\n\nCLIENTS, 11 sites. The symbol rename `streamablehttp_client` ->\n`streamable_http_client` ran through `uv run symbol-rename` (0.2.264) -- and\nWAS NOT ENOUGH, which is the part worth reading. v2's signature is\n`(url, *, http_client=None, terminate_on_close=True)`: `headers=` is GONE and\nit yields a 2-TUPLE where v1 yielded three. A symbol rename cannot see an\narity change, so the call shape was rewritten by a libcst codemod -- including\nthe sites that unpack a LOCAL HELPER wrapping the client (scripts/distill.py\n_client, tests/smoke_ws.py session), which a match on the client's own name\nwould have missed. Each site now builds its own AsyncClient with an EXPLICIT\ntimeout: a bare one carries httpx's 5 s flat deadline, which kills the\nlong-lived GET stream.\n\nAGENT IMAGE 0.2.41 -> 0.2.42. docker/agent-probe is a baked input and it\nspeaks the client API, so the tag moves with it (14469) across all three pin\nsites. Its `--with` spec is the SAME STRING as pyproject's, gated by equality\nrather than by two greps that each look right (6e493fe8).\n"),
+     "0.2.265 THE DAEMON SPEAKS MCP 2 (operator direction: \"I want to make sure we\nare using the LATEST MCP tools\"; ruled 23639, renumbered 23656). A CLEAN\nCUTOVER, not a bound: `\"mcp>=2.2,<3\"`. The `<3` is not a legacy shim -- a MAJOR\narrives by RULING, never by resolve, which is the defect class this closes.\n\nWHAT WAS BROKEN. pyproject carried `\"mcp>=1.2\"` with no upper bound, so\n`uv tool install` and waked's converge -- neither of which reads uv.lock --\ntook mcp 2.2.0 the moment it published, and daemon.py died at import:\n`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. uv.lock pinned\n1.28.1, so the repo venv, CI and `make up` were all green and BLIND to it.\nExposure was the fresh native BROKER install; bodies were never at risk --\ndaemon.py is the only module in src/ that imports mcp, and a body reaches MCP\nover HTTP.\n\nSERVER. `from mcp.server.mcpserver import Context, MCPServer`;\ntransport_security keeps its path. v2 moved stateless_http, json_response and\ntransport_security OFF the constructor ONTO streamable_http_app(), so\n`MCPServer(\"reveille\")` is bare and build_app() carries all three -- and the\nsix-line comment explaining why DNS-rebinding validation is off MOVED WITH\nTHEM, because a reason parked away from its argument is a reason nobody\nreads. `mcp_app.router.lifespan_context` still works under v2 and is KEPT;\nthe guide's `session_manager.run()` form is not needed and was not adopted on\nspeculation. Context is annotation-only here, so v2's message=/data= rename\nand the client_id removal cost nothing.\n\nTHE WEBSOCKET PLANE IS UNTOUCHED, asserted because it is the question a\nreader will have: /wake and /feed are starlette WebSocketRoutes sitting BESIDE\nthe mcp Mount, waked imports websockets and never mcp, and the lifespan was\ndriven under 2.2.0 with both routes still mounted on the way out.\n\nCLIENTS, 11 sites. The symbol rename `streamablehttp_client` ->\n`streamable_http_client` ran through `uv run symbol-rename` (0.2.264) -- and\nWAS NOT ENOUGH, which is the part worth reading. v2's signature is\n`(url, *, http_client=None, terminate_on_close=True)`: `headers=` is GONE and\nit yields a 2-TUPLE where v1 yielded three. A symbol rename cannot see an\narity change, so the call shape was rewritten by a libcst codemod -- including\nthe sites that unpack a LOCAL HELPER wrapping the client (scripts/distill.py\n_client, tests/smoke_ws.py session), which a match on the client's own name\nwould have missed. Each site now builds its own AsyncClient with an EXPLICIT\ntimeout: a bare one carries httpx's 5 s flat deadline, which kills the\nlong-lived GET stream.\n\nTHE REFUSAL CONTRACT NEARLY DIED SILENTLY, and it is the find worth\nreading. mcp 2.x reports ONLY `ToolError` to the caller: anything else\nbecomes `UnexpectedToolError`, whose message is the bare string\n`Error executing tool <name>` with the original text deliberately\nwithheld. The daemon raises store.AccessError / AuthError / BusError /\nValueError and never ToolError, so on the wire EVERY refusal on the bus\ncollapsed to one indistinguishable sentence -- `fact is over 1000 chars`,\n`is it joined?`, the AuthError that names `reveille init` as the remedy,\nall of it gone, with is_error still true. An agent could tell THAT it was\nrefused and never WHY. Nothing in the suite would have noticed, because\nthe suite calls the tools IN PROCESS where the exception is unchanged;\nit took a live v2 client against a scratch broker to see it.\n\n`@tool()` is daemon.py's own decorator over `@mcp.tool()`: it registers a\nwrapper translating those four into ToolError, and RETURNS THE ORIGINAL\nFUNCTION, so the translation exists on the wire and nowhere else. An\nin-process caller still sees store.AuthError, which is what keeps the\nsuite from having to import mcp to assert on a refusal -- the same blast\nradius argument as everything else here. A crash stays a crash: anything\nunlisted is still UnexpectedToolError, logged with its traceback and\nwithheld, which is correct for a genuine bug.\n\nALSO SILENT: v2 renamed the result field to `is_error`. v1's `isError`\nRAISES AttributeError rather than returning False, so a test carried over\nunchanged fails for the wrong reason and invites deleting the assertion.\n\nAGENT IMAGE 0.2.41 -> 0.2.42. docker/agent-probe is a baked input and it\nspeaks the client API, so the tag moves with it (14469) across all three pin\nsites. Its `--with` spec is the SAME STRING as pyproject's, gated by equality\nrather than by two greps that each look right (6e493fe8).\n"),
     ("0.2.264",
      "0.2.264 A RENAME IS A PARSE, NOT A SUBSTITUTION (operator's AST-refactor\nrule, applied to this repo for the first time). The mcp 1.x->2.x cutover\nrenames `streamablehttp_client` across ten files, and the rule binding every\nrepo in the org says a cross-file symbol rename runs through an AST-aware\ntool -- never sed, never a regex with word boundaries, never `text.replace`.\nThis repo had a `.ropeproject/` from July and nothing that used it.\n\n`uv run symbol-rename OLD NEW [--root PATH] [--dry-run]`: a thin wrapper over\n`rope.refactor.rename.Rename` that anchors on the first NAME TOKEN equal to\nOLD and hands rope the offset. rope walks the parsed module graph, so it\nresolves imports, attribute access and annotations rather than matching text.\n\nTOKENIZE, NOT SEARCH, AND THAT IS THE WHOLE POINT. A raw `source.find` with\nword-boundary checks also matches inside COMMENTS and DOCSTRINGS, where rope\ncan resolve nothing -- it returns an EMPTY change set and the tool reports\n\"Renamed X -> Y\" having changed not one file. A cross-file rename that\nsilently no-ops is the exact failure this tool exists to prevent, so the\nanchor must be a real code token and an empty change set is an ERROR.\n\nTHE CANONICAL COPY DOES NOT PARSE, found on arrival and worth recording: the\nversion the org rule names as canonical (oversiteai-roc-api) carries\n`except tokenize.TokenError, IndentationError, SyntaxError:` -- Python 2\ngrammar, `SyntaxError: multiple exception types must be parenthesized`. Both\nguards above it are therefore DEAD CODE that has never run, and the two\nsibling copies (vendor-api, streaming) are the older shape that lacks them.\nOurs is the roc-api version with the one line parenthesized.\n\nNOT UNDER src/reveille/cli/: `reveille.cli` is already a 105 KB MODULE and a\npackage of that name would shadow it, taking `reveille` -- the entry point\nevery body drains its spool with -- down with it. Flat module, caught before\nit was committed and stated here so the next author does not rediscover it.\n\nTHE ANCHOR IS ARBITRARY, SO COMPLETENESS IS CHECKED AFTER THE FACT.\n`project.get_python_files()` promises no order and does not give the same\none twice, and WHICH site anchors decides what rope renames: anchored on a\ndefinition it reaches every reference, anchored on an imported name it can\nrename that module's binding ALONE. That change set is NON-EMPTY, so the\nempty-set backstop cannot see it and a half-renamed tree reports success --\nmeasured on a two-file fixture, which renamed the caller and left the\ndefinition standing. Files are now walked in sorted order so the choice is\nat least reproducible, and after `project.do` the tree is RE-SCANNED for the\nold name as a code token: any survivor is a PARTIAL rename and exits 1.\nGated, and proven non-vacuous by disabling the re-scan -- that test alone\ngoes red.\n\nBUMPED THOUGH IT SHIPS NO SERVER CHANGE. `scripts/publish-images inputs-for\nserver` = docker/Dockerfile.server, src, pyproject.toml, uv.lock; this adds a\nmodule under src/ and a dev dependency, so image-pin-check goes RED without a\nnumber -- measured, exit 1, not argued. A tool that only developers run still\nrides into the server image, and the tag must not name two trees.\n"),
     ("0.2.263",
@@ -929,6 +931,52 @@ def _fire_deferred():
 # build_app(), which is where stateless_http, json_response and transport_security now
 # live along with the reasoning for each.
 mcp = MCPServer("reveille")
+
+
+def tool():
+    """`@mcp.tool()` plus the refusal contract, which v2 would otherwise swallow.
+
+    THE DEFECT THIS EXISTS FOR, measured on the cutover: mcp 2.x reports only
+    `ToolError` to the caller. Anything else becomes `UnexpectedToolError`,
+    whose message is the bare string `Error executing tool <name>` -- the
+    original text is deliberately withheld from the client. Under v1 the
+    exception's message rode back in `content`, and the whole fleet reads
+    refusals that way: `fact is over 1000 chars`, `is it joined?`, the AccessError
+    naming the remedy. Without this wrapper every refusal on the bus becomes
+    one indistinguishable sentence, and an agent cannot tell "your fact is too
+    long" from "you are not in that room".
+
+    So reveille's ANTICIPATED failures are translated at the one boundary where
+    mcp is already imported. store.py stays mcp-free, which is what keeps the
+    blast radius of the next SDK major to this module alone
+    (test_the_websocket_plane_is_not_served_by_mcp asserts exactly that).
+
+    A crash stays a crash: anything not listed here still becomes
+    UnexpectedToolError, logged with its traceback and withheld from the
+    caller, which is the behaviour we want for a genuine bug.
+
+    THE TRANSLATION IS ON THE WIRE ONLY, and that is deliberate. mcp registers
+    the WRAPPER, but the module keeps the ORIGINAL function under its own name,
+    so an in-process caller -- every test that does
+    `pytest.raises(store.AuthError): asyncio.run(daemon.join(ctx))` -- still
+    sees reveille's own exception type. Returning the wrapper instead would
+    convert those to ToolError and force the whole suite to import mcp to
+    assert on a refusal, which is the blast radius this module exists to hold.
+    """
+    anticipated = (store.AccessError, store.AuthError, store.BusError, ValueError)
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except anticipated as exc:
+                raise ToolError(str(exc)) from exc
+
+        mcp.tool()(wrapper)
+        return fn
+
+    return deco
 
 
 def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=None,
@@ -2794,7 +2842,7 @@ def _seen(principal, name, rooms, token_id=None):
 
 # ---- MCP tools (async -> run on the loop thread, so one sqlite conn is safe) ----
 
-@mcp.tool()
+@tool()
 async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "",
                ctx: Context = None) -> dict:
     """Join the bus, telling it where you reach the broker (`url`, e.g.
@@ -2875,7 +2923,7 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
             "doctrine": BUS_DOCTRINE}
 
 
-@mcp.tool()
+@tool()
 async def rooms(ctx: Context = None) -> dict:
     """The rooms your token can reach, as {"rooms": [{id, name}]}. This is discovery:
     no room name is ever in your env -- the broker maps your token to them."""
@@ -2883,7 +2931,7 @@ async def rooms(ctx: Context = None) -> dict:
     return {"rooms": [{"id": r, "name": n} for r, n in p.rooms.items()]}
 
 
-@mcp.tool()
+@tool()
 async def lessons(slug: str = "", budget: int = 24000, ctx: Context = None) -> str:
     """Distilled defect post-mortems: every GLOBAL lesson plus any scoped to your rooms,
     newest first. Read these at boot -- they are rules the fleet already paid for.
@@ -2909,7 +2957,7 @@ async def lessons(slug: str = "", budget: int = 24000, ctx: Context = None) -> s
         store.lessons(_conn, p.rooms, slug=slug or None, budget=budget))
 
 
-@mcp.tool()
+@tool()
 async def lesson_add(slug: str, symptom: str, root_cause: str, rule: str,
                      detection: str, room: str = "", ctx: Context = None) -> dict:
     """Record ONE lesson when a defect taught something. Not a confessional, not a
@@ -2955,7 +3003,7 @@ def _mem_ctx(p):
     return bool(tok["agent_id"]), tok["mem_tier"], False, owned
 
 
-@mcp.tool()
+@tool()
 async def memory_add(fact: str, kind: str, scope: str = "", entities: str = "",
                      source: int = 0, supersedes: str = "", occurred: str = "",
                      ctx: Context = None) -> dict:
@@ -2987,7 +3035,7 @@ async def memory_add(fact: str, kind: str, scope: str = "", entities: str = "",
     return out
 
 
-@mcp.tool()
+@tool()
 async def recall(query: str = "", kind: str = "", scope: str = "", entity: str = "",
                  author: str = "", since: str = "", until: str = "",
                  status: str = "live", limit: int = 10, explain: bool = False,
@@ -3010,7 +3058,7 @@ async def recall(query: str = "", kind: str = "", scope: str = "", entity: str =
         until_ns=_when_ns(until), status=status, limit=limit, explain=explain)
 
 
-@mcp.tool()
+@tool()
 async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> str:
     """The onboarding pack (DES-001): lessons, doctrine (ranked by entity overlap
     with your role string), live contracts, decisions, your own saved state, and a
@@ -3033,7 +3081,7 @@ async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> str
     return store.rendered(out)
 
 
-@mcp.tool()
+@tool()
 async def memory_retract(id: str, reason: str = "", ctx: Context = None) -> dict:
     """Mark a memory retracted (fact dead, record stays -- add-only store). Author or
     admin only. The reason goes to the broker log, not the row."""
@@ -3044,7 +3092,7 @@ async def memory_retract(id: str, reason: str = "", ctx: Context = None) -> dict
     return out
 
 
-@mcp.tool()
+@tool()
 async def ratify(id: str, ctx: Context = None) -> dict:
     """draft -> live. Per (token, room): effective only in rooms your token's owner
     OWNS; scope='global' requires an instance admin. Going live also completes any
@@ -3057,7 +3105,7 @@ async def ratify(id: str, ctx: Context = None) -> dict:
     return out
 
 
-@mcp.tool()
+@tool()
 async def reject(id: str, reason: str, ctx: Context = None) -> dict:
     """draft -> rejected, with a REQUIRED reason (14.2): declining a draft is a
     real outcome, distinct from leaving it queued -- draft rot is diagnosable
@@ -3072,7 +3120,7 @@ async def reject(id: str, reason: str, ctx: Context = None) -> dict:
     return out
 
 
-@mcp.tool()
+@tool()
 async def whoami(ctx: Context = None) -> dict:
     """Who you are on this session, and what to call the person you work for:
     {name, owner, owner_moniker}. owner_moniker is the RESOLVED address
@@ -3228,7 +3276,7 @@ def _usage_text(since="", budget=24000):
     return compose(0, 35)
 
 
-@mcp.tool()
+@tool()
 async def usage(since: str = "", budget: int = 24000, ctx: Context = None) -> str:
     """How to attach to the bus and stay reachable (identity, token, join/inbox/send,
     wake, and the exit-144 sandbox fallback), plus CHANGES: what each broker version
@@ -3243,7 +3291,7 @@ async def usage(since: str = "", budget: int = 24000, ctx: Context = None) -> st
     return _usage_text(since=since, budget=budget)
 
 
-@mcp.tool()
+@tool()
 async def info(ctx: Context = None) -> str:
     """Reveille status banner: tool version, your bus name, and whether your wake waiter
     is attached right now. Call it on boot to confirm the bus works end to end."""
@@ -3274,7 +3322,7 @@ def _parent_room(reply_to):
     return r["room"]
 
 
-@mcp.tool()
+@tool()
 async def send(to: str, body: str, subject: str = "",
                reply_to: int | list[int] | None = None,
                attachments: list | None = None, room: str = "",
@@ -3346,7 +3394,7 @@ async def send(to: str, body: str, subject: str = "",
             "rung": rung}
 
 
-@mcp.tool()
+@tool()
 async def inbox(ctx: Context = None) -> dict:
     """Your unread messages (direct + broadcast) across ALL your rooms, oldest first,
     as {"messages": [...]}. Each carries `room`/`room_name` -- reply in the room it
@@ -3365,7 +3413,7 @@ async def inbox(ctx: Context = None) -> dict:
     return {"messages": msgs}
 
 
-@mcp.tool()
+@tool()
 async def ack(message_ids: list[int], ctx: Context = None) -> dict:
     """Mark messages read so they leave your inbox. Idempotent. Ids outside your rooms
     or not addressed to you are ignored, not fatal -- an ack is a batch and one stale
@@ -3377,7 +3425,7 @@ async def ack(message_ids: list[int], ctx: Context = None) -> dict:
     return out
 
 
-@mcp.tool()
+@tool()
 async def upload(name: str, data_b64: str, room: str = "",
                  ctx: Context = None) -> dict:
     """Attach a SMALL TEXT-SIZED file to the bus: base64 its bytes, pass the real
@@ -3427,14 +3475,14 @@ async def upload(name: str, data_b64: str, room: str = "",
     return _finish_upload(p, rid, await run_in_threadpool(_convert_upload, fname, data), "mcp")
 
 
-@mcp.tool()
+@tool()
 async def thread(thread_id: int, ctx: Context = None) -> dict:
     """Every message in a thread, oldest first, as {"messages": [...]}. Linear view."""
     p = _me(ctx.request_context.request)
     return {"messages": store.thread(_conn, thread_id, p.rooms)}
 
 
-@mcp.tool()
+@tool()
 async def trace(message_id: int, ctx: Context = None) -> dict:
     """Track back how we got to a message: its ancestor sub-DAG as
     {"messages": [...], "edges": [[parent, child], ...]}, forks and re-links included."""
@@ -3442,7 +3490,7 @@ async def trace(message_id: int, ctx: Context = None) -> dict:
     return store.trace(_conn, message_id, p.rooms)
 
 
-@mcp.tool()
+@tool()
 async def graph(thread_id: int, ctx: Context = None) -> dict:
     """The whole web of a thread as {"messages": [...], "edges": [[parent, child], ...]}."""
     p = _me(ctx.request_context.request)
@@ -3473,7 +3521,7 @@ def _when_ns(spec: str):
     return int(dt.timestamp() * 1_000_000_000)
 
 
-@mcp.tool()
+@tool()
 async def history(keywords: str = "", since: str = "", until: str = "",
                   with_agent: str = "", mine: bool = False,
                   thread_id: int = 0, limit: int = 200, entity: str = "",
@@ -3514,7 +3562,7 @@ async def history(keywords: str = "", since: str = "", until: str = "",
     return {"messages": msgs, "count": len(msgs)}
 
 
-@mcp.tool()
+@tool()
 async def presence(ctx: Context = None) -> dict:
     """Everyone across your rooms as {"agents": [...]} -- each with its url, room,
     live (recent heartbeat), and connected (reachable in real time right now: a wake.py
@@ -3538,7 +3586,7 @@ async def presence(ctx: Context = None) -> dict:
     return {"agents": agents}
 
 
-@mcp.tool()
+@tool()
 async def leave(room: str = "", ctx: Context = None) -> str:
     """Sign off the bus for this session -- every room by default, or just one with
     room=. Membership only: your messages stay, because authorship is history."""

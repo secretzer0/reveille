@@ -6,11 +6,14 @@ The defect this closes was invisible to every gate we owned: uv.lock pinned
 A gate that reads the LOCKED tree therefore proves nothing about it.
 """
 
+import asyncio
 import re
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+from scratch import scratch_broker
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -158,3 +161,64 @@ def test_run_module_is_importable_by_the_console_script():
         capture_output=True, text=True, cwd=str(ROOT / "src"),
     )
     assert ran.returncode == 0, ran.stderr
+
+
+def test_a_refusal_still_reaches_the_caller_as_an_error_result():
+    """The wire contract every agent reads refusals through.
+
+    NOTE the v2 SPELLING: the field is `is_error`, not v1's `isError`. The
+    rename is silent -- `res.isError` raises AttributeError rather than
+    returning False -- so a test carried over unchanged fails for the wrong
+    reason and can be "fixed" by deleting the assertion.
+
+    v2 changed how MCPError travels (JSON-RPC error rather than a result), but
+    the daemon raises store.AccessError / BusError / ValueError and never
+    MCPError, so refusals must still arrive as `CallToolResult(isError=True)`
+    with the reason readable in the content. If that regressed, every refusal
+    in the fleet would become a transport-level exception and agents would
+    stop being able to READ why they were refused -- a silent, total change to
+    how the bus says no.
+
+    THIS RUNS UNDER pytest ON PURPOSE. The eight *_gate.py files that exercise
+    the v2 client are Makefile targets; `pytest --collect-only` finds none of
+    them and CI runs only `uv run pytest tests/ -q`. So this is the one place
+    the v2 client call shape is actually exercised by CI.
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from reveille import store
+
+    with scratch_broker() as b:
+        conn = store.connect(b.db)
+        u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
+        room = store.create_room(conn, u["id"], "gate")
+        tok = store.create_token(conn, u["id"], "ana", agent_name="ana", create=True)
+        store.assign_room(conn, tok["id"], room["id"], u["id"])
+        conn.close()
+
+        import httpx2
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async def call(tool, args):
+            hdrs = {"Authorization": f"Bearer {tok['secret']}", "X-Agent": "ana"}
+            async with streamable_http_client(
+                    f"{b.base}/mcp",
+                    http_client=httpx2.AsyncClient(
+                        headers=hdrs,
+                        timeout=httpx2.Timeout(30, read=300))) as (r_, w_):
+                async with ClientSession(r_, w_) as s:
+                    await s.initialize()
+                    return await s.call_tool(tool, args)
+
+        # join first, so the refusal under test is the LENGTH one and not an
+        # unjoined-agent refusal wearing the same shape.
+        asyncio.run(call("join", {"url": b.base}))
+
+        res = asyncio.run(call("memory_add", {"fact": "x" * 1001, "kind": "decision"}))
+
+        assert res.is_error, (
+            "a refused tool call came back as a SUCCESS result -- agents read "
+            "refusals off isError, so this makes every refusal invisible")
+        text = " ".join(c.text for c in res.content if getattr(c, "text", None))
+        assert "fact is over 1000 chars" in text, (
+            f"the refusal reached the caller but its REASON did not: {text!r}")
