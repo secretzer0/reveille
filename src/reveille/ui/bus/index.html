@@ -6045,10 +6045,27 @@ function vRecStop(){
  // (operator, eval box: three takes at -91 dBFS -- a browser with no real
  // input device records zeros and looks like it worked). -40 dBFS peak is
  // far below any spoken word at any gain.
- return {blob:wavBlob(pcm,r.rate),seconds:n/r.rate,peak:r.peak,silent:r.peak<0.01};
+ return {blob:wavBlob(pcm,r.rate),seconds:n/r.rate,peak:r.peak};
 }
+// ---- REC-PURE-BEGIN: WHICH WORD A REFUSED TAKE GETS (ruled 23980) ----------
+// A TAP on talk is a take of ~0 s, and a take of ~0 s has peak ~0 for a reason
+// that is not the microphone -- so the silence sentence named a device or a
+// permission fault the operator did not have (operator 23971, screenshot).
+// DURATION DECIDES BEFORE PEAK. One ordered predicate, one sentence per branch,
+// and the two are never merged into one sentence. The -40 dBFS floor stands
+// where it was measured (11124); this changes the WORD, never the floor.
+const REC_MIN_S=0.5;
+const REC_SILENT_PEAK=0.01;
+const REC_SHORT_MSG='held too briefly -- hold talk while you speak (tap to start/stop on a phone)';
 const REC_SILENT_MSG='the microphone recorded silence -- no input device or no permission in this '+
  'browser window (check the OS input and the mic permission; a normal Chrome tab works)';
+function recRefusal(r){
+ if(!r)return '';
+ if(r.seconds<REC_MIN_S)return REC_SHORT_MSG;
+ if(r.peak<REC_SILENT_PEAK)return REC_SILENT_MSG;
+ return '';
+}
+// ---- REC-PURE-END ---------------------------------------------------------
 // A canonical 44-byte RIFF/WAVE header + s16le mono -- what the stdlib `wave`
 // on the broker reads and what voice_clip_refusal measures.
 function wavBlob(pcm,rate){
@@ -6085,12 +6102,17 @@ function micWhy(e){
  return 'microphone: '+((e&&e.message)||e);
 }
 let talkBusy=false;
+let talkHeld=false;
 async function talkStart(){
  if(vRec||talkBusy)return;
+ talkHeld=true;
  if(typeof listenStop==='function')listenStop();   // one ear at a time: holding talk ends hands-free
  try{vCtxUp();}catch(e){}
  try{await vRecStart();}
- catch(e){toast(micWhy(e));return;}
+ catch(e){talkHeld=false;toast(micWhy(e));return;}
+ // THE HOLD MAY HAVE ENDED WHILE THE MIC WAS OPENING: pointerup ran talkStop()
+ // when there was no vRec to stop. Without this the mic stays on to the 60 s cap.
+ if(!talkHeld){talkStop();return;}
  for(const t of vRec.stream.getAudioTracks())t.addEventListener('ended',()=>talkStop());   // a dead mic ends the take
  $('mic').classList.add('on');$('mic').setAttribute('aria-pressed','true');
  const tick=()=>{if(!vRec)return;const sec=(performance.now()-vRec.t0)/1000;
@@ -6116,11 +6138,14 @@ async function talkResample(blob,rate){
  return wavBlob(pcm,16000);
 }
 async function talkStop(){
+ talkHeld=false;
  if(!vRec)return;
  const rate=vRec.rate;
  const r=vRecStop();
  $('mic').classList.remove('on');$('mic').setAttribute('aria-pressed','false');
- if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}
+ const refused=recRefusal(r);
+ if(refused){$('micState').textContent='';toast(refused);   // REC_SILENT_MSG or REC_SHORT_MSG
+  return;}
  talkBusy=true;$('mic').classList.add('busy');$('micState').textContent='hearing...';
  try{
   let take=r.blob;
@@ -6621,7 +6646,9 @@ async function openVoices(){
   $(pre+'Rec').onclick=async()=>{
    const b=$(pre+'Rec');
    if(vRec){const r=vRecStop();b.textContent='record';
-    if(r.silent){st.file=null;$(pre+'Name').textContent='silent take, discarded';toast(REC_SILENT_MSG);return;}
+    const refused=recRefusal(r);
+    if(refused){st.file=null;toast(refused);
+     $(pre+'Name').textContent=refused===REC_SHORT_MSG?'too brief, discarded':'silent take, discarded';return;}
     st.file=r.blob;
     $(pre+'Name').textContent='recorded '+r.seconds.toFixed(1)+' s'+
      (r.seconds<5?' -- too short, the synthesizer needs 5':r.seconds>30?' -- too long, 30 max':'');

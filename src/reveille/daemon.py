@@ -395,6 +395,37 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.276",
+     """0.2.276 A TAP ON TALK IS NOT A BROKEN MICROPHONE (operator screenshot,
+ruled 23980). The page classified every take by its peak alone, so a tap --
+a take of about a tenth of a second -- came back silent and the toast said
+"the microphone recorded silence -- no input device or no permission in this
+browser window". That sentence named a device or permission fault the operator
+did not have. He simply had not held the button: the predicate that fired and
+the word that was printed described different worlds.
+
+THE FIX IS AN ORDER, NOT A NEW MESSAGE. One pure predicate, `recRefusal(r)`,
+fenced REC-PURE-BEGIN/END in the served page and extracted verbatim by its
+node gate: under REC_MIN_S (0.5 s) the take was too brief to be speech
+whatever its peak, and the refusal says so and says what to do instead; at or
+over it the -40 dBFS floor measured in 11124 still decides and its sentence is
+untouched. The two sentences are never merged -- a person who tapped and a
+person whose microphone is dead need different next moves. Both recorders,
+push-to-talk and the voice-bank take, ask the one predicate; the `silent` flag
+vRecStop used to publish is gone, so there is no second place to classify.
+
+A SECOND DEFECT UNDER IT (found by devops in 39aec55, whose branch this
+borrows the fix from): a pointerup can land while getUserMedia is still
+opening. talkStop() found no recorder, returned, and vRecStart() then opened
+the microphone anyway -- which ran to the 60 s cap in a tab that looked idle.
+The hold is now state rather than a recorder: talkStart records it before it
+asks for the microphone, talkStop clears it before its own early return, and
+talkStart re-reads it after the await.
+
+WHAT THE GATES CANNOT SEE: there is no browser in CI, so the toast, the
+pointer capture and what a phone does with a tap are the operator's field
+proof -- tap talk, read the new sentence.
+"""),
     ("0.2.275",
      "0.2.275 THE CONNECTION IS MADE WHERE IT IS USED (field defect, the first\nlive digest() on 0.2.273). The verb evaluated _conn_for_worker() on the\nevent-loop thread and handed that connection to the pool thread the job\nran on; sqlite refused it -- `SQLite objects created in a thread can only be\nused in that same thread` -- and the tool wrapper withheld the text, so the\ncaller saw `Error executing tool digest` for the second time in an hour,\nfor a second reason. The gates had called _digest_job directly and never\ncrossed the verb's threading seam. Now the job resolves its own connection\ninside the thread, a gate drives the VERB and asserts the connection is\nmade on the thread that uses it (red on the unfixed head), and any failure\nthe job did not foresee is reported with its class and message instead of\nwithheld. 0.2.274 is red-shirt's (#308).\n"),
     ("0.2.273",
