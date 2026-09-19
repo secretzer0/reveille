@@ -23,7 +23,8 @@ import os
 import sys
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+import httpx2
+from mcp.client.streamable_http import streamable_http_client
 
 MARKERS = ("BINDING", "RATIFIED", "RULING", "ACCEPTED", "FIXED", "MERGED")
 
@@ -43,8 +44,11 @@ def _client():
     url = os.environ.get("REVEILLE_URL", "http://127.0.0.1:8765") + "/mcp"
     name = os.environ["REVEILLE_AGENT_ROLE"]
     token = os.environ["REVEILLE_TOKEN"]
-    return streamablehttp_client(
-        url, headers={"X-Agent": name, "Authorization": f"Bearer {token}"})
+    return streamable_http_client(
+        url,
+        http_client=httpx2.AsyncClient(
+            headers={"X-Agent": name, "Authorization": f"Bearer {token}"},
+            timeout=httpx2.Timeout(30, read=300)))
 
 
 def _data(res):
@@ -69,7 +73,7 @@ async def _cited(s):
 
 
 async def candidates():
-    async with _client() as (r, w, _), ClientSession(r, w) as s:
+    async with _client() as (r, w), ClientSession(r, w) as s:
         await s.initialize()
         cited = await _cited(s)
         hits = []
@@ -98,7 +102,7 @@ async def seed(path):
         missing = {"fact", "kind"} - set(sd)
         if missing:
             raise SystemExit(f"seed {i} missing {sorted(missing)}: {sd}")
-    async with _client() as (r, w, _), ClientSession(r, w) as s:
+    async with _client() as (r, w), ClientSession(r, w) as s:
         await s.initialize()
         for sd in seeds:
             out = _data(await s.call_tool("memory_add", sd))

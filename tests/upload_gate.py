@@ -15,6 +15,7 @@ what the client receives, not what the code reads like:
    own origin -- the one holding the session cookie -- which made any attachment
    stored XSS. Reading the code is not the gate; the response header is.
 """
+import httpx2
 import base64
 import contextlib
 import json
@@ -173,11 +174,15 @@ def main():
         import asyncio
 
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client.streamable_http import streamable_http_client
 
         async def via_mcp():
             hdrs_ = {"Authorization": f"Bearer {secret}", "X-Agent": "ana"}
-            async with streamablehttp_client(f"{base}/mcp", headers=hdrs_) as (r_, w_, _):
+            async with streamable_http_client(
+                    f"{base}/mcp",
+                    http_client=httpx2.AsyncClient(
+                        headers=hdrs_,
+                        timeout=httpx2.Timeout(30, read=300))) as (r_, w_):
                 async with ClientSession(r_, w_) as s:
                     await s.initialize()
                     ok = await s.call_tool("upload", {

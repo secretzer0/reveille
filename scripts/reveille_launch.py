@@ -125,7 +125,7 @@ DEFAULT_BROKER = os.environ.get("REVEILLE_LAUNCH_BROKER", "http://reveille-serve
 DEFAULT_HEALTH = os.environ.get("REVEILLE_LAUNCH_HEALTH", "http://127.0.0.1:8765")
 DEFAULT_NETWORK = os.environ.get("REVEILLE_LAUNCH_NETWORK", "reveille")
 DEFAULT_IMAGE = os.environ.get("REVEILLE_AGENT_IMAGE",
-                               "ghcr.io/secretzer0/reveille-agent:0.2.41")
+                               "ghcr.io/secretzer0/reveille-agent:0.2.42")
 # The image's agent uid/gid (docker/Dockerfile ARG UID default -- keep in
 # lockstep; a future image change is one grep for AGENT_UID). Bind-mounted
 # homes must belong to THIS uid, not to whoever ran the launcher: the two

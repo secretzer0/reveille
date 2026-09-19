@@ -18,6 +18,7 @@ Proven here over the real MCP surface, in the order it happens for real:
   4. It is visible again, addressable again, and the mail sent while it was gone
      is still UNREAD (a re-join would have eaten it).
 """
+import httpx2
 import asyncio
 import contextlib
 import json
@@ -101,11 +102,15 @@ def main():
         assert wait_health(port)
 
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client.streamable_http import streamable_http_client
 
         async def call(tool, args=None):
             hdrs = {"Authorization": f"Bearer {tok['secret']}", "X-Agent": ROLE}
-            async with streamablehttp_client(f"{base}/mcp", headers=hdrs) as (r_, w_, _):
+            async with streamable_http_client(
+                    f"{base}/mcp",
+                    http_client=httpx2.AsyncClient(
+                        headers=hdrs,
+                        timeout=httpx2.Timeout(30, read=300))) as (r_, w_):
                 async with ClientSession(r_, w_) as s:
                     await s.initialize()
                     res = await s.call_tool(tool, args or {})

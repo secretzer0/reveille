@@ -25,7 +25,8 @@ import urllib.request
 
 import websockets
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+import httpx2
+from mcp.client.streamable_http import streamable_http_client
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import __version__, store  # noqa: E402
@@ -57,15 +58,19 @@ def data(result):
 
 def session(port, name, token):
     url = f"http://127.0.0.1:{port}/mcp"
-    return streamablehttp_client(url, headers={"X-Agent": name,
-                                               "Authorization": f"Bearer {token}"})
+    return streamable_http_client(
+        url,
+        http_client=httpx2.AsyncClient(
+            headers={"X-Agent": name,
+                     "Authorization": f"Bearer {token}"},
+            timeout=httpx2.Timeout(30, read=300)))
 
 
 async def run(port, secrets):
     base = f"http://127.0.0.1:{port}"
-    async with session(port, "alice", secrets["alice"]) as (ra, wa, _a), \
+    async with session(port, "alice", secrets["alice"]) as (ra, wa), \
                ClientSession(ra, wa) as alice, \
-               session(port, "bob", secrets["bob"]) as (rb, wb, _b), \
+               session(port, "bob", secrets["bob"]) as (rb, wb), \
                ClientSession(rb, wb) as bob:
         await alice.initialize()
         await bob.initialize()
@@ -178,7 +183,7 @@ async def check_auth(port, token):
 
     # MCP tool layer -> a JSON-RPC transport answers 200 and carries the failure in the
     # result, so the assertion is on isError, not on the status code.
-    async with session(port, "alice", "WRONG") as (r, w, _c), ClientSession(r, w) as bad:
+    async with session(port, "alice", "WRONG") as (r, w), ClientSession(r, w) as bad:
         await bad.initialize()
         res = await bad.call_tool("inbox", {})
         assert res.isError and "bad token" in res.content[0].text.lower(), res
@@ -186,7 +191,7 @@ async def check_auth(port, token):
     # Binding (0.2.7): alice's token IS alice. Presenting it as bob must fail in each
     # surface's own idiom -- MCP isError, WS name_mismatch frame -- and both reasons
     # must be DISTINGUISHABLE from a dead credential.
-    async with session(port, "bob", token) as (r2, w2, _d), ClientSession(r2, w2) as forged:
+    async with session(port, "bob", token) as (r2, w2), ClientSession(r2, w2) as forged:
         await forged.initialize()
         res = await forged.call_tool("inbox", {})
         assert res.isError and "bound" in res.content[0].text.lower(), res

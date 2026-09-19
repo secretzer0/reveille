@@ -34,7 +34,8 @@ import time
 import urllib.request
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+import httpx2
+from mcp.client.streamable_http import streamable_http_client
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import spool, store  # noqa: E402
@@ -65,9 +66,12 @@ def wait_health(port, timeout=30):
 
 async def _mcp(port, name, token, calls):
     url = f"http://127.0.0.1:{port}/mcp"
-    async with streamablehttp_client(
-            url, headers={"X-Agent": name,
-                          "Authorization": f"Bearer {token}"}) as (r, w, _):
+    async with streamable_http_client(
+            url,
+            http_client=httpx2.AsyncClient(
+                headers={"X-Agent": name,
+                         "Authorization": f"Bearer {token}"},
+                timeout=httpx2.Timeout(30, read=300))) as (r, w):
         async with ClientSession(r, w) as s:
             await s.initialize()
             out = []

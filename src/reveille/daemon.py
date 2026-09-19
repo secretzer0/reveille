@@ -58,7 +58,7 @@ import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
@@ -381,6 +381,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.265",
+     "0.2.265 THE DAEMON SPEAKS MCP 2 (operator direction: \"I want to make sure we\nare using the LATEST MCP tools\"; ruled 23639, renumbered 23656). A CLEAN\nCUTOVER, not a bound: `\"mcp>=2.2,<3\"`. The `<3` is not a legacy shim -- a MAJOR\narrives by RULING, never by resolve, which is the defect class this closes.\n\nWHAT WAS BROKEN. pyproject carried `\"mcp>=1.2\"` with no upper bound, so\n`uv tool install` and waked's converge -- neither of which reads uv.lock --\ntook mcp 2.2.0 the moment it published, and daemon.py died at import:\n`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. uv.lock pinned\n1.28.1, so the repo venv, CI and `make up` were all green and BLIND to it.\nExposure was the fresh native BROKER install; bodies were never at risk --\ndaemon.py is the only module in src/ that imports mcp, and a body reaches MCP\nover HTTP.\n\nSERVER. `from mcp.server.mcpserver import Context, MCPServer`;\ntransport_security keeps its path. v2 moved stateless_http, json_response and\ntransport_security OFF the constructor ONTO streamable_http_app(), so\n`MCPServer(\"reveille\")` is bare and build_app() carries all three -- and the\nsix-line comment explaining why DNS-rebinding validation is off MOVED WITH\nTHEM, because a reason parked away from its argument is a reason nobody\nreads. `mcp_app.router.lifespan_context` still works under v2 and is KEPT;\nthe guide's `session_manager.run()` form is not needed and was not adopted on\nspeculation. Context is annotation-only here, so v2's message=/data= rename\nand the client_id removal cost nothing.\n\nTHE WEBSOCKET PLANE IS UNTOUCHED, asserted because it is the question a\nreader will have: /wake and /feed are starlette WebSocketRoutes sitting BESIDE\nthe mcp Mount, waked imports websockets and never mcp, and the lifespan was\ndriven under 2.2.0 with both routes still mounted on the way out.\n\nCLIENTS, 11 sites. The symbol rename `streamablehttp_client` ->\n`streamable_http_client` ran through `uv run symbol-rename` (0.2.264) -- and\nWAS NOT ENOUGH, which is the part worth reading. v2's signature is\n`(url, *, http_client=None, terminate_on_close=True)`: `headers=` is GONE and\nit yields a 2-TUPLE where v1 yielded three. A symbol rename cannot see an\narity change, so the call shape was rewritten by a libcst codemod -- including\nthe sites that unpack a LOCAL HELPER wrapping the client (scripts/distill.py\n_client, tests/smoke_ws.py session), which a match on the client's own name\nwould have missed. Each site now builds its own AsyncClient with an EXPLICIT\ntimeout: a bare one carries httpx's 5 s flat deadline, which kills the\nlong-lived GET stream.\n\nAGENT IMAGE 0.2.41 -> 0.2.42. docker/agent-probe is a baked input and it\nspeaks the client API, so the tag moves with it (14469) across all three pin\nsites. Its `--with` spec is the SAME STRING as pyproject's, gated by equality\nrather than by two greps that each look right (6e493fe8).\n"),
     ("0.2.264",
      "0.2.264 A RENAME IS A PARSE, NOT A SUBSTITUTION (operator's AST-refactor\nrule, applied to this repo for the first time). The mcp 1.x->2.x cutover\nrenames `streamablehttp_client` across ten files, and the rule binding every\nrepo in the org says a cross-file symbol rename runs through an AST-aware\ntool -- never sed, never a regex with word boundaries, never `text.replace`.\nThis repo had a `.ropeproject/` from July and nothing that used it.\n\n`uv run symbol-rename OLD NEW [--root PATH] [--dry-run]`: a thin wrapper over\n`rope.refactor.rename.Rename` that anchors on the first NAME TOKEN equal to\nOLD and hands rope the offset. rope walks the parsed module graph, so it\nresolves imports, attribute access and annotations rather than matching text.\n\nTOKENIZE, NOT SEARCH, AND THAT IS THE WHOLE POINT. A raw `source.find` with\nword-boundary checks also matches inside COMMENTS and DOCSTRINGS, where rope\ncan resolve nothing -- it returns an EMPTY change set and the tool reports\n\"Renamed X -> Y\" having changed not one file. A cross-file rename that\nsilently no-ops is the exact failure this tool exists to prevent, so the\nanchor must be a real code token and an empty change set is an ERROR.\n\nTHE CANONICAL COPY DOES NOT PARSE, found on arrival and worth recording: the\nversion the org rule names as canonical (oversiteai-roc-api) carries\n`except tokenize.TokenError, IndentationError, SyntaxError:` -- Python 2\ngrammar, `SyntaxError: multiple exception types must be parenthesized`. Both\nguards above it are therefore DEAD CODE that has never run, and the two\nsibling copies (vendor-api, streaming) are the older shape that lacks them.\nOurs is the roc-api version with the one line parenthesized.\n\nNOT UNDER src/reveille/cli/: `reveille.cli` is already a 105 KB MODULE and a\npackage of that name would shadow it, taking `reveille` -- the entry point\nevery body drains its spool with -- down with it. Flat module, caught before\nit was committed and stated here so the next author does not rediscover it.\n\nTHE ANCHOR IS ARBITRARY, SO COMPLETENESS IS CHECKED AFTER THE FACT.\n`project.get_python_files()` promises no order and does not give the same\none twice, and WHICH site anchors decides what rope renames: anchored on a\ndefinition it reaches every reference, anchored on an imported name it can\nrename that module's binding ALONE. That change set is NON-EMPTY, so the\nempty-set backstop cannot see it and a half-renamed tree reports success --\nmeasured on a two-file fixture, which renamed the caller and left the\ndefinition standing. Files are now walked in sorted order so the choice is\nat least reproducible, and after `project.do` the tree is RE-SCANNED for the\nold name as a code token: any survivor is a PARTIAL rename and exits 1.\nGated, and proven non-vacuous by disabling the re-scan -- that test alone\ngoes red.\n\nBUMPED THOUGH IT SHIPS NO SERVER CHANGE. `scripts/publish-images inputs-for\nserver` = docker/Dockerfile.server, src, pyproject.toml, uv.lock; this adds a\nmodule under src/ and a dev dependency, so image-pin-check goes RED without a\nnumber -- measured, exit 1, not argued. A tool that only developers run still\nrides into the server image, and the tag must not name two trees.\n"),
     ("0.2.263",
@@ -923,16 +925,10 @@ def _fire_deferred():
                      "gate 1: idle transition, counter=%s)",
                      entry.get("name"), tid, counter)
 
-# DNS-rebinding Host validation is OFF: it defaults on with an empty allow-list, so the
-# transport 421s any request whose Host is not localhost -- which rejects every remote
-# agent reaching the broker by LAN name (a documented feature) and every containerised
-# agent reaching it by docker-DNS name (DES-002 4.2, the reveille network). That check
-# guards UNAUTHENTICATED localhost services against malicious web pages; the broker is a
-# multi-host API where the bearer TOKEN is the security boundary, checked on every call,
-# so Host validation adds nothing and only breaks legitimate addressing.
-mcp = FastMCP("reveille", stateless_http=True, json_response=True,
-              transport_security=TransportSecuritySettings(
-                  enable_dns_rebinding_protection=False))
+# mcp 2.x takes the transport settings on streamable_http_app(), not here -- see
+# build_app(), which is where stateless_http, json_response and transport_security now
+# live along with the reasoning for each.
+mcp = MCPServer("reveille")
 
 
 def _notify(room_id, principals, msg_id=None, sender=None, subject="", owner=None,
@@ -6565,7 +6561,18 @@ async def _sweeper():
 
 
 def build_app():
-    mcp_app = mcp.streamable_http_app()
+    # DNS-rebinding Host validation is OFF: it defaults on with an empty allow-list, so
+    # the transport 421s any request whose Host is not localhost -- which rejects every
+    # remote agent reaching the broker by LAN name (a documented feature) and every
+    # containerised agent reaching it by docker-DNS name (DES-002 4.2, the reveille
+    # network). That check guards UNAUTHENTICATED localhost services against malicious
+    # web pages; the broker is a multi-host API where the bearer TOKEN is the security
+    # boundary, checked on every call, so Host validation adds nothing and only breaks
+    # legitimate addressing.
+    mcp_app = mcp.streamable_http_app(
+        stateless_http=True, json_response=True,
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False))
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
