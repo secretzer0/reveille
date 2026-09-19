@@ -763,14 +763,27 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
     assigned = dict()
     for expr in re.findall(r'\.(?:src|href)\s*=\s*([A-Za-z_][A-Za-z0-9_.]*)', PAGE):
         assigned[expr] = assigned.get(expr, 0) + 1
-    assert assigned == {"frameSrc": 1}, \
+    # src 0 -> 1 at vLib (0.2.263), and this gate is exactly where that belongs,
+    # because a URL set by assignment is what its own docstring says went
+    # unseen before. The review: vLib's argument is never a value from a
+    # message, an attachment or the network -- every call site above is a
+    # STRING LITERAL in this page, pinned by `loaded` earlier in this test. If
+    # one ever takes a variable, `loaded` stops matching and this line is the
+    # second thing that fails.
+    assert assigned == {"frameSrc": 1, "src": 1}, \
         f"a URL property assignment appeared: {assigned} -- route it through a check"
-    # EVERY SCRIPT SRC is a fixed, site-relative path this page ships with (the
-    # vendored Opus decoder; the vendored VAD runtime + model, DES-014 slice 2),
-    # served by the broker from its own route table, never built, never a CDN.
-    srcs = re.findall(r'<script src="([^"]*)"></script>', PAGE)
-    assert srcs == ["/ui/opus-decoder.js", "/ui/vad/ort.wasm.min.js", "/ui/vad/vad.bundle.min.js"], srcs
-    assert PAGE.count("<script src=") == len(srcs)
+    # NO SCRIPT SRC AT ALL SINCE 0.2.263. The three vendored libraries (the Opus
+    # decoder; the VAD runtime, DES-014 slice 2) were blocking tags costing
+    # 204 KB of parse on every load for features a session may never touch, so
+    # they are fetched on first use instead. The property that mattered is
+    # unchanged and now belongs to vLib: a fixed, site-relative path this page
+    # ships with, served by the broker from its own route table, never built
+    # from anything foreign, never a CDN.
+    assert PAGE.count("<script src=") == 0, "the voice libraries load on first use"
+    loaded = sorted(set(re.findall(r"vLib\('([^']*)'\)", PAGE)))
+    assert loaded == ["/ui/opus-decoder.js", "/ui/vad/ort.wasm.min.js",
+                      "/ui/vad/vad.bundle.min.js"], loaded
+    assert all(u.startswith("/ui/") for u in loaded), loaded
     assert "const PATH_URL_RE=/^\\/[^/\\\\]/;" in PAGE, \
         "an assigned URL must be site-relative: // leaves the origin, \\ is the same trick"
     assert "function frameSrc(u){return PATH_URL_RE.test(u||'')?u:'about:blank';}" in PAGE, \
@@ -999,9 +1012,13 @@ def _voice_fns():
     """The voice's pure decisions, extracted from the served page and EXECUTED
     rather than re-implemented: a copy in the test drifts from the page, which
     is the whole reason the behind-predicate gate reads the page too."""
-    out = []
+    # The constants the decisions read come too, from the page, for the same
+    # reason: a literal retyped here is a second copy that can drift.
+    out = [ln for ln in PAGE.split("\n")
+           if ln.startswith(("const V_LEAD=", "const V_LEAD_MAX=", "const V_PREBUF_K="))]
+    assert len(out) == 3, out
     for name in ("function vWant(", "function vStepNext(", "function vStepPrev(",
-                 "function vBehind("):
+                 "function vBehind(", "function vPrebuf("):
         start = PAGE.index(name)
         nl = PAGE[start:].index("\n")
         body = PAGE[start:start + nl] if PAGE[start:start + nl].rstrip().endswith("}") \
@@ -1010,7 +1027,7 @@ def _voice_fns():
     return "\n".join(out)
 
 
-def test_the_voice_cursor_walks_in_id_order_and_drops_nothing():
+def test_the_voice_cursor_walks_in_id_order_and_the_buffer_is_sized_first():
     """Everyone in a room hears the same voices in the same ORDER, and the order
     is the message id (DES-009 s2).
 
@@ -1062,6 +1079,22 @@ eq(vWant(m,'me',false),false,'off must queue nothing');
 eq(vWant({id:1,from:'me'},'me',true),false,'a listener must not hear themselves');
 eq(vWant(m,'me',true),true,'someone else, voices on');
 eq(vWant({id:1},'me',true),false,'a message with no sender is not speakable');
+
+// THE JITTER BUFFER IS SIZED BEFORE THE FIRST SOUND (0.2.259). This ran only
+// under ui-drive, which no workflow executes -- so the arithmetic behind the
+// operator's LTE stutter was gated nowhere that runs. It runs here now.
+//
+// An IN-FLIGHT utterance arrives at roughly speaking speed, so the slack
+// against it is the whole defence; a cached one cannot starve (measured: 0
+// underruns at 300 ms RTT / 2 Mbps, because 27 s of speech is 117384 bytes).
+eq(vPrebuf(2,V_LEAD),V_LEAD,'a LAN round trip must not tax first sound');
+if(!(vPrebuf(150,V_LEAD)>=0.45))throw new Error('an LTE round trip must buy a real buffer');
+if(!(vPrebuf(300,V_LEAD)>vPrebuf(150,V_LEAD)))throw new Error('a worse link must buy more');
+eq(vPrebuf(999999,0),V_LEAD_MAX,'the ceiling holds');
+// THE CASE THE OLD HALVING LOST: a floor this link already earned must survive
+// one fast round trip, or it re-learns and re-stutters for ever.
+eq(vPrebuf(2,1.6),1.6,'a learned floor survives a fast round trip');
+eq(vPrebuf(0,0),V_LEAD,'no measurement yet still yields the floor, never zero');
 console.log('ok');
 """
     res = subprocess.run([node, "-e", prog], capture_output=True, text=True)
