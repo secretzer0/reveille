@@ -92,7 +92,18 @@ async def run(port, secrets):
         # arm alice's WS wake, THEN bob sends -> the daemon pushes the ring
         wake_uri = f"{j['wake_url']}?name=alice&token={secrets['alice']}"
         async with websockets.connect(wake_uri) as ws:
-            await asyncio.sleep(0.3)  # let the daemon register the waiter
+            # THE ATTACH FRAME IS UNCONDITIONAL since 0.2.253 -- every connect
+            # is answered with {"wake": ..., "reason": "backlog"|"hello", ...}
+            # before any mail exists, which is what lets a body converge on a
+            # deploy the moment its socket comes back. So the first frame here
+            # is the greeting, not the wake, and reading one frame and calling
+            # it the wake is how this line sat red from that release until
+            # something finally ran the file.
+            hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            assert hello["reason"] in ("hello", "backlog"), hello
+            assert hello["unread"] == 0 and not hello["wake"], \
+                f"nothing has been sent yet, so the greeting must not ring: {hello}"
+
             sent = data(await bob.call_tool("send", {"to": "alice", "body": "yo", "subject": "hi"}))
             assert sent["delivered_to"] == ["alice"], sent
             frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
@@ -134,12 +145,22 @@ async def run(port, secrets):
             await asyncio.sleep(0.3)
             await alice.call_tool("send", {"to": "*", "body": "agent broadcast",
                                            "subject": "fyi"})
+            # A FRAME IS NOT A RING. Since 0.2.253 every attach is answered with
+            # an unconditional greeting (`reason: hello`, `wake: false`), so
+            # "the socket said anything at all" stopped meaning "the socket was
+            # rung" -- and this check, which treats any frame as the storm,
+            # reported the greeting as an N^2 storm from that release onward.
+            # What the rule is about is `wake`, so that is what is read.
             for who, ws in (("alice", wsa), ("bob", wsb)):
-                with contextlib.suppress(asyncio.TimeoutError):
-                    frame = await asyncio.wait_for(ws.recv(), timeout=2)
-                    raise SystemExit(
-                        f"agent broadcast RANG {who} -- that is the N^2 storm "
-                        f"this rule exists to prevent: {frame}")
+                while True:
+                    try:
+                        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                    except asyncio.TimeoutError:
+                        break          # silence is the pass: nothing rang
+                    if frame.get("wake"):
+                        raise SystemExit(
+                            f"agent broadcast RANG {who} -- that is the N^2 storm "
+                            f"this rule exists to prevent: {frame}")
             got = data(await bob.call_tool("inbox", {}))["messages"]
             assert any(m["body"] == "agent broadcast" for m in got), got
             print("agent broadcast: delivered to inbox, rang nobody")

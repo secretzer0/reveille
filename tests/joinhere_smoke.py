@@ -125,7 +125,12 @@ def main():
         assert "${REVEILLE_TOKEN" in cfg and secret not in cfg
         # hook installed in the clean user's settings
         hooks = open(os.path.join(home, ".claude", "settings.json")).read()
-        assert "agent-stop-hook" in hooks
+        # The installed command is the CONSOLE SCRIPT, `reveille-stop-hook`
+        # (install.py HOOK), not the baked container path `agent-stop-hook`
+        # this line was written against. install.py still RECOGNISES both when
+        # deciding whether an entry already exists, but only one gets written,
+        # and asserting the other is how this file sat red unnoticed.
+        assert "reveille-stop-hook" in hooks, hooks
         # PATH links exist and resolve
         for tool in ("wake", "wake-watch", "reveille-waked"):
             assert os.path.exists(os.path.join(home, ".local", "bin", tool))

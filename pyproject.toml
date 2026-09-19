@@ -51,7 +51,7 @@ module-root = "src"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Every test owns its tmp db / ports, so the suite runs on all cores: 78 s -> 16 s.
-addopts = "-n auto"
+addopts = "-n auto --dist loadgroup"
 
 [tool.ruff]
 line-length = 100

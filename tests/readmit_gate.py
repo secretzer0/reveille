@@ -169,8 +169,21 @@ def main():
         assert ROLE not in presence_names(base, adm["secret"]), \
             ("an ordinary call re-admitted an agent that deliberately left -- "
              "DIRECTIVE:LEAVE is ratified doctrine and this voids it silently")
-        asyncio.run(call("join", {"url": base}))   # join is the way back, and only join
-        assert ROLE in presence_names(base, adm["secret"])
+        # A BARE join() IS NO LONGER THE WAY BACK, and this line said it was for
+        # as long as nothing ran this file. Leave-stickiness (the rule
+        # leave_sticks_gate.py exists for) made the boot ritual unable to undo a
+        # directive: bare join() joins every room the token holds EXCEPT the ones
+        # deliberately left, and NAMES them in `skipped` rather than rejoining.
+        # The daemon says so out loud -- `join ... rooms=0 skipped=1`. Only the
+        # NAMED call is a deliberate act, so only it clears a leave.
+        back = asyncio.run(call("join", {"url": base}))
+        assert room["id"] in json.dumps(back["skipped"]), \
+            f"bare join() must SKIP a room deliberately left, not rejoin it: {back}"
+        assert ROLE not in presence_names(base, adm["secret"]), \
+            "a bare join() undid a DIRECTIVE:LEAVE -- the boot ritual must never do that"
+        asyncio.run(call("join", {"url": base, "room": room["id"]}))
+        assert ROLE in presence_names(base, adm["secret"]), \
+            "join(room=...) is the deliberate act that clears a leave -- it did not"
 
         print("readmit-gate OK: an agent reaped mid-session was invisible and "
               "unaddressable, then ONE ordinary MCP call put it back in presence "
