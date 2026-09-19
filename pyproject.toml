@@ -1,6 +1,6 @@
 [project]
 name = "reveille"
-version = "0.2.265"
+version = "0.2.266"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -9,6 +9,15 @@ dependencies = [
     "websockets>=13",
     "uvicorn>=0.30",
     "authlib==1.7.2",
+    # AUTHLIB'S UNDECLARED IMPORT, and a RUNTIME one. authlib's metadata says
+    # only cryptography + joserfc, but integrations/httpx_client/*.py does a
+    # bare `import httpx`, and integrations/starlette_client reaches it through
+    # .apps -- so merely importing the OIDC door needs httpx present. It used
+    # to arrive free as mcp 1.x's transitive; mcp 2 carries httpx2 (a separate
+    # package, not an alias), and nothing was left to pull it. Declared here
+    # rather than in the dev group because `uv sync --frozen --no-dev` is what
+    # builds the server image, and a dev-group entry is invisible to it.
+    "httpx>=0.28",
 ]
 
 [project.scripts]
@@ -29,12 +38,6 @@ dev = [
     "pytest-xdist>=3",
     "ruff>=0.6",
     "rope>=1.13",
-    # A TRANSITIVE DEP YOU IMPORT IS YOUR DEP. tests/conftest.py imports httpx
-    # directly and got away with it while mcp 1.x pulled it in; mcp 2 carries
-    # httpx2 only, so the import went red on a runner the moment the lock
-    # stopped carrying it. Declared here rather than ported to httpx2, because
-    # starlette's TestClient is built on httpx and that port is its own subject.
-    "httpx>=0.28",
 ]
 
 [build-system]

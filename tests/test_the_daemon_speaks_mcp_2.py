@@ -100,13 +100,30 @@ def test_the_daemon_imports_under_an_unlocked_resolve(tmp_path):
         capture_output=True, text=True,
     )
     assert got.returncode == 0, got.stderr
-    ran = subprocess.run(
-        [str(py), "-c", "import reveille.daemon; print('ok')"],
-        capture_output=True, text=True,
+    # A MODULE IMPORT IS NOT A BOOT, and believing it was is how 0.2.265
+    # crashlooped in production while this gate sat green. `import
+    # reveille.daemon` never executes main(), so every FUNCTION-LEVEL import
+    # main() reaches stays unevaluated -- and `_oidc_boot()` opens with an
+    # unconditional `from authlib.integrations.starlette_client import OAuth`,
+    # which needs httpx, which authlib imports but does not declare. It used to
+    # arrive free as mcp 1.x's transitive; under mcp 2 nothing pulled it, the
+    # dev group could not reach the server image (`uv sync --frozen --no-dev`),
+    # and the broker died at boot with ModuleNotFoundError.
+    #
+    # So the gate drives the BOOT PATH, not the module: _oidc_boot() with no
+    # providers configured returns no doors but still performs the import, and
+    # uvicorn is main()'s other deferred import.
+    boot = (
+        "import reveille.daemon as d;"
+        "d._oidc_boot(env={});"      # the authlib chain, unconditional
+        "import uvicorn;"            # main()'s other function-level import
+        "print('ok')"
     )
+    ran = subprocess.run([str(py), "-c", boot], capture_output=True, text=True)
     assert ran.returncode == 0, (
-        "daemon does not import under an unlocked resolve -- this is exactly "
-        f"what `uv tool install` does:\n{ran.stderr}")
+        "the daemon's BOOT PATH does not run under an unlocked, runtime-only "
+        "resolve -- which is exactly what `uv sync --frozen --no-dev` builds "
+        f"for the server image:\n{ran.stderr}")
     assert "ok" in ran.stdout
 
 
