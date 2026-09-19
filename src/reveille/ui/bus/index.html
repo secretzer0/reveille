@@ -466,9 +466,19 @@
  .arts .play,.arts .scr{color:var(--faint);font-size:.74rem;opacity:0;cursor:pointer;padding:0 .2rem}
  .row:hover .play,.row:hover .scr,.row.scripted .scr,.arts .play.busy{opacity:1}
  .arts .play:hover,.arts .scr:hover,.arts .play.busy{color:var(--gold)}
- #vstop{background:none;border:1px solid var(--gold);color:var(--gold);border-radius:7px;
-  padding:.34rem .7rem;cursor:pointer;font:inherit;font-size:.82rem}
- #vstop[hidden]{display:none}
+ #vnow{position:fixed;right:1.6rem;bottom:11.4rem;display:flex;align-items:center;gap:.4rem;
+  background:var(--card);border:1px solid var(--line);border-radius:2em;
+  padding:.3rem .5rem;font-size:.8rem;max-width:min(26rem,86vw);z-index:6}
+ #vnow[hidden]{display:none}
+ .row.speaking{box-shadow:inset 3px 0 0 var(--gold)}
+ #vnow button{background:none;border:0;color:var(--gold);cursor:pointer;font:inherit;
+  padding:.1rem .35rem;border-radius:6px;min-width:1.9rem}
+ #vnow button:disabled{color:var(--line);cursor:default}
+ #vnowtxt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  cursor:pointer}
+ #vbehind{border:1px solid var(--gold)!important;white-space:nowrap;font-size:.72rem}
+ .arts .dl{color:var(--dim,#7d8794);text-decoration:none;cursor:pointer}
+ .arts .dl:hover{color:var(--gold)}
  .row.cont .arts{float:right;margin-left:.5rem;line-height:1.2}
  .row.scripted .scr{color:var(--gold)}
  .row.scripted .body{border-left:2px solid var(--gold);padding-left:.5rem}
@@ -930,7 +940,7 @@
    text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;line-height:2.75rem}
   #roomBtn .chev{color:var(--faint);font-size:.7em;margin-left:.4em}
   #top>#roomBtn{justify-content:flex-start}
-  #voice,#vstop,#toolsBtn,#meBtn{min-height:2.75rem;min-width:2.75rem;padding:0 .7rem;white-space:nowrap;
+  #voice,#toolsBtn,#meBtn{min-height:2.75rem;min-width:2.75rem;padding:0 .7rem;white-space:nowrap;
    font-size:.9rem;border-radius:.5rem}
   #filter,#filterState,#histBtn{display:none}
   body.toolsOpen #filter{display:block;flex:1 1 100%;max-width:none;min-width:0;min-height:2.75rem}
@@ -962,6 +972,7 @@
   #composer input,#composer textarea,#filter{font-size:16px}
   #body{min-height:3.2em}                            /* the feed keeps its room; the box grows as you type (resize stays) */
   #jump{bottom:auto;top:4rem;right:.8rem}          /* off the message box (operator 11478 picture) */
+  #vnow{bottom:auto;top:7.2rem;right:.8rem;left:.8rem;max-width:none}
   /* THE FEED, denser: a smaller avatar, one-line head, id/thread/delete/audio on the
      row's tap (never hover -- there is none), a hairline where the sender changes. */
   .row{grid-template-columns:1.6rem 1fr;gap:.5rem;padding:.2rem .5rem}
@@ -1034,10 +1045,6 @@
        the label alone changes colour and not meaning. -->
   <button type="button" id="voice" aria-pressed="false"
    title="speak new messages aloud, in the order they arrive">voice off</button>
-  <!-- Operator directive 2026-08-17: a long message must be escapable. Shown only
-       while something is sounding; stops it and hands the queue on. -->
-  <button type="button" id="vstop" hidden aria-label="stop speaking"
-   title="stop what is sounding; the next queued message follows">&#9632; stop</button>
   <button id="histBtn" title="search the entire bus log">history</button>
   <button type="button" id="toolsBtn" class="ph" aria-label="filter and history"
    title="filter messages, search history">find</button>
@@ -1071,6 +1078,19 @@
   <div id="histInfo"><span id="histLabel"></span><span><b id="backLive">back to live</b></span></div>
   <div id="empty">no traffic yet</div></div></div>
  <button id="jump">&darr; latest</button>
+ <!-- WHICH MESSAGE IS SPEAKING, and the controls for moving along the stream
+      (operator 2026-09-16). This replaces the stop button: stop was already a
+      skip-to-next in everything but its name, and voice off is the real stop. -->
+ <div id="vnow" hidden>
+  <button type="button" id="vprev" aria-label="previous message"
+   title="play the message before this one">&#9198;</button>
+  <span id="vnowtxt" role="button" tabindex="0"
+   title="scroll to the message being spoken"></span>
+  <button type="button" id="vnext" aria-label="next message"
+   title="skip to the next message">&#9197;</button>
+  <button type="button" id="vbehind" hidden
+   title="jump forward to the newest message"></button>
+ </div>
  <div id="composerWrap">
   <form id="composer">
    <div class="ctop">
@@ -1237,9 +1257,12 @@
   <button id="liGo">Sign in</button>
  </div>
 </div>
-<script src="/ui/opus-decoder.js"></script>
-<script src="/ui/vad/ort.wasm.min.js"></script>
-<script src="/ui/vad/vad.bundle.min.js"></script>
+<!-- THE VOICE LIBRARIES ARE FETCHED WHEN THEY ARE USED (0.2.263). These three
+     These three were blocking tags on every load: 204 KB of JavaScript parsed
+     before first paint, on every tab, for features a session may never touch --
+     the decoder only matters once voice is ON, the VAD pair only in listen
+     mode. Their own big assets (an 11 MB wasm, a 2.3 MB onnx) were already
+     lazy; only the shims were eager. See vLib() below. -->
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
@@ -1809,16 +1832,24 @@ function artIcons(m){
    (m.has_audio?'play audio':m.gen_pending?'writing the script, then the audio...':'generate the audio, then play it')+
    '" aria-label="play audio">'+(m.has_audio?'&#9654;':'&#9655;')+'</span>'
   +(m.has_script?'<span class="scr" data-scr="'+m.id+'" title="view the script" '+
-   'aria-label="view the script">&#9998;</span>':'');
+   'aria-label="view the script">&#9998;</span>':'')
+  // KEEP THE AUDIO (operator 2026-09-16), admins only. A plain <a download> --
+  // the browser already does this, so there is no handler and no fetch. Hiding
+  // it is NOT the gate: /audio/<id>/download refuses a non-admin on its own,
+  // and that route is separate from the streaming ones precisely so a mistake
+  // in its condition can never silence the room.
+  +((m.has_audio&&me&&me.is_admin)
+    ?'<a class="dl" href="'+vBase(m.id)+'/download'+qs()+'" download '+
+     'title="download this audio" aria-label="download this audio">&#11015;</a>':'');
 }
 function paintIcons(m){
  const arts=document.querySelector('.row[data-id="'+m.id+'"] .arts');
  if(arts)arts.innerHTML=artIcons(m);
 }
-function playOne(id){
- vStop();vBusy=true;
- vPlay(id,vUrl(id));
-}
+// A GENERATED MESSAGE PLAYS FROM WHERE IT IS, AND CARRIES ON (operator: "when
+// I select a play point in the stream it should continue from that point and
+// play each one forward"). This used to play exactly one and stop.
+function playOne(id){vPlayAt(id);}
 const vAsked=new Set();      // ids this listener asked to generate: play on the audio frame
 async function genOne(m){
  if(m.gen_pending)return;
@@ -1909,7 +1940,11 @@ function render(m){
   if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click
   // The click always ASKS first (ruling 11483): the broker says ready (durable
   // file -> play) or queues -- a terse stand-in heard earlier is not a file.
-  if(e.target.closest('.play')){genOne(m);return;}
+  // A message that HAS audio is a play point: the cursor moves there and the
+  // stream carries on forward from it. One that has none still has to be made
+  // first, and the audio frame plays it through the same cursor.
+  if(e.target.closest('.dl'))return;          // the anchor downloads; not a row selection
+  if(e.target.closest('.play')){if(m.has_audio)vPlayAt(m.id);else genOne(m);return;}
   if(e.target.closest('.scr')){toggleScript(row,m);return;}
   const cp=e.target.closest('.clipPlay');
   if(cp){vStop();vBusy=true;vPlayClip(cp.dataset.clip);return;}
@@ -2014,9 +2049,26 @@ let voiceOn=false;         // default OFF on every load: no browser plays withou
 // through toggleVoice (the unlock gesture, so iOS is covered). Nothing plays by
 // itself. Listening is NOT remembered (11355 #2): a hot mic is not a preference.
 let voiceWanted=!!localStorage.revVoice;
-const vQ=[];               // pending [{id,from}], drained in id order
+// THE QUEUE IS A CURSOR (0.2.261, operator: "one of the GREATEST lacking
+// features is knowing WHICH message is being played ... I would really prefer
+// a Next/Previous rather than a Stop button ... when I select a play point in
+// the stream it should continue from that point and play each one forward").
+//
+// WHAT WAS DELETED AND WHY. vQ was a CONSUMING queue drained by vTake, and past
+// V_MAX=8 it threw the whole backlog away, kept the newest, and rang a tone:
+// "N messages skipped -- audio was falling behind". The skipped ids were in
+// vHeard, so they could never be spoken again -- the only way back to one was
+// the row's own play icon, one click each. That existed because a listener
+// could not SEE where the voice was, so falling behind had to be escaped
+// automatically. With a cursor and a chip that says how far back it is, the
+// escape is a control the human presses, and nothing is destroyed to provide
+// it.
+//
+// THE CURSOR IS AN ID, NOT AN INDEX, so trimming the feed under it (0.2.260)
+// cannot move it and cannot invalidate it. The order is the message id, which
+// is what DES-009 section 2 always said the order was.
 let vBusy=false;           // one utterance at a time -- overlapping voices are noise
-const V_MAX=8;             // queue depth past which we skip to the newest
+let vCursor=0;             // the id sounding now, or the last one that did
 // WANTED, as a pure decision so a gate can drive it: off means NOTHING is queued and
 // therefore nothing is fetched (a toggle that still fetches is a toggle that lies),
 // and nobody hears themselves -- suppressed HERE because the browser is the only
@@ -2025,29 +2077,21 @@ const V_MAX=8;             // queue depth past which we skip to the newest
 function vWant(m,me,on){
  return !!(on&&m&&m.id&&m.from&&m.from!==me);
 }
-// NEXT, also pure. Sorted at take time rather than at insert, because arrival order
-// is not id order and the requirement is about what PLAYS. A gap is not waited for:
-// a message may legitimately have no audio, and waiting on an id that never comes is
-// a stall, which section 2 forbids outright. Past V_MAX we skip to the newest and
-// report how many went -- falling behind is allowed, falling behind silently is not.
-function vTake(q,max){
- if(!q.length)return null;
- q.sort((a,b)=>a.id-b.id);
- if(q.length>max){const last=q[q.length-1],dropped=q.length-1;q.length=0;
-  return {id:last.id,dropped:dropped};}
- return {id:q.shift().id,dropped:0};
+// WHAT THIS LISTENER COULD HEAR, in id order: loaded, wanted, and actually
+// carrying audio. HAS_AUDIO IS THE LOAD-BEARING FILTER -- a 404 is a silent
+// message that advances the cursor (section 7), so auto-advance across ids with
+// no audio would spin through the whole feed in one frame. Derived from `msgs`
+// rather than kept as a second list, so it cannot drift from what is on screen.
+// ponytail: O(n log n) over at most FEED_MAX rows, called on pump and on paint.
+function vSpeakable(){
+ return [...msgs.keys()].filter(id=>{const m=msgs.get(id);
+  return m&&m.has_audio&&vWant(m,myName,true);}).sort((a,b)=>a-b);
 }
+// PURE, so a gate can drive them: where the cursor goes, and how far back it is.
+function vStepNext(ids,cur){for(const id of ids)if(id>cur)return id;return 0;}
+function vStepPrev(ids,cur){let out=0;for(const id of ids){if(id>=cur&&cur)break;out=id;}return out;}
+function vBehind(ids,cur){let n=0;for(const id of ids)if(id>cur)n++;return n;}
 let vCtx=null;
-// The audible half of "visibly behind". The toast is the readable half; a tone alone
-// would be a sound nobody can interpret, and a toast alone is invisible to whoever is
-// listening rather than looking -- which is the entire audience of this feature.
-function vMark(n){
- try{vCtx=vCtx||new (window.AudioContext||window.webkitAudioContext)();
-  const o=vCtx.createOscillator(),g=vCtx.createGain();
-  o.frequency.value=660;g.gain.value=0.05;o.connect(g);g.connect(vCtx.destination);
-  o.start();o.stop(vCtx.currentTime+0.12);}catch(e){}
- toast(n+' message'+(n>1?'s':'')+' skipped -- audio was falling behind');
-}
 // ---- the player: WebM/Opus DECODED IN THE PAGE (ruling 11211; operator 2026-08-17) --
 // The wire is WebM/Opus at 32 kbit/s, transcoded in the broker per utterance (~12x
 // smaller than the s16 WAV it replaced). It was played through MediaSource, and
@@ -2056,8 +2100,8 @@ function vMark(n){
 // so the page now decodes the stream ITSELF: a ~60-line WebM demuxer pulls the Opus
 // frames out of each fetched chunk as it lands, the vendored decoder (libopus in
 // WASM, /ui/opus-decoder.js) turns them into 48 kHz PCM, and the PCM is scheduled
-// on the ONE AudioContext -- vCtx, the same one vMark rings, resumed on the toggle's
-// click because that click IS the autoplay gesture. One code path for every browser
+// on the ONE AudioContext -- vCtx, the same one the earcons use, resumed on the
+// toggle's click because that click IS the autoplay gesture. One code path for every browser
 // with Web Audio; no MediaSource, no <audio> element, no per-browser branch.
 // Invariants carried unchanged: id order, one at a time, ADVANCED BY EVENTS AND NEVER
 // BY A TIMER (the last scheduled buffer's onended, the fetch ending with nothing
@@ -2190,7 +2234,22 @@ function vDemuxer(){
   }
  };
 }
+// ONE LOADER, CACHED BY URL, so a second call while the first is in flight
+// waits on the same promise instead of fetching twice. A failure is not cached:
+// the next attempt may succeed (a flaky link is the whole reason the voice path
+// is careful), and the caller already has a refusal path for "did not load".
+const vLibs={};
+function vLib(src){
+ return vLibs[src]||(vLibs[src]=new Promise((ok,no)=>{
+  const el=document.createElement('script');
+  el.src=src;el.async=true;
+  el.onload=()=>ok();
+  el.onerror=()=>{delete vLibs[src];el.remove();no(new Error('could not load '+src));};
+  document.head.appendChild(el);
+ }));
+}
 async function vDecoder(preSkip){
+ try{await vLib('/ui/opus-decoder.js');}catch(e){}
  const lib=window['opus-decoder'];
  if(!lib)throw new Error('the Opus decoder did not load');
  if(!vDec){vDec=new lib.OpusDecoder({channels:1,streamCount:1,coupledStreamCount:0,channelMappingTable:[0],preSkip:preSkip||0});await vDec.ready;}
@@ -2199,7 +2258,7 @@ async function vDecoder(preSkip){
 }
 async function vPlay(id,url){
  const ctl=vCtl={srcs:[],ab:new AbortController()};
- paintStop();
+ paintNow();
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
  // resume() is async: the first utterance after the click can read "suspended" for
@@ -2294,7 +2353,7 @@ async function vPlayClip(url){
  let ctx;
  try{ctx=vCtxUp();}catch(e){return vRefused();}
  const ctl=vCtl={srcs:[],ab:null};
- paintStop();
+ paintNow();
  try{
   const res=await fetch(url,{credentials:'same-origin'});
   if(!res.ok){res.json().then(j=>toast(j.error||('clip: '+res.status))).catch(()=>{});return vDone();}
@@ -2306,7 +2365,7 @@ async function vPlayClip(url){
 }
 function vStop(){
  if(!vCtl)return;
- const c=vCtl;vCtl=null;paintStop();
+ const c=vCtl;vCtl=null;paintNow();
  if(c.ab)try{c.ab.abort();}catch(e){}
  for(const s of c.srcs)try{s.onended=null;s.stop();}catch(e){}
 }
@@ -2316,25 +2375,49 @@ const vBase=id=>'/audio/'+encodeURIComponent(id);
 const vUrl=id=>vBase(id)+'.webm'+qs();
 // The stop button shows only while something is sounding (operator directive
 // 2026-08-17: a long message must be escapable); stop = abort this one, next.
-function paintStop(){const b=$('vstop');if(b)b.hidden=!vCtl;}
+// THE CHIP IS THE ANSWER TO "WHICH ONE IS PLAYING". It survives the feed trim
+// (0.2.260) because it reads the cursor, not a row: the message being spoken may
+// no longer be in the DOM, and a row highlight alone would then have nothing to
+// highlight. The row class is a bonus on top, not the mechanism.
+function paintNow(){
+ const el=$('vnow');if(!el)return;
+ const ids=vSpeakable(),m=vCursor?msgs.get(vCursor):null,behind=vBehind(ids,vCursor);
+ el.hidden=!(voiceOn&&(vCursor||ids.length));
+ for(const r of document.querySelectorAll('#inner .row.speaking'))r.classList.remove('speaking');
+ if(el.hidden)return;
+ const row=vCursor&&$('inner').querySelector('.row[data-id="'+vCursor+'"]');
+ if(row&&vCtl)row.classList.add('speaking');
+ const t=$('vnowtxt');
+ t.textContent=m?(m.from+': '+String(m.body||'').replace(/\s+/g,' ').slice(0,60))
+               :'nothing playing';
+ t.style.color=m?color(m.from):'';
+ $('vprev').disabled=!vStepPrev(ids,vCursor);
+ $('vnext').disabled=!vStepNext(ids,vCursor);
+ const b=$('vbehind');
+ b.hidden=!behind;
+ b.textContent=behind+' behind \u21e2';
+}
 function vPump(){
  if(vBusy||!voiceOn)return;
- const t=vTake(vQ,V_MAX);
- if(!t)return;
- if(t.dropped)vMark(t.dropped);
- vBusy=true;
- vPlay(t.id,vUrl(t.id));
+ const id=vStepNext(vSpeakable(),vCursor);
+ if(!id){paintNow();return;}
+ vPlayAt(id);
 }
-function vDone(){vCtl=null;vBusy=false;paintStop();earconDrain();vPump();}
-// AND THE QUEUE TAKES EACH ID ONCE: whatever delivers a frame twice (a leaked
-// socket, a broker replay), a message is spoken once. This is the belt; dropFeed
-// is the braces.
-const vHeard=new Set();
+// ONE PLACE MOVES THE CURSOR, so the chip, the auto-advance, Next/Prev and a
+// click on a row all agree about where the voice is.
+function vPlayAt(id){
+ if(!id)return;
+ vStop();vCursor=id;vBusy=true;paintNow();
+ vPlay(id,vUrl(id));
+}
+function vDone(){vCtl=null;vBusy=false;paintNow();earconDrain();vPump();}
+// AN ARRIVAL DOES NOT ENQUEUE ANYTHING ANY MORE -- it is already in `msgs`, so
+// the cursor can see it. This only nudges the pump and repaints how far behind
+// the listener is. A message delivered twice (a leaked socket, a broker replay)
+// is spoken once because add() drops the duplicate before it ever lands.
 function vPush(m){
  if(!vWant(m,myName,voiceOn))return;
- if(vHeard.has(m.id))return;
- vHeard.add(m.id);
- vQ.push({id:m.id,from:m.from});
+ paintNow();
  vPump();
 }
 function paintVoice(){
@@ -2361,9 +2444,16 @@ function vTell(){try{if(ws&&ws.readyState===1)ws.send(JSON.stringify({voice:voic
 function toggleVoice(){
  voiceOn=!voiceOn;
  voiceWanted=voiceOn;
- if(voiceOn){localStorage.revVoice='1';try{vCtxUp();}catch(e){}}      // the click is the gesture: resume here
- else{delete localStorage.revVoice;vStop();vQ.length=0;vBusy=false;}
- paintVoice();vTell();
+ if(voiceOn){
+  localStorage.revVoice='1';try{vCtxUp();}catch(e){}                 // the click is the gesture: resume here
+  // LATE JOINERS ARE STILL NOT BLASTED (DES-009 s2): turning voice on parks the
+  // cursor at the newest thing already loaded, so nothing historical speaks
+  // until the human walks back to it. The invariant used to be a property of
+  // vPush being fed by the live socket only; now it is stated here, once.
+  const ids=vSpeakable();if(ids.length)vCursor=ids[ids.length-1];
+ }
+ else{delete localStorage.revVoice;vStop();vBusy=false;}
+ paintVoice();paintNow();vTell();
 }
 
 function clearFeed(){
@@ -2754,7 +2844,24 @@ $('histBtn').onclick=()=>{
 };
 $('voice').onclick=toggleVoice;
 paintVoice();                                 // a remembered voice paints "tap to resume" before any socket
-$('vstop').onclick=()=>{vStop();vDone();};   // abort this utterance, hand the queue on
+// NEXT / PREVIOUS, not STOP (operator 2026-09-16). The old stop button was
+// already "abort this one and hand the queue on" -- a skip wearing the wrong
+// name -- and voice off was always the real stop, so that is what stop is now.
+$('vprev').onclick=()=>vPlayAt(vStepPrev(vSpeakable(),vCursor));
+$('vnext').onclick=()=>vPlayAt(vStepNext(vSpeakable(),vCursor));
+// The escape hatch the V_MAX drop used to perform automatically, as an act.
+$('vbehind').onclick=()=>{const ids=vSpeakable();if(ids.length)vPlayAt(ids[ids.length-1]);};
+// AND THE CHIP FINDS ITS OWN MESSAGE: the whole complaint was that the voice
+// could be far behind with no way to get to it.
+function vGoToCursor(){
+ if(!vCursor)return;
+ const row=$('inner').querySelector('.row[data-id="'+vCursor+'"]');
+ if(!row){toast('that message is no longer loaded -- scroll up to fetch it');return;}
+ follow=false;row.scrollIntoView({block:'center'});
+ row.classList.add('speaking');
+}
+$('vnowtxt').onclick=vGoToCursor;
+$('vnowtxt').onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();vGoToCursor();}};
 $('hGo').onclick=e=>{e.preventDefault();
  const p={limit:500};
  if($('hKw').value.trim())p.keywords=$('hKw').value.trim();
@@ -6051,8 +6158,13 @@ function listenPaint(state){
 async function listenStart(){
  if(listenVad||listenSimple||vRec)return;          // not while a talk take is open
  try{vCtxUp();earconLoad();}catch(e){}           // the mic gesture doubles as the audio unlock; the bell decodes now
- if(!window.vad||!window.vad.MicVAD){toast('ear: the listener did not load');return;}
  listenPaint('loading the listener...');
+ // FETCHED HERE, not at page load: the ear is the only thing that needs these.
+ // The order matters -- the VAD bundle expects onnxruntime to already be on the
+ // page -- so they are awaited in sequence, not in parallel.
+ try{await vLib('/ui/vad/ort.wasm.min.js');await vLib('/ui/vad/vad.bundle.min.js');}
+ catch(e){}
+ if(!window.vad||!window.vad.MicVAD){toast('ear: the listener did not load');listenPaint('');return;}
  let v;
  try{
   v=await vad.MicVAD.new({
@@ -6200,8 +6312,8 @@ function earconLoad(){
 // ---- THE EARCON VOCABULARY (DES-014 s5 amendment; operator 11576/11578, architect 11577;
 // supersedes 11465's "one bell only"). Every command that lands makes ONE short
 // sound, so a hand on the wheel hears what happened. All but the ding are
-// synthesized here (an oscillator or a noise burst through a gain envelope, the
-// vMark way) -- nothing new is fetched. One table, one function earcon(name), one
+// synthesized here (an oscillator or a noise burst through a gain envelope)
+// -- nothing new is fetched. One table, one function earcon(name), one
 // "sounds" setting per browser (default ON, revSounds in the browser store), constant
 // volume, and NEVER over an utterance being spoken: while vBusy the names queue
 // and ring in order at vDone. Skipped on purpose: countdown ticks (visible), a
