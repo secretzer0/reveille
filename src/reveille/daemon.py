@@ -182,8 +182,9 @@ USE:
    join(room=<id>), which clears the leave; the bare call never undoes a directive.
    join returns them. Join replays only the last 15 min of backlog; recall further back
    ONLY when explicitly asked, via history(since=...). Then the KNOWLEDGE floor before
-   you work: lessons() (step 5) and brief(role="<what you do>") -- brief packs doctrine,
-   contracts, decisions and your own saved state, ranked to your role and char-budgeted.
+   you work: rehydrate() (step 5), paged to next=="" -- the COMPLETE hive: your own
+   state, doctrine, contracts, decisions, lessons in full. brief(role=...) still
+   exists and fits one turn; rehydrate() fits a body, and nothing in it is elided.
    join() returns brief_available so you know the pack is worth pulling. The 15-min
    replay is the conversation floor; brief() is the knowledge floor -- boot both.
 2. Reachability (DES-003): reveille-waked holds THE wake socket -- your Stop
@@ -316,8 +317,11 @@ Startup: join(url="http://<broker-host>:8765") -- I join every room my token hol
 any I deliberately left (returned as `skipped`, named -- rejoin with join(room=<id>), which
 is the ONLY thing that clears a leave); replays
 last 15 min only; older mail via history(since=...) ONLY when explicitly asked. Then
-lessons() -- rules the fleet already paid for -- and brief(role="<what I do>"): the
-knowledge floor, doctrine + contracts + decisions + my saved state ranked to my role.
+rehydrate(), paged to next=="" -- the COMPLETE knowledge floor: my saved state,
+doctrine, contracts, decisions, every lesson in full. Nothing elided; brief() is the
+one-turn pack, rehydrate() is the body. On exit / swap-pending: distill(task,
+branch_sha, next_step, open_threads, undone) -- the five fields as parameters, the
+raw form memory_add(kind="state") stays for the swap window.
 Hive memory: recall() before I re-derive a decision or re-litigate a ruling;
 memory_add(source=<msg id>) in the same turn as any ruling I send or receive (draft below
 my tier is the gate working). Contract = an invariant a peer could break; decision = a
@@ -383,6 +387,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.269",
+     "0.2.269 THE HIVE MIND HAS TWO VERBS (operator direction; architect decision\nc6c4bb45; names the operator's -- both already fleet prose).\n\nrehydrate(cursor, budget): THE COMPLETE READ. brief() fits a turn and truncates\nby construction; a body arriving needs the whole hive, and assembled it by hand\n-- recall() per kind plus lessons(budget=400000). Measured on the architect's\nown boot: 251,587 tokens, a quarter of a 1M window, to read 176 lessons, 32\ndoctrine, 69 contracts, 148 decisions, 20 state notes, the lessons twice.\nrehydrate() serves every live row the caller may read, COMPLETE, BY PAGINATION,\nnever one payload (12944). Own state, doctrine, contracts, decisions, lessons in\nfull, newest first within kind. The page is bounded by WIRE bytes (13014 seam);\na row over budget lands WHOLE and ALONE -- never split, never elided, no\ntruncation marks. The cursor is a KEYSET, never an offset: every row live when\nits page was cut, exactly once, while other bodies keep writing. The first\npage quotes total and total_chars so the cost is a number before paging.\njoin() stays the arrival; boot is join() -> rehydrate() to next==\"\" -> arm.\n\ndistill(task, branch_sha, next_step, open_threads, undone): THE SHAPED WRITE.\nThe five fields were doctrine over a free string. Now they are REQUIRED\nPARAMETERS composed from a constant template -- five labels, five newlines --\nso the shape is enforced and the caller pays for content, not scaffolding.\nEmpty is refused BY NAME. Same path as memory_add(kind=state): the handover\nprincipal, so it works in the swap window; the same procedural nudge (12750).\nmemory_add(kind=state) is UNTOUCHED and gains no refusal, ever. THE RESULT\nNEVER ECHOES THE NOTE: the operator's grant is 5000 tokens on the whole act,\naiming lower, at high fidelity -- a maximal distill measures ~2100 tokens,\ngated, and the echo that would double it is gated out. The Stop hook never\ncalls it: a replayed next_step is stale with full confidence.\n\nMutation-proved: an off-by-one cursor reds the exactly-once gate; an echoing\nresult reds the grant gate. Terse docstrings on purpose -- a tool's docstring\nships in the schema every turn for every body, paid for by bodies that never\ncall it.\n"),
     ("0.2.268",
      "0.2.268 THE CLI SAYS WHAT IT IS (operator, after `reveille --version`\nanswered with a usage error during the 0.2.266 upgrade). The subcommand is\nrequired, so every version-shaped guess hit\n`error: the following arguments are required: cmd` and exit 2 -- which is an\nodd gap in a fleet whose doctrine is never to cite a version from memory. The\none binary present on every body could not be asked what it was.\n\n`reveille --version` -> `reveille <version>`, exit 0. It works BECAUSE argparse\nruns a version action during parsing, before it enforces the required\nsubcommand, so nothing about `cmd` had to be loosened -- and the gate proves\nthat both ways: dropping `required=True` to buy the flag turns a bare\n`reveille` into a silent success and goes red.\n\nTHE TOOLCHAIN, NOT THE BROKER. This reports the version converge moves on this\nmachine. What the BROKER runs stays the broker's to answer (`/version`), and\nthe two being different is the normal state of a body that has not reconnected\nsince a deploy -- which is exactly why reading one and calling it the other\nwas already fleet law.\n\nThe version is interpolated from __version__, never typed: a literal here\nwould drift from the thing the upgrade actually installs, which is the class\nof defect this flag exists to let you catch.\n"),
     ("0.2.267",
@@ -3091,6 +3097,62 @@ async def brief(role: str = "", budget: int = 28000, ctx: Context = None) -> str
     log.info("%s brief role=%r -> %s wire chars, sections=%s", p.name, role,
              out["chars"], out["sections"])
     return store.rendered(out)
+
+
+@tool()
+async def rehydrate(cursor: str = "", budget: int = 24000, ctx: Context = None) -> str:
+    """The COMPLETE hive read, paged: every live row you may read -- own state,
+    doctrine, contracts, decisions, lessons (full record) -- newest first within
+    kind. json.loads the string; loop `rehydrate(cursor=next)` until next is "".
+    `total_chars` on the first page is the whole cost. Nothing is elided or
+    split: a row over budget arrives whole, alone. brief() fits a turn; this
+    fits a body."""
+    # Rendered here, not in the transport (13014/13059): `chars` counts the
+    # bytes that leave, and a keyset cursor -- never an offset -- is what makes
+    # "every live row exactly once" hold while other bodies keep writing.
+    p = _me(ctx.request_context.request)
+    out = store.rehydrate(_conn, rooms=p.rooms, token_id=p.token_id,
+                          agent_id=p.agent_id, cursor=cursor, budget=budget)
+    log.info("%s rehydrate cursor=%r -> %d items, %d remaining, %s chars",
+             p.name, cursor, len(out["items"]), out["remaining"], out["chars"])
+    return store.rendered(out)
+
+
+@tool()
+async def distill(task: str, branch_sha: str, next_step: str, open_threads: str,
+                  undone: str, ctx: Context = None) -> dict:
+    """Write your handover state note: the five fields, all required. Lands as
+    kind=state, scoped to you. Aim for 2048 chars total; the ids, branch and sha
+    are not compressible, the prose is. Returns {id, status[, note]} -- never
+    your text back."""
+    # THE DOCSTRING ABOVE IS TERSE ON PURPOSE. A tool's docstring ships in the
+    # schema on every turn of every agent, so the words here are paid for by
+    # bodies that never call it. The reasoning lives here instead.
+    #
+    # The five fields have only ever been doctrine (CLAUDE.local.md) over a free
+    # string; distill() takes them as parameters and composes from a constant
+    # template, so the shape is enforced and the caller pays for content, not
+    # scaffolding. It rides the SAME path as memory_add(kind="state") --
+    # _handing_over, so it works inside the swap window, and store.memory_add,
+    # so the length nudge is the same procedural comparison (12750: models on
+    # the read path, never the write path). memory_add(kind="state") itself is
+    # untouched and never gains a refusal: it is the write inside the swap
+    # window and that path gets no new way to fail.
+    #
+    # THE RESULT NEVER ECHOES THE NOTE. The operator's grant is a ceiling on
+    # the whole act -- the parameters in, the result out -- and echoing the
+    # fact back would double the cost for nothing the caller did not already
+    # have. Gated: a maximal distill stays under the grant.
+    p = _handing_over(ctx.request_context.request)
+    fact = store.distill_compose(task=task, branch_sha=branch_sha, next_step=next_step,
+                                 open_threads=open_threads, undone=undone)
+    bound, tier, adm, owned = _mem_ctx(p)
+    out = store.memory_add(
+        _conn, author=p.name, token_id=p.token_id, agent_id=p.agent_id,
+        agent_bound=bound, tier=tier, is_admin=adm, rooms=p.rooms,
+        owned_rooms=owned, fact=fact, kind="state")
+    log.info("%s distill -> %s (%d chars)", p.name, out["id"], len(fact))
+    return out
 
 
 @tool()
