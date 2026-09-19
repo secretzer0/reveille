@@ -395,6 +395,34 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.279",
+     """0.2.279 THE KEEP-ALIVE WAS A 24 kHz RADIO (operator 24098/24137, ruled
+24153). On his phone the speech was stuttery AND MUFFLED from a cold load, went
+clear the moment he pressed listen once, and was muffled again after every
+reload. Nothing in the fetch path, the demuxer or the lead ratchet can take the
+top off a voice, and the code said why: `vUnlock()` plays a silent looping
+<audio> element to put iOS's audio session in the playback class -- the lesson
+ios-web-audio-needs-a-media-element-to-unlock-the-session -- and never stops it.
+iOS takes the session's rate from that element, and it was built at 24000 while
+every utterance decodes at 48000. Everything the page scheduled was rendered
+through a 12 kHz ceiling. Opening the microphone reconfigures the session, which
+is exactly why listen "fixed" it, and why a reload undid it again.
+
+THE RATE, AND NOTHING ELSE (one variable per deploy). The header is built at
+48000 with its byte rate following, from one fenced builder the node gate reads
+back through a DataView. The element still loops: the session stays
+playback-class only while a media element is playing, and pausing it would be a
+second change and a way to re-open the lesson above.
+
+AND THE PHONE NOW REPORTS ITS OWN NUMBERS. The operator cannot read a title= or
+a toast that has already gone (24148), so the page posts the line it composes --
+frames, samples, buffers, errors, underruns, lead, ctx state and rate, plus the
+user agent -- to `POST /diag`, which logs one capped line at INFO as the signed-in
+session and stores nothing. keepalive, so an utterance ending as the tab hides
+still lands, and every failure swallowed: a diagnostic that can break playback is
+worse than no diagnostic. The next audio question is answered from journalctl
+instead of from a person holding a phone.
+"""),
     ("0.2.278",
      "0.2.278 A CLAIM WEARING NOTHING IS STRIPPED; A FIRST RUN IS A WINDOW (architect\n24138 on devops 24136, from the first live fold on 0.2.275). Measured: the\nhook fired my first digest, 371 batches on the 6144-token writer (~1 min a\nstep, ~6 h), and step 2 was refused because the writer dropped ONE tag.\nOne retry per step over 371 steps is a run that cannot finish.\n\nTWO FAILURE CLASSES, TWO VERDICTS. An INVENTED ID is a claim wearing a\ncitation nobody can recall -- a hallucination -- and still refuses the\nstep. An UNTAGGED line under RULES/DECISIONS/LESSONS is a claim wearing\nnothing: the store's verdict is already `no backing`, so the line is\nSTRIPPED and the step kept, each one logged at INFO with its text, the\nheader counting them `[stripped: N untagged]`. Under WORK/OPEN untagged\nlines were always legal. The invariant holds: a digest line licenses a\nrecall, never a citation.\n\nA FIRST RUN (no prior digest, no mentor) folds the last DIGEST_FIRST_WINDOW_S\n(7 days) of the agent's messages plus ALL live rows it may read -- rows are\nthe small, load-bearing part; messages are the bulk, and the operator's own\nwords were the last stretch of high activity. Header `since <date> (first\nrun window)`. Later runs fold since the prior, unchanged; a protege's mentor\nrows are never windowed. A second retry was REFUSED: with the systematic\nclass gone, it would only double the cost of the class a retry rarely cures.\n\nTHE THIRD CLASS, measured on deployment-dev's first fold (497 batches, dead\nat step 1 twice: `sections must be exactly RULES/DECISIONS/LESSONS/WORK/OPEN\nin order, got LESSONS/RULES`): SECTION SHAPE IS NORMALIZED, NEVER REFUSED\n(architect 24144). Section names and order are ours, not the writer's:\nheadings in any order, case-insensitive, duplicates merged, a missing\nsection emitted as `(none)`, prose before the first heading stripped and\ncounted (`[stripped: N untagged, M unsectioned]`), and the text re-serialized\ncanonical -- so every next step sees the canonical shape. ONE INVARIANT now\ncovers all three classes: the store keeps what it can license, drops what it\ncannot, and refuses only what lies (an invented id, a [msg:N] outside the\ncaller's rooms) or is not a digest (no recognized heading at all).\n"),
     ("0.2.277",
@@ -6043,6 +6071,23 @@ def _ring_admins_about_requests():
             q.put_nowait({"event": "signup_requests", "pending": n, "room": room})
 
 
+# THE PHONE REPORTS ITS OWN AUDIO NUMBERS (architect 24150, devops 24155). A
+# defect only one device shows is diagnosed from the broker log or not at all:
+# the page composes the same line it toasts and posts it here after each
+# utterance. A LOG LINE, NOT A RECORD -- nothing is stored, nothing is pushed to
+# a feed, and the route is a session principal because the page is a person's
+# tab, never an agent.
+@_guard
+async def diag_http(request):
+    """POST /diag -> log the caller's one-line diagnostic. 204, no body."""
+    p = _user_principal(request)
+    line = (await request.body()).decode("utf-8", "replace")[:512]
+    if not line.strip():
+        return JSONResponse({"error": "empty"}, status_code=400)
+    log.info("%s diag: %s", p.name, " ".join(line.split()))
+    return Response(status_code=204)
+
+
 @_guard
 async def requests_http(request):
     """GET /users/requests -> the admin queue (pending by default, ?state=denied
@@ -7069,6 +7114,7 @@ def build_app():
                   methods=["POST"]),
             Route("/invites", invites_http, methods=["GET", "POST"]),
             Route("/invites/{code_hash}", invite_revoke_http, methods=["DELETE"]),
+            Route("/diag", diag_http, methods=["POST"]),
             Route("/me", me_http, methods=["GET", "PATCH"]),
             Route("/users", users_http, methods=["GET", "POST"]),
             Route("/users/{uid}", user_http, methods=["PATCH", "DELETE"]),
