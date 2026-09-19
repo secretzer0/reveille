@@ -176,10 +176,13 @@ def test_the_page_paints_icons_from_the_flags_and_the_frames():
     case = UI[UI.index("case 'script':"):]
     case = case[:case.index("\n")]
     assert "mm.has_script=true" in case and "mm.script=m.text" in case
-    # Play is an explicit gesture: stops what sounds, plays through the ONE url builder.
-    play = UI[UI.index("function playOne(id){"):]
-    play = play[:play.index("\n}\n")]
-    assert "vStop();" in play and "vPlay(id,vUrl(id))" in play
+    # Play is an explicit gesture, and since 0.2.261 it also MOVES THE CURSOR:
+    # a chosen play point carries on forward from there rather than playing one
+    # and stopping. vPlayAt is the single place that moves it.
+    assert "function playOne(id){vPlayAt(id);}" in UI
+    at = UI[UI.index("function vPlayAt(id){"):]
+    at = at[:at.index("\n}\n")]
+    assert "vStop();vCursor=id;" in at and "vPlay(id,vUrl(id))" in at
     assert UI.count("'/audio/'") == 1
     # The script view replaces the body in place and a second click restores the
     # escaped body -- since 14835 it comes back through colorMentions (escape
@@ -194,7 +197,11 @@ def test_the_page_paints_icons_from_the_flags_and_the_frames():
     # hollow = generate then play; the voice toggle only rules the AUTOMATIC path.
     # The click always ASKS first (ruling 11483): ready -> play, else queued --
     # a terse stand-in heard earlier is not a file (11476).
-    assert "if(e.target.closest('.play')){genOne(m);return;}" in UI
+    # A ROW'S PLAY ICON IS A PLAY POINT (0.2.261): a message that already has
+    # audio moves the cursor and the stream carries on forward from it; one that
+    # has none still has to be made first, and the audio frame plays it through
+    # the same cursor. It used to always be "generate, then play exactly one".
+    assert "if(e.target.closest('.play')){if(m.has_audio)vPlayAt(m.id);else genOne(m);return;}" in UI
     assert "if(r.state==='ready'){m.gen_pending=false;m.has_audio=true;paintIcons(m);playOne(m.id);return;}" in UI
     assert "if(!m.terse)mm.has_audio=true;" in UI, "a terse frame keeps the icon hollow"
     assert "if(e.target.closest('.scr')){toggleScript(row,m);return;}" in UI
@@ -220,12 +227,17 @@ def test_generate_on_demand_posts_once_and_plays_on_the_audio_frame():
         "the asker plays it now; everyone else queues it as an arrival"
     assert "const vBase=id=>'/audio/'+encodeURIComponent(id);" in UI and \
         "const vUrl=id=>vBase(id)+'.webm'+qs();" in UI
-    # The stop button (operator: a long message must be escapable).
-    assert 'id="vstop" hidden' in UI
-    assert "$('vstop').onclick=()=>{vStop();vDone();};" in UI
-    assert "function paintStop(){const b=$('vstop');if(b)b.hidden=!vCtl;}" in UI
-    assert "function vDone(){vCtl=null;vBusy=false;paintStop();earconDrain();vPump();}" in UI
-    assert " const c=vCtl;vCtl=null;paintStop();" in UI
+    # NEXT/PREVIOUS, NOT STOP (operator 2026-09-16, replacing the 2026-08-17
+    # stop button). Stop was already "abort this one and hand the queue on" -- a
+    # skip wearing the wrong name -- and voice off was always the real stop. The
+    # escapability the old button provided is now vnext, and the chip says which
+    # message is speaking, which is what could not be known before.
+    assert "vstop" not in UI, "the stop button is gone, not hidden (0.2.261)"
+    assert 'id="vnow" hidden' in UI and 'id="vprev"' in UI and 'id="vnext"' in UI
+    assert "$('vnext').onclick=()=>vPlayAt(vStepNext(vSpeakable(),vCursor));" in UI
+    assert "$('vprev').onclick=()=>vPlayAt(vStepPrev(vSpeakable(),vCursor));" in UI
+    assert "function vDone(){vCtl=null;vBusy=false;paintNow();earconDrain();vPump();}" in UI
+    assert " const c=vCtl;vCtl=null;paintNow();" in UI
 
 
 def test_a_continuation_row_carries_its_icons_too():

@@ -280,8 +280,12 @@ def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
         assert persisted not in listen, "listening is per tab, never persisted"
     assert "baseAssetPath:'/ui/vad/',onnxWASMBasePath:'/ui/vad/'" in ear and "model:'v5'" in ear
     assert "cdn." not in UI.lower() and "jsdelivr" not in UI, "the model ships with the page"
-    assert '<script src="/ui/vad/ort.wasm.min.js"></script>' in UI and \
-        '<script src="/ui/vad/vad.bundle.min.js"></script>' in UI
+    # THE LISTENER'S LIBRARIES ARRIVE WHEN THE EAR OPENS (0.2.263), not on every
+    # page load -- and IN ORDER, because the VAD bundle expects onnxruntime to
+    # be on the page already. They used to be blocking tags in the head.
+    assert "await vLib('/ui/vad/ort.wasm.min.js');await vLib('/ui/vad/vad.bundle.min.js');" in UI
+    assert UI.index("vLib('/ui/vad/ort.wasm.min.js')") < UI.index("vad.MicVAD.new("), \
+        "the listener must be fetched before it is used"
     assert "let listenChain=Promise.resolve();" in ear and "listenChain=listenChain.then(async()=>{" in ear, \
         "takes post one at a time -- the broker holds one slot"
 
@@ -385,7 +389,7 @@ def test_the_earcon_rings_once_when_words_land_in_listen_mode_only():
     assert "earconRing" not in talk, "no bell in push-to-talk"
     assert "function earconRing(){if(earListening())earcon('ding');}" in page
     assert " if(vBusy){earconQ.push(name);return;}" in page, "never over an utterance"
-    assert "function vDone(){vCtl=null;vBusy=false;paintStop();earconDrain();vPump();}" in page
+    assert "function vDone(){vCtl=null;vBusy=false;paintNow();earconDrain();vPump();}" in page
     assert "fetch('/ui/earcon.wav'" in page
     routes = {r.path for r in daemon.build_app().routes if hasattr(r, "path")}
     assert "/ui/earcon.wav" in routes
