@@ -52,10 +52,10 @@ def _client():
 
 
 def _data(res):
-    if res.isError:
+    if res.is_error:
         raise SystemExit(f"broker refused: {res.content[0].text}")
-    if res.structuredContent is not None:
-        return res.structuredContent
+    if res.structured_content is not None:
+        return res.structured_content
     return json.loads(res.content[0].text)
 
 

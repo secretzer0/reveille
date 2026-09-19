@@ -77,10 +77,10 @@ async def _mcp(port, name, token, calls):
             out = []
             for tool, args in calls:
                 res = await s.call_tool(tool, args)
-                if res.isError:
+                if res.is_error:
                     raise SystemExit(f"{tool} failed: {res.content[0].text}")
-                out.append(res.structuredContent
-                           if res.structuredContent is not None
+                out.append(res.structured_content
+                           if res.structured_content is not None
                            else json.loads(res.content[0].text))
             return out
 

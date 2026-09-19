@@ -139,7 +139,7 @@ def main():
                 async with ClientSession(r_, w_) as s:
                     await s.initialize()
                     res = await s.call_tool(tool, args or {})
-                    return res.structuredContent or json.loads(res.content[0].text)
+                    return res.structured_content or json.loads(res.content[0].text)
 
         seen.clear()
         asyncio.run(call("join", {"url": b.base}))

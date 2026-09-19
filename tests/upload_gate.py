@@ -191,8 +191,8 @@ def main():
                     big = await s.call_tool("upload", {
                         "name": "big.bin",
                         "data_b64": base64.b64encode(b"\0" * (300 * 1024)).decode()})
-                    return (ok.structuredContent or json.loads(ok.content[0].text),
-                            big.isError, big.content[0].text)
+                    return (ok.structured_content or json.loads(ok.content[0].text),
+                            big.is_error, big.content[0].text)
 
         mcp_out, over_is_error, over_msg = asyncio.run(via_mcp())
         assert mcp_out["name"] == "tool.png" and mcp_out["bytes"] == len(src), mcp_out

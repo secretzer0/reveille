@@ -17,8 +17,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 
 def data(result):
-    if result.structuredContent is not None:
-        return result.structuredContent
+    if result.structured_content is not None:
+        return result.structured_content
     return json.loads(result.content[0].text)
 
 

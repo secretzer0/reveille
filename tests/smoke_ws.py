@@ -51,8 +51,8 @@ def wait_health(port, timeout=30):
 
 
 def data(result):
-    if result.structuredContent is not None:
-        return result.structuredContent
+    if result.structured_content is not None:
+        return result.structured_content
     return json.loads(result.content[0].text)
 
 
@@ -186,7 +186,7 @@ async def check_auth(port, token):
     async with session(port, "alice", "WRONG") as (r, w), ClientSession(r, w) as bad:
         await bad.initialize()
         res = await bad.call_tool("inbox", {})
-        assert res.isError and "bad token" in res.content[0].text.lower(), res
+        assert res.is_error and "bad token" in res.content[0].text.lower(), res
 
     # Binding (0.2.7): alice's token IS alice. Presenting it as bob must fail in each
     # surface's own idiom -- MCP isError, WS name_mismatch frame -- and both reasons
@@ -194,7 +194,7 @@ async def check_auth(port, token):
     async with session(port, "bob", token) as (r2, w2), ClientSession(r2, w2) as forged:
         await forged.initialize()
         res = await forged.call_tool("inbox", {})
-        assert res.isError and "bound" in res.content[0].text.lower(), res
+        assert res.is_error and "bound" in res.content[0].text.lower(), res
     async with websockets.connect(f"ws://127.0.0.1:{port}/wake?name=bob&token={token}") as ws:
         frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=3))
         assert frame.get("error") == "name_mismatch", frame

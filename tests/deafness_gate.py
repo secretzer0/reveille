@@ -88,7 +88,7 @@ def main():
                 async with ClientSession(r_, w_) as s:
                     await s.initialize()
                     res = await s.call_tool(tool, args or {})
-                    return res.structuredContent or json.loads(res.content[0].text)
+                    return res.structured_content or json.loads(res.content[0].text)
 
         def mcp_row(name):
             out = asyncio.run(call("presence", secret=adm["secret"], agent="ana"))
