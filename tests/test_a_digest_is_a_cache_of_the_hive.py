@@ -83,6 +83,13 @@ def _good_digest(conn, ids, work="- shipped #305 [msg:%d]"):
     ])
 
 
+def _thread_conn(db):
+    c = sqlite3.connect(db, timeout=10, isolation_level=None, check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys=ON")
+    return c
+
+
 def _principal(tok, room, name):
     return SimpleNamespace(kind="agent", name=name, token_id=tok["id"], agent_id=tok["agent_id"],
                            rooms={room["id"]: "hive"}, user_id="", is_admin=False)
@@ -108,6 +115,9 @@ def writer(monkeypatch):
     monkeypatch.setattr(daemon, "_script_model", "stub-model")
     monkeypatch.setattr(daemon, "_digest_out", daemon.DIGEST_MAX_TOKENS)
     monkeypatch.setattr(daemon, "_digest_ctx", 0)
+    monkeypatch.setattr(daemon, "DIGEST_YIELD_S", 0)      # the voice is quiet in these gates
+    monkeypatch.setattr(daemon, "_script_active", False)
+    monkeypatch.setattr(daemon, "_digest_active", None)
     return st
 
 
@@ -545,3 +555,76 @@ def test_the_verb_starts_and_never_waits_and_rehydrate_reads(tmp_path, writer, m
     out3 = asyncio.run(daemon.digest(mentor="", ctx=ctx))
     assert out3["started"] is False and "last attempt failed" in out3["why"] \
         and "resolves to no live row" in out3["why"], out3
+
+
+def test_the_fold_yields_to_the_voice(tmp_path, writer, monkeypatch):
+    """24223: with a script being written, or queued, or just finished, no
+    fold step calls the writer; once the voice is idle it proceeds."""
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    ids = _seed(conn, room, ana, bob)
+    writer.default = _good_digest(conn, ids)
+    monkeypatch.setattr(daemon, "DIGEST_YIELD_S", 1)
+    monkeypatch.setattr(daemon, "_script_active", True)
+    done = {}
+
+    def run():
+        done["out"] = daemon._digest_job(_thread_conn(db), _principal(ana, room, "ana"))
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(2.0)
+    assert writer.calls == [], "the fold called the writer while a script was being written"
+    daemon._script_active = False
+    daemon._script_last_ns = time.time_ns()          # a script just finished: idle window starts
+    time.sleep(0.5)
+    assert writer.calls == [], "the fold did not wait out DIGEST_YIELD_S after the last script"
+    t.join(timeout=10)
+    assert done["out"]["id"] and len(writer.calls) == 1, "the fold never proceeded once the voice was idle"
+
+
+def test_one_fold_at_a_time_fleet_wide_and_the_second_is_refused_by_name(tmp_path, writer, monkeypatch):
+    """24227 b: while one agent's fold holds the writer, another scope is
+    refused with that agent's name and step -- never queued in memory."""
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    ids = _seed(conn, room, ana, bob)
+    writer.default = _good_digest(conn, ids)
+    writer.delay = 2.0
+    monkeypatch.setattr(daemon, "_digest_active", None)
+    monkeypatch.setattr(daemon, "_digest_running", {})
+    done = {}
+
+    def run():
+        done["out"] = daemon._digest_job(_thread_conn(db), _principal(ana, room, "ana"))
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.5)
+    with pytest.raises(store.BusError, match=r"ana's digest is folding \(step 1/1\)"):
+        daemon._digest_job(_thread_conn(db), _principal(bob, room, "bob"))
+    out = daemon._digest_start(_thread_conn(db), _principal(bob, room, "bob"))
+    assert out["started"] is False and "ana's digest is folding" in out["why"], out
+    t.join(timeout=10)
+    assert done["out"]["id"] and len(writer.calls) == 1
+    assert daemon._digest_active is None, "the fold did not release the fleet-wide slot"
+
+
+def test_a_fold_that_cannot_get_the_writer_gives_up_with_its_reason(tmp_path, writer, monkeypatch):
+    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
+    _seed(conn, room, ana, bob)
+    monkeypatch.setattr(daemon, "DIGEST_YIELD_S", 1)
+    monkeypatch.setattr(daemon, "DIGEST_TIMEOUT_S", 1.5)
+    monkeypatch.setattr(daemon, "_script_active", True)       # the voice never lets go
+    with pytest.raises(store.BusError, match="yielded to voice"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+    assert writer.calls == []
+
+
+def test_the_kill_switch_answers_both_paths_by_name(tmp_path, monkeypatch):
+    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
+    monkeypatch.setattr(daemon, "_script_on", True)
+    monkeypatch.setattr(daemon, "_digest_out", 0)
+    monkeypatch.setattr(daemon, "_digest_off", "digest is off on this broker (REVEILLE_DIGEST=off)")
+    out = daemon._digest_start(conn, _principal(ana, room, "ana"))
+    assert out == {"started": False, "why": "digest is off on this broker (REVEILLE_DIGEST=off)"}
+    with pytest.raises(store.BusError, match=r"REVEILLE_DIGEST=off"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
