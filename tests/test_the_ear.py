@@ -216,7 +216,10 @@ def test_the_page_has_one_mic_that_lands_words_in_the_box_and_never_sends():
     # a pointer, tap-toggle on touch, 60 s at a time, silence refused before the wire.
     assert "await vRecStart();" in ear and "const r=vRecStop();" in ear, "the shared recorder"
     assert UI.count("function vRecStart(){") == 1 and UI.count("function vRecStop(){") == 1
-    assert "if(r.silent){$('micState').textContent='';toast(REC_SILENT_MSG);return;}" in ear
+    assert "const refused=recRefusal(r);" in ear and "toast(refused);" in ear, \
+        "the take is refused by the one ordered predicate (23980), never by a peak flag"
+    assert "if(!talkHeld){talkStop();return;}" in ear, \
+        "a hold that ended while the mic was opening must close the mic (23986)"
     assert "if(e.pointerType==='touch'){touchToggle=true;return;}" in ear
     assert "m.setPointerCapture(e.pointerId);talkStart();" in ear
     assert "if(sec>=60){talkStop();return;}" in ear, "the ear takes 60 s at a time"
@@ -272,7 +275,8 @@ def test_hands_free_is_a_deliberate_visible_state_over_the_same_route():
     # the toast names where to allow the microphone instead of quoting WebKit.
     assert "function micWhy(e){" in UI and "e.name==='NotAllowedError'" in UI and \
         "Settings > (Safari or Chrome) > Microphone" in UI
-    assert "catch(e){toast(micWhy(e));return;}" in UI, "talk says the same"
+    assert "catch(e){talkHeld=false;toast(micWhy(e));return;}" in UI, \
+        "talk says the same, and a refused mic leaves no hold behind (23986)"
     assert "const on=!!(listenVad||listenSimple);" in ear and \
         "m.classList.toggle('on',on);m.setAttribute('aria-pressed',on?'true':'false');" in ear
     listen = ear[:ear.index("const EARCON_GAIN=")]        # the listen toggle's code; the sounds SETTING after it is per browser by ruling (11577)
