@@ -395,6 +395,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.275",
+     "0.2.275 THE CONNECTION IS MADE WHERE IT IS USED (field defect, the first\nlive digest() on 0.2.273). The verb evaluated _conn_for_worker() on the\nevent-loop thread and handed that connection to the pool thread the job\nran on; sqlite refused it -- `SQLite objects created in a thread can only be\nused in that same thread` -- and the tool wrapper withheld the text, so the\ncaller saw `Error executing tool digest` for the second time in an hour,\nfor a second reason. The gates had called _digest_job directly and never\ncrossed the verb's threading seam. Now the job resolves its own connection\ninside the thread, a gate drives the VERB and asserts the connection is\nmade on the thread that uses it (red on the unfixed head), and any failure\nthe job did not foresee is reported with its class and message instead of\nwithheld. 0.2.274 is red-shirt's (#308).\n"),
     ("0.2.273",
      "0.2.273 THE OUTPUT MUST FIT THE WRITER TOO (field defect, first digest on\nthe live broker, 2026-09-19 21:06Z). The live script writer is vLLM with a\n6144-token context. 0.2.271 sized the BATCH to that context and floored it\nat 4000, then asked for a 5000-token OUTPUT beside a running digest of up to\n5000 -- every fold exceeded the context and vLLM answered 400, which the job\ndid not translate: the caller saw `Error executing tool digest` and nothing\nelse.\n\nOne call must hold directive + running digest + batch + output, and the\noutput IS the next running digest, so the digest cap D and the batch B now\nsatisfy ctx >= 700 + 2*D + B: D is the operator's 5000 where the writer\nallows it and shrinks to fit where it does not (6144 -> 1972 out, 1500\nbatch); a writer too small for even that is refused by name at boot and on\nevery call. The header names the writer's context and output cap beside its\nmodel. And a writer's HTTP refusal or unreachability surfaces as the\ndigest's refusal WITH ITS TEXT, never as a withheld exception.\n"),
     ("0.2.272",
@@ -1376,9 +1378,22 @@ def digest_budget(ctx, env=""):
 
 
 def _digest_job(conn, p, mentor_name=""):
-    """Extract -> write -> verify -> store, for one agent. Runs on the caller's
-    thread with the caller's connection (the tool: the loop's; the hook route:
-    a worker thread's own). Returns {id, chars, inputs} -- never the text."""
+    """Extract -> write -> verify -> store, for one agent. Runs on a worker
+    thread with THAT thread's connection. Returns {id, chars, batches,
+    inputs} -- never the text. Any failure the broker did not foresee is
+    reported with its class and message rather than withheld: a caller who
+    reads `Error executing tool digest` can act on nothing."""
+    try:
+        return _digest_job_inner(conn, p, mentor_name)
+    except (store.BusError, store.AccessError, store.AuthError):
+        raise
+    except Exception as e:
+        log.exception("%s digest failed inside the broker", p.name)
+        raise store.BusError(f"digest failed inside the broker: {type(e).__name__}: {e} "
+                             f"-- the prior digest stays live")
+
+
+def _digest_job_inner(conn, p, mentor_name=""):
     if not _script_on:
         raise store.BusError("digest needs the script writer -- REVEILLE_SCRIPT_URL is unset "
                              "on this broker, so there is no model to fold the hive with")
@@ -3381,7 +3396,13 @@ async def digest(mentor: str = "", ctx: Context = None) -> dict:
     # what the operator asked for, and 12750 holds because the model here is
     # on the READ side: offline, regenerable, the hive authoritative behind it.
     p = _acting(ctx.request_context.request)
-    return await asyncio.to_thread(_digest_job, _conn_for_worker(), p, mentor)
+    # THE CONNECTION IS MADE ON THE THREAD THAT USES IT (field defect, first
+    # live call on 0.2.273): _conn_for_worker() evaluated HERE ran on the loop
+    # thread, and sqlite refused it from the pool thread the job ran on --
+    # `SQLite objects created in a thread can only be used in that same
+    # thread`. The gates had called _digest_job directly and never crossed
+    # this seam. Everything the job touches is resolved inside the thread.
+    return await asyncio.to_thread(lambda: _digest_job(_conn_for_worker(), p, mentor))
 
 
 @tool()
