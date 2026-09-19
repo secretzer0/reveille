@@ -1883,6 +1883,16 @@ def cmd_logout(a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="reveille", description=__doc__.splitlines()[0])
+    # THE BODY CAN SAY WHAT IT RUNS. The subcommand is required, so every
+    # version-shaped guess (`reveille --version`) used to answer with a usage
+    # error -- in a fleet whose doctrine is never to cite a version from
+    # memory, the one tool on every body could not be asked. argparse runs a
+    # `version` action during parsing, BEFORE it enforces the required
+    # subcommand, which is why this works without making `cmd` optional.
+    # The broker's version is a different question and stays the broker's to
+    # answer (`/version`); this is the TOOLCHAIN, the thing converge moves.
+    ap.add_argument("--version", action="version",
+                    version=f"reveille {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("init", help="make this machine an agent's machine")
     i.add_argument("url", nargs="?", help="broker url (or $REVEILLE_URL)")
