@@ -1059,7 +1059,12 @@ def test_the_boot_doctrine_arms_the_living_ritual_not_the_retired_one(tmp_path):
     text = path.read_text()
     assert "wake-watch $REVEILLE_AGENT_ROLE" in text
     assert "--once" not in text, "the boot doctrine prescribes the retired arm"
-    assert "join()" in text and "lessons()" in text and "brief(" in text
+    # THE LIVING RITUAL IS join() -> rehydrate() -> arm (decision c6c4bb45).
+    # lessons() and brief() still exist as tools; they are no longer the
+    # prescribed boot. A block that still marches a body through the three-
+    # call ritual is arming the retired one under a newer version stamp.
+    assert "join()" in text and "rehydrate()" in text, text[:400]
+    assert "then `lessons()`, then `brief(" not in text, "the retired three-call ritual is back"
 
 
 def test_the_hook_command_is_never_a_cache_path(monkeypatch, tmp_path):

@@ -7328,6 +7328,116 @@ def lessons(conn, rooms=(), slug=None, budget=24000):
     return _sealed(candidate(with_rule))
 
 
+# THE HIVE MIND HAS TWO VERBS (operator direction, architect decision
+# c6c4bb45). rehydrate() is the COMPLETE read, distill() the SHAPED write.
+# brief() and lessons() are unchanged: they fit a turn; rehydrate() fits a
+# body. recall() is unchanged too, and deliberately not reused here -- it is a
+# RANKED view over a bounded pool (limit*4, capped 200), which is exactly the
+# wrong instrument for "every live row exactly once".
+_REHYDRATE_RANK = {"state": 0, "doctrine": 1, "contract": 2, "decision": 3, "lesson": 4}
+
+
+def _rehydrate_row(r):
+    if r["kind"] == "lesson":
+        d = _lesson(r)
+        d["kind"] = "lesson"
+        return d
+    return _mem_dict(r)
+
+
+def rehydrate(conn, *, rooms, token_id, agent_id="", cursor="", budget=24000):
+    """Every LIVE row the caller may read, complete, by PAGINATION -- never one
+    payload. Order: own state, doctrine, contracts, decisions, lessons (full
+    record), newest-first within kind. Returns {"items", "next", "total",
+    "remaining", "total_chars", "chars"}; loop until `next` is "".
+
+    Read scoping is recall()'s invariant verbatim: global OR the caller's rooms
+    OR the caller's OWN agent scope, so another agent's state is never served.
+
+    THE PAGE IS BOUNDED BY WIRE BYTES (13014): `chars` == the JSON-escaped tool
+    result. A row longer than the budget lands WHOLE and ALONE on its page --
+    a fact is never split, never elided, and there are no truncation marks,
+    because a rehydrate that abbreviates is a brief() with a different name.
+
+    THE CURSOR IS A KEYSET, not an offset: "{rank}:{created_ns}:{id}" names the
+    last row served, and the next page is every row strictly after it in the
+    ordering. An offset would skip or double a row when the live set moves
+    between pages; a keyset serves each row that was live when its page was
+    cut exactly once. Opaque to callers -- pass it back, never build it."""
+    rooms = list(rooms or [])
+    scopes = rooms + [agent_scope(conn, token_id, agent_id)]
+    where = ["(m.scope='global' OR m.scope IN (%s))" % _ph(scopes),
+             "(m.expires_ns IS NULL OR m.expires_ns > ?)", "m.status='live'"]
+    args = list(scopes) + [time.time_ns()]
+    rank = ("CASE m.kind WHEN 'state' THEN 0 WHEN 'doctrine' THEN 1 "
+            "WHEN 'contract' THEN 2 WHEN 'decision' THEN 3 ELSE 4 END")
+    if cursor:
+        try:
+            crank, cns, cid = cursor.split(":")
+            crank, cns, cid = int(crank), int(cns), int(cid)
+        except (ValueError, AttributeError):
+            raise BusError(f"bad cursor {cursor!r} -- pass back the `next` a page gave you")
+        where.append(f"({rank} > ? OR ({rank} = ? AND (m.created_ns < ? OR "
+                     f"(m.created_ns = ? AND m.id < ?))))")
+        args += [crank, crank, cns, cns, cid]
+    sql = ("SELECT m.* FROM memories m WHERE " + " AND ".join(where) +
+           f" ORDER BY {rank} ASC, m.created_ns DESC, m.id DESC")
+    rows = conn.execute(sql, args).fetchall()
+
+    # `total`/`total_chars` describe the WHOLE live set the caller may read,
+    # not the remainder, so the first page quotes the full cost up front (E1):
+    # a number the caller can decide against before paging.
+    total_rows = rows if not cursor else conn.execute(
+        "SELECT m.* FROM memories m WHERE " + " AND ".join(where[:3]) +
+        f" ORDER BY {rank} ASC, m.created_ns DESC, m.id DESC", args[:len(scopes) + 1]
+    ).fetchall()
+    total = len(total_rows)
+    total_chars = sum(len(json.dumps(_rehydrate_row(r))) for r in total_rows)
+
+    budget = max(0, int(budget))
+    items, last = [], None
+
+    def sealed_size(cand):
+        return wire_chars({"items": cand, "next": "9" * 40, "total": total,
+                           "remaining": total, "total_chars": total_chars,
+                           "chars": 99999999})
+
+    for r in rows:
+        cand = items + [_rehydrate_row(r)]
+        if items and sealed_size(cand) > budget:
+            break          # this row opens the next page; never split it
+        items = cand       # an oversize row lands whole and alone: items was empty
+        last = r
+        if sealed_size(items) > budget:
+            break          # it was oversize; its page is exactly itself
+
+    remaining = len(rows) - len(items)
+    nxt = "" if remaining == 0 or last is None else (
+        f"{_REHYDRATE_RANK[last['kind']]}:{last['created_ns']}:{last['id']}")
+    return _sealed({"items": items, "next": nxt, "total": total,
+                    "remaining": remaining, "total_chars": total_chars})
+
+
+# The five fields are DOCTRINE (the handover note, CLAUDE.local.md) and have
+# only ever been prose: memory_add(kind="state") takes a free string and the
+# doctrine asks the agent to remember the shape. distill() takes the shape as
+# PARAMETERS and composes from a CONSTANT template -- no model on the write
+# path (12750), no prose scaffolding for the caller to pay for. The template
+# is the cheapest legible one: five labels, five newlines, nothing else.
+DISTILL_FIELDS = ("task", "branch_sha", "next_step", "open_threads", "undone")
+_DISTILL_TEMPLATE = "TASK: {task}\nBRANCH: {branch_sha}\nNEXT: {next_step}\nOPEN: {open_threads}\nUNDONE: {undone}"
+
+
+def distill_compose(**fields):
+    """The five fields -> one state note. Empty is refused BY NAME, because a
+    missing `next_step` in a handover is the one field the successor cannot
+    reconstruct. Whitespace is stripped so a blank cannot pass as a value."""
+    for k in DISTILL_FIELDS:
+        if not (fields.get(k) or "").strip():
+            raise BusError(f"distill: {k!r} is empty -- all five fields are required")
+    return _DISTILL_TEMPLATE.format(**{k: fields[k].strip() for k in DISTILL_FIELDS})
+
+
 def _displace_lesson_tips(conn, scope, slug, keep_id):
     """The one-live-row-per-slug invariant, enforced at the moment a lesson goes
     LIVE in a scope: every OTHER live same-slug row there flips to superseded.

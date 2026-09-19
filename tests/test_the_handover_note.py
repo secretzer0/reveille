@@ -58,7 +58,12 @@ def test_the_doctrine_block_tells_the_agent_what_to_do_with_it():
     """A frame nobody was taught to read is a frame that changes nothing."""
     block = cli.doctrine_block("someone", "", "0.0.0")
     assert "swap-pending" in block
-    assert "memory_add" in block
+    # distill() is THE verb for the note (decision c6c4bb45); memory_add(kind=
+    # "state") is the raw form and stays named beside it, because it is the
+    # write inside the swap window and a capability absent from the boot
+    # doctrine goes unused. Both are pinned: dropping either is a regression.
+    assert "distill(" in block, "the handover doctrine no longer names distill()"
+    assert "memory_add" in block, "the raw form memory_add(kind=state) vanished from the doctrine"
     assert "STILL the live body" in block
 
 

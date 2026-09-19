@@ -746,3 +746,27 @@ No memory editing outside the draft/ratify/supersede flow; no ratify-by-URL (a l
 someone can be socially engineered into clicking must not carry the gesture); no UI
 for kind='state' beyond read-only inspection, since state is per-agent bookkeeping and
 a human editing another agent's state bucket is misinformation with extra steps.
+
+## 15. Amendment — the hive mind has two verbs (operator direction, architect decision c6c4bb45, 2026-09-19)
+
+Section 5's tool set gains two verbs. Neither replaces anything; both name an intent the existing tools served only by ritual.
+
+### 15.1 `rehydrate(cursor="", budget=24000)` — the complete read
+
+`brief()` is budgeted for a turn and truncates by construction. A body arriving needs the *whole* hive, and until now assembled it by hand: `recall()` per kind plus `lessons(budget=400000)`. Measured on the architect's own boot: 251,587 tokens, a quarter of a 1M window, to read 176 lessons, 32 doctrine, 69 contracts, 148 decisions and 20 state notes — the lessons twice.
+
+`rehydrate()` serves every live row the caller may read, **complete, by pagination, never as one payload** (12944: a result must arrive inline). Order is own state, doctrine, contracts, decisions, lessons as full records — newest first within kind. The page is bounded by wire bytes (13014: `chars == len(json.dumps(<the text emitted>))`). A row longer than the budget lands **whole and alone** on its page; a fact is never split, never elided, and there are no truncation marks, because a rehydrate that abbreviates is a `brief()` under another name.
+
+The cursor is a **keyset** — `{rank}:{created_ns}:{id}` — never an offset. An offset skips or doubles a row when the live set moves between pages; a keyset serves every row that was live when its page was cut exactly once. The first page carries `total` and `total_chars` for the whole set, so the cost is a quotable number before paging.
+
+Read scoping is `recall()`'s invariant verbatim: global, the caller's rooms, or the caller's own agent scope. Another agent's state is never served. `join()` stays the arrival act; the boot ritual becomes `join()` → `rehydrate()` to `next==""` → arm.
+
+### 15.2 `distill(task, branch_sha, next_step, open_threads, undone)` — the shaped write
+
+The handover note's five fields were doctrine over a free string; the agent was asked to remember the shape. `distill()` takes the shape as **required parameters** and composes from a constant template — five labels, five newlines, nothing else — so the shape is enforced and the caller pays for content, not scaffolding. Empty is refused **by name**, because a missing `next_step` is the one field a successor cannot reconstruct.
+
+It rides the same path as `memory_add(kind="state")`: the handover principal, so it works inside the swap window; the same store call, so the length nudge is the same procedural comparison (12750: models on the read path, never the write path). `memory_add(kind="state")` is **untouched and gains no refusal, ever** — it is the write inside the swap window and that path gets no new way to fail.
+
+The result never echoes the note. The operator's grant is a ceiling of 5000 tokens on the whole act, always aiming lower, at high fidelity; a maximal distill is gated under it, and the echo — which would double the cost for nothing the caller did not already have — is gated out.
+
+The Stop hook **never** calls `distill()`. A hook replaying fields the agent gave earlier writes a `next_step` that is stale with full confidence. It may print the age of the last state note — a read — so staleness is visible.
