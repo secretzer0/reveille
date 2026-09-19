@@ -222,3 +222,62 @@ def test_a_refusal_still_reaches_the_caller_as_an_error_result():
         text = " ".join(c.text for c in res.content if getattr(c, "text", None))
         assert "fact is over 1000 chars" in text, (
             f"the refusal reached the caller but its REASON did not: {text!r}")
+
+
+def test_the_wrapper_does_not_change_the_tool_schema():
+    """`@tool()` wraps, and MCPServer builds the schema from what it REGISTERED.
+
+    The wrapper's signature is `(*args, **kwargs)`. If `functools.wraps` did
+    not carry `__wrapped__`, or mcp did not follow it, every tool would
+    advertise a two-argument schema and `ctx: Context` injection would stop
+    resolving -- the whole tool surface broken at once, with the suite still
+    green because in-process callers never read the schema.
+
+    Asserted from the WIRE (`tools/list`), not from inspect: the schema the
+    client is served is the only one that matters.
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from reveille import store
+
+    with scratch_broker() as b:
+        conn = store.connect(b.db)
+        u = store.setup_first_admin(conn, "ana", "hunter2hunter2")
+        room = store.create_room(conn, u["id"], "gate")
+        tok = store.create_token(conn, u["id"], "ana", agent_name="ana", create=True)
+        store.assign_room(conn, tok["id"], room["id"], u["id"])
+        conn.close()
+
+        import httpx2
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async def listing():
+            hdrs = {"Authorization": f"Bearer {tok['secret']}", "X-Agent": "ana"}
+            async with streamable_http_client(
+                    f"{b.base}/mcp",
+                    http_client=httpx2.AsyncClient(
+                        headers=hdrs,
+                        timeout=httpx2.Timeout(30, read=300))) as (r_, w_):
+                async with ClientSession(r_, w_) as s:
+                    await s.initialize()
+                    return await s.list_tools()
+
+        tools = asyncio.run(listing())
+
+    n_decorated = (ROOT / "src" / "reveille" / "daemon.py").read_text().count("\n@tool()\n")
+    assert len(tools.tools) == n_decorated, (
+        f"{n_decorated} functions wear @tool() but {len(tools.tools)} reached the wire")
+
+    # NOTE the v2 SPELLING: `input_schema`, not v1's `inputSchema`. Same silent
+    # snake_case rename as `is_error` -- it raises AttributeError rather than
+    # returning None, so a carried-over assertion fails for the wrong reason.
+    schema = next(t for t in tools.tools if t.name == "memory_add").input_schema
+    props = schema.get("properties", {})
+
+    assert set(props) == {"fact", "kind", "scope", "entities",
+                          "source", "supersedes", "occurred"}, sorted(props)
+    assert set(schema.get("required", [])) == {"fact", "kind"}, schema.get("required")
+    assert "ctx" not in props, "Context leaked into the client-facing schema"
+    assert not {"args", "kwargs"} & set(props), (
+        "the schema was built from the WRAPPER's signature -- functools.wraps "
+        "no longer reaches mcp, and every tool's arguments are now wrong")
