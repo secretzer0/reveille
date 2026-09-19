@@ -106,6 +106,8 @@ def writer(monkeypatch):
     monkeypatch.setattr(daemon, "_script_on", True)
     monkeypatch.setattr(daemon, "_script_url", "http://stub")
     monkeypatch.setattr(daemon, "_script_model", "stub-model")
+    monkeypatch.setattr(daemon, "_digest_out", daemon.DIGEST_MAX_TOKENS)
+    monkeypatch.setattr(daemon, "_digest_ctx", 0)
     return st
 
 
@@ -245,7 +247,7 @@ def test_rehydrate_page_one_row_one_is_the_digest(tmp_path, writer):
     assert page["items"][1]["kind"] == "state"
     head = page["items"][0]["fact"].splitlines()[0]
     assert re.match(r"\[digest:ana \d{4}-\d{2}-\d{2} \| since the beginning \| input: \d+ rows, "
-                    r"\d+ batches \| prior: none \| writer: stub-model\]", head), head
+                    r"\d+ batches \| prior: none \| writer: stub-model ctx \? out 5000\]", head), head
 
 
 # g7 ---------------------------------------------------------------------------
@@ -329,3 +331,42 @@ def test_a_refusal_is_not_an_invitation_to_retry_every_turn(tmp_path, writer, mo
     assert r2.status_code == 200 and r2.json()["started"] is False, r2.text
     assert "attempt" in r2.json()["why"], r2.json()
     assert len(writer.calls) == 2, "the second turn re-asked the writer"
+
+
+def test_the_output_is_sized_to_the_writer_not_only_the_batch():
+    """Field defect 2026-09-19: a 6144-token vLLM writer answered 400 to every
+    fold because only the BATCH was fitted to its context. One call holds
+    directive + running digest + batch + output, and the output is the next
+    running digest."""
+    b, out = daemon.digest_budget(6144)
+    assert out < daemon.DIGEST_MAX_TOKENS and b >= daemon.DIGEST_MIN_BATCH_TOKENS
+    assert daemon.DIGEST_DIRECTIVE_TOKENS + 2 * out + b <= 6144, (b, out)
+    b, out = daemon.digest_budget(32768)
+    assert out == daemon.DIGEST_MAX_TOKENS and b == 32768 - 700 - 2 * 5000
+    assert daemon.digest_budget(0) == (store.DIGEST_INPUT_TOKENS, daemon.DIGEST_MAX_TOKENS)
+    b, out = daemon.digest_budget(32768, env="3000")
+    assert b == 3000 and out == daemon.DIGEST_MAX_TOKENS, "env caps the batch, never the output"
+    with pytest.raises(store.BusError, match="too small"):
+        daemon.digest_budget(2500)
+
+
+def test_a_writers_refusal_surfaces_with_its_text(tmp_path, monkeypatch):
+    import io
+    import urllib.error
+    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
+    _seed(conn, room, ana, bob)
+    monkeypatch.setattr(daemon, "_script_on", True)
+    monkeypatch.setattr(daemon, "_script_url", "http://stub")
+    monkeypatch.setattr(daemon, "_digest_out", 1972)
+    monkeypatch.setattr(daemon, "_digest_ctx", 6144)
+
+    def refuse(*a, **k):
+        raise urllib.error.HTTPError("http://stub/v1/chat/completions", 400, "Bad Request", {},
+                                     io.BytesIO(b'{"error":"maximum context length is 6144 tokens"}'))
+        yield  # noqa: unreachable -- keeps this a generator like _llm_stream
+    monkeypatch.setattr(daemon, "_llm_stream", refuse)
+    with pytest.raises(store.BusError, match=r"HTTP 400 .*maximum context length is 6144"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+    monkeypatch.setattr(daemon, "_digest_out", 0)
+    with pytest.raises(store.BusError, match="too small"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))

@@ -395,6 +395,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.273",
+     "0.2.273 THE OUTPUT MUST FIT THE WRITER TOO (field defect, first digest on\nthe live broker, 2026-09-19 21:06Z). The live script writer is vLLM with a\n6144-token context. 0.2.271 sized the BATCH to that context and floored it\nat 4000, then asked for a 5000-token OUTPUT beside a running digest of up to\n5000 -- every fold exceeded the context and vLLM answered 400, which the job\ndid not translate: the caller saw `Error executing tool digest` and nothing\nelse.\n\nOne call must hold directive + running digest + batch + output, and the\noutput IS the next running digest, so the digest cap D and the batch B now\nsatisfy ctx >= 700 + 2*D + B: D is the operator's 5000 where the writer\nallows it and shrinks to fit where it does not (6144 -> 1972 out, 1500\nbatch); a writer too small for even that is refused by name at boot and on\nevery call. The header names the writer's context and output cap beside its\nmodel. And a writer's HTTP refusal or unreachability surfaces as the\ndigest's refusal WITH ITS TEXT, never as a withheld exception.\n"),
     ("0.2.272",
      "0.2.272 A REFUSAL IS NOT AN INVITATION TO RETRY (architect 24049, the\nnon-blocking gap named on #306). The hook's digest trigger counted its\ninterval from the last DIGEST, so a body with no digest yet and a writer\nthat refused twice was asked again by every turn's Stop hook -- two times\nK writer calls a turn, until one landed. The interval now also counts from\nthe last ATTEMPT, landed or refused; the MCP verb digest() is unaffected,\nbecause an agent asking by hand is not a hook asking by reflex.\n"),
     ("0.2.271",
@@ -1314,9 +1316,9 @@ _DIGEST_FRAME_PROTEGE = (
     "except `- (new body, nothing shipped yet)` and OPEN with what the mentor left open.")
 
 
-def digest_prompt(text, protege=False):
+def digest_prompt(text, protege=False, cap=DIGEST_MAX_TOKENS):
     """The two messages the writer is sent. Pure. Data rides in the USER turn."""
-    system = _DIGEST_FRAME.format(cap=DIGEST_MAX_TOKENS) + (_DIGEST_FRAME_PROTEGE if protege else "")
+    system = _DIGEST_FRAME.format(cap=cap) + (_DIGEST_FRAME_PROTEGE if protege else "")
     return [{"role": "system", "content": system}, {"role": "user", "content": text}]
 
 
@@ -1326,6 +1328,10 @@ _digest_last_try = {}            # scope -> ns of the last attempt, landed or
                                  # refused (architect 24049): a refusal is not an
                                  # invitation to retry on every Stop-hook turn
 _digest_batch = store.DIGEST_INPUT_TOKENS * store.CHARS_PER_TOKEN   # chars per batch
+_digest_out = DIGEST_MAX_TOKENS                                     # tokens per fold output
+_digest_ctx = 0                                                     # the writer's, 0 = unknown
+DIGEST_DIRECTIVE_TOKENS = 700   # the system frame, measured generously
+DIGEST_MIN_BATCH_TOKENS = 1500  # under this a fold is more digest than batch
 
 
 def _writer_context(url, token):
@@ -1344,16 +1350,29 @@ def _writer_context(url, token):
         return 0
 
 
-def digest_input_tokens(ctx, env=""):
-    """Batch size in tokens (24015): the env override, else the writer's
-    context minus the 5000-token output, minus the running digest it is
-    shown beside (another 5000), minus ~1000 of directive; never under 4000;
-    the fallback constant when the context is unknown. Pure."""
+def digest_budget(ctx, env=""):
+    """(batch_tokens, out_tokens) for a writer of context `ctx` (24015, and
+    the field defect of 2026-09-19: a 6144-token vLLM writer answered 400 to
+    every fold because the batch was floored on the INPUT side while the
+    output still asked for 5000). One call must hold: directive + running
+    digest + batch + output, and the output IS the next running digest, so
+    the digest cap D and the batch B satisfy ctx >= directive + 2*D + B.
+    D is the operator's 5000 where the writer allows it and shrinks to fit
+    where it does not; B is what is left, never under DIGEST_MIN_BATCH_TOKENS;
+    a writer too small for even that is refused by name. env overrides the
+    batch only. Unknown context -> the fallbacks. Pure."""
+    if not ctx:
+        batch = int(env) if env else store.DIGEST_INPUT_TOKENS
+        return max(DIGEST_MIN_BATCH_TOKENS, batch), DIGEST_MAX_TOKENS
+    room = ctx - DIGEST_DIRECTIVE_TOKENS
+    out = min(DIGEST_MAX_TOKENS, (room - DIGEST_MIN_BATCH_TOKENS) // 2)
+    if out < 500:
+        raise store.BusError(f"the script writer's context is {ctx} tokens -- too small to fold "
+                             f"a digest (needs {DIGEST_DIRECTIVE_TOKENS + DIGEST_MIN_BATCH_TOKENS + 1000}+)")
+    batch = room - 2 * out
     if env:
-        return max(4000, int(env))
-    if ctx:
-        return max(4000, ctx - 2 * DIGEST_MAX_TOKENS - 1000)
-    return store.DIGEST_INPUT_TOKENS
+        batch = min(batch, max(DIGEST_MIN_BATCH_TOKENS, int(env)))
+    return batch, out
 
 
 def _digest_job(conn, p, mentor_name=""):
@@ -1363,6 +1382,9 @@ def _digest_job(conn, p, mentor_name=""):
     if not _script_on:
         raise store.BusError("digest needs the script writer -- REVEILLE_SCRIPT_URL is unset "
                              "on this broker, so there is no model to fold the hive with")
+    if not _digest_out:
+        raise store.BusError(f"the script writer's context ({_digest_ctx} tokens) is too small "
+                             f"to fold a digest -- see the broker's boot line")
     scope = store.agent_scope(conn, p.token_id, p.agent_id)
     mentor = None
     if mentor_name:
@@ -1389,12 +1411,24 @@ def _digest_job(conn, p, mentor_name=""):
         for step in range(1, steps + 1):
             batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
             data = store.digest_batch_text(running, inputs["base"], batch, step, steps)
-            messages = digest_prompt(data, protege=mentor is not None)
+            messages = digest_prompt(data, protege=mentor is not None, cap=_digest_out)
             out = None
             for attempt in (1, 2):
-                text = strip_think("".join(_llm_stream(
-                    _script_url, _script_model, _script_token, messages,
-                    timeout=DIGEST_TIMEOUT_S, max_tokens=DIGEST_MAX_TOKENS))).strip()
+                # A WRITER'S REFUSAL IS A REFUSAL, NOT A CRASH: a 400 from vLLM
+                # (context exceeded, bad request) or a dead endpoint surfaces
+                # with its text, where "Error executing tool digest" told the
+                # first field caller nothing (2026-09-19).
+                try:
+                    text = strip_think("".join(_llm_stream(
+                        _script_url, _script_model, _script_token, messages,
+                        timeout=DIGEST_TIMEOUT_S, max_tokens=_digest_out))).strip()
+                except urllib.error.HTTPError as e:
+                    detail = e.read(300).decode("utf-8", "replace") if e.fp else ""
+                    raise store.BusError(f"the script writer refused the fold: HTTP {e.code} "
+                                         f"{detail.strip()} -- the prior digest stays live")
+                except (urllib.error.URLError, OSError, TimeoutError) as e:
+                    raise store.BusError(f"the script writer is unreachable: {e} -- the prior "
+                                         f"digest stays live")
                 try:
                     store.digest_verify(conn, text, p.rooms, scope)
                     out = text
@@ -1408,7 +1442,8 @@ def _digest_job(conn, p, mentor_name=""):
                                      f"-- the prior digest stays live")
             running = out
         body = running
-        fact = store.digest_header(name=p.name, inputs=inputs, model=_script_model,
+        writer = f"{_script_model or 'server default'} ctx {_digest_ctx or '?'} out {_digest_out}"
+        fact = store.digest_header(name=p.name, inputs=inputs, model=writer,
                                    batches=steps, mentor=mentor) + "\n" + body
         uid = store.digest_store(conn, scope=scope, author=p.name, fact=fact)
         log.info("%s digest -> %s (%d chars, %d rows in %d batches, %d dropped)", p.name, uid,
@@ -7050,7 +7085,7 @@ def _plaintext_banner(url, lan_ok, what):
 
 def main():
     global _conn, _files_dir, _voices_dir, _db_path, _tts_on, _tts_url, _tts_token
-    global _script_on, _script_url, _script_model, _script_token, _digest_batch
+    global _script_on, _script_url, _script_model, _script_token, _digest_batch, _digest_out, _digest_ctx
     global _stt_on, _stt_url, _stt_token, _stt_model, _stt_timeout
     import uvicorn
     _setup_logging()
@@ -7100,11 +7135,15 @@ def main():
             _script_on = True
             _script_url, _script_token = s_url, s_token
             _script_model = os.environ.get("REVEILLE_SCRIPT_MODEL", "")
-            _digest_batch = digest_input_tokens(_writer_context(s_url, s_token),
-                                                os.environ.get("REVEILLE_DIGEST_INPUT_TOKENS", "")
-                                                ) * store.CHARS_PER_TOKEN
-            print(f"digest ON: {_digest_batch // store.CHARS_PER_TOKEN} input tokens per batch",
-                  flush=True)
+            _digest_ctx = _writer_context(s_url, s_token)
+            try:
+                b, _digest_out = digest_budget(_digest_ctx, os.environ.get("REVEILLE_DIGEST_INPUT_TOKENS", ""))
+                _digest_batch = b * store.CHARS_PER_TOKEN
+                print(f"digest ON: writer context {_digest_ctx or 'unknown'}, {b} input tokens per "
+                      f"batch, {_digest_out} out", flush=True)
+            except store.BusError as e:
+                _digest_out = 0
+                print(f"DIGEST REFUSED: {e}", flush=True)
             first = float(os.environ.get("REVEILLE_SCRIPT_TIMEOUT") or "2.5")   # 11549: measured, see DES-013 s5
             _plaintext_banner(s_url, lan_ok, "the script writer")
             threading.Thread(target=_script_worker, args=(s_url, _script_model, s_token, first),
