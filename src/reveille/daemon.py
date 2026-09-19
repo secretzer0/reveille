@@ -189,8 +189,9 @@ USE:
    fits one turn; rehydrate() fits a body, and nothing in it is elided. No digest
    yet? digest() writes one from the hive; a NEW body starts with
    digest(mentor="<agent>") and inherits ONE agent's skills, not every agent's
-   memory. The Stop hook asks the broker for a digest after each turn; the broker
-   writes one only when it is due.
+   memory. digest() STARTS and answers at once; rehydrate() READS the result
+   when it lands. The Stop hook asks the broker for a digest after each turn;
+   the broker writes one only when it is due.
    join() returns brief_available so you know the pack is worth pulling. The 15-min
    replay is the conversation floor; brief() is the knowledge floor -- boot both.
 2. Reachability (DES-003): reveille-waked holds THE wake socket -- your Stop
@@ -327,7 +328,8 @@ rehydrate() PAGE 1 -- row 1 is my DIGEST (the broker's fold of my work and the
 hive's changes since the last one); the rest of the hive (state, doctrine, contracts,
 decisions, every lesson in full) stays behind `next` for reaching back. Nothing
 elided; brief() is the one-turn pack, rehydrate() is the body. No digest yet:
-digest(); a new body: digest(mentor="$REVEILLE_MENTOR") first. On exit / swap-pending:
+digest() starts one and rehydrate() reads it when it lands; a new body:
+digest(mentor="$REVEILLE_MENTOR") first. On exit / swap-pending:
 distill(task, branch_sha, next_step, open_threads, undone) -- the five fields as
 parameters, the raw form memory_add(kind="state") stays for the swap window.
 Hive memory: recall() before I re-derive a decision or re-litigate a ruling;
@@ -395,6 +397,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.280",
+     "0.2.280 A VERB STARTS; REHYDRATE READS (architect 24173 on devops 24172, from\nthe third live fold on 0.2.278). The fold itself was finally healthy -- 85\nbatches after the 7-day window, a dropped tag stripped and the step kept --\nand the CLIENT died at ~110 s: `Server disconnected without sending a\nresponse` on the held POST /mcp, while the fold ran on for its 85 minutes\nunheard. INVARIANT: NO VERB HOLDS A REQUEST OPEN FOR A MODEL -- the same\nfamily as 12750. digest() now prepares on a worker thread (refusals,\nmentor, extraction: store-only, sub-second), spawns the fold on its own\nthread, and answers at once: {started, batches, since, first_run}; while\none is in flight, {started: false, why: ... (step k/K)}; after a failed\nattempt, the reason itself until DIGEST_MIN_INTERVAL passes, so a body can\nsee why it has no digest without journalctl. The verb and POST /agent/digest\nare ONE path. The result is read where it was always going to be read:\nrehydrate() page 1 row 1, whose header carries id, chars, batches and what\nwas stripped. {id, chars, inputs} on return is dead.\n"),
     ("0.2.279",
      """0.2.279 THE KEEP-ALIVE WAS A 24 kHz RADIO (operator 24098/24137, ruled
 24153). On his phone the speech was stuttery AND MUFFLED from a cold load, went
@@ -1408,10 +1412,11 @@ def digest_prompt(text, protege=False, cap=DIGEST_MAX_TOKENS):
 
 
 _digest_lock = threading.Lock()
-_digest_running = set()          # scopes with a writer call in flight
-_digest_last_try = {}            # scope -> ns of the last attempt, landed or
-                                 # refused (architect 24049): a refusal is not an
-                                 # invitation to retry on every Stop-hook turn
+_digest_running = {}             # scope -> [step, steps] of the fold in flight (24173)
+_digest_last_try = {}            # scope -> (ns, reason) of the last attempt, landed
+                                 # ("") or failed (why) -- 24049: a refusal is not an
+                                 # invitation to retry every Stop-hook turn; 24173:
+                                 # the next verb call carries the reason
 _digest_batch = store.DIGEST_INPUT_TOKENS * store.CHARS_PER_TOKEN   # chars per batch
 _digest_out = DIGEST_MAX_TOKENS                                     # tokens per fold output
 _digest_ctx = 0                                                     # the writer's, 0 = unknown
@@ -1460,23 +1465,11 @@ def digest_budget(ctx, env=""):
     return batch, out
 
 
-def _digest_job(conn, p, mentor_name=""):
-    """Extract -> write -> verify -> store, for one agent. Runs on a worker
-    thread with THAT thread's connection. Returns {id, chars, batches,
-    inputs} -- never the text. Any failure the broker did not foresee is
-    reported with its class and message rather than withheld: a caller who
-    reads `Error executing tool digest` can act on nothing."""
-    try:
-        return _digest_job_inner(conn, p, mentor_name)
-    except (store.BusError, store.AccessError, store.AuthError):
-        raise
-    except Exception as e:
-        log.exception("%s digest failed inside the broker", p.name)
-        raise store.BusError(f"digest failed inside the broker: {type(e).__name__}: {e} "
-                             f"-- the prior digest stays live")
-
-
-def _digest_job_inner(conn, p, mentor_name=""):
+def _digest_prepare(conn, p, mentor_name=""):
+    """Everything BEFORE the writer, on the caller's thread: refusals, the
+    mentor, the extraction (store-only, sub-second). Registers the scope as
+    in flight so a second start sees it. Returns (scope, mentor, inputs);
+    raises with the reason recorded, so the next call can say why."""
     if not _script_on:
         raise store.BusError("digest needs the script writer -- REVEILLE_SCRIPT_URL is unset "
                              "on this broker, so there is no model to fold the hive with")
@@ -1484,99 +1477,175 @@ def _digest_job_inner(conn, p, mentor_name=""):
         raise store.BusError(f"the script writer's context ({_digest_ctx} tokens) is too small "
                              f"to fold a digest -- see the broker's boot line")
     scope = store.agent_scope(conn, p.token_id, p.agent_id)
-    mentor = None
-    if mentor_name:
-        if store.digest_prior(conn, scope) is not None:
-            raise store.BusError("you already have a digest -- a mentor seeds the FIRST one only")
-        m = store.mentor_agent(conn, p.token_id, mentor_name)
-        mp = store.digest_prior(conn, f"agent:{m['id']}")
-        mentor = {"id": m["id"], "name": m["name"], "digest_uid": mp["uid"] if mp else ""}
     with _digest_lock:
         if scope in _digest_running:
-            raise store.BusError("a digest is already being written for you -- wait for it")
-        _digest_running.add(scope)
+            k, n = _digest_running[scope]
+            raise store.BusError(f"a digest is being written for you (step {k}/{n})")
+        _digest_running[scope] = [0, 0]
     try:
+        mentor = None
+        if mentor_name:
+            if store.digest_prior(conn, scope) is not None:
+                raise store.BusError("you already have a digest -- a mentor seeds the FIRST one only")
+            m = store.mentor_agent(conn, p.token_id, mentor_name)
+            mp = store.digest_prior(conn, f"agent:{m['id']}")
+            mentor = {"id": m["id"], "name": m["name"], "digest_uid": mp["uid"] if mp else ""}
         inputs = store.digest_inputs(conn, name=p.name, agent_id=p.agent_id,
                                      token_id=p.token_id, rooms=p.rooms, mentor=mentor,
                                      batch_chars=_digest_batch)
-        # SEQUENTIAL FOLD (operator 24003): the writer's context may be smaller
-        # than the hive, so each call sees the running digest beside ONE batch
-        # and hands back the next running digest, verified before the next
-        # batch. A first run with nothing to fold still writes a digest from
-        # the base alone (a mentor's, or an empty one).
-        steps = max(1, len(inputs["batches"]))
-        running, why, stripped_total, unsectioned_total = "", "", 0, 0
-        for step in range(1, steps + 1):
-            batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
-            data = store.digest_batch_text(running, inputs["base"], batch, step, steps)
-            messages = digest_prompt(data, protege=mentor is not None, cap=_digest_out)
-            out = None
-            for attempt in (1, 2):
-                # A WRITER'S REFUSAL IS A REFUSAL, NOT A CRASH: a 400 from vLLM
-                # (context exceeded, bad request) or a dead endpoint surfaces
-                # with its text, where "Error executing tool digest" told the
-                # first field caller nothing (2026-09-19).
-                try:
-                    text = strip_think("".join(_llm_stream(
-                        _script_url, _script_model, _script_token, messages,
-                        timeout=DIGEST_TIMEOUT_S, max_tokens=_digest_out))).strip()
-                except urllib.error.HTTPError as e:
-                    detail = e.read(300).decode("utf-8", "replace") if e.fp else ""
-                    raise store.BusError(f"the script writer refused the fold: HTTP {e.code} "
-                                         f"{detail.strip()} -- the prior digest stays live")
-                except (urllib.error.URLError, OSError, TimeoutError) as e:
-                    raise store.BusError(f"the script writer is unreachable: {e} -- the prior "
-                                         f"digest stays live")
-                try:
-                    out, stripped, unsectioned = store.digest_verify(conn, text, p.rooms, scope)
-                    for line in stripped:      # a body can look (24138)
-                        log.info("%s digest step %d/%d stripped untagged: %s",
-                                 p.name, step, steps, line[:200])
-                    for line in unsectioned:   # 24144: prose before the first heading
-                        log.info("%s digest step %d/%d stripped unsectioned: %s",
-                                 p.name, step, steps, line[:200])
-                    stripped_total += len(stripped)
-                    unsectioned_total += len(unsectioned)
-                    break
-                except store.BusError as e:
-                    why = str(e)
-                    log.warning("%s digest step %d/%d attempt %d refused: %s",
-                                p.name, step, steps, attempt, why)
-            if out is None:
-                raise store.BusError(f"digest refused twice at step {step}/{steps}: {why} "
-                                     f"-- the prior digest stays live")
-            running = out
-        body = running
-        writer = f"{_script_model or 'server default'} ctx {_digest_ctx or '?'} out {_digest_out}"
-        fact = store.digest_header(name=p.name, inputs=inputs, model=writer,
-                                   batches=steps, mentor=mentor, stripped=stripped_total,
-                                   unsectioned=unsectioned_total) + "\n" + body
-        uid = store.digest_store(conn, scope=scope, author=p.name, fact=fact)
-        log.info("%s digest -> %s (%d chars, %d rows in %d batches, %d dropped)", p.name, uid,
-                 len(fact), inputs["rows"], steps, len(inputs["dropped"]))
-        return {"id": uid, "chars": len(fact), "batches": steps,
-                "inputs": {k: inputs[k] for k in ("rows", "dropped", "since_ns", "prior")}}
+        with _digest_lock:
+            _digest_running[scope] = [0, max(1, len(inputs["batches"]))]
+        return scope, mentor, inputs
+    except (store.BusError, store.AccessError, store.AuthError) as e:
+        with _digest_lock:
+            _digest_running.pop(scope, None)
+            _digest_last_try[scope] = (time.time_ns(), str(e))
+        raise
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        log.exception("%s digest failed inside the broker", p.name)
+        with _digest_lock:
+            _digest_running.pop(scope, None)
+            _digest_last_try[scope] = (time.time_ns(), reason)
+        raise store.BusError(f"digest failed inside the broker: {reason} -- the prior "
+                             f"digest stays live")
+
+
+def _digest_run(conn, p, scope, mentor, inputs):
+    """The fold, on whatever thread holds `conn`: write -> verify -> store,
+    with the bookkeeping every path shares -- progress in _digest_running,
+    the outcome in _digest_last_try, the scope released at the end. Any
+    failure the broker did not foresee is reported with its class and
+    message rather than withheld."""
+    reason = ""
+    try:
+        return _digest_fold(conn, p, scope, mentor, inputs)
+    except (store.BusError, store.AccessError, store.AuthError) as e:
+        reason = str(e)
+        raise
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        log.exception("%s digest failed inside the broker", p.name)
+        raise store.BusError(f"digest failed inside the broker: {reason} -- the prior "
+                             f"digest stays live")
     finally:
         with _digest_lock:
-            _digest_running.discard(scope)
-            _digest_last_try[scope] = time.time_ns()
+            _digest_running.pop(scope, None)
+            _digest_last_try[scope] = (time.time_ns(), reason)
+
+
+def _digest_job(conn, p, mentor_name=""):
+    """Prepare + run on THIS thread: the synchronous whole, for gates and for
+    a body that wants to wait in-process. The wire never calls this (24173)."""
+    scope, mentor, inputs = _digest_prepare(conn, p, mentor_name)
+    return _digest_run(conn, p, scope, mentor, inputs)
+
+
+def _digest_start(conn, p, mentor_name=""):
+    """A VERB STARTS; REHYDRATE READS (24173: no verb holds a request open for
+    a model). Prepares on the caller's thread, spawns the fold on its own
+    thread with its own connection, and answers at once. Returns {started,
+    batches, since, first_run} or {started: false, why}: in flight names
+    the step; a failed attempt inside DIGEST_MIN_INTERVAL names its reason,
+    so a body can see why it has no digest without journalctl."""
+    scope = store.agent_scope(conn, p.token_id, p.agent_id)
+    with _digest_lock:
+        if scope in _digest_running:
+            k, n = _digest_running[scope]
+            return {"started": False, "why": f"a digest is being written for you (step {k}/{n})"}
+        tried, reason = _digest_last_try.get(scope, (0, ""))
+    if reason and (time.time_ns() - tried) / 1e9 < DIGEST_MIN_INTERVAL:
+        return {"started": False, "why": f"last attempt failed: {reason}"}
+    scope, mentor, inputs = _digest_prepare(conn, p, mentor_name)
+
+    def bg():
+        try:
+            _digest_run(_conn_for_worker(), p, scope, mentor, inputs)
+        except Exception as e:                   # the wire has gone; the log and the next call carry it
+            log.warning("%s digest not written: %s", p.name, e)
+    threading.Thread(target=bg, name="digest", daemon=True).start()
+    since = inputs["first_window_ns"] or inputs["since_ns"]
+    return {"started": True, "batches": max(1, len(inputs["batches"])),
+            "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since / 1e9)) if since else "",
+            "first_run": bool(inputs["first_window_ns"])}
+
+
+def _digest_fold(conn, p, scope, mentor, inputs):
+    """The SEQUENTIAL FOLD (24015): each writer call sees the running digest
+    beside ONE batch and hands back the next running digest, verified and
+    normalized before the next batch. Progress is written to _digest_running
+    so a concurrent asker is told the step."""
+    steps = max(1, len(inputs["batches"]))
+    running, why, stripped_total, unsectioned_total = "", "", 0, 0
+    for step in range(1, steps + 1):
+        with _digest_lock:
+            _digest_running[scope] = [step, steps]
+        batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
+        data = store.digest_batch_text(running, inputs["base"], batch, step, steps)
+        messages = digest_prompt(data, protege=mentor is not None, cap=_digest_out)
+        out = None
+        for attempt in (1, 2):
+            # A WRITER'S REFUSAL IS A REFUSAL, NOT A CRASH: a 400 from vLLM
+            # (context exceeded, bad request) or a dead endpoint surfaces
+            # with its text, where "Error executing tool digest" told the
+            # first field caller nothing (2026-09-19).
+            try:
+                text = strip_think("".join(_llm_stream(
+                    _script_url, _script_model, _script_token, messages,
+                    timeout=DIGEST_TIMEOUT_S, max_tokens=_digest_out))).strip()
+            except urllib.error.HTTPError as e:
+                detail = e.read(300).decode("utf-8", "replace") if e.fp else ""
+                raise store.BusError(f"the script writer refused the fold: HTTP {e.code} "
+                                     f"{detail.strip()} -- the prior digest stays live")
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                raise store.BusError(f"the script writer is unreachable: {e} -- the prior "
+                                     f"digest stays live")
+            try:
+                out, stripped, unsectioned = store.digest_verify(conn, text, p.rooms, scope)
+                for line in stripped:      # a body can look (24138)
+                    log.info("%s digest step %d/%d stripped untagged: %s",
+                             p.name, step, steps, line[:200])
+                for line in unsectioned:   # 24144: prose before the first heading
+                    log.info("%s digest step %d/%d stripped unsectioned: %s",
+                             p.name, step, steps, line[:200])
+                stripped_total += len(stripped)
+                unsectioned_total += len(unsectioned)
+                break
+            except store.BusError as e:
+                why = str(e)
+                log.warning("%s digest step %d/%d attempt %d refused: %s",
+                            p.name, step, steps, attempt, why)
+        if out is None:
+            raise store.BusError(f"digest refused twice at step {step}/{steps}: {why} "
+                                 f"-- the prior digest stays live")
+        running = out
+    body = running
+    writer = f"{_script_model or 'server default'} ctx {_digest_ctx or '?'} out {_digest_out}"
+    fact = store.digest_header(name=p.name, inputs=inputs, model=writer,
+                               batches=steps, mentor=mentor, stripped=stripped_total,
+                               unsectioned=unsectioned_total) + "\n" + body
+    uid = store.digest_store(conn, scope=scope, author=p.name, fact=fact)
+    log.info("%s digest -> %s (%d chars, %d rows in %d batches, %d dropped)", p.name, uid,
+             len(fact), inputs["rows"], steps, len(inputs["dropped"]))
+    return {"id": uid, "chars": len(fact), "batches": steps,
+            "inputs": {k: inputs[k] for k in ("rows", "dropped", "since_ns", "prior")}}
 
 
 def _digest_due(conn, p):
     """The hook asks every turn; this says whether a digest is DUE (23979 s6):
-    activity since the last one AND DIGEST_MIN_INTERVAL elapsed. Pure over
-    the store: no model is consulted to decide whether to consult a model."""
+    not in flight, DIGEST_MIN_INTERVAL since the last ATTEMPT (24049) and
+    since the last digest, and activity since it. Pure over the store: no
+    model is consulted to decide whether to consult a model."""
     scope = store.agent_scope(conn, p.token_id, p.agent_id)
     with _digest_lock:
         if scope in _digest_running:
-            return "a digest is being written for you now"
-        tried = _digest_last_try.get(scope, 0)
-    # THE INTERVAL COUNTS FROM THE LAST TRY, NOT ONLY THE LAST DIGEST (24049):
-    # a body with no digest and a writer refusing twice was otherwise asked
-    # again by every turn's hook -- 2 x K writer calls a turn until one landed.
+            k, n = _digest_running[scope]
+            return f"a digest is being written for you now (step {k}/{n})"
+        tried, reason = _digest_last_try.get(scope, (0, ""))
     since_try = (time.time_ns() - tried) / 1e9
     if tried and since_try < DIGEST_MIN_INTERVAL:
-        return f"last digest attempt was {since_try:.0f}s ago; interval is {DIGEST_MIN_INTERVAL}s"
+        return (f"last attempt {since_try:.0f}s ago" + (f" failed: {reason}" if reason else "")
+                + f"; interval is {DIGEST_MIN_INTERVAL}s")
     prior = store.digest_prior(conn, scope)
     if prior is None:
         return ""
@@ -3475,11 +3544,12 @@ async def distill(task: str, branch_sha: str, next_step: str, open_threads: str,
 
 @tool()
 async def digest(mentor: str = "", ctx: Context = None) -> dict:
-    """Ask the broker to write your DIGEST: its own fold of your work and the
-    hive's changes since your last one, verified against the store, landed as
-    kind=digest (page 1 row 1 of rehydrate). mentor=<agent> seeds a NEW body's
-    first digest from that agent's. Returns {id, chars, inputs} -- never the
-    text; rehydrate() reads it. Blocks while the broker's writer works."""
+    """START your DIGEST: the broker folds your work and the hive's changes
+    since your last one on its own thread, verified against the store, and
+    lands it as kind=digest -- page 1 row 1 of rehydrate(), which is where
+    you read it. Answers at once: {started, batches, since, first_run}, or
+    {started: false, why} naming the step in flight or the last failure.
+    mentor=<agent> seeds a NEW body's first digest from that agent's."""
     # The docstring is terse on purpose (it ships in every schema). The
     # reasoning: A DIGEST IS A CACHE OF THE HIVE, NEVER A FACT IN IT (23979).
     # The broker extracts, its script LLM folds, the store verifies every tag
@@ -3487,13 +3557,11 @@ async def digest(mentor: str = "", ctx: Context = None) -> dict:
     # what the operator asked for, and 12750 holds because the model here is
     # on the READ side: offline, regenerable, the hive authoritative behind it.
     p = _acting(ctx.request_context.request)
-    # THE CONNECTION IS MADE ON THE THREAD THAT USES IT (field defect, first
-    # live call on 0.2.273): _conn_for_worker() evaluated HERE ran on the loop
-    # thread, and sqlite refused it from the pool thread the job ran on --
-    # `SQLite objects created in a thread can only be used in that same
-    # thread`. The gates had called _digest_job directly and never crossed
-    # this seam. Everything the job touches is resolved inside the thread.
-    return await asyncio.to_thread(lambda: _digest_job(_conn_for_worker(), p, mentor))
+    # A VERB STARTS; REHYDRATE READS (24173). The blocking shape died on the
+    # wire at ~110 s in the field (proxy/SDK closed the held POST while the
+    # fold ran 85 minutes). THE CONNECTION IS MADE ON THE THREAD THAT USES IT
+    # (0.2.275): everything the prepare touches is resolved inside to_thread.
+    return await asyncio.to_thread(lambda: _digest_start(_conn_for_worker(), p, mentor))
 
 
 @tool()
@@ -6369,15 +6437,13 @@ async def digest_http(request):
     why = _digest_due(_conn, p)
     if why:
         return JSONResponse({"started": False, "why": why})
-    threading.Thread(target=_digest_bg, args=(p,), name="digest", daemon=True).start()
-    return JSONResponse({"started": True}, status_code=202)
-
-
-def _digest_bg(p):
+    # ONE PATH WITH THE VERB (24173): prepare on a worker thread, fold on its
+    # own; the hook only ever learns the fold began.
     try:
-        _digest_job(_conn_for_worker(), p)
-    except Exception as e:                       # a background fold reports, never raises
-        log.warning("%s digest (hook) not written: %s", p.name, e)
+        out = await asyncio.to_thread(lambda: _digest_start(_conn_for_worker(), p))
+    except store.BusError as e:
+        return JSONResponse({"started": False, "why": str(e)})
+    return JSONResponse(out, status_code=202 if out["started"] else 200)
 
 
 # ---- DES-012: a visit is a body swap (EPIC-001 #8) -----------------------
