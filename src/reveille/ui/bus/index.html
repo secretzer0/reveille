@@ -2158,14 +2158,33 @@ let vDec=null;             // the one Opus decoder (WASM), reset per utterance
 // data: URI this page builds, not a URL anyone sent.
 const V_IOS=/iP(hone|ad|od)/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
 let vUnlocked=null;
-function vUnlock(){
- if(!V_IOS||vUnlocked)return;
+// ---- UNLOCK-RATE-BEGIN: THE KEEP-ALIVE RUNS AT THE PLAYER'S RATE (ruled 24153)
+// The element above is what puts iOS's audio session in the playback class, and
+// it never stops -- so the session takes ITS rate, and the page's own sound is
+// rendered through that. It was built at 24 kHz while every utterance decodes at
+// 48 kHz, which is a 12 kHz audio ceiling: the operator heard it as MUFFLED AND
+// STUTTERY from a cold load (24098/24137), clear the moment listen opened the
+// microphone -- getUserMedia reconfigures the session -- and muffled again on
+// the next reload, because the element is rebuilt every time. Same number as the
+// decoder's output, so the session never has to resample what we schedule.
+const V_UNLOCK_RATE=48000;
+function vUnlockWav(){
  const n=4800,h=new Uint8Array(44+n*2),dv=new DataView(h.buffer);
  const str=(o,t)=>{for(let i=0;i<t.length;i++)h[o+i]=t.charCodeAt(i);};
  str(0,'RIFF');dv.setUint32(4,36+n*2,true);str(8,'WAVE');str(12,'fmt ');dv.setUint32(16,16,true);
- dv.setUint16(20,1,true);dv.setUint16(22,1,true);dv.setUint32(24,24000,true);dv.setUint32(28,48000,true);
+ dv.setUint16(20,1,true);dv.setUint16(22,1,true);
+ dv.setUint32(24,V_UNLOCK_RATE,true);dv.setUint32(28,V_UNLOCK_RATE*2,true);
  dv.setUint16(32,2,true);dv.setUint16(34,16,true);str(36,'data');dv.setUint32(40,n*2,true);
+ return h;
+}
+// ---- UNLOCK-RATE-END ------------------------------------------------------
+function vUnlock(){
+ if(!V_IOS||vUnlocked)return;
+ const h=vUnlockWav();
  let bin='';for(let i=0;i<h.length;i++)bin+=String.fromCharCode(h[i]);
+ // STILL LOOPING, DELIBERATELY (24153): the session stays playback-class only
+ // while a media element is playing -- pausing it is a second variable and would
+ // re-open ios-web-audio-needs-a-media-element-to-unlock-the-session.
  const el=document.createElement('audio');el.loop=true;el.setAttribute('playsinline','');
  el.src='data:audio/wav;base64,'+btoa(bin);el.volume=0.01;
  vUnlocked=el;el.play().catch(()=>{vUnlocked=null;});
@@ -2186,6 +2205,13 @@ function vDiagPaint(){const line='last: '+vDiag.frames+' frames, '+vDiag.decoded
  ' samples, '+vDiag.scheduled+' buffers, '+vDiag.errors+' errors, '+vDiag.underruns+' underruns (lead '+
  vDiag.lead.toFixed(2)+' s); ctx '+vDiag.ctx+' @'+vDiag.rate+(vDiag.lib?'':'; NO DECODER');
  vDiagLine=line;
+ // AND IT GOES WHERE WE CAN READ IT (architect 24150): a defect only one phone
+ // shows cannot be diagnosed from a title= nobody can open. Fire-and-forget,
+ // keepalive so an utterance ending as the tab hides still lands, every failure
+ // swallowed -- a diagnostic that can break playback is worse than none.
+ try{fetch('/diag'+qs(),{method:'POST',credentials:'same-origin',
+  headers:{'content-type':'text/plain'},keepalive:true,
+  body:(line+'; ua '+navigator.userAgent).slice(0,512)}).catch(()=>{});}catch(e){}
  const b=$('voice');if(b)b.title=line;   // iOS sounds since 0.2.117: the on-screen toast is gone (operator 11401)
 }
 // Refusal is the failure mode worth naming: without this the queue drains into
