@@ -397,6 +397,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.287",
+     "0.2.287 A CONTEXT BUDGET NEEDS SLACK (field defect 2026-09-20 02:35Z, the\nfirst long fold). deployment-dev's 243-batch run died at step ~33:\n`This model's maximum context length is 6144 tokens. However, you requested\n1972 output tokens and your prompt contains at least 4173 input tokens, for\na total of at least 6145 tokens.` ONE token over.\n\nThe estimate was nearly perfect and that was the defect: 0.2.273 solved\nctx >= directive + 2*out + batch as an EQUALITY, spending the whole\ncontext, while our sizing is chars/4 and the writer's is a real tokenizer.\nAny disagreement lands on the wrong side and the whole run is lost. The\nbudget now reserves DIGEST_CTX_MARGIN_TOKENS (256) that nothing may spend,\nso the live 6144 writer folds with out 1844 and batch 1500 and 256 tokens\nof room to be wrong. A writer too small to afford the margin is refused at\nboot by name, as before -- the margin is charged, never quietly dropped.\n\nWhat worked, and is why this was one log line instead of a mystery: the\nwriter's own sentence crossed the boundary (0.2.273), the refusal left the\nprior digest live, and the saved run was cleared because a refusal is not a\ncrash (0.2.285). The next run starts fresh with a budget that fits.\n"),
     ("0.2.286",
      "0.2.286 A HELD IDENTITY IS SAID ONCE (found by running the rollout, not by\nreading it). The host waked suppressed repeat `stale` lines and said\n`<name> already held by another waked` on EVERY 30 s pass: 74 lines during\ntwenty minutes of transition on the operator's workstation, and one line\nper identity every 30 s forever on any host where an agent keeps its own\ndaemon. Both kinds are now remembered by name and said once, and a name is\nforgotten the moment its situation changes -- it attaches, or it leaves the\nregistry -- so the next change is heard.\n"),
     ("0.2.285",
@@ -1444,6 +1446,17 @@ _digest_out = DIGEST_MAX_TOKENS                                     # tokens per
 _digest_ctx = 0                                                     # the writer's, 0 = unknown
 DIGEST_DIRECTIVE_TOKENS = 700   # the system frame, measured generously
 DIGEST_MIN_BATCH_TOKENS = 1500  # under this a fold is more digest than batch
+# A BUDGET THAT SPENDS THE WHOLE CONTEXT HAS NO ROOM TO BE WRONG (field
+# defect 2026-09-20 02:35Z). The first long fold died at step ~33 with
+# `maximum context length is 6144 tokens ... you requested 1972 output
+# tokens and your prompt contains at least 4173 input tokens, for a total
+# of at least 6145` -- ONE token over. The estimate was nearly perfect and
+# that was the problem: directive + 2*out + batch summed to exactly ctx, so
+# any disagreement between our char arithmetic and the model's tokenizer
+# lands on the wrong side. We do not have the writer's tokenizer and never
+# will for every writer, so the budget keeps a margin instead of pretending
+# to be exact.
+DIGEST_CTX_MARGIN_TOKENS = 256
 
 
 def _writer_context(url, token):
@@ -1464,11 +1477,12 @@ def _writer_context(url, token):
 
 def digest_budget(ctx, env=""):
     """(batch_tokens, out_tokens) for a writer of context `ctx` (24015, and
-    the field defect of 2026-09-19: a 6144-token vLLM writer answered 400 to
-    every fold because the batch was floored on the INPUT side while the
-    output still asked for 5000). One call must hold: directive + running
+    two field defects a day apart). One call must hold: directive + running
     digest + batch + output, and the output IS the next running digest, so
-    the digest cap D and the batch B satisfy ctx >= directive + 2*D + B.
+    the digest cap D and the batch B satisfy
+    ctx >= directive + MARGIN + 2*D + B -- the margin because our sizing is
+    chars/4 and the writer's is a real tokenizer, and the first long fold
+    died one token over a budget that summed to exactly ctx.
     D is the operator's 5000 where the writer allows it and shrinks to fit
     where it does not; B is what is left, never under DIGEST_MIN_BATCH_TOKENS;
     a writer too small for even that is refused by name. env overrides the
@@ -1476,11 +1490,11 @@ def digest_budget(ctx, env=""):
     if not ctx:
         batch = int(env) if env else store.DIGEST_INPUT_TOKENS
         return max(DIGEST_MIN_BATCH_TOKENS, batch), DIGEST_MAX_TOKENS
-    room = ctx - DIGEST_DIRECTIVE_TOKENS
+    room = ctx - DIGEST_DIRECTIVE_TOKENS - DIGEST_CTX_MARGIN_TOKENS
     out = min(DIGEST_MAX_TOKENS, (room - DIGEST_MIN_BATCH_TOKENS) // 2)
     if out < 500:
         raise store.BusError(f"the script writer's context is {ctx} tokens -- too small to fold "
-                             f"a digest (needs {DIGEST_DIRECTIVE_TOKENS + DIGEST_MIN_BATCH_TOKENS + 1000}+)")
+                             f"a digest (needs {DIGEST_DIRECTIVE_TOKENS + DIGEST_CTX_MARGIN_TOKENS + DIGEST_MIN_BATCH_TOKENS + 1000}+)")
     batch = room - 2 * out
     if env:
         batch = min(batch, max(DIGEST_MIN_BATCH_TOKENS, int(env)))
