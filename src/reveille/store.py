@@ -7035,7 +7035,22 @@ def ratify_memory(conn, uid, *, tier="state", is_admin, owned_rooms, actor=""):
 def sweep_expired_state(conn):
     """Hard-delete expired state memories (they are ephemeral by contract) with the
     FTS old-values delete sync. Joins the hourly sweep; reads already filter on
-    expires_ns, so this is hygiene, not the correctness gate."""
+    expires_ns, so this is hygiene, not the correctness gate.
+
+    THIS RAISES ON EVERY PASS AND IS LEFT THAT WAY ON PURPOSE (operator,
+    2026-09-20). memories.supersedes_id is a real foreign key and distill()
+    chains every state note to the one before it, so the ORDINARY shape is an
+    expired row pinned by the live note that replaced it: `FOREIGN KEY
+    constraint failed`, batch-wide, 63 of 98 rows pinned in the field. The
+    one-line unblock is known (NULL the survivors' pointer first) and is NOT
+    applied, because this is a HARD delete and the operator is keeping the
+    bytes for later training. Nothing READS them either way -- _readable_live
+    and recall both filter expires_ns > now, so the 30-day expiry already took
+    these rows out of the fold and out of every query. Deletion would only
+    destroy the last copy. What changed instead is that the failure no longer
+    starves the sweeps behind it (_sweep_one) and now says its own name.
+    The real fix is retention policy, not this function: a terminal status that
+    keeps the row, which needs 'expired' in the memories CHECK constraint."""
     rows = conn.execute("SELECT id, fact, entities, symptom, root_cause, rule, "
                         "detection FROM memories WHERE kind='state' "
                         "AND expires_ns IS NOT NULL AND expires_ns <= ?",

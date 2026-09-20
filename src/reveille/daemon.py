@@ -394,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.299",
+     "0.2.299 ONE TRY AROUND NINE SWEEPS.\n\nTHE HOURLY SWEEP HAS BEEN FAILING ON EVERY PASS and the log said only `sweep\nfailed`, naming nothing. sweep_expired_state hard-deletes the expired state\nbatch in one transaction, memories.supersedes_id is a REAL foreign key, and\ndistill() chains each state note to the one it replaces -- so an expired note\npinned by the live note that superseded it raises FOREIGN KEY constraint\nfailed and sweeps nothing. Not a rare shape, the ORDINARY one: 98 expired\nrows in the field with 63 of them pinned. The old test seeded a single state\nrow with no successor, which is why it stayed green through all of it.\n\nTHE PART THAT ACTUALLY COST SOMETHING: nine sweeps shared one try/except and\nthis one runs FIFTH, so its failure also skipped tombstones, knocks and\nrecalls -- silently, hourly, for as long as the first defect has existed. The\nfield snapshot still holds 3 spent return tickets sweep_recalls should have\ntaken. _sweep_one(label, fn) isolates each sweep and NAMES it in the log;\nevery sweep already owned its transaction, so isolation costs nothing.\n\nTHE DELETE ITSELF IS LEFT REFUSING, ON PURPOSE (operator). The one-line\nunblock is known and is not applied: this is a HARD delete of the last copy,\nand the operator is keeping expired state for later training. Nothing READS\nthose rows either way -- _readable_live and recall both filter\nexpires_ns > now, so the 30-day expiry took them out of the fold and out of\nevery query a month before the sweep ever reached them. Deletion is not the\nloss event; expiry is, and it already happened. The real fix is retention\npolicy -- a terminal status that KEEPS the row, which needs 'expired' in the\nmemories CHECK constraint -- not a tidy-up inside the sweep. A test now\nasserts the refusal, so the day somebody unblocks it they do it deliberately.\n\nThe lesson is this release's own, in a new place: a failure caught too far out\nreports the SYMPTOM and hides both the cause and everything downstream of it.\nOne try around nine calls is one budget around nine terms."),
     ("0.2.298",
      "0.2.298 AN EXTRACTOR, NOT AN EDITOR -- and four more unbudgeted terms.\n\nTHE FOLD KEPT 44 OF 445 ROWS. 9% coverage on a full 27-batch run that landed\nat 5219 real tokens, 10% of the ceiling, with nothing near any limit: 27 steps\nx 800 gave 21600 output tokens available against ~17800 needed, and it emitted\n6531. Many steps returned 46 tokens -- five headings and (none).\n\nTHE CAUSE WAS MY FRAME, NOT A BUDGET. It said RETURN ONLY WHAT THIS BATCH\nEARNS, which makes the writer a CURATOR, and it curated 401 rows away. The\nstore had already decided those rows mattered by putting them in the batch;\nasking the model to re-decide inverts our own division -- the model composes,\nthe store decides truth. The frame now says: you are an EXTRACTOR, not an\neditor; one line per tagged row; returning fewer lines than the batch has rows\nDROPS THOSE ROWS FOR EVER, because this is a single pass; if the batch is\nlarge write SHORTER LINES, never fewer. Measured on the same window, same\nbatches: curating held 678 tokens at step 6 and finished 27 steps at 4684;\nextractive reached 4333 by step 6 and 11657 by step 19, every step emitting\nits full budget.\n\nFOUR MORE UNBUDGETED TERMS, ALL MINE, ALL THE SAME CLASS AS THE MARGIN:\n1. RATIO. Batches went 1500 -> 3876 while a step stayed capped at 800 out --\n   from 0.9x (output EXCEEDED input, so a step could restate everything) to\n   4.8x. The fold is SINGLE-PASS, so the overflow was not deferred, it was\n   lost: 82 of 132 rows, 37% coverage, suite green. Batch ROW COUNT is now\n   derived from what a step can state (800/40 = 20), never chosen beside it.\n2. NOTHING MEASURED IT. The store cuts the batches, so it always knew exactly\n   which rows it offered -- and never checked what arrived. digest_coverage()\n   computes it and the fold logs it every run.\n3. THE TAG LIST. Removing the carried note, I replaced it with the ids of\n   recorded rows and called the cost flat. Flat at 30 rows (291 tokens), not at\n   150 (1372); at 1250 it would cost 11105, twice the whole context. It killed\n   a fold at step 19. Bounded to 40 ids with its own budget line, and a gate\n   asserts directive + tags + batch + out + margin <= ctx.\n4. THE BATCH ITSELF WAS STILL CUT BY chars/4. It ran ~19% low: 17 of 27\n   batches over budget, worst by 809 tokens against a 768 margin, killing a\n   fold at step 20 by 41 tokens. Batches are now cut by the WRITER'S OWN\n   tokenizer -- a fast char pass, then split anything that does not actually\n   fit. An estimate is fine for guessing where to cut and never for deciding\n   that the cut fits.\n\nAND A FOLD NOW BUILDS ON ITS OWN PAST. Asked whether a second fold would be\nincremental: yes on the input side (since = prior.created_ns), but the output\nside had lost its accumulation. The carried fold kept the prior by\nRE-TRANSCRIBING it into step 1; a stateless step does not, and the writer is\ntold not to restate recorded rows, so `running` starting empty meant every fold\nafter the first superseded the whole note with one hour of traffic -- a mind\nthat only ever remembers the last hour, producing a well-formed digest every\ntime. It seeds from the prior's body now, provenance header stripped, because\n[digest:...] and [stripped:...] describe the fold and not the memory.\n\nWHAT IS STILL OPEN, named because it is not fixed: coverage WARNS where it must\nREFUSE -- a step that returns fewer lines than its batch has rows should fail\nand re-issue, since the loss is irreversible and a warning arrives after it.\nNothing bounds the stored note: compaction is unbuilt and the ceiling is a\ntarget nothing enforces. DROP survives in the grammar but the step carries no\nnote, so the writer cannot name a target for it. And coverage is a FLOOR, not a\nresult: a digest 1:1 with the store IS the store, so the number that judges the\nfold is stored-tokens-per-row against the source rows' own count. All four were\nfound by native-doorbell-test reading the design."),
     ("0.2.297",
@@ -7488,31 +7490,43 @@ async def _pending_sweeper():
             log.exception("pending sweep failed")
 
 
+def _sweep_one(label, fn):
+    """Run ONE sweep, isolated, and return its count. A sweep that raises must
+    not starve the sweeps behind it: nine of them shared one try, so
+    sweep_expired_state's foreign-key failure -- which fired on every single
+    pass -- silently took tombstones, knocks and recalls with it, and the log
+    said `sweep failed` without ever naming which one. The label is that name.
+    Each sweep owns its own transaction already, so isolating them here costs
+    nothing and the survivors run on their own schedule."""
+    try:
+        return fn(_conn) or 0
+    except Exception:
+        log.exception("sweep %s failed", label)
+        return 0
+
+
 async def _sweeper():
     """Retention, expired sessions, stale presence. On the event loop, not a thread:
     _conn is used only from the loop thread, so a thread would need its own connection
-    and real locking. One bad sweep must never kill the task."""
+    and real locking. One bad sweep must never kill the task -- nor the next sweep."""
     while True:
         await asyncio.sleep(SWEEP_SECS)
-        try:
-            store.sweep_oidc_state(_conn)
-            dropped = store.sweep_retention(_conn)
-            store.sweep_sessions(_conn)
-            store.reap_stale(_conn)
-            store.sweep_expired_state(_conn)
-            gone = store.sweep_tombstones(_conn)
-            if gone:
-                log.info("swept %s expired token tombstone(s)", gone)
-            gone = store.sweep_knocks(_conn)
-            if gone:
-                log.info("swept %s expired knock(s)", gone)
-            gone = store.sweep_recalls(_conn)
-            if gone:
-                log.info("swept %s spent return ticket(s)", gone)
-            if dropped:
-                log.info("retention swept %s message(s)", dropped)
-        except Exception:
-            log.exception("sweep failed")
+        _sweep_one("oidc-state", store.sweep_oidc_state)
+        dropped = _sweep_one("retention", store.sweep_retention)
+        _sweep_one("sessions", store.sweep_sessions)
+        _sweep_one("presence", store.reap_stale)
+        _sweep_one("expired-state", store.sweep_expired_state)
+        gone = _sweep_one("tombstones", store.sweep_tombstones)
+        if gone:
+            log.info("swept %s expired token tombstone(s)", gone)
+        gone = _sweep_one("knocks", store.sweep_knocks)
+        if gone:
+            log.info("swept %s expired knock(s)", gone)
+        gone = _sweep_one("recalls", store.sweep_recalls)
+        if gone:
+            log.info("swept %s spent return ticket(s)", gone)
+        if dropped:
+            log.info("retention swept %s message(s)", dropped)
 
 
 def build_app():
