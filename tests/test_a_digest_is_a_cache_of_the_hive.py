@@ -11,6 +11,8 @@ The writer is STUBBED at daemon._llm_stream: what it returns is what a model
 would, and the store's verification is the thing under test, not the model.
 """
 
+import json
+import os
 import re
 import sqlite3
 import sys
@@ -533,7 +535,10 @@ def test_the_verb_starts_and_never_waits_and_rehydrate_reads(tmp_path, writer, m
     assert out["started"] is True and out["batches"] == 1 and out["first_run"] is True, out
     assert took < 1.0, f"the verb waited {took:.1f}s on the writer"
     again = asyncio.run(daemon.digest(mentor="", ctx=ctx))
-    assert again["started"] is False and "step 1/1" in again["why"], again
+    # the fold may not have reached step 1 yet: either way the answer names
+    # the run in flight rather than starting a second one
+    assert again["started"] is False and ("step 1/1" in again["why"]
+                                          or "starting, 1 batches" in again["why"]), again
     scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
     deadline = time.monotonic() + 10
     while store.digest_prior(conn, scope) is None and time.monotonic() < deadline:
@@ -599,7 +604,7 @@ def test_one_fold_at_a_time_fleet_wide_and_the_second_is_refused_by_name(tmp_pat
     t = threading.Thread(target=run, daemon=True)
     t.start()
     time.sleep(0.5)
-    with pytest.raises(store.BusError, match=r"ana's digest is folding \(step 1/1\)"):
+    with pytest.raises(store.BusError, match=r"ana's digest is folding \((step 1/1|starting)"):
         daemon._digest_job(_thread_conn(db), _principal(bob, room, "bob"))
     out = daemon._digest_start(_thread_conn(db), _principal(bob, room, "bob"))
     assert out["started"] is False and "ana's digest is folding" in out["why"], out
@@ -628,3 +633,79 @@ def test_the_kill_switch_answers_both_paths_by_name(tmp_path, monkeypatch):
     assert out == {"started": False, "why": "digest is off on this broker (REVEILLE_DIGEST=off)"}
     with pytest.raises(store.BusError, match=r"REVEILLE_DIGEST=off"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
+
+
+def test_a_fold_survives_a_deploy_and_resumes_at_the_next_step(tmp_path, writer, monkeypatch):
+    """24342: three folds died to three deploys in one evening. A run is
+    saved after every verified step; the next start resumes it over the SAME
+    batches and the writer is called once per REMAINING step, not per step."""
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    ids = _seed(conn, room, ana, bob)
+    for i in range(12):
+        store.send(conn, store.agent_principal(ana["agent_id"]), "*", "y" * 300,
+                   subject=f"note {i}", room=room["id"])
+    monkeypatch.setattr(daemon, "_db_path", db)
+    monkeypatch.setattr(daemon, "_digest_batch", 1200)
+    writer.default = _good_digest(conn, ids)
+
+    # the deploy: the fold dies after step 2, exactly as a container restart
+    # kills it -- nothing is cleaned up, the file on disk is all that is left
+    class Killed(RuntimeError):
+        pass
+
+    real = store.digest_run_save
+    saves = []
+
+    def save_then_die(data_dir, scope, inputs, step, running, wr):
+        saves.append(step)
+        real(data_dir, scope, inputs, step, running, wr)
+        if step == 2:
+            raise Killed("deploy")
+    monkeypatch.setattr(store, "digest_run_save", save_then_die)
+    with pytest.raises(store.BusError, match="Killed"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
+    # a CRASH is not a refusal: the saved run must still be there
+    run = store.digest_run_load(daemon._digest_data_dir(), scope, "")
+    assert run is not None and run["step"] == 2, run and run["step"]
+    steps = len(run["inputs"]["batches"])
+    assert steps > 3, "the batch size must force a multi-step run or this proves nothing"
+
+    monkeypatch.setattr(store, "digest_run_save", real)
+    writer.calls.clear()
+    out = daemon._digest_job(conn, _principal(ana, room, "ana"))
+    assert len(writer.calls) == steps - 2, (
+        f"resumed run called the writer {len(writer.calls)} times, expected {steps - 2}")
+    fact = store.digest_prior(conn, scope)["fact"]
+    assert "resumed at step 3" in fact.splitlines()[0], fact.splitlines()[0]
+    assert out["id"]
+    # landed -> the run file is gone
+    assert store.digest_run_load(daemon._digest_data_dir(), scope, out["id"]) is None
+    assert not os.path.exists(store.digest_run_path(daemon._digest_data_dir(), scope))
+
+
+def test_a_saved_run_is_stale_when_the_hive_moved_under_it(tmp_path, writer, monkeypatch):
+    """Resumable means cut against the prior digest that is STILL live, and
+    younger than a day. Anything else is a fresh run."""
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    ids = _seed(conn, room, ana, bob)
+    monkeypatch.setattr(daemon, "_db_path", db)
+    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
+    inputs = {"batches": ["b1", "b2"], "prior": "abc123"}
+    d = daemon._digest_data_dir()
+    store.digest_run_save(d, scope, inputs, 1, "running text", "w")
+    assert store.digest_run_load(d, scope, "abc123")["step"] == 1
+    assert store.digest_run_load(d, scope, "different") is None, "the prior moved: not resumable"
+    assert store.digest_run_load(d, scope, "") is None
+    # too old
+    path = store.digest_run_path(d, scope)
+    stale = json.loads(open(path).read())
+    stale["saved_ns"] = time.time_ns() - (store.DIGEST_RUN_MAX_AGE_S + 60) * 10**9
+    open(path, "w").write(json.dumps(stale))
+    assert store.digest_run_load(d, scope, "abc123") is None, "a day-old run is not resumable"
+    # and a fresh start clears whatever was there
+    writer.default = _good_digest(conn, ids)
+    daemon._digest_job(conn, _principal(ana, room, "ana"))
+    assert not os.path.exists(path) or store.digest_run_load(d, scope, "abc123") is None
