@@ -76,19 +76,48 @@ def _kqueue_pair(path):
         return None
 
 
+TICK_S = 2   # the longest a wait blocks: every tick re-checks the parent
+
+
+def _bind_to_parent():
+    """WHEN THE PARENT LEAVES, THE WATCHER LEAVES (operator 24200, ruled
+    24202). A watcher's owner IS the shell that armed it; a harness that
+    stops tracking that shell, or a session that ends, must not leave a
+    python behind reparented to init -- seven of those were counted on one
+    host. Two halves: the kernel names the owner (PR_SET_PDEATHSIG, Linux,
+    delivered the instant the parent thread exits), and the portable half is
+    a ppid check on every wait tick (a parent gone before this ran, or a
+    macOS parent). No GUID, no file, no pattern-kill: the mechanism is the
+    bookkeeping. reveille-waked is deliberately NOT bound this way -- it is
+    the identity's daemon and outlives every session."""
+    if sys.platform.startswith("linux"):
+        try:
+            libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+            libc.prctl(1, 15, 0, 0, 0)          # PR_SET_PDEATHSIG = 1, SIGTERM = 15
+        except (OSError, AttributeError):
+            pass                                # the tick check still holds
+    if os.getppid() == 1:                       # the parent left before we bound
+        raise SystemExit(0)
+
+
+def _parent_gone():
+    return os.getppid() == 1
+
+
 def _arm(path):
     """The change watch, chosen per OS: returns (wait, close).
 
-    wait() blocks until the directory changed or ~30s passed and drains the
-    event; close() releases whatever was opened. inotify on Linux, kqueue on
-    the BSDs and macOS, a 2s poll where neither answers. Every caller
-    re-scans AFTER wait() returns, so the backend choice is latency, never
-    correctness -- and the poll path is the proof the scan loop needs no
-    events at all."""
+    wait() blocks until the directory changed or TICK_S passed and drains
+    the event; close() releases whatever was opened. inotify on Linux,
+    kqueue on the BSDs and macOS, a TICK_S poll where neither answers. Every
+    caller re-scans AFTER wait() returns, so the backend choice is latency,
+    never correctness -- and the poll path is the proof the scan loop needs
+    no events at all. The tick is short because the parent check rides on
+    it (24202)."""
     fd = _inotify_fd(path)
     if fd is not None:
         def wait():
-            r, _, _ = select.select([fd], [], [], 30)
+            r, _, _ = select.select([fd], [], [], TICK_S)
             if r:
                 os.read(fd, 65536)   # drain events; the re-scan reads names
         return wait, lambda: os.close(fd)
@@ -96,12 +125,12 @@ def _arm(path):
     if pair is not None:
         kq, dirfd = pair
         def wait():
-            kq.control(None, 4, 30)  # up to 4 coalesced events, or timeout
+            kq.control(None, 4, TICK_S)  # up to 4 coalesced events, or timeout
         def close():
             kq.close()
             os.close(dirfd)
         return wait, close
-    return (lambda: time.sleep(2)), (lambda: None)   # polling fallback
+    return (lambda: time.sleep(TICK_S)), (lambda: None)   # polling fallback
 
 
 def _emit(path, text):
@@ -155,6 +184,8 @@ def _follow(agent, newdir):
                 _emit(p, text)
             seen &= {os.path.basename(p) for p in spool.entries(agent)}
             wait()
+            if _parent_gone():
+                return
     finally:
         close()
 
@@ -167,6 +198,7 @@ def main():
                          "session instead of once per turn)")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args()
+    _bind_to_parent()
     spool.ensure(a.agent)
     newdir = os.path.join(spool.agent_dir(a.agent), "new")
 
@@ -188,6 +220,8 @@ def main():
                 _emit(*got)
                 return 0
             wait()
+            if _parent_gone():
+                return 0        # the shell that armed us is gone; so are we
     finally:
         close()
 
