@@ -397,8 +397,10 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.288",
+     "0.2.288 WHO REFUSED DECIDES WHAT SURVIVES (architect 24470, from the\nthirty-three steps 0.2.287 could not save). The writer's 400 arrived as a\nplain BusError, and 0.2.285 reads any refusal as \"this run is bad\" and\nthrows its saved steps away -- so a budget bug the next deploy fixed cost\nan entire 243-batch run instead of one step.\n\nThe two refusals are now different kinds. The STORE refuses CONTENT -- an\ninvented citation, no digest shape -- which means the model lied and the\nrun is poisoned: clear it. The WRITER refuses a CALL -- context, 5xx,\ntransport, timeout -- which says nothing about the steps already verified:\nkeep the saved run, end with the reason, and the next start resumes at\nstep k+1, where the same batches now fit under the 0.2.287 margin.\nWriterRefusal is its own class for exactly that reason.\n"),
     ("0.2.287",
-     "0.2.287 A CONTEXT BUDGET NEEDS SLACK (field defect 2026-09-20 02:35Z, the\nfirst long fold). deployment-dev's 243-batch run died at step ~33:\n`This model's maximum context length is 6144 tokens. However, you requested\n1972 output tokens and your prompt contains at least 4173 input tokens, for\na total of at least 6145 tokens.` ONE token over.\n\nThe estimate was nearly perfect and that was the defect: 0.2.273 solved\nctx >= directive + 2*out + batch as an EQUALITY, spending the whole\ncontext, while our sizing is chars/4 and the writer's is a real tokenizer.\nAny disagreement lands on the wrong side and the whole run is lost. The\nbudget now reserves DIGEST_CTX_MARGIN_TOKENS (256) that nothing may spend,\nso the live 6144 writer folds with out 1844 and batch 1500 and 256 tokens\nof room to be wrong. A writer too small to afford the margin is refused at\nboot by name, as before -- the margin is charged, never quietly dropped.\n\nWhat worked, and is why this was one log line instead of a mystery: the\nwriter's own sentence crossed the boundary (0.2.273), the refusal left the\nprior digest live, and the saved run was cleared because a refusal is not a\ncrash (0.2.285). The next run starts fresh with a budget that fits.\n"),
+     "0.2.287 A CONTEXT BUDGET NEEDS SLACK (field defect 2026-09-20 02:35Z, the\nfirst long fold). deployment-dev's 243-batch run died at step ~33:\n`This model's maximum context length is 6144 tokens. However, you requested\n1972 output tokens and your prompt contains at least 4173 input tokens, for\na total of at least 6145 tokens.` ONE token over.\n\nThe estimate was nearly perfect and that was the defect: 0.2.273 solved\nctx >= directive + 2*out + batch as an EQUALITY, spending the whole\ncontext, while our sizing is chars/4 and the writer's is a real tokenizer.\nAny disagreement lands on the wrong side and the whole run is lost. The\nbudget now reserves DIGEST_CTX_MARGIN_TOKENS (256) that nothing may spend,\nso the live 6144 writer folds with out 1844 and batch 1500 and 256 tokens\nof room to be wrong. A writer too small to afford the margin is refused at\nboot by name, as before -- the margin is charged, never quietly dropped.\n\nSaid plainly because it is true of the next writer too: chars/4 is an\nESTIMATE, the writer's tokenizer is authoritative and never ours, and a\nmargin is what makes an estimate safe to spend against a hard limit."),
     ("0.2.286",
      "0.2.286 A HELD IDENTITY IS SAID ONCE (found by running the rollout, not by\nreading it). The host waked suppressed repeat `stale` lines and said\n`<name> already held by another waked` on EVERY 30 s pass: 74 lines during\ntwenty minutes of transition on the operator's workstation, and one line\nper identity every 30 s forever on any host where an agent keeps its own\ndaemon. Both kinds are now remembered by name and said once, and a name is\nforgotten the moment its situation changes -- it attaches, or it leaves the\nregistry -- so the next change is heard.\n"),
     ("0.2.285",
@@ -1587,7 +1589,14 @@ def _digest_run(conn, p, scope, mentor, inputs, resume=None):
     try:
         return _digest_fold(conn, p, scope, mentor, inputs, resume)
     except (store.BusError, store.AccessError, store.AuthError) as e:
-        reason, refused = str(e), True
+        # WHO REFUSED DECIDES WHAT SURVIVES (24470). The STORE refusing means
+        # the content is bad -- an invented citation, no digest shape -- and
+        # the run is poisoned. The WRITER refusing means the CALL failed --
+        # context, 5xx, transport, timeout -- and every verified step so far
+        # is still good, so the saved run is kept and the next start resumes
+        # it. Thirty-three steps were thrown away once for want of this line.
+        reason = str(e)
+        refused = not isinstance(e, store.WriterRefusal)
         raise
     except Exception as e:
         # A CRASH IS NOT A REFUSAL, and this is the deploy case in miniature:
@@ -1602,9 +1611,9 @@ def _digest_run(conn, p, scope, mentor, inputs, resume=None):
     finally:
         global _digest_active
         if refused:
-            # The run ended on a REFUSAL: its saved state dies with it, and
-            # the prior digest stays live either way (24342 s3). A crash
-            # keeps it -- see above.
+            # The STORE refused: the content is poisoned, so its saved state
+            # dies with it and the prior digest stays live (24342 s3). A
+            # crash and a WRITER refusal both KEEP it (24470).
             store.digest_run_clear(_digest_data_dir(), scope)
         with _digest_lock:
             _digest_running.pop(scope, None)
@@ -1717,11 +1726,13 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
                     timeout=DIGEST_TIMEOUT_S, max_tokens=_digest_out))).strip()
             except urllib.error.HTTPError as e:
                 detail = e.read(300).decode("utf-8", "replace") if e.fp else ""
-                raise store.BusError(f"the script writer refused the fold: HTTP {e.code} "
-                                     f"{detail.strip()} -- the prior digest stays live")
+                raise store.WriterRefusal(f"the script writer refused the fold: HTTP {e.code} "
+                                          f"{detail.strip()} -- the prior digest stays live, "
+                                          f"and this run's saved steps are kept")
             except (urllib.error.URLError, OSError, TimeoutError) as e:
-                raise store.BusError(f"the script writer is unreachable: {e} -- the prior "
-                                     f"digest stays live")
+                raise store.WriterRefusal(f"the script writer is unreachable: {e} -- the prior "
+                                          f"digest stays live, and this run's saved steps "
+                                          f"are kept")
             try:
                 out, stripped, unsectioned = store.digest_verify(conn, text, p.rooms, scope)
                 for line in stripped:      # a body can look (24138)

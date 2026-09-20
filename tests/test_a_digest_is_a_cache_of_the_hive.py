@@ -731,3 +731,55 @@ def test_the_budget_keeps_slack_because_our_tokenizer_is_not_the_writers():
     # silently ignored: a context that only fits without slack is refused
     with pytest.raises(store.BusError, match="too small"):
         daemon.digest_budget(daemon.DIGEST_DIRECTIVE_TOKENS + daemon.DIGEST_MIN_BATCH_TOKENS + 1000)
+
+
+def test_a_writer_refusal_keeps_the_run_and_a_store_refusal_clears_it(tmp_path, writer, monkeypatch):
+    """24470: the writer's 400 threw away 33 verified steps because it
+    arrived as a plain BusError and read as 'this run is bad'. Who refused
+    decides what survives: the STORE refuses CONTENT (poisoned, clear), the
+    WRITER refuses a CALL (the steps are still good, keep and resume)."""
+    import io
+    import urllib.error
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    ids = _seed(conn, room, ana, bob)
+    for i in range(12):
+        store.send(conn, store.agent_principal(ana["agent_id"]), "*", "y" * 300,
+                   subject=f"note {i}", room=room["id"])
+    monkeypatch.setattr(daemon, "_db_path", db)
+    monkeypatch.setattr(daemon, "_digest_batch", 1200)
+    good = _good_digest(conn, ids)
+    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
+
+    # ONE stub for the whole test, reading live state: the fixture's own
+    # patch would otherwise be replaced and later phases would never see the
+    # text they set (caught by this gate's first run).
+    st = {"calls": 0, "die_on": 3, "text": good}
+
+    def stub(url, model, token, messages, timeout, max_tokens=300):
+        st["calls"] += 1
+        if st["calls"] == st["die_on"]:
+            raise urllib.error.HTTPError(
+                "http://stub/v1/chat/completions", 400, "Bad Request", {},
+                io.BytesIO(b'{"error":{"message":"maximum context length is 6144 tokens"}}'))
+        yield st["text"]
+    monkeypatch.setattr(daemon, "_llm_stream", stub)
+    with pytest.raises(store.WriterRefusal, match="maximum context length"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+    run = store.digest_run_load(daemon._digest_data_dir(), scope, "")
+    assert run is not None and run["step"] == 2, (
+        "a writer refusal threw away the verified steps")
+
+    # and it resumes: the writer recovers, the run picks up at step 3
+    st["die_on"] = 0
+    out = daemon._digest_job(conn, _principal(ana, room, "ana"))
+    fact = store.digest_prior(conn, scope)["fact"]
+    assert "resumed at step 3" in fact.splitlines()[0], fact.splitlines()[0]
+    assert out["id"]
+
+    # the STORE's refusal is the other kind: content poisoned, run cleared
+    st["text"] = good.replace(_tag_of(conn, ids["decision"]), "[decision:deadbeef 2026-09-20]")
+    with pytest.raises(store.BusError, match="resolves to no live row"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+    assert store.digest_run_load(daemon._digest_data_dir(), scope, out["id"]) is None, (
+        "a poisoned run was kept")

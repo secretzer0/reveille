@@ -749,6 +749,17 @@ class AuthError(Exception):
     """No/!valid credential. The transport turns this into a 401."""
 
 
+class WriterRefusal(BusError):
+    """The MODEL ENDPOINT refused a call -- context exceeded, 5xx, transport,
+    timeout. Distinct from every other refusal because of what it says about
+    the WORK: the store refuses CONTENT (an invented citation, no digest
+    shape), which poisons a run and throws its saved steps away; a writer
+    refuses a CALL, and the steps already verified are still good. Thirty-
+    three verified fold steps were discarded once because a budget bug
+    arrived as a plain BusError and read as "this run is bad" (ruled 24470).
+    """
+
+
 class AccessError(Exception):
     """Valid principal, but not for this room/resource. The transport 403s it."""
 
