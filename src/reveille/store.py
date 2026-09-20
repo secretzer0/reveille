@@ -7622,7 +7622,7 @@ DIGEST_LINE_TOKENS = 40     # measured: a restated row plus its [kind:id8 date]
 
 def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
                   batch_chars=DIGEST_INPUT_TOKENS * CHARS_PER_TOKEN,
-                  batch_rows=0, tokens_of=None, max_tokens=0):
+                  batch_rows=0, tokens_of=None, max_tokens=0, row_budget=0):
     """Deterministic extraction (23979 s2/s8'), cut into BATCHES for a writer
     whose context is smaller than the hive (operator 24003): the caller folds
     them in order, each call = the running digest + one batch.
@@ -7646,7 +7646,7 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
     scopes = rooms + [scope]
     prior = digest_prior(conn, scope)
     items, since, base = [], 0, ""          # items: (ns, line), time order
-    first_window = False
+    first_window, left_out = False, 0
     if mentor is not None:
         mprior = digest_prior(conn, f"agent:{mentor['id']}")
         if mprior is None:
@@ -7673,7 +7673,10 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
             base = (_block("PRIOR DIGEST -- fold it: keep, update, drop; never append",
                            [prior["fact"]]) + "\n\n" +
                     _block("THE STORE'S VERDICT ON EVERY TAG ABOVE", _verdicts(conn, prior["fact"])))
-        for r in _readable_live(conn, scopes, since):
+        live = _readable_live(conn, scopes, since)
+        if row_budget:
+            live, left_out = digest_select(live, row_budget)
+        for r in live:
             items.append((r["created_ns"], _mem_line(r)))
         # A FIRST RUN WINDOWS THE MESSAGES, NEVER THE ROWS (24138): rows are
         # the small, load-bearing part; messages are the bulk, and the
@@ -7744,6 +7747,9 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
                     [ln for _, ln in b]) for i, b in enumerate(batches)]
     return {"base": base, "batches": texts, "rows": total, "dropped": dropped,
             "since_ns": since, "prior": prior["uid"] if prior else "", "scope": scope,
+            # ROWS THE BUDGET LEFT OUT -- live, queryable, one recall() away,
+            # and named in the header so the note never implies it is the store.
+            "left_out": left_out,
             # THE NOTE THE NEXT FOLD BUILDS ON. Under the carried fold the prior
             # survived by being RE-TRANSCRIBED into step 1's output; the step no
             # longer carries it and the writer is told not to restate recorded
@@ -8204,12 +8210,66 @@ def digest_oversize(text, cap_tokens, tokens_of=None, skip=()):
     sections, _said = _digest_sections(text)
     worst, worst_n = "", 0
     for name, lines in sections.items():
-        if name in skip:
+        # ONLY THE SECTIONS THAT GROW. WORK and OPEN are untagged narrative,
+        # rewritten whole by every step and never accumulating, so there is
+        # nothing in them to merge -- and a compaction of them is guaranteed
+        # to fail its own gate, because that gate requires every returned line
+        # to name the rows it speaks for. Measured: two writer calls per pass
+        # spent to be refused, and two alarming lines in the log.
+        if name not in DIGEST_TAGGED or name in skip:
             continue
         n = count("\n".join(lines))
         if n > cap_tokens and n > worst_n:
             worst, worst_n = name, n
     return worst
+
+
+# MEASURED, not chosen: 29951 real tokens of stored note across 258 folded
+# rows on the 43-batch run of 2026-09-20. It is what one row COSTS once it is
+# in the note, and it is the only honest way to turn a token ceiling into a
+# row budget. Re-measure it when the frame changes; a stale number here makes
+# the budget lie in the direction of overflow.
+DIGEST_STORED_ROW_TOKENS = 116
+
+# The kinds that BIND, in the order they are kept. doctrine and contract are
+# rules a peer could break by not knowing them, so they are carried whole
+# before anything else competes for room; decisions and lessons are carried
+# newest-first with what is left.
+DIGEST_BINDING_KINDS = ("doctrine", "contract")
+
+
+def digest_select(rows, budget):
+    """(kept, left_out) -- the rows a fold may carry, bounded BEFORE any GPU.
+
+    THE NOTE IS A CACHE, NOT THE STORE. A row left out here is not lost: it is
+    live, queryable, and one recall() away. What is bounded is what an agent
+    carries without asking -- the operator's "smallest brain footprint with the
+    largest intelligence" -- and bounding it is the only thing that can, because
+    the rows do not overlap. Three independent measurements agreed on that:
+    word-Jaccard over 1360 live rows found 4 near-duplicate pairs, TF-IDF over
+    word bigrams and char 5-grams found the same 4, and the writer itself
+    collapsed 7 lines of 258 in 934 GPU-seconds. There is nothing to merge, so
+    the bound has to be selection.
+
+    THE ORDER IS THE POLICY, and it is deterministic so the same store always
+    yields the same note: every binding rule first (doctrine and contract --
+    what a peer breaks by not knowing it), then decisions and lessons
+    newest-first. Time order is restored afterwards, so the note still reads
+    chronologically and the fold still sees its batches in sequence.
+
+    IT ALSO MAKES COVERAGE MEAN SOMETHING. An unbounded fold offered 445 rows
+    and kept 258 -- not a choice, just where it ran out of steps, reported as
+    57%. A bounded fold offers what it intends to carry, so coverage measures
+    the fold instead of measuring the store's size.
+    """
+    budget = max(0, int(budget))
+    binding = [r for r in rows if r["kind"] in DIGEST_BINDING_KINDS]
+    rest = sorted((r for r in rows if r["kind"] not in DIGEST_BINDING_KINDS),
+                  key=lambda r: r["created_ns"], reverse=True)
+    kept = binding[:budget]
+    kept += rest[:max(0, budget - len(kept))]
+    kept.sort(key=lambda r: r["created_ns"])
+    return kept, len(rows) - len(kept)
 
 
 def digest_compact_windows(lines, max_tokens, tokens_of=None):
@@ -8306,6 +8366,9 @@ def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
             f"writer: {model or 'server default'}]")
     if mentor is not None:
         head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
+    if inputs.get("left_out"):
+        head += (f"\n[bounded: {inputs['left_out']} older row(s) not carried -- "
+                 f"live in the store, reachable with recall()]")
     if inputs["dropped"]:
         head += "\n[dropped: " + ", ".join(inputs["dropped"]) + "]"
     if stripped or unsectioned:

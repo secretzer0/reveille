@@ -191,3 +191,14 @@ def test_the_pass_reaches_every_section_not_only_the_worst():
         seen.add(name)
         order.append(name)
     assert order == ["DECISIONS", "LESSONS", "RULES"], order   # worst first, all three
+
+
+def test_only_the_sections_that_grow_are_ever_compacted():
+    """WORK and OPEN are untagged narrative, rewritten whole every step. There
+    is nothing in them to merge, and compacting them is guaranteed to fail the
+    gate -- measured in the field as two wasted writer calls per pass and two
+    refusals in the log that read like defects."""
+    note = ("RULES\n- (none)\nDECISIONS\n- (none)\nLESSONS\n- (none)\n"
+            "WORK\n" + "\n".join(f"- shipped thing {i} " + "x" * 200 for i in range(6)) +
+            "\nOPEN\n" + "\n".join(f"- owes thing {i} " + "y" * 200 for i in range(6)))
+    assert store.digest_oversize(note, 10) == ""
