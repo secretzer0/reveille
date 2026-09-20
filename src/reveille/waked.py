@@ -1367,7 +1367,7 @@ def host_plan(entries, held):
     return attach, stale
 
 
-async def _host_pass(url, opts, tasks, locks, said_stale, parked=None):
+async def _host_pass(url, opts, tasks, locks, noted, parked=None):
     """ONE enumeration: reap finished runs, then attach every registered
     identity this process is not already serving. Separate from the loop so
     a gate can drive exactly one pass without a test-only flag in the
@@ -1393,26 +1393,38 @@ async def _host_pass(url, opts, tasks, locks, said_stale, parked=None):
                 print(f"reveille-waked: agents/{name}: parked ({why}) -- re-attaches "
                       f"when its credential changes", file=sys.stderr)
     attach, stale = host_plan(entries, set(tasks))
+    # SAID ONCE, NOT EVERY PASS (measured on the rollout, 2026-09-20): the
+    # stale lines were already suppressed and the held ones were not, so a
+    # host sharing a machine with one per-agent waked printed a line per
+    # identity every 30 s -- 74 lines in twenty minutes of transition, and
+    # forever after on a host where an identity keeps its own daemon. `noted`
+    # remembers what has been said, by kind, and forgets a name the moment
+    # its situation changes.
     # A parked identity waits for its credential to change (or SIGHUP, which
     # clears the map): the mtime AT THE REFUSAL is the whole memory.
     attach = [(n, d) for n, d in attach
               if n not in parked or credential_mtime(d) != parked[n]]
     for n, _ in attach:
         parked.pop(n, None)
+    gone = {k for k in noted if k.split(":", 1)[1] not in entries}
+    noted -= gone
     for name, why in stale:
-        if name not in said_stale:
-            said_stale.add(name)
+        if f"stale:{name}" not in noted:
+            noted.add(f"stale:{name}")
             print(f"reveille-waked: agents/{name}: stale ({why})", file=sys.stderr)
     for name, workdir in attach:
-        said_stale.discard(name)
+        noted.discard(f"stale:{name}")
         lock = open(spool.lock_path(name), "w")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             lock.close()
-            print(f"reveille-waked: {name} already held by another waked "
-                  f"-- leaving it alone", file=sys.stderr)
+            if f"held:{name}" not in noted:
+                noted.add(f"held:{name}")
+                print(f"reveille-waked: {name} already held by another waked "
+                      f"-- leaving it alone", file=sys.stderr)
             continue
+        noted.discard(f"held:{name}")
         lock.write(f"{os.getpid()}\n")
         lock.flush()
         locks[name] = lock
@@ -1430,13 +1442,13 @@ async def _host(url, idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s,
     rescan_s and immediately on SIGHUP: an added identity attaches without a
     restart, and nothing about the others is disturbed."""
     opts = (idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s)
-    tasks, locks, said_stale, parked = {}, {}, set(), {}
+    tasks, locks, noted, parked = {}, {}, set(), {}
     wake = asyncio.Event()
     with contextlib.suppress(NotImplementedError, AttributeError):
         asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, wake.set)
     try:
         while True:
-            await _host_pass(url, opts, tasks, locks, said_stale, parked)
+            await _host_pass(url, opts, tasks, locks, noted, parked)
             wake.clear()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(wake.wait(), rescan_s)
