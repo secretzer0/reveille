@@ -1964,7 +1964,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
     """
     tag = makefile_image(pathlib.Path(rl.__file__).parent.parent)
     assert tag == rl.DEFAULT_IMAGE
-    assert tag == "ghcr.io/secretzer0/reveille-agent:0.2.44", (
+    assert tag == "ghcr.io/secretzer0/reveille-agent:0.2.45", (
         "the entrypoint changed and the tag did not -- two images, one name")
     # 0.2.38 MAKES THE BOOT REPORT OBSERVE THE DAEMON instead of asserting it
     # (14716 item 4): the two sentences that claimed waked -- "running
@@ -2033,7 +2033,7 @@ def test_the_agent_image_tag_moves_when_the_entrypoint_does():
 IMAGE_INPUTS = ("docker/Dockerfile", "docker/attach-gate", "docker/agent-probe",
                 "docker/busdeaf-probe", "docker/entrypoint.sh",
                 "docker/tmux.conf", "src/reveille/agent-stop-hook")
-IMAGE_INPUT_SHA = "44d5b7331840765a73ed3ce454dfcbfc770e110b71de5ac88837d1e72ca28d21"
+IMAGE_INPUT_SHA = "18f77dd61739fadd29323af22de7eef796e11c21451e60a9d9e7f4c2a8309612"
 
 
 def _image_input_sha(root):

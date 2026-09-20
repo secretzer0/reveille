@@ -190,5 +190,13 @@ PY
 then exit 0; fi
 
 watch_bin="$bindir/wake-watch"; [ -x "$watch_bin" ] || watch_bin="wake-watch"
-printf '{"decision":"block","reason":"Wake watcher not armed -- you are deaf to bus rings. Arm it with Bash run_in_background=true: %s %s -- bare, nothing prepended or appended. Its task completion IS one ring: inbox(), ack(), act only if owed, DELETE the spool entry you processed -- each ring carries a `spool` key holding its absolute path under %s/new/, so rm that and never a glob -- then RE-ARM, last, after the ack and the rm. An entry left behind is re-printed by the next watcher process. FALLBACK, only where run_in_background does not exist: the Monitor tool with command=\\\"%s --follow %s\\\", persistent=true -- it expires at 1800000 ms and the harness wakes you to re-arm, which is two blind turns an hour."}\n' "$watch_bin" "$role" "$spool" "$watch_bin" "$role"
+# The body should learn WHICH half failed rather than arming by reflex, so
+# hand it the one command that prints doorbell.reachable()'s own sentence.
+# NO DOUBLE QUOTES IN THIS STRING. It is interpolated into a JSON verdict by
+# printf, and a stray `\"` makes the whole block unparseable -- which is how
+# the unarmed-watcher verdict silently never blocked at all (PR #274). The
+# role rides as argv so the python body needs no quoting of its own.
+reach_py='import sys; from reveille import doorbell; print(doorbell.reachable(sys.argv[1])[1])'
+reach_cmd="${REVEILLE_HOOK_PYTHON:-python3} -c '$reach_py' $role"
+printf '{"decision":"block","reason":"THE DOORBELL CANNOT REACH YOU and no watcher is armed, so you are deaf to bus rings. The arm rule is dead: a reachable body needs no watcher, and this block means reachability FAILED -- not that you should arm by habit. FIX REACHABILITY FIRST. Run: %s -- it names the half that failed (no waked holding your spool lock, the directory claiming another identity, no reveille MCP, or no live interactive session in your registered directory). If you cannot fix it here, arm ONCE as the fallback with Bash run_in_background=true: %s %s -- bare, nothing prepended or appended -- then inbox(), ack(), act only if owed, and `reveille ack <the spool path the ring names, under %s/new/>` to ack and rm in one call. Arm ONCE and VERIFY on the next turn: a second arm while the first still holds the socket SIGTERMs the newcomer (exit 143) and leaves you unarmed behind an exit code that reads as ordinary noise."}\n' "$reach_cmd" "$watch_bin" "$role" "$spool"
 exit 0

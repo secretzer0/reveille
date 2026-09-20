@@ -111,44 +111,46 @@ def _hold(tmp_path, role="mac-agent"):
 WAKED_ARGV = "reveille-waked --url ws://127.0.0.1:8765/wake --name mac-agent"
 
 
-def test_the_unarmed_watcher_verdict_is_json_a_client_can_parse(tmp_path):
+def test_the_unreachable_verdict_is_json_a_client_can_parse(tmp_path):
     """A `\\"` inside a SINGLE-quoted printf format is a printf escape, not a
     shell one: it reached stdout as a bare `"` and closed the JSON string
     early. Unparseable on every platform since the line was written, so the
-    block never blocked -- a guard whose failure was printed and discarded."""
+    block never blocked -- a guard whose failure was printed and discarded.
+
+    STILL THE POINT AFTER THE DOCTRINE FLIP, and freshly so: rewriting this
+    verdict for the dead arm rule reintroduced the identical defect within the
+    hour, by interpolating a `python -c "..."` command into the reason. Parse
+    it, with the interpolations live, or it is not a verdict."""
     commands = _fixture(tmp_path, flock_exit=1, watcher_armed=False)
     out = _run_hook(commands, tmp_path, python=sys.executable)
 
     verdict = json.loads(out)
     assert verdict["decision"] == "block"
-    # Both shapes are still named, and the escape still survives the round
-    # trip -- that `\"` is the defect this test was written for.
-    assert 'command="wake-watch --follow mac-agent"' in verdict["reason"]
+    assert '"' not in verdict["reason"], (
+        "a double quote survived into the reason -- the escape defect, again")
 
 
-def test_the_verdict_names_the_one_shot_first(tmp_path):
-    """F5 doctrine flip (ruling 20441), asserted through the CONSUMER'S PARSER
-    rather than by reading the template (f7142c5e).
+def test_the_verdict_sends_a_deaf_body_to_reachability_not_to_arming(tmp_path):
+    """THE ARM RULE IS DEAD (operator, 2026-09-20), and this verdict is the last
+    thing a deaf body reads, so whatever it names first is what the fleet does.
 
-    The block reason is the last thing a deaf body reads before it arms, so
-    whichever shape it names first is the shape the fleet runs. It named the
-    Monitor follow, which expires at the harness's 1800000 ms cap and wakes the
-    body to re-arm: two blind turns an hour, per body, that nothing on our side
-    can tune. The one-shot under run_in_background was assumed to fare worse
-    because of Bash's 600000 ms cap -- MEASURED 2026-09-16 at 11m06s, exit 0 on
-    its ring, because that cap bounds a FOREGROUND call and a backgrounded task
-    is a different shape."""
+    It used to name a watcher shape -- first the Monitor follow, then, after
+    ruling 20441, the one-shot. Both are now the FALLBACK: since 0.2.290 a ring
+    also rings the session's own inbox socket, and since 0.2.292 the hook lets a
+    reachable body stop with nothing armed at all. A block therefore means
+    reachability FAILED, and the body's first move is to find out which half --
+    not to arm by reflex, which is what the old text trained."""
     commands = _fixture(tmp_path, flock_exit=1, watcher_armed=False)
     reason = json.loads(_run_hook(commands, tmp_path, python=sys.executable))["reason"]
 
-    one_shot = reason.index("run_in_background")
-    follow = reason.index("--follow")
-    assert one_shot < follow, (
-        "the block reason must name the one-shot before the Monitor follow")
-    assert "FALLBACK" in reason and reason.index("FALLBACK") < follow
-    # The drain order is part of the instruction, not an aside: re-arming
-    # before the ack is how a body rings itself in a loop.
-    assert reason.index("ack()") < reason.index("RE-ARM")
+    assert "arm rule is dead" in reason.lower()
+    fix = reason.lower().index("fix reachability first")
+    arm = reason.lower().index("arm once")
+    assert fix < arm, "the verdict must send a body to reachability before arming"
+    assert "doorbell.reachable" in reason, (
+        "it must hand over the command that names the half that failed")
+    # ...and the retracted claim is named as retracted where a body will read it
+    assert "143" in reason, "arming once is only safe if the SIGTERM is named"
 
 
 def test_flock_answering_held_stops_a_second_daemon(tmp_path):
