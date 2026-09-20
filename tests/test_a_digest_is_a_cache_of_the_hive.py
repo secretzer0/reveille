@@ -264,7 +264,8 @@ def test_rehydrate_page_one_row_one_is_the_digest(tmp_path, writer):
     assert page["items"][1]["kind"] == "state"
     head = page["items"][0]["fact"].splitlines()[0]
     assert re.match(r"\[digest:ana \d{4}-\d{2}-\d{2} \| since \d{4}-\d{2}-\d{2} \(first run window\) "
-                    r"\| input: \d+ rows, \d+ batches \| prior: none \| writer: stub-model ctx \? out 5000\]",
+                    r"\| input: \d+ rows, \d+ batches \| prior: none \| writer: stub-model ctx \? "
+                    r"out 5000 batch \d+\]",
                     head), head
 
 
@@ -362,7 +363,7 @@ def test_the_output_is_sized_to_the_writer_not_only_the_batch():
     assert daemon.DIGEST_DIRECTIVE_TOKENS + 2 * out + b <= 6144, (b, out)
     b, out = daemon.digest_budget(32768)
     assert out == daemon.DIGEST_MAX_TOKENS
-    assert b == 32768 - 700 - daemon.DIGEST_CTX_MARGIN_TOKENS - 2 * 5000
+    assert b == 32768 - 700 - daemon.digest_margin(32768) - 2 * 5000
     assert daemon.digest_budget(0) == (store.DIGEST_INPUT_TOKENS, daemon.DIGEST_MAX_TOKENS)
     b, out = daemon.digest_budget(32768, env="3000")
     assert b == 3000 and out == daemon.DIGEST_MAX_TOKENS, "env caps the batch, never the output"
@@ -700,6 +701,10 @@ def test_a_saved_run_is_stale_when_the_hive_moved_under_it(tmp_path, writer, mon
     assert store.digest_run_load(d, scope, "abc123")["step"] == 1
     assert store.digest_run_load(d, scope, "different") is None, "the prior moved: not resumable"
     assert store.digest_run_load(d, scope, "") is None
+    # ...and cut by the same writer under the same budget (0.2.289)
+    assert store.digest_run_load(d, scope, "abc123", "w")["step"] == 1
+    assert store.digest_run_load(d, scope, "abc123", "w out 1588") is None, (
+        "the budget moved: the batches were cut against arithmetic that no longer holds")
     # too old
     path = store.digest_run_path(d, scope)
     stale = json.loads(open(path).read())
@@ -721,9 +726,9 @@ def test_the_budget_keeps_slack_because_our_tokenizer_is_not_the_writers():
     for ctx in (6144, 8192, 16384, 32768):
         batch, out = daemon.digest_budget(ctx)
         worst = daemon.DIGEST_DIRECTIVE_TOKENS + 2 * out + batch
-        assert worst <= ctx - daemon.DIGEST_CTX_MARGIN_TOKENS, (
+        assert worst <= ctx - daemon.digest_margin(ctx), (
             f"ctx {ctx}: worst case {worst} leaves {ctx - worst} slack, "
-            f"want at least {daemon.DIGEST_CTX_MARGIN_TOKENS}")
+            f"want at least {daemon.digest_margin(ctx)}")
     # the live writer, exactly: 6144 must still fold, with room to be wrong
     batch, out = daemon.digest_budget(6144)
     assert batch >= daemon.DIGEST_MIN_BATCH_TOKENS and out >= 500
@@ -731,6 +736,80 @@ def test_the_budget_keeps_slack_because_our_tokenizer_is_not_the_writers():
     # silently ignored: a context that only fits without slack is refused
     with pytest.raises(store.BusError, match="too small"):
         daemon.digest_budget(daemon.DIGEST_DIRECTIVE_TOKENS + daemon.DIGEST_MIN_BATCH_TOKENS + 1000)
+
+
+def test_the_slack_scales_with_the_request_because_the_error_does():
+    """Field defect 2026-09-20 15:31:47Z, ONE TOKEN OVER AGAIN, this time
+    over the flat 256 that 0.2.287 added: `you requested 1844 output tokens
+    and your prompt contains at least 4301 input tokens, for a total of at
+    least 6145`. We had planned 4044 input tokens for that call and 4172 for
+    the February one, and the writer counted 4301 and 4173 -- off by 257,
+    then by 1. The error is a FRACTION of the request, so the slack has to
+    be one too; a constant is just the next equality."""
+    # the live writer, against BOTH measured error rates
+    batch, out = daemon.digest_budget(6144)
+    planned_in = daemon.DIGEST_DIRECTIVE_TOKENS + out + batch
+    for rate in (4173 / 4172, 4301 / 4044):
+        assert planned_in * rate + out <= 6144, (
+            f"a {(rate - 1) * 100:.1f}% tokenizer disagreement overflows 6144: "
+            f"{planned_in} planned input * {rate:.4f} + {out} out")
+    # and the margin is proportional, not a constant, above the floor
+    assert daemon.digest_margin(6144) == 6144 // daemon.DIGEST_CTX_MARGIN_DIV
+    assert daemon.digest_margin(32768) > daemon.digest_margin(6144), (
+        "a bigger request needs more slack, not the same slack")
+    # ...with the constant kept as the FLOOR for a writer too small to scale
+    assert daemon.digest_margin(1) == daemon.DIGEST_CTX_MARGIN_TOKENS
+    # the refusal names a context that actually works
+    assert daemon.digest_budget(daemon.digest_min_ctx())[1] >= 500
+    with pytest.raises(store.BusError, match=f"needs {daemon.digest_min_ctx()}"):
+        daemon.digest_budget(2500)
+
+
+def test_a_run_whose_budget_moved_is_cut_again_not_resumed(tmp_path, writer, monkeypatch):
+    """The other half of 15:31:47Z. 0.2.288 keeps a run across a writer
+    refusal -- right -- but when the BUDGET is what refused, resuming replays
+    the same oversized batches into the same HTTP 400 at every start, for
+    ever, and the fix that ships next can never reach it. A saved run carries
+    the writer and its arithmetic; when they move, the run is re-cut."""
+    db = str(tmp_path / "b.db")
+    conn, u, room, ana, bob = _world(db)
+    ids = _seed(conn, room, ana, bob)
+    for i in range(12):
+        store.send(conn, store.agent_principal(ana["agent_id"]), "*", "y" * 300,
+                   subject=f"note {i}", room=room["id"])
+    monkeypatch.setattr(daemon, "_db_path", db)
+    monkeypatch.setattr(daemon, "_digest_batch", 1200)
+    monkeypatch.setattr(daemon, "_digest_out", 1844)
+    writer.default = _good_digest(conn, ids)
+
+    class Killed(RuntimeError):
+        pass
+
+    real = store.digest_run_save
+
+    def save_then_die(data_dir, scope, inputs, step, running, wr):
+        real(data_dir, scope, inputs, step, running, wr)
+        if step == 2:
+            raise Killed("deploy")
+    monkeypatch.setattr(store, "digest_run_save", save_then_die)
+    with pytest.raises(store.BusError, match="Killed"):
+        daemon._digest_job(conn, _principal(ana, room, "ana"))
+    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
+    run = store.digest_run_load(daemon._digest_data_dir(), scope, "")
+    assert run is not None and run["step"] == 2
+    steps = len(run["inputs"]["batches"])
+    assert steps > 3, "the batch size must force a multi-step run or this proves nothing"
+
+    # the deploy that fixes the budget: out shrinks under the bigger margin
+    monkeypatch.setattr(store, "digest_run_save", real)
+    monkeypatch.setattr(daemon, "_digest_out", 1588)
+    writer.calls.clear()
+    daemon._digest_job(conn, _principal(ana, room, "ana"))
+    assert len(writer.calls) == steps, (
+        f"the budget moved and the run was RESUMED anyway: {len(writer.calls)} writer calls, "
+        f"expected a fresh cut of {steps}")
+    fact = store.digest_prior(conn, scope)["fact"]
+    assert "resumed at step" not in fact.splitlines()[0], fact.splitlines()[0]
 
 
 def test_a_writer_refusal_keeps_the_run_and_a_store_refusal_clears_it(tmp_path, writer, monkeypatch):

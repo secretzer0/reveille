@@ -7733,17 +7733,27 @@ def digest_run_save(data_dir, scope, inputs, step, running, writer):
     return path
 
 
-def digest_run_load(data_dir, scope, prior_uid):
+def digest_run_load(data_dir, scope, prior_uid, writer=""):
     """The unfinished run to resume, or None. Resumable means: it exists, it
     was cut against the prior digest that is STILL live (or both have none),
-    and it is younger than DIGEST_RUN_MAX_AGE_S. Anything else is stale -- the
-    hive moved under it -- and the file is removed by the caller."""
+    it was cut by the SAME writer under the SAME budget, and it is younger
+    than DIGEST_RUN_MAX_AGE_S. Anything else is stale -- the hive or the
+    arithmetic moved under it -- and the file is removed by the caller.
+
+    The budget belongs in that list because of what it cost when it was not
+    (2026-09-20 15:31:47Z): shared-dev's run was kept across a writer refusal
+    exactly as 0.2.288 intends, and then resumed at the same step with the
+    same oversized batches into the same HTTP 400, every start, for ever. A
+    run whose budget has changed has to be CUT AGAIN; keeping the steps is
+    only worth anything when the next step can still fit."""
     try:
         with open(digest_run_path(data_dir, scope)) as f:
             run = json.load(f)
     except (OSError, ValueError):
         return None
     if (run.get("inputs") or {}).get("prior", "") != (prior_uid or ""):
+        return None
+    if writer and run.get("writer", "") != writer:
         return None
     if (time.time_ns() - run.get("saved_ns", 0)) / 1e9 > DIGEST_RUN_MAX_AGE_S:
         return None
