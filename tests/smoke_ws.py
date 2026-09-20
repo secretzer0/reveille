@@ -30,6 +30,8 @@ import httpx2
 from mcp.client.streamable_http import streamable_http_client
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scratch import child_report  # noqa: E402
 from reveille import __version__, store  # noqa: E402
 
 
@@ -124,8 +126,18 @@ async def run(port, secrets):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         await asyncio.sleep(0.5)
         await bob.call_tool("send", {"to": "alice", "body": "ping"})
-        out, _ = await asyncio.wait_for(w.communicate(), timeout=8)
-        assert w.returncode == 0 and b'"wake"' in out, (w.returncode, out)
+        out, werr = await asyncio.wait_for(w.communicate(), timeout=8)
+        # NAME THE CAUSE, NOT THE CODE. This read `(w.returncode, out)` and
+        # threw stderr away, so a CI red said `AssertionError: (2, b'')` and
+        # nothing else -- while wake.py had printed exactly why on the stream
+        # being discarded. Exit 2 is `superseded`: a NEWER wake attachment for
+        # this agent took the slot, and the broker supersedes the OLDER holder
+        # on every new attach (daemon.py, `_SUPERSEDE`). So a 2 here means
+        # something attached as alice AFTER this binary did, and the next red
+        # will say so in its own words instead of in a tuple.
+        assert w.returncode == 0 and b'"wake"' in out, child_report(
+            "wake", w.returncode, out, werr,
+            hint="2 = superseded: a NEWER wake attachment for this agent took the slot")
         print("wake.py binary woke on push:", out.decode().strip())
         ping = data(await alice.call_tool("inbox", {}))["messages"]
         await alice.call_tool("ack", {"message_ids": [m["id"] for m in ping]})
