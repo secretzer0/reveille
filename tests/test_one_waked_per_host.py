@@ -190,3 +190,63 @@ def test_each_identity_gets_its_own_token_and_its_own_artifacts(home, monkeypatc
     assert waked.read_parked(str(b)) == "", "one identity's parked secret reached another"
     assert json.loads((a / ".claude" / "settings.local.json").read_text())["env"][
         "REVEILLE_AGENT_ROLE"] == "ana"
+
+
+def test_a_refused_run_parks_until_its_credential_changes(home, monkeypatch):
+    """24332: five identities on the operator's host hold dead tokens. A run
+    that ends on a refusal must not be re-attached on every 30 s pass --
+    attach, 401, release, attach is churn in the log and on the broker. It
+    waits for its credential to change (or SIGHUP, which clears the map)."""
+    d = _init(home, "ana")
+    attaches = []
+
+    async def refuses(url, name, *a, **kw):
+        attaches.append(name)
+        return waked.DEAD_CREDENTIAL          # the broker does not know this token
+
+    monkeypatch.setattr(waked, "_run", refuses)
+
+    async def drive():
+        tasks, locks, parked = {}, {}, {}
+        for _ in range(3):                    # three passes, one attach allowed
+            await waked._host_pass("http://b:8765", (0, 1800, 10, 0),
+                                   tasks, locks, set(), parked)
+            await asyncio.sleep(0)            # let the run finish and be reaped
+        assert attaches == ["ana"], f"re-attached a refused identity: {attaches}"
+        assert "ana" in parked and not tasks and not locks
+        # the credential changes -> it is worth trying again
+        cli.write_credential("http://b:8765", "ana", "secret-ana-2", str(d))
+        await waked._host_pass("http://b:8765", (0, 1800, 10, 0),
+                               tasks, locks, set(), parked)
+        await asyncio.sleep(0)
+        assert attaches == ["ana", "ana"], "a fresh credential did not re-attach"
+        for f in locks.values():
+            f.close()
+
+    asyncio.run(drive())
+
+
+def test_a_run_that_ends_for_any_other_reason_re_attaches(home, monkeypatch):
+    """The guard is for refusals only: a crash or a clean stop may be
+    transient, and an identity nobody serves is the failure this whole slice
+    exists to prevent."""
+    _init(home, "ana")
+    attaches = []
+
+    async def crashes(url, name, *a, **kw):
+        attaches.append(name)
+        raise RuntimeError("socket blew up")
+
+    monkeypatch.setattr(waked, "_run", crashes)
+
+    async def drive():
+        tasks, locks, parked = {}, {}, {}
+        for _ in range(2):
+            await waked._host_pass("http://b:8765", (0, 1800, 10, 0),
+                                   tasks, locks, set(), parked)
+            await asyncio.sleep(0)
+        for f in locks.values():
+            f.close()
+        return attaches
+
+    assert asyncio.run(drive()) == ["ana", "ana"], "a crashed run was parked"
