@@ -7858,6 +7858,156 @@ def digest_verify(conn, text, rooms, scope):
     return clean, stripped, unsectioned
 
 
+DIGEST_DROP = "DROP"
+
+
+def digest_delta_split(text):
+    """(body, dropped_ids) -- peel the DROP list off a delta before verifying it.
+
+    A DELTA IS THE SAME GRAMMAR, MINUS THE COPYING. The writer keeps emitting
+    RULES/DECISIONS/LESSONS/WORK/OPEN, but the three tagged sections now carry
+    ONLY WHAT IS NEW, and one extra heading, DROP, lists the tags that no longer
+    belong. Everything else -- the tag shape, the untagged strip, the empty
+    marker -- is unchanged, so digest_verify still does the licensing and this
+    function only has to get DROP out of its way first.
+
+    Dropped ids are the 8-hex id alone: a retire names the ROW, and re-stating
+    its kind and date would be two more things to get wrong.
+    """
+    body, dropped, in_drop = [], [], False
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        name = _section_name(s)
+        if name == DIGEST_DROP:
+            in_drop = True
+            continue
+        if name in DIGEST_SECTIONS:
+            in_drop = False
+        if in_drop:
+            if not s or _is_empty_marker(s):
+                continue
+            m = _TAG_ANY.search(s) or re.search(r"\b([0-9a-f]{8})\b", s)
+            if m:
+                dropped.append(m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1))
+            continue
+        body.append(raw)
+    return "\n".join(body), dropped
+
+
+def digest_merge(prior, delta, dropped=()):
+    """Fold a verified DELTA into the prior digest. Pure; returns clean text.
+
+    WHY THIS EXISTS AT ALL: a linear fold makes the writer re-transcribe the
+    whole digest every step, so the budget must hold it TWICE (carried in,
+    written out) and the artifact is capped at under half the writer's context
+    -- 1588 tokens of an operator's 5000 on the live 6144 writer. Emitting only
+    the change collapses that to one copy plus a small delta, and the same
+    hardware carries a much larger note.
+
+    THE RULES, in order, because order is the whole semantics:
+      1. a DROPPED id removes that line from the prior -- the store already
+         knows what was retired, so this is the model agreeing, not deciding;
+      2. a new line whose tag id matches one in the prior REPLACES IT IN PLACE,
+         so an update cannot reorder the digest or appear twice;
+      3. anything else is appended to its section, in the order given;
+      4. WORK and OPEN are taken wholesale from the delta. They are narrative,
+         untagged and short, so there is nothing to merge and no accumulation
+         to fear -- rewriting them costs a few dozen tokens and keeps them
+         honest about the present.
+
+    What this DOES NOT do, said plainly because it is the cost: a writer seeing
+    only the change cannot notice that three scattered prior lines collapse into
+    one. That synthesis is what a full rewrite buys, and it is why a periodic
+    compaction pass exists in the plan rather than never.
+    """
+    dropped = {d for d in (dropped or ()) if d}
+    old, _ = _digest_sections(prior)
+    new, said = _digest_sections(delta)
+    out = {}
+    for k in DIGEST_SECTIONS:
+        if k not in DIGEST_TAGGED:
+            # NAMING A SECTION EMPTY IS AN ACT; OMITTING IT IS NOT. `- (none)`
+            # under OPEN means the debts are paid, and falling back to the prior
+            # there would make a finished obligation immortal -- the writer could
+            # add to OPEN for ever and never clear it. So the HEADING decides:
+            # present means the delta speaks for that section, absent means it
+            # did not touch it.
+            out[k] = new[k] if k in said else old.get(k, [])
+            continue
+        # A RESTATED TAG IS NOT A DROPPED ONE (H1, native-doorbell-test). A
+        # delta may carry both `DROP [x]` and a new line tagged x. Dropping
+        # first and adding second, or the reverse, are both readable from the
+        # rules as written and differ by the whole line -- measured, the code
+        # silently DELETED it, so a writer that meant "rewrite x" lost x. The
+        # restate WINS, and the reason generalises: the DROP carries an id and
+        # nothing else, the line carries content, and content outranks a bare
+        # pointer to it.
+        restated = {i for i in (_digest_tag_id(x) for x in new.get(k, [])) if i}
+        drop_here = dropped - restated
+        lines, seen = [], {}
+        for line in old.get(k, []):
+            tid = _digest_tag_id(line)
+            if tid is None:
+                continue                      # see the untagged note below
+            if tid in drop_here:
+                continue
+            if tid in seen:
+                # H2: replace-in-place is only defined when a tag appears ONCE.
+                # Two copies and the first match silently eats one and leaves
+                # the other, with no layer noticing. Refuse by name instead of
+                # discovering it -- the same rule the budget follows.
+                raise BusError(f"digest: [{tid}] appears twice under {k} -- "
+                               f"a tag names one row, so a merge cannot place it")
+            seen[tid] = len(lines)
+            lines.append(line)
+        for line in new.get(k, []):
+            tid = _digest_tag_id(line)
+            if tid is None:
+                # UNTAGGED LINES DO NOT ENTER A TAGGED SECTION (H3). Verify
+                # already strips them, so this is belt on braces -- but it is
+                # also what makes merge IDEMPOTENT BY CONSTRUCTION: every line
+                # that survives here carries a tag, and a tag replaces in place,
+                # so applying the same delta twice is applying it once. Our
+                # failure handling is retry-shaped (a kept run resumes), so a
+                # merge that doubled on replay would corrupt quietly.
+                continue
+            at = seen.get(tid)
+            if at is not None:
+                lines[at] = line              # an update, in place
+            else:
+                seen[tid] = len(lines)
+                lines.append(line)
+        out[k] = lines
+    return "\n".join(f"{k}\n" + ("\n".join(v) if v else "- (none)")
+                     for k, v in out.items())
+
+
+def _digest_sections(text):
+    """({SECTION: [line, ...]}, {sections whose HEADING appeared}).
+
+    The second half is what lets a delta say "this section is now empty"
+    distinctly from "I did not touch this section" -- see digest_merge.
+    """
+    section, out, said = None, {k: [] for k in DIGEST_SECTIONS}, set()
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        name = _section_name(s)
+        if name in DIGEST_SECTIONS:
+            section = name
+            said.add(name)
+            continue
+        if section and not _is_empty_marker(s):
+            out[section].append(s)
+    return out, said
+
+
+def _digest_tag_id(line):
+    m = _TAG_ANY.search(line or "")
+    return m.group(2) if m else None
+
+
 def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
                   unsectioned=0, resumed_at=0):
     """The provenance lines, written by the STORE, never the model (24015):

@@ -17,30 +17,30 @@ choice with a rationale; lesson (lesson_add) = a defect that taught me something
 Holding ratify tier: recall(status='draft') is my queue; ratify(id) approves, reject(id,
 reason) declines -- never silently ignore a draft, and never rewrite someone else's text
 then approve it: reject and redraft citing the same source.
-Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
-entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
-becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
-armed. I arm it with Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`,
-bare, nothing prepended or appended -- its task completion IS one bus ring. Then:
-inbox(), ack() everything, act only if owed, DELETE the spool file I processed -- the
-ring's `spool` key is its absolute path; rm that, never a glob -- and RE-ARM LAST, after
-the ack and the rm, inside a turn I am taking anyway. `reveille ack <the spool path>`
-does the ack and the rm in one call and refuses to delete a ring whose ack did not land. An entry I leave behind is
-re-printed by the NEXT watcher process, so a missed drain becomes an acked ring replayed
-at every arm. THE ONE-SHOT IS PRIMARY: measured 2026-09-16 it ran 11m06s and exited 0 on
-its ring, past Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
-backgrounded task. The Monitor tool with `wake-watch --follow` is the FALLBACK, for
-harnesses with no run_in_background: Monitor expires at 1800000 ms and the harness wakes
-me to re-arm, which is 2 blind turns an hour that nothing on our side can tune.
-The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
-and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
-lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
-`wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
-every check and rings nobody. A SESSION BOUNDARY KILLS EVERY WATCHER THE OLD SESSION
-ARMED -- arming is per BODY-SESSION and the boundary is invisible from the far side of
-it. "ALREADY ARMED" IS A CLAIM ABOUT A LIVE PROCESS, VERIFIED BY LIVENESS, NEVER BY
-MEMORY -- at boot I arm unconditionally; a duplicate watcher costs one duplicate ring, a
-skipped one costs every ring. Unicast rings. A HUMAN's broadcast rings the
+Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook, the host
+waked, or the container entrypoint runs it; I NEVER start it, poll it, or re-arm it. Each
+ring becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/) AND rings my
+CLI's own inbox socket, which starts a turn in a body sitting idle. So a ring reaches me
+with NO watcher running anywhere.
+I DO NOT ARM A WATCHER. The arm rule is DEAD (operator, 2026-09-20). Do not run
+`wake-watch`, do not re-arm after a ring, do not arm "just in case" at boot. THE STOP HOOK
+DECIDES, not standing doctrine: it lets me stop when the doorbell can reach me -- a waked
+holding my spool lock, and a live interactive session in my registered directory with the
+reveille MCP -- and when it cannot it BLOCKS and NAMES WHICH HALF FAILED. I act on that
+sentence, and only then, and only as it says.
+Per ring: inbox(), ack() everything, act only if owed, DELETE the spool file I processed
+-- the ring's `spool` key is its absolute path; rm that, never a glob. `reveille ack <the
+spool path>` does the ack and the rm in one call and refuses to delete a ring whose ack did
+not land. An entry I leave behind is replayed, so drain what I read.
+THE SPOOL IS STILL THE MAILBOX; the doorbell is only the doorbell. The socket reaches a
+RUNNING session and nothing else, so waked files the ring FIRST and rings afterwards: a
+ring that lands while no session is up waits in the spool and is read on my next turn --
+never lost.
+IF THE HOOK EVER DOES SEND ME TO ARM ONE, arm ONCE and verify on the turn after: a second
+arm raised while the first still holds the wake socket gets the NEWCOMER SIGTERM'd
+(`Terminated`, exit 143), which leaves me UNARMED behind an exit code that reads as
+ordinary noise. The old claim that "a duplicate costs one duplicate ring" is RETRACTED --
+it costs the arming. Unicast rings. A HUMAN's broadcast rings the
 room; an AGENT's parentless broadcast queues until my next turn, and an
 agent's REPLY on a thread I authored in rings me unless I already read it
 (or the room has run 40 agent messages with no human speaking). Being woken is not being asked:

@@ -298,7 +298,7 @@ def test_the_hook_fails_closed_on_a_broken_interpreter(tmp_path, monkeypatch):
                              text=True, env=env, timeout=60).stdout
         assert '"decision":"block"' in out, (
             f"a dead interpreter passed the gate instead of blocking: {out[:300]}")
-        assert "Wake watcher not armed" in out
+        assert "no watcher is armed" in out and "arm rule is dead" in out
     finally:
         srv.close()
 
@@ -319,3 +319,55 @@ def test_the_hook_passes_a_reachable_body_through(tmp_path, monkeypatch):
         assert '"decision":"block"' not in r.stdout, r.stdout[:300]
     finally:
         srv.close()
+
+
+def test_the_block_verdict_is_parseable_json(tmp_path, monkeypatch):
+    """THE VERDICT IS NOT JSON UNTIL IT IS PARSED. A stray `"` inside the reason
+    makes the whole block unparseable, the harness discards it, and the hook
+    silently stops blocking -- which is exactly how the unarmed-watcher verdict
+    never fired at all (PR #274). I reintroduced it in this very change by
+    interpolating a python -c command with double quotes, and only parsing the
+    output caught it. So: parse it, every time, with the interpolations live."""
+    env = _sealed_env()
+    env["REVEILLE_AGENT_ROLE"] = "nobody-is-reachable-here"
+    r = subprocess.run(["sh", HOOK], input="{}", capture_output=True,
+                       text=True, env=env, timeout=60)
+    assert r.stdout.strip(), "the hook blocked with no verdict at all"
+    d = json.loads(r.stdout)                      # the assertion IS the parse
+    assert d["decision"] == "block"
+    assert '"' not in d["reason"], "a double quote survived into the reason"
+
+
+def test_the_shipped_doctrine_does_not_teach_the_dead_arm_rule():
+    """The correction has to reach the TEMPLATE, not just my own memory.
+
+    0.2.293 recorded that a duplicate arm SIGTERMs the newcomer, and the text
+    every NEW body boots on kept teaching the opposite -- native-doorbell-test
+    regenerated its CLAUDE.local.md at 0.2.294 and got a byte-identical body,
+    sha256 unchanged. A new body has no memory to correct it with, and the
+    doorbell made cold starts cheap to trigger, so this is the highest-leverage
+    prose in the system. Asserted against the SHIPPED constants, not the repo's
+    own markdown, because the constants are what `reveille init` writes."""
+    from reveille import cli, daemon
+    # doctrine_body IS what `reveille init` writes between the markers -- the
+    # text a NEW body boots on. daemon.USAGE is what usage() serves. Both.
+    text = cli.doctrine_body("someagent", "devops") + daemon.USAGE
+
+    # THE INSTRUCTION FORM ONLY. A gate that greps the phrase itself also flags
+    # the sentence RETRACTING it, which is how this gate first went red on its
+    # own correction (the lesson a-gate-must-not-grep-the-prose-that-names-the-rule).
+    assert "arm unconditionally" not in text, "the shipped doctrine still orders an unconditional arm"
+    for claim in ("duplicate watcher costs one duplicate ring",
+                  "a duplicate costs one duplicate ring"):
+        at = text.find(claim)
+        if at != -1:
+            near = text[max(0, at - 200):at + 200]
+            assert "RETRACTED" in near or "retracted" in near, (
+                f"{claim!r} appears without being retracted in the same breath")
+
+    assert "arm rule is DEAD" in text or "arm rule is dead" in text, (
+        "the shipped doctrine does not say the arm rule is dead")
+    low = text.lower()
+    assert "doorbell" in low and "stop hook" in low, (
+        "it does not tell a body what replaced arming: the doorbell, and the hook that judges it")
+    assert "Arm the watcher with Bash" not in text, "the old arm instruction survives"

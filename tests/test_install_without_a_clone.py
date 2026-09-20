@@ -1047,24 +1047,34 @@ def test_the_installer_grants_the_permission_its_registration_needs(
     assert (cfg / "settings.json").read_text() == before
 
 
-def test_the_boot_doctrine_arms_the_living_ritual_not_the_retired_one(tmp_path):
-    """The first native agent's boot banner told it to run `wake --once` -- the
-    RETIRED pre-DES-003 arm, which grabs the wake socket itself and fights the
-    supervised reveille-waked for it: stolen slot, or superseded into silent
-    deafness. The living ritual is wake-watch, harmless in duplicate. The
-    wrapper that used to print the banner is gone; the doctrine's home is now
-    the CLAUDE.md init seeds into the agent directory, so that text is what is
-    gated -- a capability absent from the boot doctrine goes unused."""
+def test_the_boot_doctrine_teaches_the_living_ritual_not_a_retired_one(tmp_path):
+    """The doctrine's home is the CLAUDE.local.md that init seeds, so that text
+    is what is gated -- a capability absent from the boot doctrine goes unused,
+    and a RETIRED one taught there is worse: a new body has no memory to correct
+    it with, and boots on it at ~41k tokens a time.
+
+    TWO RETIREMENTS ARE GATED HERE, both of which this text once taught.
+    `wake --once` grabbed the wake socket itself and fought the supervised
+    reveille-waked for it. And ARMING AT ALL is now dead (operator,
+    2026-09-20): a ring rings the session's own inbox socket, so a reachable
+    body needs no watcher, and the Stop hook -- not standing doctrine -- decides
+    when one is needed. The correction reaching the LESSON but not this TEMPLATE
+    is exactly how it survived 0.2.293: native-doorbell-test regenerated at
+    0.2.294 and got a byte-identical body, sha256 unchanged."""
     path, _ = cli.sync_claude_md(tmp_path, "dev-agent", "devops")
     text = path.read_text()
-    assert "wake-watch $REVEILLE_AGENT_ROLE" in text
     assert "--once" not in text, "the boot doctrine prescribes the retired arm"
-    # THE LIVING RITUAL IS join() -> rehydrate() -> arm (decision c6c4bb45).
-    # lessons() and brief() still exist as tools; they are no longer the
-    # prescribed boot. A block that still marches a body through the three-
-    # call ritual is arming the retired one under a newer version stamp.
+    assert "arm rule is DEAD" in text, "the boot doctrine does not retire arming"
+    assert "Arm the watcher with Bash" not in text, "the retired arm instruction survives"
+    assert "arm unconditionally" not in text, "it still orders an unconditional arm"
+    low = text.lower()
+    assert "doorbell" in low and "stop hook" in low, (
+        "it does not name what replaced arming, or who now decides")
+    # THE LIVING RITUAL IS join() -> rehydrate() (decision c6c4bb45), and it no
+    # longer ends in "then arm".
     assert "join()" in text and "rehydrate()" in text, text[:400]
     assert "then `lessons()`, then `brief(" not in text, "the retired three-call ritual is back"
+    assert "then arm" not in text, "the ritual still ends in an arm"
 
 
 def test_the_hook_command_is_never_a_cache_path(monkeypatch, tmp_path):

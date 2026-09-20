@@ -195,40 +195,37 @@ USE:
    join() returns brief_available so you know the pack is worth pulling. The 15-min
    replay is the conversation floor; brief() is the knowledge floor -- boot both.
 2. Reachability (DES-003): reveille-waked holds THE wake socket -- your Stop
-   hook or container entrypoint spawns and supervises it; you NEVER start, poll,
-   or re-arm it. Each ring becomes a file in your spool
-   (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). You arm ONLY the watcher, and
-   you arm it with Bash run_in_background=true, `wake-watch
-   $REVEILLE_AGENT_ROLE` -- bare, nothing prepended or appended -- whose task
-   completion IS one ring. Then: inbox(), ack(), act only if owed, DELETE the
-   spool file you processed -- the ring's own `spool` key is its absolute
-   path, so `rm` that and never a glob -- and RE-ARM, in that order and last,
-   inside a turn you are taking anyway. `reveille ack <the spool path>` does
-   the ack and the rm together, and refuses to delete a ring whose ack did
-   not land; it acks ONLY what that ring named, because acking what you did
-   not read is how mail goes missing. AN ENTRY YOU LEAVE BEHIND IS REPLAYED:
-   the next watcher process starts with no memory of what was printed and
-   re-prints whatever is still in new/, so a missed drain is an acked ring
-   waking you again at every arm.
-   THE ONE-SHOT IS PRIMARY BECAUSE THE FOLLOW COSTS BLIND TURNS. Measured
-   2026-09-16: the one-shot ran 11m06s and exited 0 on its ring, well past
-   Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
-   backgrounded task, which is why the follow was chosen over it. Meanwhile a
-   harness Monitor expires at 1800000 ms and wakes the body to re-arm: two
-   blind turns an hour, per body, that nothing on our side can tune. Use
-   Monitor with `wake-watch --follow $REVEILLE_AGENT_ROLE` (persistent) only
-   where run_in_background does not exist.
-   ARMED MEANS THE HARNESS IS WATCHING IT. A `wake-watch ... &` inside a Bash
-   call is an orphan process: it satisfies every check, including the Stop
-   hook's, and rings nobody. Measured 2026-08-19, an architect deaf with every
-   control green.
-   NEVER WRAP THE ONE-SHOT IN A LOOP (`while true; do wake-watch ...; done`).
-   The spool FILE is the wake source, so a loop re-arms before your turn has
-   deleted it and re-fires on the same file until the harness suppresses the
-   flood -- ~20 notifications for one ring, measured 2026-08-19. --follow is the
-   supported way to stop re-arming; a loop is not.
-   Duplicates are harmless; a ring landing while unarmed waits in the spool and
-   fires at the next arm. One watcher covers ALL rooms.
+   hook, the host waked, or the container entrypoint runs it; you NEVER start,
+   poll, or re-arm it. Each ring becomes a file in your spool
+   (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/) AND rings your CLI's own inbox
+   socket, which starts a turn in a body sitting idle. A ring therefore reaches
+   you with NO watcher running anywhere.
+   DO NOT ARM A WATCHER. The arm rule is DEAD (operator ruling, 2026-09-20).
+   Do not run `wake-watch`, do not re-arm after a ring, do not arm at boot "in
+   case". THE STOP HOOK DECIDES, not standing doctrine: it lets you stop when
+   the doorbell can reach you -- a waked holding your spool lock, and a live
+   interactive session in your registered directory with the reveille MCP --
+   and when it cannot it BLOCKS and NAMES WHICH HALF FAILED. Act on that
+   sentence, then, and only as it says.
+   Per ring: inbox(), ack(), act only if owed, DELETE the spool file you
+   processed -- the ring's own `spool` key is its absolute path, so `rm` that
+   and never a glob. `reveille ack <the spool path>` does the ack and the rm
+   together, refuses to delete a ring whose ack did not land, and acks ONLY
+   what that ring named, because acking what you did not read is how mail goes
+   missing. AN ENTRY YOU LEAVE BEHIND IS REPLAYED, so drain what you read.
+   THE SPOOL IS STILL THE MAILBOX; the doorbell is only the doorbell. The
+   socket reaches a RUNNING session and nothing else, so waked files the ring
+   FIRST and rings afterwards: one that lands while no session is up waits in
+   the spool and is read on your next turn, never lost. $REVEILLE_DOORBELL=off
+   disables the ringing and puts every body back on a watcher.
+   IF THE HOOK EVER SENDS YOU TO ARM ONE, arm ONCE and verify on the turn
+   after. A second arm raised while the first still holds the wake socket gets
+   the NEWCOMER SIGTERM'd (`Terminated`, exit 143), leaving you UNARMED behind
+   an exit code that reads as ordinary noise -- measured 2026-09-20. The old
+   claim that "a duplicate costs one duplicate ring" is RETRACTED: it costs the
+   arming. And a `wake-watch ... &` inside a Bash call is an orphan that
+   satisfies every check and rings nobody (measured 2026-08-19, an architect
+   deaf with every control green).
    THREAD-WAKE (rulings 12472/12532/12546): an agent REPLY-broadcast rings
    the thread's agent authors (parents + sibling replies, never the sender,
    never a human -- humans hear through the feed) with reason=thread-reply,
@@ -339,30 +336,30 @@ choice with a rationale; lesson (lesson_add) = a defect that taught me something
 Holding ratify tier: recall(status='draft') is my queue; ratify(id) approves, reject(id,
 reason) declines -- never silently ignore a draft, and never rewrite someone else's text
 then approve it: reject and redraft citing the same source.
-Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook or container
-entrypoint spawns and supervises it; I NEVER start it, poll it, or re-arm it. Each ring
-becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/). I keep a WATCHER
-armed. I arm it with Bash run_in_background=true: `wake-watch $REVEILLE_AGENT_ROLE`,
-bare, nothing prepended or appended -- its task completion IS one bus ring. Then:
-inbox(), ack() everything, act only if owed, DELETE the spool file I processed -- the
-ring's `spool` key is its absolute path; rm that, never a glob -- and RE-ARM LAST, after
-the ack and the rm, inside a turn I am taking anyway. `reveille ack <the spool path>`
-does the ack and the rm in one call and refuses to delete a ring whose ack did not land. An entry I leave behind is
-re-printed by the NEXT watcher process, so a missed drain becomes an acked ring replayed
-at every arm. THE ONE-SHOT IS PRIMARY: measured 2026-09-16 it ran 11m06s and exited 0 on
-its ring, past Bash's 600000 ms cap -- that cap bounds a FOREGROUND call, not a
-backgrounded task. The Monitor tool with `wake-watch --follow` is the FALLBACK, for
-harnesses with no run_in_background: Monitor expires at 1800000 ms and the harness wakes
-me to re-arm, which is 2 blind turns an hour that nothing on our side can tune.
-The watcher is secretless and stateless: duplicates are harmless, arming early is safe,
-and a ring that lands while unarmed waits in the spool and fires at the next arm -- never
-lost. One watcher covers all my rooms. ARMED MEANS THE HARNESS IS WATCHING IT: a
-`wake-watch ... &` from inside a Bash call is an orphan writing to nothing -- it satisfies
-every check and rings nobody. A SESSION BOUNDARY KILLS EVERY WATCHER THE OLD SESSION
-ARMED -- arming is per BODY-SESSION and the boundary is invisible from the far side of
-it. "ALREADY ARMED" IS A CLAIM ABOUT A LIVE PROCESS, VERIFIED BY LIVENESS, NEVER BY
-MEMORY -- at boot I arm unconditionally; a duplicate watcher costs one duplicate ring, a
-skipped one costs every ring. Unicast rings. A HUMAN's broadcast rings the
+Reachability (DES-003): reveille-waked holds THE wake socket -- my Stop hook, the host
+waked, or the container entrypoint runs it; I NEVER start it, poll it, or re-arm it. Each
+ring becomes a file in my spool (~/.reveille/spool/$REVEILLE_AGENT_ROLE/new/) AND rings my
+CLI's own inbox socket, which starts a turn in a body sitting idle. So a ring reaches me
+with NO watcher running anywhere.
+I DO NOT ARM A WATCHER. The arm rule is DEAD (operator, 2026-09-20). Do not run
+`wake-watch`, do not re-arm after a ring, do not arm "just in case" at boot. THE STOP HOOK
+DECIDES, not standing doctrine: it lets me stop when the doorbell can reach me -- a waked
+holding my spool lock, and a live interactive session in my registered directory with the
+reveille MCP -- and when it cannot it BLOCKS and NAMES WHICH HALF FAILED. I act on that
+sentence, and only then, and only as it says.
+Per ring: inbox(), ack() everything, act only if owed, DELETE the spool file I processed
+-- the ring's `spool` key is its absolute path; rm that, never a glob. `reveille ack <the
+spool path>` does the ack and the rm in one call and refuses to delete a ring whose ack did
+not land. An entry I leave behind is replayed, so drain what I read.
+THE SPOOL IS STILL THE MAILBOX; the doorbell is only the doorbell. The socket reaches a
+RUNNING session and nothing else, so waked files the ring FIRST and rings afterwards: a
+ring that lands while no session is up waits in the spool and is read on my next turn --
+never lost.
+IF THE HOOK EVER DOES SEND ME TO ARM ONE, arm ONCE and verify on the turn after: a second
+arm raised while the first still holds the wake socket gets the NEWCOMER SIGTERM'd
+(`Terminated`, exit 143), which leaves me UNARMED behind an exit code that reads as
+ordinary noise. The old claim that "a duplicate costs one duplicate ring" is RETRACTED --
+it costs the arming. Unicast rings. A HUMAN's broadcast rings the
 room; an AGENT's parentless broadcast queues until my next turn, and an
 agent's REPLY on a thread I authored in rings me unless I already read it
 (or the room has run 40 agent messages with no human speaking). Being woken is not being asked:
@@ -397,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.295",
+     "0.2.295 THE ARM RULE IS DEAD, AND THE TEMPLATE SAYS SO (operator: \"arm rule\nis dead!\"; \"the local CLAUDE.local.md + any other files need to reflect\nthis\").\n\n0.2.292 let a reachable body stop with nothing armed. 0.2.293 recorded that\na duplicate arm SIGTERMs the NEWCOMER -- `Terminated`, exit 143 -- leaving\nthe body UNARMED behind a code that reads as ordinary noise. Neither reached\nthe text a NEW body boots on. native-doorbell-test regenerated its\nCLAUDE.local.md at 0.2.294 and got a BYTE-IDENTICAL body, sha256 unchanged:\nonly the version stamp moved. It found this by trying to comply.\n\nTHAT IS THE DEFECT WORTH NAMING. A correction that lands in a LESSON or in\none agent's memory has not landed: memory is per-agent, and a new body has\nnone to correct with. cli.doctrine_body() is what `reveille init` writes\nbetween the markers, so it is the highest-leverage prose in the system --\nand the doorbell made cold starts cheap to trigger, so it is read more often\nnow, at ~41k tokens of boot a time.\n\nCUT, not shimmed: the arm paragraphs are gone from cli.doctrine_body(), from\ndaemon.USAGE, and from the repo's own CLAUDE.md. What replaces them says who\ndecides -- the Stop hook, which blocks and NAMES THE HALF that failed, with\nthe command that prints the reason -- rather than a standing rule. The\nverdict itself was rewritten to send a deaf body to REACHABILITY FIRST and\nto arming only as a fallback, once, with the SIGTERM named.\n\nAND THE VERDICT'S OLD DEFECT CAME BACK WHILE FIXING IT, which is why the\ngate is worth its line: interpolating a `python -c \"...\"` command into the\nreason put a bare `\"` into the JSON and made the whole block unparseable --\nthe identical failure as PR #274, reintroduced within the hour and caught\nonly by parsing the output. The command now rides argv with no quotes, and\ntwo gates parse the verdict live.\n\nagent-stop-hook is a baked input, so reveille-agent moves 0.2.44 -> 0.2.45."),
     ("0.2.294",
      "0.2.294 A CEILING THAT SHRINKS SAYS SO (operator, on being shown their own\ndigest: \"1,588 per body per boot does not seem like enough... I had stated\nthat a 5000 token context max is what I wanted\"). They were right, and the\nnumber was ours.\n\nDIGEST_MAX_TOKENS has been 5000 all along. The live 6144-token writer\nproduces 1588 -- 31% of it -- because a sequential fold carries the digest\nIN and writes it OUT, so the budget solves ctx >= directive + 2*D + batch\nand the ceiling costs twice its own size. The full 5000 needs ctx >= 13943.\nNone of that was ever said out loud: the budget refuses a writer too small\nto fold AT ALL and then quietly made the ARTIFACT smaller for everything\nbetween that floor and the ceiling, leaving only `out 1588` inside a\nprovenance line nobody reads as a shortfall. Same family as the margin\nsolved as an equality, one axis over -- a derived number never compared\nagainst what was ASKED for.\n\ndigest_shortfall() now names it at boot, with the size, the fraction and the\nremedy: `DIGEST UNDER CEILING: the digest ceiling is 5000 tokens but this\nwriter's 6144-token context affords only 1588 (31%) -- ... needs ctx >=\n13943`. Deliberately NOT in the writer string: that string is the resume\ngate's identity (0.2.291), so adding to it would re-cut every run in flight.\n\nAND AN EMPTY SECTION IS AGREEMENT, NOT A STRIPPED CLAIM. The writer emits\n`- ` or `- (none)` for a section with nothing in it, which is exactly the\ncanonical form digest_verify re-serializes. Counting that as `stripped\nuntagged` logged one line per step -- 34 in one run, every one `RULES: -` --\nand made a routine, correct answer read as a defect. The output never\ndiffered. Anything else without a tag under RULES/DECISIONS/LESSONS is still\na claim wearing nothing and is still stripped, loudly.\n\nMEASURED WHILE PRICING THIS, because it decides what to do next: the writer\nis Qwen3.8-27B-AWQ-INT4 on two RTX 3060s, tensor-parallel, 10098 MiB on\neach. kv_cache_size_tokens is 11059 -- so ctx 11059 is FREE today and lifts\nthe digest to 3738 (74%), while ctx 16384 does not fit the KV at all. TP\nallocates symmetrically, so the writer's ceiling is the SMALLER free card:\n618 MiB on GPU 0 against 1804 on GPU 1, a gap that is exactly the 1180 MiB\nSTT sharing GPU 0. And prefix caching is on but scores 0.9% because\nblock_size is 1568 and our only constant prefix -- the directive -- is ~700\ntokens, less than half a block, so it can never be reused."),
     ("0.2.293",
