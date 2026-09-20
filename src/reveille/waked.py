@@ -59,7 +59,7 @@ import urllib.parse
 
 import websockets
 
-from reveille import __version__, spool, timings
+from reveille import __version__, doorbell, spool, timings
 from reveille.cli import GIT_SOURCE
 
 HB_SECONDS = int(os.environ.get("WAKE_HB", "300"))
@@ -248,6 +248,12 @@ def write_ring(agent, frame):
     The line is derived from the frame that was actually written, never from
     what the caller meant to write: a frame whose reason drifts from its log
     line would make the count lie about the thing it exists to measure.
+
+    THE FILE IS WRITTEN BEFORE THE DOORBELL IS RUNG, ALWAYS (doorbell.py). The
+    socket reaches a running session and nothing else, so it is the doorbell and
+    the spool is the mailbox: ring first and a crash between the two loses the
+    ring, file first and the worst case is the old path's latency. Nothing the
+    doorbell does may reach this function's return value.
     """
     path = spool.write_ring(agent, frame)
     try:
@@ -259,7 +265,32 @@ def write_ring(agent, frame):
     print(f"reveille-waked: ring {obj.get('reason', '?')} "
           f"id={obj.get('id', '-')} direct={obj.get('direct', '-')}",
           file=sys.stderr)
+    _doorbell(agent, obj, path)
     return path
+
+
+def _doorbell(agent, obj, path):
+    """Ring the body's own CLI inbox, if it has one. Best effort BY DESIGN.
+
+    Wrapped whole: this is the one place in waked where a brand-new, externally
+    shaped dependency (another program's unix socket) touches the delivery path,
+    and the delivery already succeeded one line above. An exception here would
+    turn a working ring into a lost one, so every failure becomes a log line and
+    the ring stands.
+    """
+    try:
+        workdir = spool.registered().get(agent, "")
+        rung, why = doorbell.knock(agent, workdir, dict(obj, spool=path))
+        if rung:
+            print(f"reveille-waked: doorbell rang {rung} session(s) for {agent}",
+                  file=sys.stderr)
+        elif why:
+            print(f"reveille-waked: doorbell silent for {agent} -- {why}",
+                  file=sys.stderr)
+    except Exception as e:                                   # noqa: BLE001
+        print(f"reveille-waked: doorbell failed for {agent} -- "
+              f"{type(e).__name__}: {e} (the ring is filed either way)",
+              file=sys.stderr)
 
 
 async def _nudger(agent, interval_s, state):
