@@ -17,10 +17,10 @@ import pytest
 from reveille import store
 
 PRIOR = ("RULES\n"
-         "- rule A [contract:aaaaaaaa 2026-09-01]\n"
-         "- rule B [contract:bbbbbbbb 2026-09-02]\n"
+         "- rule A [contract:aaaaaaaa]\n"
+         "- rule B [contract:bbbbbbbb]\n"
          "DECISIONS\n- (none)\n"
-         "LESSONS\n- lesson L [lesson:cccccccc 2026-09-03]\n"
+         "LESSONS\n- lesson L [lesson:cccccccc]\n"
          "WORK\n- shipped the old thing\n"
          "OPEN\n- owes the architect a ruling")
 
@@ -47,15 +47,15 @@ def test_the_four_merge_rules_hold_together():
     the narrative sections come wholesale from the delta."""
     out = _merge(PRIOR,
                  "RULES\n"
-                 "- rule B REVISED [contract:bbbbbbbb 2026-09-20]\n"
-                 "- rule C new [contract:dddddddd 2026-09-20]\n"
-                 "DROP\n- [contract:aaaaaaaa 2026-09-01]\n"
+                 "- rule B REVISED [contract:bbbbbbbb]\n"
+                 "- rule C new [contract:dddddddd]\n"
+                 "DROP\n- [contract:aaaaaaaa]\n"
                  "WORK\n- shipped the NEW thing\n")
     rules = _lines(out, "RULES")
     assert "aaaaaaaa" not in out, "a dropped tag survived"
     assert rules[0].startswith("- rule B REVISED"), f"replace did not hold position: {rules}"
     assert rules[1].startswith("- rule C new"), f"append did not follow: {rules}"
-    assert _lines(out, "LESSONS") == ["- lesson L [lesson:cccccccc 2026-09-03]"], \
+    assert _lines(out, "LESSONS") == ["- lesson L [lesson:cccccccc]"], \
         "a section the delta never mentioned was disturbed"
     assert _lines(out, "WORK") == ["- shipped the NEW thing"]
     assert _lines(out, "OPEN") == ["- owes the architect a ruling"], \
@@ -87,8 +87,8 @@ def test_a_restated_tag_is_not_a_dropped_one(capsys):
     id and nothing else, the line carries content, and content outranks a bare
     pointer to it."""
     out = _merge(PRIOR,
-                 "RULES\n- rule A RESTATED [contract:aaaaaaaa 2026-09-20]\n"
-                 "DROP\n- [contract:aaaaaaaa 2026-09-01]\n")
+                 "RULES\n- rule A RESTATED [contract:aaaaaaaa]\n"
+                 "DROP\n- [contract:aaaaaaaa]\n")
     rules = _lines(out, "RULES")
     assert any("RESTATED" in r for r in rules), f"the restate was eaten by the drop: {rules}"
     assert sum("aaaaaaaa" in r for r in rules) == 1, f"restate duplicated the row: {rules}"
@@ -100,7 +100,7 @@ def test_a_restated_tag_is_not_a_dropped_one(capsys):
         f"the restate lost its place -- dropped then appended rather than replaced: {rules}")
     assert rules[1].startswith("- rule B"), rules
     # ...and a plain drop, with nothing restating it, still retires the line
-    gone = _merge(PRIOR, "DROP\n- [contract:aaaaaaaa 2026-09-01]\n")
+    gone = _merge(PRIOR, "DROP\n- [contract:aaaaaaaa]\n")
     assert "aaaaaaaa" not in gone
 
 
@@ -109,11 +109,11 @@ def test_a_tag_that_appears_twice_is_refused_by_name():
     the first draft: the second copy was updated and the FIRST left behind --
     a stale line wearing a live tag, with no layer noticing. Refuse at the merge
     rather than discover it later, the same rule the budget follows."""
-    twinned = ("RULES\n- first [contract:bbbbbbbb 2026-09-01]\n"
-               "- second [contract:bbbbbbbb 2026-09-02]\n"
+    twinned = ("RULES\n- first [contract:bbbbbbbb]\n"
+               "- second [contract:bbbbbbbb]\n"
                "DECISIONS\n- (none)\nLESSONS\n- (none)\nWORK\n- w\nOPEN\n- o")
     with pytest.raises(store.BusError, match=r"\[bbbbbbbb\] appears twice under RULES"):
-        _merge(twinned, "RULES\n- NEW [contract:bbbbbbbb 2026-09-20]\n")
+        _merge(twinned, "RULES\n- NEW [contract:bbbbbbbb]\n")
 
 
 def test_the_merge_is_idempotent_by_construction():
@@ -126,7 +126,7 @@ def test_the_merge_is_idempotent_by_construction():
     merge ever sees one -- so it was unreachable in the pipeline. Closed anyway:
     merge drops them itself, so idempotence is a property of this function
     rather than a promise about its caller."""
-    delta = "RULES\n- added [contract:eeeeeeee 2026-09-20]\nWORK\n- did it\nOPEN\n- (none)\n"
+    delta = "RULES\n- added [contract:eeeeeeee]\nWORK\n- did it\nOPEN\n- (none)\n"
     once = _merge(PRIOR, delta)
     assert _merge(once, delta) == once, "replaying a delta changed the digest"
 
@@ -140,7 +140,7 @@ def test_the_delta_carries_less_than_the_digest_it_updates():
     """The point of the whole exercise, asserted as a size relation rather than
     a hope: a step's OUTPUT is the change, not the accumulated note. With the
     linear fold these are the same string, which is what caps the artifact."""
-    delta = ("RULES\n- rule C [contract:dddddddd 2026-09-20]\n"
+    delta = ("RULES\n- rule C [contract:dddddddd]\n"
              "WORK\n- shipped it\nOPEN\n- (none)\n")
     merged = _merge(PRIOR, delta)
     assert len(delta) < len(merged), (
@@ -185,7 +185,7 @@ def test_the_tag_files_the_line_not_the_writer(tmp_path):
 
     # every line filed under RULES, exactly as the live writer did it
     text = "RULES\n" + "\n".join(
-        f"- a {k} fact [{k}:{i} 2026-09-20]" for k, i in made.items()
+        f"- a {k} fact [{k}:{i}]" for k, i in made.items()
     ) + "\nDECISIONS\n- (none)\nLESSONS\n- (none)\nWORK\n- shipped\nOPEN\n- (none)"
     clean, stripped, _ = store.digest_verify(conn, text, [room["id"]], scope)
     assert stripped == [], stripped
@@ -288,16 +288,16 @@ def test_coverage_counts_what_the_fold_was_given(tmp_path):
     """The denominator nobody was computing. The store CUTS the batches, so it
     has always known which rows it offered -- and never checked whether they
     arrived, which is how two thirds of a digest went missing silently."""
-    batches = ["- x [contract:aaaaaaaa 2026-09-01]\n- y [decision:bbbbbbbb 2026-09-02]",
-               "- z [lesson:cccccccc 2026-09-03]"]
+    batches = ["- x [contract:aaaaaaaa]\n- y [decision:bbbbbbbb]",
+               "- z [lesson:cccccccc]"]
     assert store.digest_offered(batches) == {"aaaaaaaa", "bbbbbbbb", "cccccccc"}
 
-    full = ("RULES\n- x [contract:aaaaaaaa 2026-09-01]\nDECISIONS\n"
-            "- y [decision:bbbbbbbb 2026-09-02]\nLESSONS\n- z [lesson:cccccccc 2026-09-03]")
+    full = ("RULES\n- x [contract:aaaaaaaa]\nDECISIONS\n"
+            "- y [decision:bbbbbbbb]\nLESSONS\n- z [lesson:cccccccc]")
     kept, offered, missed = store.digest_coverage(batches, full)
     assert (kept, offered, missed) == (3, 3, []), "a complete fold is 100%"
 
-    lossy = "RULES\n- x [contract:aaaaaaaa 2026-09-01]\nDECISIONS\n- (none)"
+    lossy = "RULES\n- x [contract:aaaaaaaa]\nDECISIONS\n- (none)"
     kept, offered, missed = store.digest_coverage(batches, lossy)
     assert (kept, offered) == (1, 3) and missed == ["bbbbbbbb", "cccccccc"], (
         f"the loss must be named row by row: {missed}")
@@ -345,7 +345,7 @@ def test_a_later_fold_builds_on_the_prior_and_does_not_replace_it(tmp_path):
     meant every fold after the first superseded the whole note with one hour of
     traffic -- a mind that only ever remembers the last hour."""
     conn, scope = _hive(tmp_path)
-    first = ("RULES\n- an old rule [contract:aaaaaaaa 2026-09-01]\nDECISIONS\n- (none)\n"
+    first = ("RULES\n- an old rule [contract:aaaaaaaa]\nDECISIONS\n- (none)\n"
              "LESSONS\n- (none)\nWORK\n- shipped the old thing\nOPEN\n- (none)")
     store.digest_store(conn, scope=scope, author="ana",
                        fact="[digest:ana 2026-09-01 | input: 1 rows]\n[stripped: 0 untagged]\n"
@@ -358,7 +358,7 @@ def test_a_later_fold_builds_on_the_prior_and_does_not_replace_it(tmp_path):
         "provenance describes the FOLD, not the memory -- it must not fold forward")
 
     # a later fold seeds from that body and merges one new line onto it
-    merged = store.digest_merge(body, "RULES\n- a new rule [contract:bbbbbbbb 2026-09-20]", [])
+    merged = store.digest_merge(body, "RULES\n- a new rule [contract:bbbbbbbb]", [])
     assert "an old rule" in merged, "the prior was replaced instead of built on"
     assert "a new rule" in merged, "the new material never landed"
     assert "shipped the old thing" in merged, "the narrative sections were dropped"

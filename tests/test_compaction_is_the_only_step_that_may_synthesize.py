@@ -16,11 +16,8 @@ from reveille import daemon, store
 
 from test_store import _mem_kw, fixture
 
-D = "2026-09-20"
-
-
 def L(text, *ids, kind="lesson"):
-    return f"- {text} " + " ".join(f"[{kind}:{i} {D}]" for i in ids)
+    return f"- {text} " + " ".join(f"[{kind}:{i}]" for i in ids)
 
 
 def test_a_merged_line_carries_every_row_it_speaks_for():
@@ -116,7 +113,7 @@ def test_a_line_may_not_name_rows_from_two_sections():
     c, admin, room, tok = fixture()
     les = _seeded(c, admin, room, tok, 1)[0]
     dec = _seeded(c, admin, room, tok, 1, kind="decision")[0]
-    line = f"- both [lesson:{les} {D}] [decision:{dec} {D}]"
+    line = f"- both [lesson:{les}] [decision:{dec}]"
     text = "RULES\n- (none)\nDECISIONS\n- (none)\nLESSONS\n" + line + \
            "\nWORK\n- w\nOPEN\n- (none)"
     with pytest.raises(store.BusError, match="never across"):

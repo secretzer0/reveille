@@ -7519,10 +7519,20 @@ DIGEST_FIRST_WINDOW_S = 7 * 86400   # a FIRST run folds this much message histor
                                     # Live hive ROWS are never windowed.
 DIGEST_SECTIONS = ("RULES", "DECISIONS", "LESSONS", "WORK", "OPEN")
 DIGEST_TAGGED = ("RULES", "DECISIONS", "LESSONS")
-_TAG_END = re.compile(r"\[(doctrine|contract|decision|lesson|state|digest):([0-9a-f]{8}) "
-                      r"(\d{4}-\d{2}-\d{2})\]\s*$")
-_TAG_ANY = re.compile(r"\[(doctrine|contract|decision|lesson|state|digest):([0-9a-f]{8}) "
-                      r"\d{4}-\d{2}-\d{2}\]")
+# THE DATE LEFT THE CITATION (measured 2026-09-20). `[lesson:9d384223 2026-09-16]`
+# costs 22.94 tokens a row and `[lesson:9d384223]` costs 11.94 -- 19175 tokens
+# across the live store, for a field the store already holds in created_ns and
+# serves with the row. A citation's whole job is to RESOLVE; anything in it the
+# lookup returns anyway is rent.
+#
+# EIGHT HEX STAYS, and that is not caution for its own sake: 4 hex already
+# collides 8 times in today's 2169 rows and projects to 1636 collisions at a
+# year of growth; 6 hex projects to 6.4; 8 hex to 0.02. The cheaper citation
+# was worth 19175 tokens, a shorter id is worth 2 a row and a wrong row.
+_TAG_END = re.compile(r"\[(doctrine|contract|decision|lesson|state|digest):"
+                      r"([0-9a-f]{8})\]\s*$")
+_TAG_ANY = re.compile(r"\[(doctrine|contract|decision|lesson|state|digest):"
+                      r"([0-9a-f]{8})\]")
 _MSG_TAG = re.compile(r"\[msg:(\d+)\]")
 
 
@@ -7531,7 +7541,7 @@ def _d8(ns):
 
 
 def _tag(r):
-    return f"[{r['kind']}:{r['uid'][:8]} {_d8(r['created_ns'])}]"
+    return f"[{r['kind']}:{r['uid'][:8]}]"
 
 
 def _mem_line(r):
@@ -7617,7 +7627,7 @@ def _block(heading, lines):
     return f"== {heading} ==\n" + ("\n".join(lines) if lines else "(none)")
 
 
-DIGEST_LINE_TOKENS = 40     # measured: a restated row plus its [kind:id8 date]
+DIGEST_LINE_TOKENS = 40     # measured: a restated row plus its [kind:id8]
 
 
 def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
@@ -8229,7 +8239,12 @@ def digest_oversize(text, cap_tokens, tokens_of=None, skip=()):
 # in the note, and it is the only honest way to turn a token ceiling into a
 # row budget. Re-measure it when the frame changes; a stale number here makes
 # the budget lie in the direction of overflow.
-DIGEST_STORED_ROW_TOKENS = 116
+# What ONE ROW COSTS in the note, measured, and the only honest way to turn a
+# token ceiling into a row budget. It was 116 when a model WROTE each line;
+# indexing costs 34, so the same 50000 ceiling now carries 1470 rows rather
+# than 431. A derived number that outlives what it was derived from is how a
+# budget starts lying -- this one moves when the line format moves.
+DIGEST_INDEX_ROW_TOKENS = 34
 
 # The kinds that BIND, in the order they are kept. doctrine and contract are
 # rules a peer could break by not knowing them, so they are carried whole
@@ -8270,6 +8285,75 @@ def digest_select(rows, budget):
     kept += rest[:max(0, budget - len(kept))]
     kept.sort(key=lambda r: r["created_ns"])
     return kept, len(rows) - len(kept)
+
+
+# MEASURED over the 1360-row live store, swept together. Two findings.
+#
+# SPLITTING THE FIRST SENTENCE ON ":" AS WELL AS ".!?" MADE THE STUBS. A colon
+# in this corpus INTRODUCES the content ("S3 review rulings: lesson promotion
+# is the ONE sanctioned...") rather than ending a thought, so the split kept
+# the label and threw the sentence away: 47 useless stubs against 7.
+#
+# AND A LESSON NEEDS FEWER CHARACTERS THAN A RULE, because it already carries
+# a descriptive SLUG and the others carry only prose:
+#   lesson@45 other@45   43596 tok  32.1/row  87%  17 stubs
+#   lesson@30 other@70   45848      33.7      91%   7 stubs   <- this
+#   lesson@35 other@75   47630      35.0      95%   7 stubs
+# One length for both spent characters where the slug had already said it and
+# starved the rules, which is where the truncation actually hurt.
+DIGEST_TITLE_CHARS = {"lesson": 30}
+DIGEST_TITLE_CHARS_DEFAULT = 70
+
+
+
+
+def digest_title(row, chars=0):
+    """One row's line in the index: its own first sentence, truncated.
+
+    DETERMINISTIC ON PURPOSE. A written restatement costs 116 tokens a row, a
+    model call, and a paraphrase that can drift from the row it cites; a
+    truncation costs ~30, no call, and cannot drift, because it IS the row's
+    words. Fidelity goes UP, not down -- what falls is prose quality, and the
+    exact text is one recall() away for any line the reader wants whole.
+
+    Brackets are stripped: the line's tag is found by _TAG_END anchored at the
+    end, and a stray `]` inside the title would end it early.
+    """
+    chars = chars or DIGEST_TITLE_CHARS.get(row["kind"], DIGEST_TITLE_CHARS_DEFAULT)
+    raw = (row["rule"] if row["kind"] == "lesson" and row["rule"] else row["fact"]) or ""
+    s = re.sub(r"\s+", " ", raw).replace("[", "(").replace("]", ")").strip()
+    # ".!?" ONLY. A colon in this corpus introduces the content rather than
+    # ending a thought, and splitting on it kept the label and threw the
+    # sentence away -- 47 useless stubs like "S3 review rulings:" against 7.
+    first = re.split(r"(?<=[.!?]) ", s)[0]
+    out = first if len(first) <= chars else s[:chars].rsplit(" ", 1)[0]
+    if row["kind"] == "lesson" and row["slug"]:
+        out = f"{row['slug']}: {out}"
+    return out.strip() or "(empty row)"
+
+
+def digest_index(rows, chars=0):
+    """The three tagged sections, built from the STORE alone. No model.
+
+    THE NOTE IS A TABLE OF CONTENTS, NOT A PHOTOCOPY. The written fold carried
+    431 of 1360 rows for 49996 tokens -- 32% of the hive at 116 tokens a row --
+    and everything it left out was invisible to the agent holding it. An index
+    carries ALL of them for ~40000, and the ones a reader wants in full are a
+    recall() away. Coverage stops being a measurement and becomes a property:
+    every row selected appears, because appearing is what this function does.
+
+    It also deletes the failure modes that made the written fold expensive: no
+    batches, no step that can decline a row, no invented tag to license, no
+    retry, and no 22-batch first fold. The writer keeps the one job with no
+    source row to copy -- WORK and OPEN, the agent's own story.
+    """
+    out = {k: [] for k in DIGEST_TAGGED}
+    for r in rows:
+        section = _KIND_SECTION.get(r["kind"])
+        if section is None:
+            continue
+        out[section].append(f"- {digest_title(r, chars)} {_tag(r)}")
+    return out
 
 
 def digest_compact_windows(lines, max_tokens, tokens_of=None):

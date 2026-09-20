@@ -81,8 +81,8 @@ def test_the_row_budget_comes_from_the_token_ceiling_not_a_second_number():
     """A ceiling in tokens and a cost per row is ONE budget, converted once,
     from a measured cost -- not two numbers kept in step by hand."""
     assert daemon.digest_row_budget() == (daemon.DIGEST_MAX_TOKENS //
-                                          store.DIGEST_STORED_ROW_TOKENS)
-    assert (daemon.digest_row_budget() * store.DIGEST_STORED_ROW_TOKENS
+                                          store.DIGEST_INDEX_ROW_TOKENS)
+    assert (daemon.digest_row_budget() * store.DIGEST_INDEX_ROW_TOKENS
             <= daemon.DIGEST_MAX_TOKENS)
 
 

@@ -137,7 +137,7 @@ def test_an_invented_tag_refuses_the_whole_digest_and_the_prior_stays_live(tmp_p
     scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
     prior = store.digest_store(conn, scope=scope, author="ana", fact="[digest:ana]\n" + _good_digest(conn, ids))
     bad = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
-                                          "[decision:deadbeef 2026-09-19]")
+                                          "[decision:deadbeef]")
     writer.answers = [bad, bad]
     with pytest.raises(store.BusError, match=r"refused twice.*resolves to no live row"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
@@ -456,7 +456,7 @@ def test_a_dropped_tag_does_not_throw_away_the_run(tmp_path, writer):
     assert "[stripped: 1 untagged, 0 unsectioned]" in fact.splitlines()[1], fact.splitlines()[:3]
     assert "forgot this one" not in fact and "length before signal" in fact
     writer.default = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
-                                                     "[decision:deadbeef 2026-09-19]")
+                                                     "[decision:deadbeef]")
     with pytest.raises(store.BusError, match="resolves to no live row"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
     assert store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["uid"] == out["id"]
@@ -571,7 +571,7 @@ def test_the_verb_starts_and_never_waits_and_rehydrate_reads(tmp_path, writer, m
     monkeypatch.setattr(daemon, "_digest_last_try", {})
     writer.delay = 0.0
     writer.default = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
-                                                     "[decision:deadbeef 2026-09-19]")
+                                                     "[decision:deadbeef]")
     out2 = asyncio.run(daemon.digest(mentor="", ctx=ctx))
     assert out2["started"] is True
     deadline = time.monotonic() + 10
@@ -876,7 +876,7 @@ def test_a_writer_refusal_keeps_the_run_and_a_store_refusal_clears_it(tmp_path, 
     assert out["id"]
 
     # the STORE's refusal is the other kind: content poisoned, run cleared
-    st["text"] = good.replace(_tag_of(conn, ids["decision"]), "[decision:deadbeef 2026-09-20]")
+    st["text"] = good.replace(_tag_of(conn, ids["decision"]), "[decision:deadbeef]")
     with pytest.raises(store.BusError, match="resolves to no live row"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
     assert store.digest_run_load(daemon._digest_data_dir(), scope, out["id"]) is None, (
