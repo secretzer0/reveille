@@ -265,7 +265,7 @@ def test_rehydrate_page_one_row_one_is_the_digest(tmp_path, writer):
     head = page["items"][0]["fact"].splitlines()[0]
     assert re.match(r"\[digest:ana \d{4}-\d{2}-\d{2} \| since \d{4}-\d{2}-\d{2} \(first run window\) "
                     r"\| input: \d+ rows, \d+ batches \| prior: none \| writer: stub-model ctx \? "
-                    r"out 5000 batch \d+\]",
+                    r"out \d+ batch \d+\]",
                     head), head
 
 
@@ -296,7 +296,13 @@ def test_a_writer_smaller_than_the_hive_gets_batches_not_a_truncation(tmp_path, 
     out = daemon._digest_job(conn, _principal(ana, room, "ana"))
     expect = -(-len(lines) // 2)
     assert out["batches"] == expect and len(writer.calls) == expect, (out, len(writer.calls))
-    assert "BATCH 1 OF" in writer.calls[0] and "RUNNING DIGEST AFTER STEP 1" in writer.calls[1]
+    # THE NOTE IS NOT IN THE PROMPT. Step 1 says nothing is recorded; step 2
+    # names the TAGS already kept, never the lines -- that is what makes the
+    # step's cost flat in the size of the digest.
+    assert "BATCH 1 OF" in writer.calls[0]
+    assert "NOTHING RECORDED YET" in writer.calls[0]
+    assert "ALREADY RECORDED" in writer.calls[1], writer.calls[1][:200]
+    assert "RUNNING DIGEST" not in writer.calls[1], "the step carried the note"
     shown = "".join(writer.calls)
     assert all(ln in shown for ln in lines), "a row was truncated away"
     final = store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["fact"]
@@ -359,14 +365,16 @@ def test_the_output_is_sized_to_the_writer_not_only_the_batch():
     directive + running digest + batch + output, and the output is the next
     running digest."""
     b, out = daemon.digest_budget(6144)
-    assert out < daemon.DIGEST_MAX_TOKENS and b >= daemon.DIGEST_MIN_BATCH_TOKENS
-    assert daemon.DIGEST_DIRECTIVE_TOKENS + 2 * out + b <= 6144, (b, out)
+    assert out == daemon.DIGEST_STEP_OUT_TOKENS and b >= daemon.DIGEST_MIN_BATCH_TOKENS
+    # NO 2*out TERM: a step carries no prior digest, so the cost is directive +
+    # batch + one step's output, flat in the size of the note.
+    assert daemon.DIGEST_DIRECTIVE_TOKENS + b + out <= 6144 - daemon.digest_margin(6144)
     b, out = daemon.digest_budget(32768)
-    assert out == daemon.DIGEST_MAX_TOKENS
-    assert b == 32768 - 700 - daemon.digest_margin(32768) - 2 * 5000
-    assert daemon.digest_budget(0) == (store.DIGEST_INPUT_TOKENS, daemon.DIGEST_MAX_TOKENS)
+    assert out == daemon.DIGEST_STEP_OUT_TOKENS, "a step's output never scales with ctx"
+    assert b == 32768 - 700 - daemon.digest_margin(32768) - daemon.DIGEST_STEP_OUT_TOKENS
+    assert daemon.digest_budget(0) == (store.DIGEST_INPUT_TOKENS, daemon.DIGEST_STEP_OUT_TOKENS)
     b, out = daemon.digest_budget(32768, env="3000")
-    assert b == 3000 and out == daemon.DIGEST_MAX_TOKENS, "env caps the batch, never the output"
+    assert b == 3000 and out == daemon.DIGEST_STEP_OUT_TOKENS, "env caps the batch, never the output"
     with pytest.raises(store.BusError, match="too small"):
         daemon.digest_budget(2500)
 
@@ -496,7 +504,14 @@ def test_section_shape_is_normalized_never_refused(tmp_path, writer):
     heads = [ln for ln in body.splitlines() if ln in store.DIGEST_SECTIONS]
     assert heads == list(store.DIGEST_SECTIONS), heads
     assert "DECISIONS\n- (none)" in body and "WORK\n- (none)" in body and "OPEN\n- (none)" in body
-    assert body.index("never truncate a digest") < body.index("never truncate a digest, again") < body.index("length before signal")
+    # A TAG NAMES ONE ROW, so the two RULES lines sharing a doctrine id collapse
+    # to the LAST statement of it -- that is the merge rule, not a loss. The
+    # ordering that still matters is between SECTIONS, and the lesson is filed
+    # under LESSONS by its own tag rather than left wherever the writer put it.
+    assert body.count("never truncate a digest") == 1, body
+    assert "never truncate a digest, again" in body, body
+    assert body.index("never truncate a digest") < body.index("length before signal")
+    assert "LESSONS\n- length before signal" in body, body
     assert "Here is the digest" not in body
     assert "[stripped: 0 untagged, 1 unsectioned]" in fact.splitlines()[1], fact.splitlines()[:3]
     # the next step is shown the NORMALIZED running digest
@@ -725,7 +740,7 @@ def test_the_budget_keeps_slack_because_our_tokenizer_is_not_the_writers():
     the wrong side. Every context keeps a margin now."""
     for ctx in (6144, 8192, 16384, 32768):
         batch, out = daemon.digest_budget(ctx)
-        worst = daemon.DIGEST_DIRECTIVE_TOKENS + 2 * out + batch
+        worst = daemon.DIGEST_DIRECTIVE_TOKENS + batch + out
         assert worst <= ctx - daemon.digest_margin(ctx), (
             f"ctx {ctx}: worst case {worst} leaves {ctx - worst} slack, "
             f"want at least {daemon.digest_margin(ctx)}")
@@ -748,7 +763,8 @@ def test_the_slack_scales_with_the_request_because_the_error_does():
     be one too; a constant is just the next equality."""
     # the live writer, against BOTH measured error rates
     batch, out = daemon.digest_budget(6144)
-    planned_in = daemon.DIGEST_DIRECTIVE_TOKENS + out + batch
+    # the INPUT is the directive and the batch; the note is not in the prompt
+    planned_in = daemon.DIGEST_DIRECTIVE_TOKENS + batch
     for rate in (4173 / 4172, 4301 / 4044):
         assert planned_in * rate + out <= 6144, (
             f"a {(rate - 1) * 100:.1f}% tokenizer disagreement overflows 6144: "
