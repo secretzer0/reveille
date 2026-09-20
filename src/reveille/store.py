@@ -7685,7 +7685,7 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
                     _block("THE STORE'S VERDICT ON EVERY TAG ABOVE", _verdicts(conn, prior["fact"])))
         live = _readable_live(conn, scopes, since)
         if row_budget:
-            live, left_out = digest_select(live, row_budget)
+            live, left_out = digest_select(live, row_budget, who=name)
         for r in live:
             items.append((r["created_ns"], _mem_line(r)))
         # A FIRST RUN WINDOWS THE MESSAGES, NEVER THE ROWS (24138): rows are
@@ -8253,7 +8253,47 @@ DIGEST_INDEX_ROW_TOKENS = 34
 DIGEST_BINDING_KINDS = ("doctrine", "contract")
 
 
-def digest_select(rows, budget):
+def digest_agent_tokens(name):
+    """The component words an agent's NAME claims, for matching row entities.
+
+    The fleet names bodies after what they own, and the entity extractor pulls
+    the same words out of the rows -- measured on 915 OverSiteAI rows, the top
+    of the entity vocabulary IS the agent roster: roc-api 175, shared 133,
+    controller-api 102, mobile 100, roc-ui 85, minimal-mobile 74, deployment
+    37, streaming 16, vendor-api 15, controller-ui 12. A correspondence that
+    good is a scoping signal sitting in the schema, and it costs no model.
+
+    `-dev` is a role suffix, not a component, so it is dropped; the parts are
+    kept as well as the whole so minimal-mobile-dev matches both
+    `minimal-mobile` and the plain `mobile` rows.
+    """
+    base = name[:-4] if name.endswith("-dev") else (name or "")
+    return {base} | {p for p in base.split("-") if len(p) > 2} - {""}
+
+
+def digest_rank(row, who, toks):
+    """Priority for one row, lowest first. Deterministic, no model.
+
+    0  IT BINDS -- doctrine, contract, or a global row. A peer breaks these by
+       not knowing them, so they are never what gets dropped.
+    1  I WROTE IT. An agent's own record of its own work.
+    2  IT NAMES MY COMPONENT, by the entities the extractor already stored.
+    3  EVERYTHING ELSE, newest first.
+
+    Tier 3 is not a bin for discards: today every tier fits, so this is an
+    ORDER and not a filter. It decides what survives the day the store outgrows
+    the ceiling, which is the only day the distinction matters.
+    """
+    if row["kind"] in DIGEST_BINDING_KINDS or row["scope"] == "global":
+        return 0
+    if who and row["author"] == who:
+        return 1
+    if toks and set((row["entities"] or "").split()) & toks:
+        return 2
+    return 3
+
+
+def digest_select(rows, budget, who=""):
     """(kept, left_out) -- the rows a fold may carry, bounded BEFORE any GPU.
 
     THE NOTE IS A CACHE, NOT THE STORE. A row left out here is not lost: it is
@@ -8266,23 +8306,24 @@ def digest_select(rows, budget):
     collapsed 7 lines of 258 in 934 GPU-seconds. There is nothing to merge, so
     the bound has to be selection.
 
-    THE ORDER IS THE POLICY, and it is deterministic so the same store always
-    yields the same note: every binding rule first (doctrine and contract --
-    what a peer breaks by not knowing it), then decisions and lessons
-    newest-first. Time order is restored afterwards, so the note still reads
-    chronologically and the fold still sees its batches in sequence.
+    ROOM SCOPE ALREADY DOES MOST OF IT, and quoting the all-live figure
+    overstated the problem: no agent ever sees 1360 rows. Reveille2.0 shows an
+    agent 445 and OverSiteAI shows one 922 -- 30% and 62% of the ceiling, 18
+    weeks and 2.4 weeks of headroom at their measured growth. The pressure is
+    INSIDE the big room, where 17 agents share 915 rows.
 
-    IT ALSO MAKES COVERAGE MEAN SOMETHING. An unbounded fold offered 445 rows
-    and kept 258 -- not a choice, just where it ran out of steps, reported as
-    57%. A bounded fold offers what it intends to carry, so coverage measures
-    the fold instead of measuring the store's size.
+    So the order is per-AGENT, by digest_rank, newest-first inside each tier.
+    Measured across the OverSiteAI roster, the first three tiers come to
+    158-417 rows against 922 unscoped: 10-28% of the ceiling instead of 62%,
+    and roc-api-dev's headroom goes from 2.4 weeks to about 35.
+
+    Time order is restored afterwards, so the note still reads chronologically
+    and the fold still sees its batches in sequence.
     """
     budget = max(0, int(budget))
-    binding = [r for r in rows if r["kind"] in DIGEST_BINDING_KINDS]
-    rest = sorted((r for r in rows if r["kind"] not in DIGEST_BINDING_KINDS),
-                  key=lambda r: r["created_ns"], reverse=True)
-    kept = binding[:budget]
-    kept += rest[:max(0, budget - len(kept))]
+    toks = digest_agent_tokens(who)
+    ranked = sorted(rows, key=lambda r: (digest_rank(r, who, toks), -r["created_ns"]))
+    kept = ranked[:budget]
     kept.sort(key=lambda r: r["created_ns"])
     return kept, len(rows) - len(kept)
 
@@ -8299,12 +8340,8 @@ def digest_select(rows, budget):
 #   lesson@45 other@45   43596 tok  32.1/row  87%  17 stubs
 #   lesson@30 other@70   45848      33.7      91%   7 stubs   <- this
 #   lesson@35 other@75   47630      35.0      95%   7 stubs
-# One length for both spent characters where the slug had already said it and
-# starved the rules, which is where the truncation actually hurt.
 DIGEST_TITLE_CHARS = {"lesson": 30}
 DIGEST_TITLE_CHARS_DEFAULT = 70
-
-
 
 
 def digest_title(row, chars=0):
@@ -8312,12 +8349,12 @@ def digest_title(row, chars=0):
 
     DETERMINISTIC ON PURPOSE. A written restatement costs 116 tokens a row, a
     model call, and a paraphrase that can drift from the row it cites; a
-    truncation costs ~30, no call, and cannot drift, because it IS the row's
+    truncation costs ~34, no call, and cannot drift, because it IS the row's
     words. Fidelity goes UP, not down -- what falls is prose quality, and the
     exact text is one recall() away for any line the reader wants whole.
 
-    Brackets are stripped: the line's tag is found by _TAG_END anchored at the
-    end, and a stray `]` inside the title would end it early.
+    Brackets are neutralised: the line's tag is found by _TAG_END anchored at
+    the end, and a stray `]` inside the title would end the scan early.
     """
     chars = chars or DIGEST_TITLE_CHARS.get(row["kind"], DIGEST_TITLE_CHARS_DEFAULT)
     raw = (row["rule"] if row["kind"] == "lesson" and row["rule"] else row["fact"]) or ""
@@ -8338,7 +8375,7 @@ def digest_index(rows, chars=0):
     THE NOTE IS A TABLE OF CONTENTS, NOT A PHOTOCOPY. The written fold carried
     431 of 1360 rows for 49996 tokens -- 32% of the hive at 116 tokens a row --
     and everything it left out was invisible to the agent holding it. An index
-    carries ALL of them for ~40000, and the ones a reader wants in full are a
+    carries ALL of them for 45848, and the ones a reader wants in full are a
     recall() away. Coverage stops being a measurement and becomes a property:
     every row selected appears, because appearing is what this function does.
 
