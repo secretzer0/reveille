@@ -7782,6 +7782,27 @@ def _section_name(s):
     return s.strip().strip("#*: ").upper()
 
 
+_EMPTY_MARKERS = {"", "-", "()", "(none)", "none", "n/a", "- none", "nothing"}
+
+
+def _is_empty_marker(s):
+    """Is this line the writer saying a tagged section is EMPTY?
+
+    It already emits one every step -- `- ` or `- (none)` -- and it is RIGHT to:
+    the canonical form this function re-serializes uses `- (none)` for a section
+    with nothing in it, so the writer is agreeing, in a slightly different
+    dialect. Counting that as `stripped untagged` logged a line per step (34 in
+    one run, all of them `RULES: -`) and made a correct, routine answer read as
+    a defect. The OUTPUT never differed: an empty section is re-emitted as
+    `- (none)` either way. This only stops calling it a strip.
+
+    Deliberately not a general "short line" test: anything else without a tag
+    under RULES/DECISIONS/LESSONS is still a claim wearing nothing and is still
+    stripped, loudly.
+    """
+    return s.lstrip("-").strip().strip(".").lower() in _EMPTY_MARKERS
+
+
 def digest_verify(conn, text, rooms, scope):
     """The fidelity check a store can do without a model (23979 s3, amended
     24138 and 24144). ONE INVARIANT: THE STORE KEEPS WHAT IT CAN LICENSE,
@@ -7811,6 +7832,8 @@ def digest_verify(conn, text, rooms, scope):
             unsectioned.append(s)
             continue
         if section in DIGEST_TAGGED:
+            if _is_empty_marker(s):
+                continue          # the writer saying "nothing here" -- see below
             m = _TAG_END.search(s)
             if not m:
                 stripped.append(f"{section}: {s}")

@@ -397,6 +397,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.294",
+     "0.2.294 A CEILING THAT SHRINKS SAYS SO (operator, on being shown their own\ndigest: \"1,588 per body per boot does not seem like enough... I had stated\nthat a 5000 token context max is what I wanted\"). They were right, and the\nnumber was ours.\n\nDIGEST_MAX_TOKENS has been 5000 all along. The live 6144-token writer\nproduces 1588 -- 31% of it -- because a sequential fold carries the digest\nIN and writes it OUT, so the budget solves ctx >= directive + 2*D + batch\nand the ceiling costs twice its own size. The full 5000 needs ctx >= 13943.\nNone of that was ever said out loud: the budget refuses a writer too small\nto fold AT ALL and then quietly made the ARTIFACT smaller for everything\nbetween that floor and the ceiling, leaving only `out 1588` inside a\nprovenance line nobody reads as a shortfall. Same family as the margin\nsolved as an equality, one axis over -- a derived number never compared\nagainst what was ASKED for.\n\ndigest_shortfall() now names it at boot, with the size, the fraction and the\nremedy: `DIGEST UNDER CEILING: the digest ceiling is 5000 tokens but this\nwriter's 6144-token context affords only 1588 (31%) -- ... needs ctx >=\n13943`. Deliberately NOT in the writer string: that string is the resume\ngate's identity (0.2.291), so adding to it would re-cut every run in flight.\n\nAND AN EMPTY SECTION IS AGREEMENT, NOT A STRIPPED CLAIM. The writer emits\n`- ` or `- (none)` for a section with nothing in it, which is exactly the\ncanonical form digest_verify re-serializes. Counting that as `stripped\nuntagged` logged one line per step -- 34 in one run, every one `RULES: -` --\nand made a routine, correct answer read as a defect. The output never\ndiffered. Anything else without a tag under RULES/DECISIONS/LESSONS is still\na claim wearing nothing and is still stripped, loudly.\n\nMEASURED WHILE PRICING THIS, because it decides what to do next: the writer\nis Qwen3.8-27B-AWQ-INT4 on two RTX 3060s, tensor-parallel, 10098 MiB on\neach. kv_cache_size_tokens is 11059 -- so ctx 11059 is FREE today and lifts\nthe digest to 3738 (74%), while ctx 16384 does not fit the KV at all. TP\nallocates symmetrically, so the writer's ceiling is the SMALLER free card:\n618 MiB on GPU 0 against 1804 on GPU 1, a gap that is exactly the 1180 MiB\nSTT sharing GPU 0. And prefix caching is on but scores 0.9% because\nblock_size is 1568 and our only constant prefix -- the directive -- is ~700\ntokens, less than half a block, so it can never be reused."),
     ("0.2.293",
      "0.2.293 A GATE MUST NOT LEAK A DAEMON. 0.2.292's new gate drives the REAL\nStop hook, and the hook starts `reveille-waked --name <role>` whenever that\nidentity's lock is free. The fixture WROTE A PID into the lock file and took\nno flock -- so the hook looked, saw a free slot, and spawned. Twice a run,\nevery run, including CI's: twelve were dialling the live broker before\nanybody ran ps.\n\nThe fixture now takes the flock a real waked would hold, and a gate counts\ndaemons across the drive and fails on any new one, killing what it found so\na red cannot leave the box worse. Mutation: drop the flock and it counts a\nspawn.\n\nTHE OTHER HALF OF THE SAME AFTERNOON, worth writing down because two\nseparate commands hit it: `pkill -f \"<pattern>\"` matches THE SHELL ASKING\nTHE QUESTION. Both attempts to clean up killed their own caller (exit 144)\nand left the daemons running. Kill by pid, read from `ps -eo pid,args` and\nfiltered with awk -- the lesson kill-a-service-by-pid-not-by-pkill-f-pattern\nwas already in the hive and was re-learned anyway.\n\nAND A DOCTRINE CORRECTION, measured by native-doorbell-test: \"arm the\nwatcher unconditionally, a duplicate costs one duplicate ring\" IS FALSE. A\nsecond arm raised while the first still holds the wake socket gets the\nNEWCOMER SIGTERM'd -- `Terminated` / `[exited with code 143]` -- so the\nsecond dies, the first exits on its next ring, and the body is left UNARMED\nwith an exit code that reads as ordinary background noise. Moot for a body\nthe doorbell reaches, which is now most of them, and still wrong for anyone\nwho arms. The watcher should lose politely (exit 0, \"already armed\") rather\nthan on a signal; that is filed, not built."),
     ("0.2.292",
@@ -1488,6 +1490,39 @@ def digest_margin(ctx):
     """The tokens of the writer's context that the budget may NOT spend.
     Proportional, because the estimate's error is. Pure."""
     return max(DIGEST_CTX_MARGIN_TOKENS, ctx // DIGEST_CTX_MARGIN_DIV)
+
+
+def digest_full_ctx():
+    """The smallest writer context that affords the OPERATOR'S CEILING in full.
+
+    Solve ctx - directive - ctx/DIV >= 2*MAX + MIN_BATCH for ctx. The 2* is the
+    whole story: a sequential fold carries the digest in AND writes it out, so
+    the ceiling costs twice its own size, and a writer needs more than double
+    the note it is producing.
+    """
+    need = DIGEST_DIRECTIVE_TOKENS + 2 * DIGEST_MAX_TOKENS + DIGEST_MIN_BATCH_TOKENS
+    div = DIGEST_CTX_MARGIN_DIV
+    return max(need + DIGEST_CTX_MARGIN_TOKENS,
+               -(-need * div // (div - 1)))
+
+
+def digest_shortfall(ctx, out):
+    """"" when the writer affords DIGEST_MAX_TOKENS, else what it costs.
+
+    A LIMIT THAT SHRINKS SILENTLY IS THE DEFECT WE KEEP PAYING FOR. The budget
+    refuses a writer too small to fold AT ALL (digest_min_ctx) and then quietly
+    shrank the ARTIFACT for every writer between there and digest_full_ctx() --
+    so the operator asked for a 5000-token note, the live 6144 writer produced
+    1588, and the only trace was `out 1588` inside a provenance line nobody
+    reads as a shortfall. Same family as the margin that was solved as an
+    equality: say it by name, at configuration time, where it is cheap.
+    """
+    if not ctx or out >= DIGEST_MAX_TOKENS:
+        return ""
+    return (f"the digest ceiling is {DIGEST_MAX_TOKENS} tokens but this writer's "
+            f"{ctx}-token context affords only {out} "
+            f"({out * 100 // DIGEST_MAX_TOKENS}%) -- a fold carries the digest in "
+            f"AND writes it out, so the full ceiling needs ctx >= {digest_full_ctx()}")
 
 
 def digest_min_ctx():
@@ -7536,6 +7571,12 @@ def main():
                 _digest_batch = b * store.CHARS_PER_TOKEN
                 print(f"digest ON: writer context {_digest_ctx or 'unknown'}, {b} input tokens per "
                       f"batch, {_digest_out} out", flush=True)
+                # SAY THE SHORTFALL BY NAME, HERE, WHERE IT IS CHEAP. Not in the
+                # writer string: that string is the resume gate's identity, so
+                # adding to it would re-cut every run in flight (0.2.291).
+                short = digest_shortfall(_digest_ctx, _digest_out)
+                if short:
+                    print(f"DIGEST UNDER CEILING: {short}", flush=True)
             except store.BusError as e:
                 _digest_out = 0
                 print(f"DIGEST REFUSED: {e}", flush=True)
