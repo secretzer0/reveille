@@ -250,3 +250,71 @@ def test_a_run_that_ends_for_any_other_reason_re_attaches(home, monkeypatch):
         return attaches
 
     assert asyncio.run(drive()) == ["ana", "ana"], "a crashed run was parked"
+
+
+def test_a_held_identity_is_said_once_not_every_pass(home, monkeypatch, capsys):
+    """Found by running the rollout: 74 `already held` lines in twenty
+    minutes, because stale entries were suppressed and held ones were not.
+    Both are said once, and a name is forgotten when its situation changes
+    so the next change is heard."""
+    _init(home, "ana")
+    held = open(spool.lock_path("ana"), "w")
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    async def fake_run(url, name, *a, **kw):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(waked, "_run", fake_run)
+
+    async def passes(n, noted, tasks, locks):
+        for _ in range(n):
+            await waked._host_pass("http://b:8765", (0, 1800, 10, 0), tasks, locks, noted, {})
+            await asyncio.sleep(0)
+
+    noted, tasks, locks = set(), {}, {}
+    asyncio.run(passes(4, noted, tasks, locks))
+    out = capsys.readouterr().err
+    assert out.count("ana already held") == 1, f"said it {out.count('ana already held')} times"
+    assert not tasks
+    # the other waked leaves: the name is heard about again, as a serving line
+    held.close()
+    asyncio.run(passes(1, noted, tasks, locks))
+    out = capsys.readouterr().err
+    assert "serving ana" in out and set(tasks) == {"ana"}
+    for f in locks.values():
+        f.close()
+    tasks["ana"].cancel()
+
+
+def test_a_stale_entry_is_said_once_and_again_when_it_changes(home, monkeypatch, capsys):
+    gone = home / "gone"
+    gone.mkdir()
+    cli.write_credential("http://b:8765", "cat", "secret-cat", str(gone))
+    import shutil
+    shutil.rmtree(gone)
+
+    async def fake_run(url, name, *a, **kw):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(waked, "_run", fake_run)
+
+    async def passes(n, noted, tasks, locks):
+        for _ in range(n):
+            await waked._host_pass("http://b:8765", (0, 1800, 10, 0), tasks, locks, noted, {})
+            await asyncio.sleep(0)
+
+    noted, tasks, locks = set(), {}, {}
+    asyncio.run(passes(3, noted, tasks, locks))
+    out = capsys.readouterr().err
+    assert out.count("agents/cat: stale") == 1, out
+    # the directory comes back with its credential: it attaches, and nothing
+    # about the old complaint lingers
+    _init(home, "cat")
+    asyncio.run(passes(1, noted, tasks, locks))
+    out = capsys.readouterr().err
+    assert "serving cat" in out, out
+    assert "stale:cat" not in noted
+    for f in locks.values():
+        f.close()
+    for t in tasks.values():
+        t.cancel()
