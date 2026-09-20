@@ -394,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.300",
+     "0.2.300 THE ONLY STEP THAT MAY SYNTHESIZE.\n\nMEASURED FIRST, because the question was the operator's: as the digest rolls\nforward, what stops it being the store with extra steps? Dedup is by ROW\nIDENTITY and it works -- every line in RULES/DECISIONS/LESSONS ends in\n[kind:id8 date], digest_verify refuses a tag naming no live row and strips a\nline carrying none, _KIND_SECTION files each line by its tag's kind so a row\nhas one home, digest_merge replaces IN PLACE by that id, an untagged line\ncannot enter a tagged section (which is what makes the merge idempotent on\nreplay), and _verdicts hands the writer the STORE's ruling on every tag the\nprior note carried. On the 43-batch fold that landed: 266 lines, 263 tag\noccurrences, 258 DISTINCT rows. Not one row twice.\n\nAND IT WAS STILL A COMPRESSED COPY. 258 source rows are 50206 real tokens and\nthe note was 29951 -- 0.60x, 116 tokens per row stored against 195 at source.\nThat is transcription, and it is the direct cost of the extractive frame: a\nstep is told to write one line for EVERY row and never to decide which matter,\nbecause the day it decided it kept 9%. Coverage and synthesis wanted opposite\ninstructions, and nothing in the fold could see two lines at once to notice\nthey were one fact. The note grew linearly in rows: at 116 tok/row the 50000\nceiling is ~430 rows and the live store holds 1546.\n\nCOMPACTION IS WHERE THE OPPOSITE INSTRUCTION IS SAFE. One section, one window\nof its lines, handed over together, with the frame inverted: MERGE LINES THAT\nSAY THE SAME THING; a merged line ends with the tags of EVERY line it merged;\nevery tag given must come back exactly once; a line nothing else duplicates is\nreturned UNCHANGED; merging nothing is a correct answer.\n\nTHE GATE IS A SET COMPARISON, NOT A COUNT. digest_compact_verify compares the\ntag ids in against the tag ids out -- a compaction is SUPPOSED to return fewer\nlines, so counting lines cannot tell a good collapse from a lost row, and\ncounting ids can. A dropped row, an invented tag, an untagged line or a line\nnot ending in its tag all fail, and a failed window is kept EXACTLY as it was.\nProven on the real note against a dead endpoint: six windows refused, 258 rows\nout of 258, text byte-identical.\n\nTHE GRAMMAR NOW ADMITS A LINE THAT NAMES SEVERAL ROWS, so three things moved\nwith it. digest_verify licenses EVERY tag on a line, not just the one at the\nend -- otherwise a compaction is a way to smuggle an unreadable id in behind a\nreadable one -- and refuses a line whose tags belong to two different sections.\ndigest_merge retires a line only when EVERY row it names is retired: retiring\non the primary tag alone would take live rows down with it.\n\nTHE PEAK IS A WINDOW, NEVER THE NOTE. A window is held twice, in and out at\nthe SAME size, because reserving less assumes the shrink -- so the window is\nhalf the room after directive and margin, and directive + 2*W bounds the call\nwhatever the note weighs. digest_section_cap is the ceiling divided by the\nthree sections that grow, so bounding each one bounds the note by construction\nrather than by a second term kept in step with the first.\n\nSYNTHESIS IS WINDOW-LOCAL and that is named, not hidden: two lines that say\nthe same thing forty apart will not meet. The section is in time order because\nthat is the cheap order to have; clustering by similarity before windowing is\nthe upgrade when the measured collapse rate says so.\n\nAND digest_oversize RETURNS THE WORST SECTION, which stays the worst after\nbeing compacted -- so the loop that asked it, remembered what it had seen and\nbroke on a repeat compacted exactly ONE section and left the other two for\never. It takes `skip` now and is asked for the worst UNHANDLED one."),
     ("0.2.299",
      "0.2.299 ONE TRY AROUND NINE SWEEPS.\n\nTHE HOURLY SWEEP HAS BEEN FAILING ON EVERY PASS and the log said only `sweep\nfailed`, naming nothing. sweep_expired_state hard-deletes the expired state\nbatch in one transaction, memories.supersedes_id is a REAL foreign key, and\ndistill() chains each state note to the one it replaces -- so an expired note\npinned by the live note that superseded it raises FOREIGN KEY constraint\nfailed and sweeps nothing. Not a rare shape, the ORDINARY one: 98 expired\nrows in the field with 63 of them pinned. The old test seeded a single state\nrow with no successor, which is why it stayed green through all of it.\n\nTHE PART THAT ACTUALLY COST SOMETHING: nine sweeps shared one try/except and\nthis one runs FIFTH, so its failure also skipped tombstones, knocks and\nrecalls -- silently, hourly, for as long as the first defect has existed. The\nfield snapshot still holds 3 spent return tickets sweep_recalls should have\ntaken. _sweep_one(label, fn) isolates each sweep and NAMES it in the log;\nevery sweep already owned its transaction, so isolation costs nothing.\n\nTHE DELETE ITSELF IS LEFT REFUSING, ON PURPOSE (operator). The one-line\nunblock is known and is not applied: this is a HARD delete of the last copy,\nand the operator is keeping expired state for later training. Nothing READS\nthose rows either way -- _readable_live and recall both filter\nexpires_ns > now, so the 30-day expiry took them out of the fold and out of\nevery query a month before the sweep ever reached them. Deletion is not the\nloss event; expiry is, and it already happened. The real fix is retention\npolicy -- a terminal status that KEEPS the row, which needs 'expired' in the\nmemories CHECK constraint -- not a tidy-up inside the sweep. A test now\nasserts the refusal, so the day somebody unblocks it they do it deliberately.\n\nThe lesson is this release's own, in a new place: a failure caught too far out\nreports the SYMPTOM and hides both the cause and everything downstream of it.\nOne try around nine calls is one budget around nine terms."),
     ("0.2.298",
@@ -1684,6 +1686,63 @@ def digest_budget(ctx, env=""):
     return batch, out
 
 
+DIGEST_COMPACT_DIRECTIVE_TOKENS = 500   # the compaction frame, measured generously
+
+
+def digest_section_cap():
+    """The tokens one TAGGED section may hold before it must be compacted.
+
+    The note's ceiling divided by the sections that can grow. WORK and OPEN are
+    rewritten every step and never accumulate, so the three tagged sections are
+    the whole of the growth, and bounding each of them bounds the note by
+    construction -- no separate check on the total, and no term that has to be
+    kept in step with another one."""
+    return max(1, DIGEST_MAX_TOKENS // len(store.DIGEST_TAGGED))
+
+
+def digest_compact_window(ctx):
+    """Tokens of ONE compaction window -- the lines handed over together.
+
+    A window is held TWICE: in, and out at the SAME size. Reserving less for
+    the output assumes the writer will shrink it, which is assuming the answer
+    -- and a compaction that merges nothing is a correct compaction, it just
+    returns what it was given. So the window is half the room after the
+    directive and the margin, and the peak is directive + 2*W, never 2*D and
+    never 2*S: the note may be far larger than the context, and so may a
+    section, but a window never is."""
+    if not ctx:
+        return 0
+    room = ctx - DIGEST_COMPACT_DIRECTIVE_TOKENS - digest_margin(ctx)
+    return max(0, room // 2)
+
+
+_COMPACT_FRAME = (
+    "You are compacting ONE SECTION of an agent's working memory. You are given every line "
+    "of a WINDOW of that section. Each line restates one row the hive recorded and ENDS with "
+    "that row's tag, [kind:id8 date].\n"
+    "YOUR ONE JOB IS TO MERGE LINES THAT SAY THE SAME THING. This is the only step that sees "
+    "lines beside each other, so it is the only step that may notice three of them are one "
+    "fact. Where several lines make the same point, write ONE line that makes it, and end "
+    "that line with the tags of EVERY line you merged, in the order you were given them, each "
+    "copied EXACTLY.\n"
+    "YOU MAY NOT DROP A ROW. Every tag you were given must appear exactly once in your reply. "
+    "Deciding a row was not worth carrying is not your judgement to make -- the store made it "
+    "by keeping the row. A line that says something nothing else says is returned UNCHANGED, "
+    "tag and all. If NOTHING here merges, return every line exactly as given: that is a "
+    "correct answer, not a failure.\n"
+    "Keep ids, numbers, versions, file names and error text EXACT. A merged line states the "
+    "shared fact, not a summary of the topic.\n"
+    "At most {cap} tokens. Output ONLY the bullet lines, each starting `- ` and ending with "
+    "its tag or tags. No heading, no preamble, no commentary, no code fences.")
+
+
+def compact_prompt(section, lines, cap):
+    """The two messages a compaction step is sent. Pure."""
+    system = _COMPACT_FRAME.format(cap=cap)
+    body = (f"SECTION: {section}\nLINES ({len(lines)}):\n" + "\n".join(lines))
+    return [{"role": "system", "content": system}, {"role": "user", "content": body}]
+
+
 def _digest_writer():
     """The writer AND the arithmetic a run is cut against, as one string. It
     is provenance in the digest header, and it is the resume gate's identity
@@ -1889,6 +1948,74 @@ def _digest_yield(step, steps):
         time.sleep(1)
 
 
+def _digest_compact(conn, p, scope, text):
+    """Compact every over-cap section of the note. Returns (text, collapsed).
+
+    THE ONLY STEP THAT MAY SYNTHESIZE. A fold step is an EXTRACTOR by design --
+    told to write one line for every row and never to decide which rows matter,
+    because the day it decided it kept 9% of what it was given. That buys
+    coverage and forbids synthesis: nothing in the fold can notice that three
+    lines are one fact, so the note grows linearly in rows and a digest 1:1
+    with the store IS the store. Compaction is where the opposite instruction
+    is safe, because here the writer sees lines SIDE BY SIDE and is gated on
+    not losing any.
+
+    THE GATE IS A SET COMPARISON, not a count: a compaction is supposed to
+    return fewer lines, so only the tag ids can tell a good collapse from a
+    lost row. A window whose reply fails digest_compact_verify is left EXACTLY
+    as it was -- a refused window costs nothing but the call, while a trusted
+    one would cost rows.
+
+    NEVER RAISES UPWARD. The fold has already landed its coverage by the time
+    this runs; a compaction that cannot reach the writer, or that the writer
+    fails, leaves a larger note and that is strictly better than losing it.
+    """
+    ctx = _digest_ctx
+    window_tokens = digest_compact_window(ctx)
+    if not window_tokens:
+        return text, 0
+    cap = digest_section_cap()
+    def tokens_of(s):
+        return writer_tokens(s, _script_url, _script_token)[0]
+
+    collapsed, seen = 0, set()
+    # One pass per section per fold: a section that is still over cap after
+    # being compacted once is over cap because its rows genuinely differ, and
+    # calling again would spend the GPU to be told so a second time.
+    while True:
+        name = store.digest_oversize(text, cap, tokens_of, skip=seen)
+        if not name:
+            break
+        seen.add(name)
+        sections, _said = store._digest_sections(text)
+        lines = sections[name]
+        windows = store.digest_compact_windows(lines, window_tokens, tokens_of)
+        log.info("%s digest compacting %s: %d lines in %d window(s), cap %d",
+                 p.name, name, len(lines), len(windows), cap)
+        out = []
+        for i, win in enumerate(windows, 1):
+            _digest_yield(i, len(windows))
+            messages = compact_prompt(name, win, window_tokens)
+            try:
+                reply = strip_think("".join(_llm_stream(
+                    _script_url, _script_model, _script_token, messages,
+                    timeout=DIGEST_TIMEOUT_S, max_tokens=window_tokens))).strip()
+                got = [ln.strip() for ln in reply.splitlines() if ln.strip().startswith("- ")]
+                store.digest_compact_verify(win, got)
+            except (store.BusError, urllib.error.URLError, urllib.error.HTTPError,
+                    OSError, TimeoutError) as e:
+                log.warning("%s digest compaction %s window %d/%d refused: %s -- "
+                            "the window is kept as it was", p.name, name, i, len(windows), e)
+                out.extend(win)
+                continue
+            collapsed += len(win) - len(got)
+            out.extend(got)
+        text = store.digest_replace_section(text, name, out)
+    if collapsed:
+        log.info("%s digest compaction collapsed %d line(s)", p.name, collapsed)
+    return text, collapsed
+
+
 def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
     """The SEQUENTIAL FOLD (24015): each writer call sees the running digest
     beside ONE batch and hands back the next running digest, verified and
@@ -1972,7 +2099,9 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
                     " ".join(missed[:20]) + (" ..." if len(missed) > 20 else ""))
     else:
         log.info("%s digest coverage %d%% (%d rows)", p.name, pct, offered_n)
-    body = running
+    body, collapsed = _digest_compact(conn, p, scope, running)
+    if collapsed:
+        log.info("%s digest compacted %d line(s) away", p.name, collapsed)
     fact = store.digest_header(name=p.name, inputs=inputs, model=writer,
                                batches=steps, mentor=mentor, stripped=stripped_total,
                                unsectioned=unsectioned_total,

@@ -7925,18 +7925,32 @@ def digest_verify(conn, text, rooms, scope):
         if section in DIGEST_TAGGED:
             if _is_empty_marker(s):
                 continue          # the writer saying "nothing here" -- see below
-            m = _TAG_END.search(s)
-            if not m:
+            if not _TAG_END.search(s):
                 stripped.append(f"{section}: {s}")
                 continue
-            kind, id8, _ = m.groups()
-            live = conn.execute(
-                f"SELECT 1 FROM memories WHERE kind=? AND uid LIKE ? AND status='live' "
-                f"AND (scope='global' OR scope IN ({_ph(rooms + [scope])}))",
-                [kind, id8 + "%"] + rooms + [scope]).fetchone()
-            if live is None:
-                raise BusError(f"digest: tag [{kind}:{id8}] resolves to no live row")
-            section = _KIND_SECTION.get(kind, section)   # the tag files the line
+            # EVERY TAG ON THE LINE IS LICENSED, not only the one at the end.
+            # A compacted line names several rows, and if only the last were
+            # checked a compaction would be a way to smuggle an unreadable id
+            # in behind a readable one.
+            homes = set()
+            for kind, id8 in _digest_line_tags(s):
+                live = conn.execute(
+                    f"SELECT 1 FROM memories WHERE kind=? AND uid LIKE ? AND status='live' "
+                    f"AND (scope='global' OR scope IN ({_ph(rooms + [scope])}))",
+                    [kind, id8 + "%"] + rooms + [scope]).fetchone()
+                if live is None:
+                    raise BusError(f"digest: tag [{kind}:{id8}] resolves to no live row")
+                homes.add(_KIND_SECTION.get(kind, section))
+            if len(homes) > 1:
+                # Compaction merges rows WITHIN one section. A line naming a
+                # doctrine and a lesson has no home, and silently filing it
+                # under one of them would lose the other from the section that
+                # owns it -- which is the exact loss the tag list exists to
+                # make impossible.
+                raise BusError(f"digest: one line names rows belonging in "
+                               f"{' and '.join(sorted(homes))} -- a line merges rows "
+                               f"within ONE section, never across")
+            section = homes.pop()                       # the tag files the line
         else:
             for mid in _MSG_TAG.findall(s):
                 if not rooms or not conn.execute(
@@ -8034,14 +8048,21 @@ def digest_merge(prior, delta, dropped=()):
         # restate WINS, and the reason generalises: the DROP carries an id and
         # nothing else, the line carries content, and content outranks a bare
         # pointer to it.
-        restated = {i for i in (_digest_tag_id(x) for x in new.get(k, [])) if i}
+        restated = {i for _k, i in
+                    (tg for x in new.get(k, []) for tg in _digest_line_tags(x))}
         drop_here = dropped - restated
         lines, seen = [], {}
         for line in old.get(k, []):
             tid = _digest_tag_id(line)
             if tid is None:
                 continue                      # see the untagged note below
-            if tid in drop_here:
+            # A COMPACTED LINE DIES ONLY WHEN EVERY ROW IT NAMES IS RETIRED.
+            # Retiring it on its primary tag alone would take the other rows
+            # it speaks for down with it, and they were never retired -- the
+            # tag list exists precisely so that cannot happen quietly. While
+            # any row survives the line stays; the next fold's verdicts tell
+            # the writer the dead tag is RETIRED and it restates without it.
+            if all(i in drop_here for _k, i in _digest_line_tags(line)):
                 continue
             if tid in seen:
                 # H2: replace-in-place is only defined when a tag appears ONCE.
@@ -8096,8 +8117,22 @@ def _digest_sections(text):
 
 
 def _digest_tag_id(line):
+    """The line's PRIMARY tag -- its identity for replace-in-place. A compacted
+    line carries several; the first one is the one the merge files it under."""
     m = _TAG_ANY.search(line or "")
     return m.group(2) if m else None
+
+
+def _digest_line_tags(line):
+    """EVERY tag on the line, in order, as (kind, id8).
+
+    A line carrying more than one tag is what COMPACTION produces: several rows
+    that said one thing, collapsed into the sentence they share, with every
+    source row still named. The tag list is both the provenance and the proof
+    that the collapse lost nothing -- digest_compact_verify compares the set
+    before against the set after and refuses any difference.
+    """
+    return _TAG_ANY.findall(line or "")
 
 
 def _digest_body(fact):
@@ -8146,8 +8181,14 @@ def digest_tags(text):
     return out
 
 
-def digest_oversize(text, cap_tokens, tokens_of=None):
-    """The section that must be compacted, or "" -- measured in REAL TOKENS.
+def digest_oversize(text, cap_tokens, tokens_of=None, skip=()):
+    """The worst over-cap section, or "" -- measured in REAL TOKENS.
+
+    `skip` names sections already dealt with this pass. Without it the caller
+    that loops on this function stops at the FIRST section it has handled --
+    the worst one stays the worst after being compacted, so it is returned
+    again and a "have I seen this?" break ends the pass with the other two
+    sections untouched. Asking for the worst UNHANDLED one is the whole fix.
 
     `tokens_of` is the writer's own counter when we have one; without it this
     falls back to chars/CHARS_PER_TOKEN, which is an ESTIMATE and is named as
@@ -8163,10 +8204,90 @@ def digest_oversize(text, cap_tokens, tokens_of=None):
     sections, _said = _digest_sections(text)
     worst, worst_n = "", 0
     for name, lines in sections.items():
+        if name in skip:
+            continue
         n = count("\n".join(lines))
         if n > cap_tokens and n > worst_n:
             worst, worst_n = name, n
     return worst
+
+
+def digest_compact_windows(lines, max_tokens, tokens_of=None):
+    """Cut one section's lines into WINDOWS that each fit `max_tokens`.
+
+    Compaction is the only step that sees lines side by side, so it is the only
+    step that can notice two of them are one fact. It cannot see the whole
+    section: a window is held TWICE (in, and out at the same size, because
+    assuming the shrink is assuming the answer), so the window is bounded by
+    half the writer's room and a large section takes several.
+
+    ponytail: synthesis is therefore WINDOW-LOCAL -- two lines that say the
+    same thing forty lines apart will not meet. The section is in time order
+    and that is the cheap order to have; clustering by similarity before
+    windowing is the upgrade if the measured collapse rate is poor.
+
+    A single line larger than a window is its own window: it cannot be split
+    and refusing it would stall the pass on one row.
+    """
+    count = tokens_of or (lambda s: len(s) // CHARS_PER_TOKEN)
+    out, cur, size = [], [], 0
+    for line in lines:
+        n = count(line)
+        if cur and size + n > max_tokens:
+            out.append(cur)
+            cur, size = [], 0
+        cur.append(line)
+        size += n
+    if cur:
+        out.append(cur)
+    return out
+
+
+def digest_compact_verify(before, after):
+    """Refuse a compaction that moved any ROW. Returns the collapsed line count.
+
+    THE WHOLE SAFETY OF COMPACTION IS THIS COMPARISON. The writer is asked to
+    merge lines that say one thing, and the one thing it must not do is decide
+    a row was not worth carrying -- the same inversion that made the fold keep
+    9% of what it was given. So the tag SET is compared, not the prose: every
+    id that went in must come out, on some line, and no id may appear that did
+    not go in. A writer that drops a row, invents a tag, or silently rewrites
+    an id fails here and the section is left exactly as it was.
+
+    Coverage is a set comparison and NOT a count: a compaction is supposed to
+    return fewer LINES, so counting lines cannot tell a good collapse from a
+    lost row. Counting ids can.
+    """
+    was = {i for _k, i in (tg for ln in before for tg in _digest_line_tags(ln))}
+    now = {i for _k, i in (tg for ln in after for tg in _digest_line_tags(ln))}
+    lost, made = sorted(was - now), sorted(now - was)
+    if lost:
+        raise BusError(f"digest compaction dropped {len(lost)} row(s): "
+                       f"{', '.join(lost[:6])} -- a compaction merges rows, "
+                       f"it never decides one was not worth carrying")
+    if made:
+        raise BusError(f"digest compaction invented {len(made)} tag(s): "
+                       f"{', '.join(made[:6])} -- every id must come from the "
+                       f"lines it was given")
+    for ln in after:
+        tags = _digest_line_tags(ln)
+        if not tags:
+            raise BusError("digest compaction returned an untagged line -- every "
+                           "line in a tagged section names the rows it speaks for")
+        if not _TAG_END.search(ln):
+            raise BusError(f"digest compaction returned a line not ending in a tag: "
+                           f"{ln[:80]}")
+    return len(before) - len(after)
+
+
+def digest_replace_section(text, name, lines):
+    """The note with ONE section swapped for `lines`. Order and every other
+    section are untouched, because compaction is a rewrite of one shelf and
+    must not be a way to reorder the library."""
+    sections, _said = _digest_sections(text)
+    sections[name] = list(lines)
+    return "\n".join(f"{k}\n" + ("\n".join(v) if v else "- (none)")
+                      for k, v in sections.items())
 
 
 def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
