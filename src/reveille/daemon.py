@@ -394,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.297",
+     "0.2.297 TWO BUDGETS, NOT ONE (operator, 2026-09-20: the storage limit is in\ntokens, and willing to raise it to 10k; plus: seeing how the memories changed\nover time is a highly valuable feature).\n\nBUDGET A is the FOLD and the GPU bounds it -- every step must fit the writer's\ncontext. BUDGET B is the STORED digest and only the operator bounds it. They\nwere the same number because a step carried the note IN and wrote it OUT, so B\ncould never exceed (ctx - directive - batch)/2: 1588 tokens of a 5000 ceiling on\nthe live 6144 writer, and the same term that made a delta fold grow until it\nblew the context at step 5.\n\nA STEP NO LONGER CARRIES THE NOTE. It gets the batch and the TAG IDS already\nrecorded -- ids, not the lines they name -- and returns only what that batch\nearns; the store files it by tag, as it already did. The fold costs directive +\nbatch + one step's output, FLAT in the size of the digest. At 6144 the batch\ngoes 1500 -> 3876 (+158%), at 9408 -> 6732, and the stored ceiling is 10000 REAL\ntokens whatever the context is. The smallest writer that can fold at all drops\nto 3429, and there is one threshold now instead of two, because the ceiling\ncosts the context nothing.\n\nTOKENS, COUNTED BY THE WRITER. stream_options.include_usage is on and\nlast_usage() reads prompt/completion counts from the model's own tokenizer.\nchars/4 cost two one-token context overflows in one day; it survives only for\nCUTTING a batch, where an estimate is fine, and never again decides whether a\nstored artifact is inside its ceiling. Thread-local, because the fold and the\nvoice worker call the writer at once and a module global would hand one thread\nthe other's numbers.\n\nTHE PEAK IS A SECTION, NOT THE NOTE. digest_oversize() names the section past\nits cap in real tokens, so a compaction holds ONE SECTION twice rather than the\nwhole digest: directive + 2*S_max, never 2*D. Without it a full-rewrite\ncompaction restores the exact term this change deletes -- native-doorbell-test\nfound that circularity in the design before it shipped.\n\nAND THE MIND KEEPS ITS HISTORY, which cost nothing because it was never thrown\naway: digest_store has SUPERSEDED rather than deleted since it was written, each\nfold linked to the one it replaced. digest_history() walks that chain\nnewest-first, bounded, ending at a broken link rather than hanging on it. No\nmigration and no new storage -- it needed a way to ask.\n\nNOT YET MET A REAL WRITER. Every gate here feeds hand-written text, and the last\nfold design that looked sound died at step 4 in the field."),
     ("0.2.296",
      "0.2.296 THE TAG FILES THE LINE, NOT THE WRITER (first landed fold,\nd17827da 2026-09-20; operator, on reading it: fix the classification defect\ntoo).\n\nThe first digest ever to complete came back with all 21 lines under RULES --\nlessons, decisions, doctrine and contracts in one pile -- and DECISIONS,\nLESSONS, WORK and OPEN all `- (none)`. Four of five sections empty. The frame\nsays plainly which kind goes where; the writer ignored it. The store could not\ncatch it because every line carried a VALID tag resolving to a LIVE row:\ncorrectly licensed, wrongly filed.\n\nSo filing stops being the model's judgement. It composes the line; the tag it\ncopied decides where the line lives -- doctrine and contract to RULES, decision\nto DECISIONS, lesson to LESSONS, and a kind with no opinion (state, digest)\nstays where the writer put it. Same division that already makes the store, not\nthe model, decide truth.\n\nTHE OTHER HALF IS NOT ROUTING AND IS NOT FIXED BY IT. WORK and OPEN are\nuntagged narrative -- the only record of what the agent itself did and still\nowes -- and the writer produced nothing for either while filling RULES. No\nstore rule can invent them, so the frame now says they are almost never empty,\nthat they come from the agent OWN messages, and that they are written BEFORE\nanything else is trimmed. Whether that holds is a measurement on the next fold,\nnot a claim made here.\n\nGate: four rows, one of each kind, all filed under RULES exactly as the live\nwriter did it, must come back under their own headings. Mutation -- let the\nwriter file them -- reproduces the field symptom, four lines in RULES."),
     ("0.2.295",
@@ -1414,31 +1416,43 @@ def strip_think(text):
 # whole point.
 DIGEST_MIN_INTERVAL = 3600      # s between hook-triggered digests (23979 s6); a
                                 # plain constant, not a REVEILLE_TIMINGS member
-DIGEST_MAX_TOKENS = 5000        # the operator's ceiling on the note itself
+DIGEST_MAX_TOKENS = 10000       # the operator's ceiling on the STORED note, in
+                                # REAL tokens (their count, 2026-09-20). It is a
+                                # STORAGE budget and it is NOT the writer's
+                                # context: a fold that never carries the whole
+                                # digest can keep one far larger than one
+                                # context window. Those two budgets were the
+                                # same number only because the old fold carried
+                                # the note in and wrote it out every step.
+DIGEST_STEP_OUT_TOKENS = 800    # what ONE step may emit: the lines this batch
+                                # earns, never the accumulated note
 DIGEST_TIMEOUT_S = 300.0        # the writer gets this long; past it, no note
 _DIGEST_FRAME = (
-    "You maintain ONE agent's working memory of a shared engineering bus. You are given "
-    "DATA: the agent's previous digest (if any) with the store's VERDICT on every tag in it, "
-    "rows the hive learned since, and the agent's own messages since. Produce the NEW digest: "
-    "FOLD, never append -- keep what still holds, update what changed, drop what the verdicts "
-    "retired. Aim for the fewest tokens that keep every fact, id, number and name exact; hard "
-    "ceiling {cap} tokens. OUTPUT FORMAT, exactly these five section headings on their own "
-    "lines, in this order, each followed by `- ` bullet lines:\n"
-    "RULES\nDECISIONS\nLESSONS\nWORK\nOPEN\n"
-    "Every bullet under RULES, DECISIONS and LESSONS ENDS with the tag of the row it "
-    "restates, copied EXACTLY from the data: [kind:id8 date]. Never invent a tag, never "
-    "alter one, never write an untagged bullet in those three sections; a fact with no "
-    "row to tag does not go there. THE TAG'S KIND CHOOSES THE SECTION: doctrine and "
-    "contract go under RULES, decision under DECISIONS, lesson under LESSONS. Put each "
-    "line under the heading its own tag names -- do not pile everything into RULES.\n"
-    "WORK AND OPEN ARE NOT OPTIONAL AND ARE ALMOST NEVER EMPTY. WORK = what this agent "
-    "did and shipped, from its OWN messages in the data; OPEN = what it still owes and who "
-    "owes it, citing messages as [msg:N]. These two are the only record of what the agent "
-    "itself has been doing -- a digest that fills RULES and leaves WORK and OPEN at "
-    "`- (none)` has thrown away the agent's own history and is the WRONG answer whenever "
-    "the data contains any message it sent. Write them before you trim anything else.\n"
-    "Plain text only: no markdown beyond `- `, no code fences, no preamble, no closing "
-    "remarks.")
+    "You maintain ONE agent's working memory of a shared engineering bus. You are given ONE "
+    "BATCH of material -- rows the hive learned and messages the agent sent -- and the list of "
+    "tag ids ALREADY RECORDED. You do NOT see the note itself and you do not need to: the store "
+    "keeps it and files what you return.\n"
+    "RETURN ONLY WHAT THIS BATCH EARNS. Never restate a tag in the ALREADY RECORDED list unless "
+    "this batch CHANGES what it says -- a restatement REPLACES the recorded line, so restate "
+    "only to correct or update. At most {cap} tokens; a batch that earns two lines returns two "
+    "lines.\n"
+    "OUTPUT FORMAT, these headings on their own lines, each followed by `- ` bullet lines:\n"
+    "RULES\nDECISIONS\nLESSONS\nDROP\nWORK\nOPEN\n"
+    "Every bullet under RULES, DECISIONS and LESSONS ENDS with the tag of the row it restates, "
+    "copied EXACTLY from the data: [kind:id8 date]. Never invent a tag, never alter one, never "
+    "write an untagged bullet in those three sections. Put each line under the heading its own "
+    "tag names: doctrine and contract under RULES, decision under DECISIONS, lesson under "
+    "LESSONS.\n"
+    "DROP lists tags in the ALREADY RECORDED list that this batch RETIRES -- one per bullet, "
+    "the tag alone. Retire only what the data says was superseded or is no longer true.\n"
+    "WORK and OPEN are the agent's own story and are REWRITTEN each time from what this batch "
+    "shows: WORK = what it did and shipped, OPEN = what it still owes and who owes it, citing "
+    "messages as [msg:N]. They are short, they are not optional, and they are the only record "
+    "of what the agent itself has been doing.\n"
+    "A section with nothing to say gets exactly one bullet: `- (none)`. Emit every heading "
+    "every time. Plain text only: no markdown beyond `- `, no code fences, no preamble, no "
+    "closing remarks.")
+
 _DIGEST_FRAME_PROTEGE = (
     " THIS IS A FIRST DIGEST FOR A NEW AGENT: the MENTOR DIGEST is its baseline -- restate "
     "it, fold in the mentor's rows and the rules that bind everyone, and leave WORK empty "
@@ -1464,9 +1478,19 @@ _digest_last_try = {}            # scope -> (ns, reason) of the last attempt, la
                                  # invitation to retry every Stop-hook turn; 24173:
                                  # the next verb call carries the reason
 _digest_batch = store.DIGEST_INPUT_TOKENS * store.CHARS_PER_TOKEN   # chars per batch
-_digest_out = DIGEST_MAX_TOKENS                                     # tokens per fold output
+_digest_out = DIGEST_STEP_OUT_TOKENS                                # tokens ONE STEP may emit
+                                                                    # -- never the stored ceiling
 _digest_ctx = 0                                                     # the writer's, 0 = unknown
 DIGEST_DIRECTIVE_TOKENS = 700   # the system frame, measured generously
+# THE TWO BUDGETS ARE NOT ONE (operator, 2026-09-20). BUDGET A is the FOLD and
+# is bounded by the GPU: every step must fit the writer's context. BUDGET B is
+# the STORED digest and is bounded by DIGEST_MAX_TOKENS alone. B was trapped
+# inside A because a step carried the digest in AND wrote it out, so the note
+# could never exceed (ctx - directive - batch)/2 -- 1588 of the operator's 5000
+# on the live 6144 writer. A step now carries NO prior digest: the store dedupes
+# and files by tag (digest_merge), so the writer never needs to see what it
+# already said. The fold costs directive + batch + step-out, flat, whatever the
+# note has grown to.
 DIGEST_MIN_BATCH_TOKENS = 1500  # under this a fold is more digest than batch
 # A BUDGET THAT SPENDS THE WHOLE CONTEXT HAS NO ROOM TO BE WRONG (field
 # defect 2026-09-20 02:35Z). The first long fold died at step ~33 with
@@ -1508,7 +1532,7 @@ def digest_full_ctx():
     the ceiling costs twice its own size, and a writer needs more than double
     the note it is producing.
     """
-    need = DIGEST_DIRECTIVE_TOKENS + 2 * DIGEST_MAX_TOKENS + DIGEST_MIN_BATCH_TOKENS
+    need = DIGEST_DIRECTIVE_TOKENS + DIGEST_STEP_OUT_TOKENS + DIGEST_MIN_BATCH_TOKENS
     div = DIGEST_CTX_MARGIN_DIV
     return max(need + DIGEST_CTX_MARGIN_TOKENS,
                -(-need * div // (div - 1)))
@@ -1525,20 +1549,26 @@ def digest_shortfall(ctx, out):
     reads as a shortfall. Same family as the margin that was solved as an
     equality: say it by name, at configuration time, where it is cheap.
     """
-    if not ctx or out >= DIGEST_MAX_TOKENS:
+    if not ctx or ctx >= digest_full_ctx():
         return ""
-    return (f"the digest ceiling is {DIGEST_MAX_TOKENS} tokens but this writer's "
-            f"{ctx}-token context affords only {out} "
-            f"({out * 100 // DIGEST_MAX_TOKENS}%) -- a fold carries the digest in "
-            f"AND writes it out, so the full ceiling needs ctx >= {digest_full_ctx()}")
+    return (f"this writer's {ctx}-token context cannot run a fold step "
+            f"(needs {digest_full_ctx()}: directive {DIGEST_DIRECTIVE_TOKENS} + batch "
+            f"{DIGEST_MIN_BATCH_TOKENS} + step output {DIGEST_STEP_OUT_TOKENS} + margin). "
+            f"The STORED ceiling of {DIGEST_MAX_TOKENS} tokens is unaffected: a step "
+            f"carries no prior digest, so the note's size never enters this sum")
 
 
 def digest_min_ctx():
-    """The smallest writer context that can fold at all with the margin
-    charged -- what the refusal quotes, so it names a number that works."""
-    need = DIGEST_DIRECTIVE_TOKENS + DIGEST_MIN_BATCH_TOKENS + 2 * 500
-    return max(need + DIGEST_CTX_MARGIN_TOKENS,
-               -(-need * DIGEST_CTX_MARGIN_DIV // (DIGEST_CTX_MARGIN_DIV - 1)))
+    """The smallest writer context that can run a fold step.
+
+    ONE THRESHOLD NOW, NOT TWO. Under the old fold these were different
+    questions -- "can it fold at all" versus "can it afford the operator's
+    ceiling" -- because the ceiling cost twice its own size in every step. A
+    step no longer carries the note, so the ceiling costs the context NOTHING
+    and the only question left is whether one step fits. digest_full_ctx() is
+    the same number and is kept as the name the boot report reads.
+    """
+    return digest_full_ctx()
 
 
 def _writer_context(url, token):
@@ -1574,13 +1604,17 @@ def digest_budget(ctx, env=""):
     batch only. Unknown context -> the fallbacks. Pure."""
     if not ctx:
         batch = int(env) if env else store.DIGEST_INPUT_TOKENS
-        return max(DIGEST_MIN_BATCH_TOKENS, batch), DIGEST_MAX_TOKENS
+        return max(DIGEST_MIN_BATCH_TOKENS, batch), DIGEST_STEP_OUT_TOKENS
     room = ctx - DIGEST_DIRECTIVE_TOKENS - digest_margin(ctx)
-    out = min(DIGEST_MAX_TOKENS, (room - DIGEST_MIN_BATCH_TOKENS) // 2)
-    if out < 500:
+    # NO 2*D TERM. A step carries no prior digest, so the fold's cost is flat in
+    # the size of the note: directive + batch + one step's output. The batch
+    # takes what is left after the step cap, which is the opposite of the old
+    # split -- there, the note's size ate the batch twice over.
+    out = DIGEST_STEP_OUT_TOKENS
+    batch = room - out
+    if batch < DIGEST_MIN_BATCH_TOKENS:
         raise store.BusError(f"the script writer's context is {ctx} tokens -- too small to fold "
                              f"a digest (needs {digest_min_ctx()}+)")
-    batch = room - 2 * out
     if env:
         batch = min(batch, max(DIGEST_MIN_BATCH_TOKENS, int(env)))
     return batch, out
@@ -1806,7 +1840,8 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
         with _digest_lock:
             _digest_running[scope] = [step, steps]
         batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
-        data = store.digest_batch_text(running, inputs["base"], batch, step, steps)
+        data = store.digest_batch_text(store.digest_tags(running), inputs["base"],
+                                       batch, step, steps)
         messages = digest_prompt(data, protege=mentor is not None, cap=_digest_out)
         out = None
         for attempt in (1, 2):
@@ -1828,7 +1863,12 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
                                           f"digest stays live, and this run's saved steps "
                                           f"are kept")
             try:
-                out, stripped, unsectioned = store.digest_verify(conn, text, p.rooms, scope)
+                add, stripped, unsectioned = store.digest_verify(conn, text, p.rooms, scope)
+                # THE STEP ADDS; THE STORE KEEPS. The writer sees only this
+                # batch, so what it returns is this batch's lines -- merged in
+                # by tag, never swapped for the note.
+                body, dropped = store.digest_delta_split(add)
+                out = store.digest_merge(running, body, dropped)
                 for line in stripped:      # a body can look (24138)
                     log.info("%s digest step %d/%d stripped untagged: %s",
                              p.name, step, steps, line[:200])
@@ -1888,12 +1928,36 @@ def _digest_due(conn, p):
     return ""
 
 
+_usage_local = threading.local()
+
+
+def last_usage():
+    """The writer's OWN token counts for this thread's last _llm_stream call,
+    or {} if it did not report them. {prompt_tokens, completion_tokens,
+    total_tokens}.
+
+    THE NUMBER THAT DECIDES A BUDGET MUST COME FROM THE ENFORCER. We size input
+    as chars/4 and the writer counts with a real tokenizer, and that gap has
+    already produced two context overflows one token over, thirteen hours apart.
+    An estimate is fine for CUTTING a batch; it is not fine for deciding whether
+    a stored artifact is within its ceiling. Ask the thing that counts.
+    """
+    return dict(getattr(_usage_local, "last", {}) or {})
+
+
 def _llm_stream(url, model, token, messages, timeout, max_tokens=300):
     """Token deltas from an OpenAI-compatible /v1/chat/completions with
     stream=true (llama-server). Yields text pieces; raises on transport error.
     Thinking off (chat_template_kwargs) -- the script needs no thought."""
     body = json.dumps({"model": model, "messages": messages, "max_tokens": max_tokens,
                        "temperature": 0.5, "stream": True,
+                       # COUNT TOKENS WITH THE WRITER'S OWN TOKENIZER, NOT OURS
+                       # (operator, 2026-09-20: "I want it by tokens"). chars/4
+                       # is an ESTIMATE and it has already cost two one-token
+                       # context overflows in one day. vLLM reports the real
+                       # prompt/completion counts in a final usage chunk for the
+                       # asking, and we are making the call anyway.
+                       "stream_options": {"include_usage": True},
                        "chat_template_kwargs": {"enable_thinking": False}}).encode()
     req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions", data=body,
                                  headers={"content-type": "application/json"})
@@ -1912,6 +1976,13 @@ def _llm_stream(url, model, token, messages, timeout, max_tokens=300):
                 d = json.loads(payload)
             except ValueError:
                 continue
+            u = d.get("usage")
+            if isinstance(u, dict) and u.get("total_tokens"):
+                # The usage chunk carries no choices. Kept THREAD-LOCAL: the
+                # fold and the voice worker call this concurrently, and a module
+                # global would hand one thread the other's token counts -- the
+                # same seam as the sqlite connection (lesson 13488cc6).
+                _usage_local.last = dict(u)
             for c in d.get("choices") or []:
                 piece = (c.get("delta") or {}).get("content")
                 if piece:

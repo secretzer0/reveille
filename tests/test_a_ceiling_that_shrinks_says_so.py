@@ -9,44 +9,58 @@ made the artifact smaller.
 Same family as the margin solved as an equality, one axis over: the number that
 matters is derived and then never compared against what was ASKED for.
 """
+import pytest
+
 from reveille import daemon, store
 
 
-def test_the_shortfall_is_named_with_its_size_and_its_remedy():
-    batch, out = daemon.digest_budget(6144)
-    why = daemon.digest_shortfall(6144, out)
-    assert why, "the live writer is under the ceiling and said nothing"
-    assert str(daemon.DIGEST_MAX_TOKENS) in why, "the ceiling it missed"
-    assert str(out) in why, "what it actually affords"
-    assert "31%" in why, f"how far short, as a fraction: {why}"
-    assert str(daemon.digest_full_ctx()) in why, "the context that would fix it"
+def test_the_stored_ceiling_no_longer_depends_on_the_writers_context():
+    """THE PREMISE OF THIS FILE WAS RETIRED, NOT THE FILE. It used to assert
+    that a small writer silently SHRANK the artifact -- 1588 tokens of the
+    operator's 5000 on a 6144 writer -- because the fold carried the note in and
+    wrote it out, so the ceiling cost twice its own size every step.
+
+    A step no longer carries the note (operator, 2026-09-20: the storage budget
+    and the GPU budget are not one number). The fold costs directive + batch +
+    one step's output, FLAT in the size of the digest, so the stored ceiling is
+    whatever the operator says and the context cannot shrink it. The thing worth
+    gating is that independence."""
+    small = daemon.digest_budget(daemon.digest_min_ctx())
+    large = daemon.digest_budget(32768)
+    assert small[1] == large[1] == daemon.DIGEST_STEP_OUT_TOKENS, (
+        "a step's output must not depend on the writer's context")
+    assert daemon.DIGEST_MAX_TOKENS == 10000, "the operator's stored ceiling"
+    # the batch grows with the context; the CEILING does not move at all
+    assert large[0] > small[0], "a bigger writer should fold bigger batches"
+    for ctx in (daemon.digest_min_ctx(), 6144, 9408, 32768):
+        assert daemon.digest_shortfall(ctx, daemon.digest_budget(ctx)[1]) == "", (
+            f"ctx {ctx} affords a step, so nothing is short")
 
 
-def test_a_writer_that_affords_the_ceiling_says_nothing():
-    """Silence is the correct answer when there is no shortfall -- a banner that
-    always fires is a banner nobody reads."""
-    big = daemon.digest_full_ctx()
-    batch, out = daemon.digest_budget(big)
-    assert out == daemon.DIGEST_MAX_TOKENS, (big, out)
-    assert daemon.digest_shortfall(big, out) == ""
-    # ...and one token less than that is a shortfall again
-    batch, out = daemon.digest_budget(big - 8)
-    assert out < daemon.DIGEST_MAX_TOKENS
-    assert daemon.digest_shortfall(big - 8, out) != ""
+def test_a_context_too_small_for_one_step_is_refused_by_name():
+    """The only ctx question left: can ONE step fit? Below that the fold cannot
+    run at all, and it is refused at configuration time rather than discovered
+    at step 1 -- the margin rule, one axis over."""
+    floor = daemon.digest_min_ctx()
+    assert daemon.digest_budget(floor)[0] >= daemon.DIGEST_MIN_BATCH_TOKENS
+    with pytest.raises(store.BusError, match=f"needs {floor}"):
+        daemon.digest_budget(floor - 8)
+    why = daemon.digest_shortfall(floor - 8, daemon.DIGEST_STEP_OUT_TOKENS)
+    assert str(floor) in why and "STORED ceiling" in why, (
+        f"the refusal must separate the two budgets: {why}")
 
 
 def test_full_ctx_is_derived_from_the_fold_not_guessed():
-    """The fold carries the digest IN and writes it OUT, so the ceiling costs
-    twice its own size -- a writer needs more than double the note it makes.
-    Asserted as the arithmetic, so changing any term moves the answer."""
-    need = (daemon.DIGEST_DIRECTIVE_TOKENS + 2 * daemon.DIGEST_MAX_TOKENS
-            + daemon.DIGEST_MIN_BATCH_TOKENS)
+    """One threshold now, not two: with a flat fold "can it run" and "can it
+    afford the ceiling" are the same question, because the ceiling costs the
+    context nothing."""
     full = daemon.digest_full_ctx()
-    assert full >= need, "the ceiling must at least fit twice over"
-    assert full - daemon.digest_margin(full) - daemon.DIGEST_DIRECTIVE_TOKENS >= (
-        2 * daemon.DIGEST_MAX_TOKENS + daemon.DIGEST_MIN_BATCH_TOKENS)
-    # the number the operator can act on: measured 13943 for today's constants
-    assert 12200 < full < 16384, full
+    assert full == daemon.digest_min_ctx(), "two thresholds where one remains"
+    need = (daemon.DIGEST_DIRECTIVE_TOKENS + daemon.DIGEST_MIN_BATCH_TOKENS
+            + daemon.DIGEST_STEP_OUT_TOKENS)
+    assert full >= need
+    assert full - daemon.digest_margin(full) >= need, "the margin must still be charged"
+    assert full < 4000, f"a flat fold should need a SMALL writer, got {full}"
 
 
 def test_an_empty_section_is_agreement_not_a_stripped_claim(tmp_path):

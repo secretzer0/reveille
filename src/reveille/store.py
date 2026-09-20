@@ -7767,14 +7767,29 @@ def digest_run_clear(data_dir, scope):
         os.unlink(digest_run_path(data_dir, scope))
 
 
-def digest_batch_text(running, base, batch, step, steps):
-    """One writer call's data: the RUNNING digest (the prior's base on the
-    first step, the model's last output after) beside ONE batch. Pure."""
-    if running:
-        head = _block(f"RUNNING DIGEST AFTER STEP {step - 1} OF {steps} -- fold the batch into it",
-                      [running])
-    else:
-        head = base or _block("NO PRIOR DIGEST -- this batch starts one", [])
+def digest_batch_text(kept_tags, base, batch, step, steps):
+    """One writer call's data: ONE batch, and the TAGS already recorded -- never
+    the digest itself. Pure.
+
+    THE STEP NO LONGER CARRIES THE NOTE (operator, 2026-09-20). It used to hand
+    the writer the whole running digest and ask it to fold the batch in, so the
+    note appeared in the prompt AND in the completion, and the stored artifact
+    was capped at under half the writer's context -- 1588 tokens of a 5000
+    ceiling, and later the thing that made a delta fold grow until it blew the
+    context at step 5. The writer never needed it: digest_merge files by tag,
+    replaces a restated tag in place and drops what DROP retires, so the STORE
+    already knows what has been said.
+
+    What the writer does need is the SHORT answer to "have I already covered
+    this row?", which is the tag list -- ids only, a few tokens each, not the
+    lines they name. That keeps the step's cost flat in the size of the note:
+    directive + batch + one step's output, whatever the digest has grown to.
+    """
+    seen = (_block(f"ALREADY RECORDED ({len(kept_tags)} rows) -- do not restate these "
+                   f"unless the batch CHANGES them", [" ".join(sorted(kept_tags))])
+            if kept_tags else
+            _block("NOTHING RECORDED YET -- this batch starts the note", []))
+    head = (base + "\n\n" + seen) if base and step == 1 else seen
     return head + "\n\n" + batch
 
 
@@ -8021,6 +8036,35 @@ def _digest_tag_id(line):
     return m.group(2) if m else None
 
 
+def digest_tags(text):
+    """Every tag id already recorded in `text`. What a step is told instead of
+    the note: ids are a few tokens each, the lines they name are not."""
+    return {t for t in (_digest_tag_id(x) for x in (text or "").splitlines()) if t}
+
+
+def digest_oversize(text, cap_tokens, tokens_of=None):
+    """The section that must be compacted, or "" -- measured in REAL TOKENS.
+
+    `tokens_of` is the writer's own counter when we have one; without it this
+    falls back to chars/CHARS_PER_TOKEN, which is an ESTIMATE and is named as
+    one wherever its answer is used. The operator's ceiling is a TOKEN budget
+    (2026-09-20) and a character count is not a token count.
+
+    PER SECTION, NOT PER NOTE, and that is the whole reason a big digest is
+    affordable: compacting one section holds only that section twice, so the
+    peak is directive + 2*S_max rather than directive + 2*D. The note may be
+    far larger than any single context window; no section may be.
+    """
+    count = tokens_of or (lambda s: len(s) // CHARS_PER_TOKEN)
+    sections, _said = _digest_sections(text)
+    worst, worst_n = "", 0
+    for name, lines in sections.items():
+        n = count("\n".join(lines))
+        if n > cap_tokens and n > worst_n:
+            worst, worst_n = name, n
+    return worst
+
+
 def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
                   unsectioned=0, resumed_at=0):
     """The provenance lines, written by the STORE, never the model (24015):
@@ -8042,6 +8086,34 @@ def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
     if stripped or unsectioned:
         head += f"\n[stripped: {stripped} untagged, {unsectioned} unsectioned]"
     return head
+
+
+def digest_history(conn, scope, limit=20):
+    """Every completed fold for one agent, newest first: the mind over time.
+
+    THE CHAIN WAS ALWAYS KEPT AND NEVER SERVED (operator, 2026-09-20: "being
+    able to see how the memories changed over time is a highly valuable
+    feature"). digest_store has superseded rather than deleted since it was
+    written -- each new digest carries supersedes_id back to the one it
+    replaced, and the old row stays with status='superseded'. So history costs
+    no new storage and no migration; it needed a way to ASK.
+
+    Walked along supersedes_id rather than selected by time, because the chain
+    is the truth: a row that superseded nothing is where the mind began, and a
+    gap means somebody retracted a link rather than that a fold went missing.
+    """
+    live = digest_prior(conn, scope)
+    out, seen, cur = [], set(), live["id"] if live else None
+    while cur and cur not in seen and len(out) < limit:
+        seen.add(cur)
+        r = conn.execute("SELECT id, uid, fact, status, created_ns, supersedes_id "
+                         "FROM memories WHERE id=? AND kind='digest'", (cur,)).fetchone()
+        if r is None:
+            break
+        out.append({"uid": r["uid"], "status": r["status"], "created_ns": r["created_ns"],
+                    "chars": len(r["fact"] or ""), "fact": r["fact"]})
+        cur = r["supersedes_id"]
+    return out
 
 
 def digest_store(conn, *, scope, author, fact):

@@ -209,3 +209,57 @@ def test_the_tag_files_the_line_not_the_writer(tmp_path):
     assert len(sect("LESSONS")) == 1 and made["lesson"] in sect("LESSONS")[0], \
         f"a lesson was left in the pile: {sect('LESSONS')}"
     assert sect("WORK") == ["- shipped"], "an untagged narrative line must stay put"
+
+
+def _hive(tmp_path):
+    import sqlite3
+    db = str(tmp_path / "b.db")
+    conn = store.connect(db)
+    store.migrate(conn, db)
+    u = store.setup_first_admin(conn, "owner", "hunter2hunter2")
+    room = store.create_room(conn, u["id"], "hive")
+    ana = store.create_token(conn, u["id"], "ana", agent_name="ana", create=True)
+    store.assign_room(conn, ana["id"], room["id"], u["id"])
+    conn.row_factory = sqlite3.Row
+    return conn, store.agent_scope(conn, ana["agent_id"], ana["agent_id"])
+
+
+def test_the_mind_keeps_its_own_history(tmp_path):
+    """THE CHAIN WAS ALWAYS KEPT AND NEVER SERVED. digest_store has superseded
+    rather than deleted since it was written, so every completed fold is still
+    there with supersedes_id pointing back. The operator asked to SEE how a
+    mind changed over time; that needed a way to ask, not new storage."""
+    conn, scope = _hive(tmp_path)
+    for n in ("first", "second", "third"):
+        store.digest_store(conn, scope=scope, author="ana",
+                           fact=f"RULES\n- the {n} mind\nDECISIONS\n- (none)\n"
+                                f"LESSONS\n- (none)\nWORK\n- (none)\nOPEN\n- (none)")
+
+    hist = store.digest_history(conn, scope)
+    assert len(hist) == 3, f"a fold went missing from the chain: {len(hist)}"
+    assert [h["status"] for h in hist] == ["live", "superseded", "superseded"]
+    assert "third" in hist[0]["fact"], "newest first"
+    assert "second" in hist[1]["fact"] and "first" in hist[2]["fact"]
+    # exactly one live, always -- history must not resurrect a retired mind
+    assert sum(h["status"] == "live" for h in hist) == 1
+    # and the walk is the CHAIN, not a timestamp sort: each links to the next
+    assert hist[0]["created_ns"] >= hist[1]["created_ns"] >= hist[2]["created_ns"]
+
+
+def test_history_is_bounded_and_survives_a_broken_link(tmp_path):
+    """A limit, because a long-lived mind has many folds and a caller asking
+    for its history should not be handed all of them. And a cycle or a missing
+    row ends the walk rather than hanging it -- a retracted link is a gap in
+    the story, not a reason to spin."""
+    conn, scope = _hive(tmp_path)
+    for n in range(5):
+        store.digest_store(conn, scope=scope, author="ana",
+                           fact=f"RULES\n- mind {n}\nDECISIONS\n- (none)\nLESSONS\n"
+                                f"- (none)\nWORK\n- (none)\nOPEN\n- (none)")
+    assert len(store.digest_history(conn, scope, limit=2)) == 2
+    assert len(store.digest_history(conn, scope)) == 5
+
+    # break the chain in the middle: the walk stops there, it does not hang
+    mid = store.digest_history(conn, scope)[2]["uid"]
+    conn.execute("UPDATE memories SET supersedes_id=NULL WHERE uid=?", (mid,))
+    assert len(store.digest_history(conn, scope)) == 3
