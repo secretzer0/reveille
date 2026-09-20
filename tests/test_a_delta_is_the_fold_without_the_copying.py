@@ -263,3 +263,102 @@ def test_history_is_bounded_and_survives_a_broken_link(tmp_path):
     mid = store.digest_history(conn, scope)[2]["uid"]
     conn.execute("UPDATE memories SET supersedes_id=NULL WHERE uid=?", (mid,))
     assert len(store.digest_history(conn, scope)) == 3
+
+
+def test_a_batch_never_holds_more_rows_than_a_step_can_state():
+    """MEASURED 2026-09-20: 37% coverage, 82 of 132 offered rows lost, every
+    gate green. The fold is SINGLE-PASS -- a row a step declines is never
+    offered again -- so a batch bigger than the step's output cap does not
+    DEFER the remainder, it loses it.
+
+    The two numbers had been chosen independently and stopped matching: the old
+    fold ran batch 1500 against out 1588, output EXCEEDING input, so a step
+    could restate everything it saw. Making batches 158% bigger while capping a
+    step at 800 made the ratio 4.8x. The row count is now DERIVED from what a
+    step may emit."""
+    from reveille import daemon
+    rows = daemon.digest_batch_rows(daemon.DIGEST_STEP_OUT_TOKENS)
+    assert rows * store.DIGEST_LINE_TOKENS <= daemon.DIGEST_STEP_OUT_TOKENS, (
+        "a full batch cannot be stated inside one step's output")
+    assert daemon.digest_batch_rows(80) == 2 and daemon.digest_batch_rows(1) == 1, (
+        "the row cap must follow the step's output, and never reach zero")
+
+
+def test_coverage_counts_what_the_fold_was_given(tmp_path):
+    """The denominator nobody was computing. The store CUTS the batches, so it
+    has always known which rows it offered -- and never checked whether they
+    arrived, which is how two thirds of a digest went missing silently."""
+    batches = ["- x [contract:aaaaaaaa 2026-09-01]\n- y [decision:bbbbbbbb 2026-09-02]",
+               "- z [lesson:cccccccc 2026-09-03]"]
+    assert store.digest_offered(batches) == {"aaaaaaaa", "bbbbbbbb", "cccccccc"}
+
+    full = ("RULES\n- x [contract:aaaaaaaa 2026-09-01]\nDECISIONS\n"
+            "- y [decision:bbbbbbbb 2026-09-02]\nLESSONS\n- z [lesson:cccccccc 2026-09-03]")
+    kept, offered, missed = store.digest_coverage(batches, full)
+    assert (kept, offered, missed) == (3, 3, []), "a complete fold is 100%"
+
+    lossy = "RULES\n- x [contract:aaaaaaaa 2026-09-01]\nDECISIONS\n- (none)"
+    kept, offered, missed = store.digest_coverage(batches, lossy)
+    assert (kept, offered) == (1, 3) and missed == ["bbbbbbbb", "cccccccc"], (
+        f"the loss must be named row by row: {missed}")
+
+
+def test_the_recorded_tag_list_is_bounded_and_budgeted():
+    """IT GREW AND NOTHING PAID FOR IT. The step stopped carrying the note, and
+    I replaced it with the list of already-recorded ids -- then called the cost
+    flat. It was flat at 30 rows (291 tokens) and not at 150 (1372), and the
+    fold died at step 19 with `your prompt contains at least 5345 input tokens`
+    because the budget had been solved as an equality with no room for it.
+
+    The list is an OPTIMISATION, never a correctness requirement: digest_merge
+    replaces a restated tag IN PLACE and is idempotent, so showing fewer ids
+    costs output tokens and never a row."""
+    from reveille import daemon
+    cap = daemon.digest_tag_cap()
+    assert cap * daemon.DIGEST_TAG_TOKENS <= daemon.DIGEST_TAGS_TOKENS
+
+    for rows in (30, 150, 1250):
+        tags = ["%08x" % i for i in range(rows)]
+        txt = store.digest_batch_text(tags, "", "BATCH", 2, 9, tag_cap=cap)
+        shown = [w for w in txt.split() if len(w) == 8 and all(c in "0123456789abcdef" for c in w)]
+        assert len(shown) <= cap, f"{rows} rows showed {len(shown)} ids, cap is {cap}"
+        # the newest are the ones kept, and the older ones are ACKNOWLEDGED
+        assert tags[-1] in txt, "the most recent id must be shown"
+        if rows > cap:
+            assert tags[0] not in txt and "restating one is harmless" in txt
+
+    # and every term of the step is charged against the context
+    batch, out = daemon.digest_budget(6144)
+    total = (daemon.DIGEST_DIRECTIVE_TOKENS + daemon.DIGEST_TAGS_TOKENS + batch
+             + out + daemon.digest_margin(6144))
+    assert total <= 6144, f"the step's terms sum to {total}, over the context"
+
+
+def test_a_later_fold_builds_on_the_prior_and_does_not_replace_it(tmp_path):
+    """THE QUESTION THAT FOUND IT: will a second fold be incremental?
+
+    Yes on the INPUT side -- `since = prior.created_ns`, so a later fold reads
+    only what arrived after the last one. But the OUTPUT side had lost its
+    accumulation. Under the carried fold the prior survived by being
+    RE-TRANSCRIBED into step 1; the stateless step does not carry it, and the
+    writer is told not to restate recorded rows. So `running` starting empty
+    meant every fold after the first superseded the whole note with one hour of
+    traffic -- a mind that only ever remembers the last hour."""
+    conn, scope = _hive(tmp_path)
+    first = ("RULES\n- an old rule [contract:aaaaaaaa 2026-09-01]\nDECISIONS\n- (none)\n"
+             "LESSONS\n- (none)\nWORK\n- shipped the old thing\nOPEN\n- (none)")
+    store.digest_store(conn, scope=scope, author="ana",
+                       fact="[digest:ana 2026-09-01 | input: 1 rows]\n[stripped: 0 untagged]\n"
+                            + first)
+
+    prior = store.digest_prior(conn, scope)
+    body = store._digest_body(prior["fact"])
+    assert "an old rule" in body, "the note must survive the header strip"
+    assert "[digest:" not in body and "[stripped:" not in body, (
+        "provenance describes the FOLD, not the memory -- it must not fold forward")
+
+    # a later fold seeds from that body and merges one new line onto it
+    merged = store.digest_merge(body, "RULES\n- a new rule [contract:bbbbbbbb 2026-09-20]", [])
+    assert "an old rule" in merged, "the prior was replaced instead of built on"
+    assert "a new rule" in merged, "the new material never landed"
+    assert "shipped the old thing" in merged, "the narrative sections were dropped"

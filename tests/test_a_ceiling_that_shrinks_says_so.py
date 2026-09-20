@@ -29,7 +29,14 @@ def test_the_stored_ceiling_no_longer_depends_on_the_writers_context():
     large = daemon.digest_budget(32768)
     assert small[1] == large[1] == daemon.DIGEST_STEP_OUT_TOKENS, (
         "a step's output must not depend on the writer's context")
-    assert daemon.DIGEST_MAX_TOKENS == 10000, "the operator's stored ceiling"
+    assert daemon.DIGEST_MAX_TOKENS >= 20000, "the operator raised the stored ceiling"
+    # THE CEILING MUST NOT BLOCK A FOLD (operator: I do not want to block it).
+    # It is a target for compaction, never a refusal -- so no budget path may
+    # consult it, and a step's output is capped by the STEP, not the note.
+    assert daemon.digest_prompt("x")[0]["content"], "the frame must exist"
+    import inspect
+    assert inspect.signature(daemon.digest_prompt).parameters["cap"].default == (
+        daemon.DIGEST_STEP_OUT_TOKENS), "a prompt must never default to the STORED ceiling"
     # the batch grows with the context; the CEILING does not move at all
     assert large[0] > small[0], "a bigger writer should fold bigger batches"
     for ctx in (daemon.digest_min_ctx(), 6144, 9408, 32768):

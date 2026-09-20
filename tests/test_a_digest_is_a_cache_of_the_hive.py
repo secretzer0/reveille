@@ -371,7 +371,10 @@ def test_the_output_is_sized_to_the_writer_not_only_the_batch():
     assert daemon.DIGEST_DIRECTIVE_TOKENS + b + out <= 6144 - daemon.digest_margin(6144)
     b, out = daemon.digest_budget(32768)
     assert out == daemon.DIGEST_STEP_OUT_TOKENS, "a step's output never scales with ctx"
-    assert b == 32768 - 700 - daemon.digest_margin(32768) - daemon.DIGEST_STEP_OUT_TOKENS
+    # the ALREADY RECORDED list is a budgeted term too -- unbudgeted, it grew
+    # with the row count and overflowed a fold at step 19 (2026-09-20)
+    assert b == (32768 - 700 - daemon.DIGEST_TAGS_TOKENS - daemon.digest_margin(32768)
+                 - daemon.DIGEST_STEP_OUT_TOKENS)
     assert daemon.digest_budget(0) == (store.DIGEST_INPUT_TOKENS, daemon.DIGEST_STEP_OUT_TOKENS)
     b, out = daemon.digest_budget(32768, env="3000")
     assert b == 3000 and out == daemon.DIGEST_STEP_OUT_TOKENS, "env caps the batch, never the output"

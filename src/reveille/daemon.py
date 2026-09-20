@@ -394,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.298",
+     "0.2.298 AN EXTRACTOR, NOT AN EDITOR -- and four more unbudgeted terms.\n\nTHE FOLD KEPT 44 OF 445 ROWS. 9% coverage on a full 27-batch run that landed\nat 5219 real tokens, 10% of the ceiling, with nothing near any limit: 27 steps\nx 800 gave 21600 output tokens available against ~17800 needed, and it emitted\n6531. Many steps returned 46 tokens -- five headings and (none).\n\nTHE CAUSE WAS MY FRAME, NOT A BUDGET. It said RETURN ONLY WHAT THIS BATCH\nEARNS, which makes the writer a CURATOR, and it curated 401 rows away. The\nstore had already decided those rows mattered by putting them in the batch;\nasking the model to re-decide inverts our own division -- the model composes,\nthe store decides truth. The frame now says: you are an EXTRACTOR, not an\neditor; one line per tagged row; returning fewer lines than the batch has rows\nDROPS THOSE ROWS FOR EVER, because this is a single pass; if the batch is\nlarge write SHORTER LINES, never fewer. Measured on the same window, same\nbatches: curating held 678 tokens at step 6 and finished 27 steps at 4684;\nextractive reached 4333 by step 6 and 11657 by step 19, every step emitting\nits full budget.\n\nFOUR MORE UNBUDGETED TERMS, ALL MINE, ALL THE SAME CLASS AS THE MARGIN:\n1. RATIO. Batches went 1500 -> 3876 while a step stayed capped at 800 out --\n   from 0.9x (output EXCEEDED input, so a step could restate everything) to\n   4.8x. The fold is SINGLE-PASS, so the overflow was not deferred, it was\n   lost: 82 of 132 rows, 37% coverage, suite green. Batch ROW COUNT is now\n   derived from what a step can state (800/40 = 20), never chosen beside it.\n2. NOTHING MEASURED IT. The store cuts the batches, so it always knew exactly\n   which rows it offered -- and never checked what arrived. digest_coverage()\n   computes it and the fold logs it every run.\n3. THE TAG LIST. Removing the carried note, I replaced it with the ids of\n   recorded rows and called the cost flat. Flat at 30 rows (291 tokens), not at\n   150 (1372); at 1250 it would cost 11105, twice the whole context. It killed\n   a fold at step 19. Bounded to 40 ids with its own budget line, and a gate\n   asserts directive + tags + batch + out + margin <= ctx.\n4. THE BATCH ITSELF WAS STILL CUT BY chars/4. It ran ~19% low: 17 of 27\n   batches over budget, worst by 809 tokens against a 768 margin, killing a\n   fold at step 20 by 41 tokens. Batches are now cut by the WRITER'S OWN\n   tokenizer -- a fast char pass, then split anything that does not actually\n   fit. An estimate is fine for guessing where to cut and never for deciding\n   that the cut fits.\n\nAND A FOLD NOW BUILDS ON ITS OWN PAST. Asked whether a second fold would be\nincremental: yes on the input side (since = prior.created_ns), but the output\nside had lost its accumulation. The carried fold kept the prior by\nRE-TRANSCRIBING it into step 1; a stateless step does not, and the writer is\ntold not to restate recorded rows, so `running` starting empty meant every fold\nafter the first superseded the whole note with one hour of traffic -- a mind\nthat only ever remembers the last hour, producing a well-formed digest every\ntime. It seeds from the prior's body now, provenance header stripped, because\n[digest:...] and [stripped:...] describe the fold and not the memory.\n\nWHAT IS STILL OPEN, named because it is not fixed: coverage WARNS where it must\nREFUSE -- a step that returns fewer lines than its batch has rows should fail\nand re-issue, since the loss is irreversible and a warning arrives after it.\nNothing bounds the stored note: compaction is unbuilt and the ceiling is a\ntarget nothing enforces. DROP survives in the grammar but the step carries no\nnote, so the writer cannot name a target for it. And coverage is a FLOOR, not a\nresult: a digest 1:1 with the store IS the store, so the number that judges the\nfold is stored-tokens-per-row against the source rows' own count. All four were\nfound by native-doorbell-test reading the design."),
     ("0.2.297",
      "0.2.297 TWO BUDGETS, NOT ONE (operator, 2026-09-20: the storage limit is in\ntokens, and willing to raise it to 10k; plus: seeing how the memories changed\nover time is a highly valuable feature).\n\nBUDGET A is the FOLD and the GPU bounds it -- every step must fit the writer's\ncontext. BUDGET B is the STORED digest and only the operator bounds it. They\nwere the same number because a step carried the note IN and wrote it OUT, so B\ncould never exceed (ctx - directive - batch)/2: 1588 tokens of a 5000 ceiling on\nthe live 6144 writer, and the same term that made a delta fold grow until it\nblew the context at step 5.\n\nA STEP NO LONGER CARRIES THE NOTE. It gets the batch and the TAG IDS already\nrecorded -- ids, not the lines they name -- and returns only what that batch\nearns; the store files it by tag, as it already did. The fold costs directive +\nbatch + one step's output, FLAT in the size of the digest. At 6144 the batch\ngoes 1500 -> 3876 (+158%), at 9408 -> 6732, and the stored ceiling is 10000 REAL\ntokens whatever the context is. The smallest writer that can fold at all drops\nto 3429, and there is one threshold now instead of two, because the ceiling\ncosts the context nothing.\n\nTOKENS, COUNTED BY THE WRITER. stream_options.include_usage is on and\nlast_usage() reads prompt/completion counts from the model's own tokenizer.\nchars/4 cost two one-token context overflows in one day; it survives only for\nCUTTING a batch, where an estimate is fine, and never again decides whether a\nstored artifact is inside its ceiling. Thread-local, because the fold and the\nvoice worker call the writer at once and a module global would hand one thread\nthe other's numbers.\n\nTHE PEAK IS A SECTION, NOT THE NOTE. digest_oversize() names the section past\nits cap in real tokens, so a compaction holds ONE SECTION twice rather than the\nwhole digest: directive + 2*S_max, never 2*D. Without it a full-rewrite\ncompaction restores the exact term this change deletes -- native-doorbell-test\nfound that circularity in the design before it shipped.\n\nAND THE MIND KEEPS ITS HISTORY, which cost nothing because it was never thrown\naway: digest_store has SUPERSEDED rather than deleted since it was written, each\nfold linked to the one it replaced. digest_history() walks that chain\nnewest-first, bounded, ending at a broken link rather than hanging on it. No\nmigration and no new storage -- it needed a way to ask.\n\nNOT YET MET A REAL WRITER. Every gate here feeds hand-written text, and the last\nfold design that looked sound died at step 4 in the field."),
     ("0.2.296",
@@ -1416,7 +1418,7 @@ def strip_think(text):
 # whole point.
 DIGEST_MIN_INTERVAL = 3600      # s between hook-triggered digests (23979 s6); a
                                 # plain constant, not a REVEILLE_TIMINGS member
-DIGEST_MAX_TOKENS = 10000       # the operator's ceiling on the STORED note, in
+DIGEST_MAX_TOKENS = 50000       # the operator's ceiling on the STORED note, in
                                 # REAL tokens (their count, 2026-09-20). It is a
                                 # STORAGE budget and it is NOT the writer's
                                 # context: a fold that never carries the whole
@@ -1424,18 +1426,30 @@ DIGEST_MAX_TOKENS = 10000       # the operator's ceiling on the STORED note, in
                                 # context window. Those two budgets were the
                                 # same number only because the old fold carried
                                 # the note in and wrote it out every step.
+DIGEST_TAGS_TOKENS = 400        # the ALREADY RECORDED list's OWN budget. It grows
+                                # with the row count and was never budgeted, which
+                                # is what overflowed a fold at step 19; it is
+                                # bounded now and charged here like every other term.
+DIGEST_TAG_TOKENS = 10          # measured: one 8-hex id plus its separator
 DIGEST_STEP_OUT_TOKENS = 800    # what ONE step may emit: the lines this batch
                                 # earns, never the accumulated note
 DIGEST_TIMEOUT_S = 300.0        # the writer gets this long; past it, no note
 _DIGEST_FRAME = (
     "You maintain ONE agent's working memory of a shared engineering bus. You are given ONE "
-    "BATCH of material -- rows the hive learned and messages the agent sent -- and the list of "
-    "tag ids ALREADY RECORDED. You do NOT see the note itself and you do not need to: the store "
-    "keeps it and files what you return.\n"
-    "RETURN ONLY WHAT THIS BATCH EARNS. Never restate a tag in the ALREADY RECORDED list unless "
-    "this batch CHANGES what it says -- a restatement REPLACES the recorded line, so restate "
-    "only to correct or update. At most {cap} tokens; a batch that earns two lines returns two "
-    "lines.\n"
+    "BATCH of material -- rows the hive learned and messages the agent sent -- and the ids of "
+    "the most recently recorded rows. You do NOT see the note itself; the store keeps it and "
+    "files what you return.\n"
+    "YOU ARE AN EXTRACTOR, NOT AN EDITOR. Write ONE LINE FOR EVERY TAGGED ROW IN THIS BATCH. "
+    "Do not decide which rows matter -- that judgement is not yours and the store has already "
+    "made it by putting the row in front of you. A batch with fifteen tagged rows produces "
+    "fifteen lines. Returning fewer lines than the batch has rows DROPS THOSE ROWS FOR EVER: "
+    "this is a single pass and no later step sees this batch again.\n"
+    "Each line restates what its row says, compressed to its facts, ids, numbers and names, "
+    "kept exact. At most {cap} tokens for the whole reply -- if the batch is large, write "
+    "SHORTER LINES, never fewer of them.\n"
+    "The only rows you may skip are those whose ids appear in the ALREADY RECORDED list, and "
+    "only when this batch does not change them; restate one when it does, and a restatement "
+    "REPLACES the recorded line.\n"
     "OUTPUT FORMAT, these headings on their own lines, each followed by `- ` bullet lines:\n"
     "RULES\nDECISIONS\nLESSONS\nDROP\nWORK\nOPEN\n"
     "Every bullet under RULES, DECISIONS and LESSONS ENDS with the tag of the row it restates, "
@@ -1443,15 +1457,13 @@ _DIGEST_FRAME = (
     "write an untagged bullet in those three sections. Put each line under the heading its own "
     "tag names: doctrine and contract under RULES, decision under DECISIONS, lesson under "
     "LESSONS.\n"
-    "DROP lists tags in the ALREADY RECORDED list that this batch RETIRES -- one per bullet, "
-    "the tag alone. Retire only what the data says was superseded or is no longer true.\n"
-    "WORK and OPEN are the agent's own story and are REWRITTEN each time from what this batch "
-    "shows: WORK = what it did and shipped, OPEN = what it still owes and who owes it, citing "
-    "messages as [msg:N]. They are short, they are not optional, and they are the only record "
-    "of what the agent itself has been doing.\n"
-    "A section with nothing to say gets exactly one bullet: `- (none)`. Emit every heading "
-    "every time. Plain text only: no markdown beyond `- `, no code fences, no preamble, no "
-    "closing remarks.")
+    "DROP lists ids from the ALREADY RECORDED list that this batch RETIRES -- one per bullet, "
+    "the id alone. Retire only what the data says was superseded or is no longer true.\n"
+    "WORK and OPEN are the agent's own story, rewritten from what this batch shows: WORK = what "
+    "it did and shipped, OPEN = what it still owes and who owes it, citing messages as [msg:N]. "
+    "They are short and they are not optional.\n"
+    "A section with nothing to say gets exactly one bullet: `- (none)`. Emit every heading every "
+    "time. Plain text only: no markdown beyond `- `, no code fences, no preamble.")
 
 _DIGEST_FRAME_PROTEGE = (
     " THIS IS A FIRST DIGEST FOR A NEW AGENT: the MENTOR DIGEST is its baseline -- restate "
@@ -1459,7 +1471,7 @@ _DIGEST_FRAME_PROTEGE = (
     "except `- (new body, nothing shipped yet)` and OPEN with what the mentor left open.")
 
 
-def digest_prompt(text, protege=False, cap=DIGEST_MAX_TOKENS):
+def digest_prompt(text, protege=False, cap=DIGEST_STEP_OUT_TOKENS):
     """The two messages the writer is sent. Pure. Data rides in the USER turn."""
     system = _DIGEST_FRAME.format(cap=cap) + (_DIGEST_FRAME_PROTEGE if protege else "")
     return [{"role": "system", "content": system}, {"role": "user", "content": text}]
@@ -1478,6 +1490,7 @@ _digest_last_try = {}            # scope -> (ns, reason) of the last attempt, la
                                  # invitation to retry every Stop-hook turn; 24173:
                                  # the next verb call carries the reason
 _digest_batch = store.DIGEST_INPUT_TOKENS * store.CHARS_PER_TOKEN   # chars per batch
+_digest_batch_rows = 0          # rows per batch -- derived from the step's output
 _digest_out = DIGEST_STEP_OUT_TOKENS                                # tokens ONE STEP may emit
                                                                     # -- never the stored ceiling
 _digest_ctx = 0                                                     # the writer's, 0 = unknown
@@ -1532,7 +1545,8 @@ def digest_full_ctx():
     the ceiling costs twice its own size, and a writer needs more than double
     the note it is producing.
     """
-    need = DIGEST_DIRECTIVE_TOKENS + DIGEST_STEP_OUT_TOKENS + DIGEST_MIN_BATCH_TOKENS
+    need = (DIGEST_DIRECTIVE_TOKENS + DIGEST_TAGS_TOKENS + DIGEST_STEP_OUT_TOKENS
+            + DIGEST_MIN_BATCH_TOKENS)
     div = DIGEST_CTX_MARGIN_DIV
     return max(need + DIGEST_CTX_MARGIN_TOKENS,
                -(-need * div // (div - 1)))
@@ -1571,6 +1585,35 @@ def digest_min_ctx():
     return digest_full_ctx()
 
 
+def writer_tokens(text, url=None, token=None, timeout=10):
+    """EXACT token count for text we never send the writer, from the writer's
+    own tokenizer (`POST /tokenize`, no generation). Falls back to the chars/4
+    ESTIMATE and says so by returning (n, exact=False).
+
+    The stored digest is the one number the writer never counts for us: it is
+    not in any prompt, so `usage` cannot report it. Guarding a 20000-token
+    ceiling with chars/4 is the defect class that cost two context overflows in
+    a day -- so ASK the tokenizer, and when it cannot be reached, be honest that
+    the answer is an estimate rather than quietly treating it as a count.
+    """
+    url = url or _script_url
+    if url and text:
+        try:
+            body = json.dumps({"model": _script_model or "writer", "prompt": text}).encode()
+            req = urllib.request.Request(url.rstrip("/") + "/tokenize", data=body,
+                                         headers={"content-type": "application/json"})
+            tok = token if token is not None else _script_token
+            if tok:
+                req.add_header("authorization", f"Bearer {tok}")
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                n = json.load(r).get("count")
+            if isinstance(n, int) and n >= 0:
+                return n, True
+        except Exception:
+            pass
+    return len(text or "") // store.CHARS_PER_TOKEN, False
+
+
 def _writer_context(url, token):
     """The writer's context length, read from its own /v1/models (vLLM
     `max_model_len`, llama-server `meta.n_ctx_train`), or 0 when it does not
@@ -1585,6 +1628,25 @@ def _writer_context(url, token):
         return int(m.get("max_model_len") or (m.get("meta") or {}).get("n_ctx_train") or 0)
     except Exception:
         return 0
+
+
+def digest_tag_cap():
+    """How many recorded ids a step is shown: the list's budget, in ids."""
+    return max(1, DIGEST_TAGS_TOKENS // DIGEST_TAG_TOKENS)
+
+
+def digest_batch_rows(out_tokens=None):
+    """How many rows one batch may carry: what a step can actually STATE.
+
+    THE TWO NUMBERS WERE CHOSEN INDEPENDENTLY AND STOPPED MATCHING. The old
+    fold ran batch 1500 against out 1588 -- output EXCEEDED input, so a step
+    could restate everything it was shown. Making batches 158% bigger while
+    capping a step at 800 made the ratio 4.8x, and since the fold is
+    SINGLE-PASS the overflow was not deferred, it was lost: 82 of 132 offered
+    rows, 37% coverage, with every gate green. So the row count is DERIVED from
+    what a step may emit rather than picked beside it.
+    """
+    return max(1, (out_tokens or DIGEST_STEP_OUT_TOKENS) // store.DIGEST_LINE_TOKENS)
 
 
 def digest_budget(ctx, env=""):
@@ -1605,7 +1667,7 @@ def digest_budget(ctx, env=""):
     if not ctx:
         batch = int(env) if env else store.DIGEST_INPUT_TOKENS
         return max(DIGEST_MIN_BATCH_TOKENS, batch), DIGEST_STEP_OUT_TOKENS
-    room = ctx - DIGEST_DIRECTIVE_TOKENS - digest_margin(ctx)
+    room = ctx - DIGEST_DIRECTIVE_TOKENS - DIGEST_TAGS_TOKENS - digest_margin(ctx)
     # NO 2*D TERM. A step carries no prior digest, so the fold's cost is flat in
     # the size of the note: directive + batch + one step's output. The batch
     # takes what is left after the step cap, which is the opposite of the old
@@ -1686,7 +1748,10 @@ def _digest_prepare(conn, p, mentor_name=""):
             mentor = {"id": m["id"], "name": m["name"], "digest_uid": mp["uid"] if mp else ""}
         inputs = store.digest_inputs(conn, name=p.name, agent_id=p.agent_id,
                                      token_id=p.token_id, rooms=p.rooms, mentor=mentor,
-                                     batch_chars=_digest_batch)
+                                     batch_chars=_digest_batch,
+                                     batch_rows=_digest_batch_rows,
+                                     tokens_of=lambda s: writer_tokens(s)[0],
+                                     max_tokens=_digest_batch // store.CHARS_PER_TOKEN)
         with _digest_lock:
             _digest_running[scope] = [0, max(1, len(inputs["batches"]))]
         return scope, mentor, inputs, None
@@ -1829,7 +1894,11 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
     so a concurrent asker is told the step. ONE fold holds the writer at a
     time fleet-wide, and every step yields to the voice first (24223)."""
     steps = max(1, len(inputs["batches"]))
-    running, why, stripped_total, unsectioned_total = "", "", 0, 0
+    # SEED FROM THE PRIOR, or every fold after the first replaces the whole
+    # note with one hour of traffic. The carried fold got this for free by
+    # re-transcribing; a stateless step has to be handed its own past.
+    running = inputs.get("prior_text", "") or ""
+    why, stripped_total, unsectioned_total = "", 0, 0
     first, resumed_at = 1, 0
     writer = _digest_writer()
     if resume:
@@ -1841,7 +1910,7 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
             _digest_running[scope] = [step, steps]
         batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
         data = store.digest_batch_text(store.digest_tags(running), inputs["base"],
-                                       batch, step, steps)
+                                       batch, step, steps, tag_cap=digest_tag_cap())
         messages = digest_prompt(data, protege=mentor is not None, cap=_digest_out)
         out = None
         for attempt in (1, 2):
@@ -1889,6 +1958,18 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
         # SAVED AFTER EVERY VERIFIED STEP, never before: what is on disk has
         # always passed the store's own check.
         store.digest_run_save(_digest_data_dir(), scope, inputs, step, running, writer)
+    # COVERAGE IS THE NUMBER THAT SAYS A FOLD WORKED, not that it finished
+    # (measured 2026-09-20: 37%, 82 of 132 rows lost, every gate green). Said
+    # out loud and carried in the header; it never REFUSES a fold -- the
+    # operator's ceiling and this are targets, not gates.
+    kept_n, offered_n, missed = store.digest_coverage(inputs["batches"], running)
+    pct = kept_n * 100 // max(offered_n, 1)
+    if missed:
+        log.warning("%s digest coverage %d%% -- %d of %d offered rows never reached "
+                    "the note: %s", p.name, pct, len(missed), offered_n,
+                    " ".join(missed[:20]) + (" ..." if len(missed) > 20 else ""))
+    else:
+        log.info("%s digest coverage %d%% (%d rows)", p.name, pct, offered_n)
     body = running
     fact = store.digest_header(name=p.name, inputs=inputs, model=writer,
                                batches=steps, mentor=mentor, stripped=stripped_total,
@@ -7648,6 +7729,7 @@ def main():
             try:
                 b, _digest_out = digest_budget(_digest_ctx, os.environ.get("REVEILLE_DIGEST_INPUT_TOKENS", ""))
                 _digest_batch = b * store.CHARS_PER_TOKEN
+                _digest_batch_rows = digest_batch_rows(_digest_out)
                 print(f"digest ON: writer context {_digest_ctx or 'unknown'}, {b} input tokens per "
                       f"batch, {_digest_out} out", flush=True)
                 # SAY THE SHORTFALL BY NAME, HERE, WHERE IT IS CHEAP. Not in the

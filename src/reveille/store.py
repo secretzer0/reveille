@@ -7602,8 +7602,12 @@ def _block(heading, lines):
     return f"== {heading} ==\n" + ("\n".join(lines) if lines else "(none)")
 
 
+DIGEST_LINE_TOKENS = 40     # measured: a restated row plus its [kind:id8 date]
+
+
 def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
-                  batch_chars=DIGEST_INPUT_TOKENS * CHARS_PER_TOKEN):
+                  batch_chars=DIGEST_INPUT_TOKENS * CHARS_PER_TOKEN,
+                  batch_rows=0, tokens_of=None, max_tokens=0):
     """Deterministic extraction (23979 s2/s8'), cut into BATCHES for a writer
     whose context is smaller than the hive (operator 24003): the caller folds
     them in order, each call = the running digest + one batch.
@@ -7685,7 +7689,13 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
             dropped.append(f"{m.group(1)}:{m.group(2)} ({len(line)} chars)" if m
                            else f"row ({len(line)} chars)")
             continue
-        if cur and size + len(line) + 1 > batch_chars:
+        # A BATCH MUST NOT HOLD MORE ROWS THAN A STEP CAN STATE (measured
+        # 2026-09-20: 37% coverage, 82 of 132 offered rows lost). The fold is
+        # SINGLE-PASS -- a row a step declines is never offered again -- so a
+        # batch bigger than the step's output cap drops the remainder silently
+        # and every gate stays green. Cut on whichever limit arrives first.
+        if cur and (size + len(line) + 1 > batch_chars
+                    or (batch_rows and len(cur) >= batch_rows)):
             batches.append(cur)
             cur, size = [], 0
         cur.append((ns, line))
@@ -7695,10 +7705,37 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
     label = (f"SINCE {_d8(since)}" if since else
              f"ROWS SINCE THE BEGINNING, MESSAGES SINCE {_d8(msg_since)} (FIRST RUN WINDOW)"
              if first_window else "SINCE THE BEGINNING")
+    # CUT BY REAL TOKENS, NOT BY chars/4 (measured 2026-09-20: 17 of 27 batches
+    # over budget, worst by 809 tokens against a 768 margin, killing a fold at
+    # step 20 by 41 tokens). The char cut is a fast first pass; anything still
+    # over its allowance is SPLIT until it fits, using the writer's own count.
+    # An estimate is fine for guessing where to cut and never for deciding that
+    # the cut fits -- the fourth time that distinction has cost a run today.
+    if tokens_of and max_tokens:
+        split, guard = [], 0
+        for b in batches:
+            queue = [b]
+            while queue and guard < 500:
+                guard += 1
+                cur = queue.pop(0)
+                text = "\n".join(ln for _, ln in cur)
+                if len(cur) > 1 and tokens_of(text) > max_tokens:
+                    mid = len(cur) // 2
+                    queue[:0] = [cur[:mid], cur[mid:]]
+                else:
+                    split.append(cur)
+        batches = split
     texts = [_block(f"BATCH {i + 1} OF {len(batches)}: HIVE ROWS AND MESSAGES {label}, IN TIME ORDER",
                     [ln for _, ln in b]) for i, b in enumerate(batches)]
     return {"base": base, "batches": texts, "rows": total, "dropped": dropped,
             "since_ns": since, "prior": prior["uid"] if prior else "", "scope": scope,
+            # THE NOTE THE NEXT FOLD BUILDS ON. Under the carried fold the prior
+            # survived by being RE-TRANSCRIBED into step 1's output; the step no
+            # longer carries it and the writer is told not to restate recorded
+            # rows, so without this every fold after the first would supersede
+            # the whole note with one hour of new material. The fold seeds
+            # `running` from here and merges onto it.
+            "prior_text": _digest_body(prior["fact"]) if prior else "",
             "first_window_ns": msg_since if first_window else 0,
             # THE CUT POINT: anything that arrives after this belongs to the
             # NEXT run, so a resumed fold folds what it started with (24342).
@@ -7767,7 +7804,7 @@ def digest_run_clear(data_dir, scope):
         os.unlink(digest_run_path(data_dir, scope))
 
 
-def digest_batch_text(kept_tags, base, batch, step, steps):
+def digest_batch_text(kept_tags, base, batch, step, steps, tag_cap=0):
     """One writer call's data: ONE batch, and the TAGS already recorded -- never
     the digest itself. Pure.
 
@@ -7785,9 +7822,21 @@ def digest_batch_text(kept_tags, base, batch, step, steps):
     lines they name. That keeps the step's cost flat in the size of the note:
     directive + batch + one step's output, whatever the digest has grown to.
     """
-    seen = (_block(f"ALREADY RECORDED ({len(kept_tags)} rows) -- do not restate these "
-                   f"unless the batch CHANGES them", [" ".join(sorted(kept_tags))])
-            if kept_tags else
+    # BOUNDED, BECAUSE A COMPLETE LIST IS NOT FREE (measured 2026-09-20: 150
+    # recorded rows cost 1372 tokens of EVERY prompt and killed a fold at step
+    # 19; 1250 rows would cost 11105, nearly twice the whole context). The list
+    # is an OPTIMISATION -- it spares the writer from restating what is already
+    # kept -- and never a correctness requirement, because digest_merge replaces
+    # a restated tag IN PLACE and is idempotent. So a restatement costs a few
+    # output tokens and nothing else, and dropping the oldest ids is safe.
+    kept = list(kept_tags or [])
+    shown = kept[-tag_cap:] if tag_cap else kept
+    more = len(kept) - len(shown)
+    seen = (_block(f"ALREADY RECORDED -- do not restate these unless the batch CHANGES "
+                   f"them ({len(shown)} most recent of {len(kept)}"
+                   f"{'; older ones are kept too and restating one is harmless' if more else ''})",
+                   [" ".join(shown)])
+            if shown else
             _block("NOTHING RECORDED YET -- this batch starts the note", []))
     head = (base + "\n\n" + seen) if base and step == 1 else seen
     return head + "\n\n" + batch
@@ -8036,10 +8085,50 @@ def _digest_tag_id(line):
     return m.group(2) if m else None
 
 
+def _digest_body(fact):
+    """A stored digest minus its provenance header -- the part that is the note.
+
+    The header lines (`[digest:... | since ... ]`, `[stripped: ...]`) describe
+    the fold that produced it, not the memory it holds, so they must not be
+    folded forward into the next one."""
+    lines = [ln for ln in (fact or "").splitlines()
+             if not (ln.startswith("[digest:") or ln.startswith("[stripped:"))]
+    return "\n".join(lines).strip()
+
+
+def digest_offered(batches):
+    """Every row id the fold was GIVEN. The denominator nothing was computing.
+
+    The store cuts the batches, so it has always known exactly which rows it
+    offered the writer -- and never checked whether they arrived. A digest can
+    lose two thirds of its input with every gate green, which is how 82 of 132
+    rows went missing unnoticed. Coverage is cheap and it is the only number
+    that says whether a fold WORKED, as opposed to merely finishing.
+    """
+    out = set()
+    for b in batches or ():
+        out |= {m.group(2) for m in _TAG_ANY.finditer(b)}
+    return out
+
+
+def digest_coverage(batches, digest):
+    """(kept, offered, missed_ids) -- what reached the note, and what did not."""
+    offered = digest_offered(batches)
+    kept = set(digest_tags(digest))      # digest_tags is ORDERED; coverage is not
+    return len(kept & offered), len(offered), sorted(offered - kept)
+
+
 def digest_tags(text):
-    """Every tag id already recorded in `text`. What a step is told instead of
-    the note: ids are a few tokens each, the lines they name are not."""
-    return {t for t in (_digest_tag_id(x) for x in (text or "").splitlines()) if t}
+    """Tag ids already recorded in `text`, IN ORDER, newest last. A list rather
+    than a set because the step is told only the most recent few (the list is
+    bounded), and "most recent" needs an order to mean anything."""
+    out, seen = [], set()
+    for line in (text or "").splitlines():
+        tid = _digest_tag_id(line)
+        if tid and tid not in seen:
+            seen.add(tid)
+            out.append(tid)
+    return out
 
 
 def digest_oversize(text, cap_tokens, tokens_of=None):
