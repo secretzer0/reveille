@@ -451,3 +451,29 @@ the rare branch: the safety net for a body that sends and goes quiet without
 reading. It was entered once in its first night, organically, mid-handover
 (DEFERRED 01:58:46 -> FIRED 02:00:16). The rarity is the fleet reading its
 mail, not a defect in the branch.
+
+## W6 — one waked per host, and a watcher that leaves with its parent
+
+Four rulings over one evening (operator 24200 and 24206; architect 24202, 24208/24213/24286, 24332, 24342) changed what waked *is* on a machine that runs more than one agent. The measurement that started it: **eleven** `reveille-waked` processes on the operator's workstation, one per identity, each with its own converge, its own lock, and its own "which one is mine".
+
+### 6.1 The split: a watcher belongs to a session, a daemon belongs to an identity
+
+`wake-watch` is armed by a shell each turn, so **its owner is that shell**. It now dies with it: `PR_SET_PDEATHSIG` on Linux, plus a `getppid() == 1` check on every wait tick (the tick shortened from 30 s to 2 s to carry it; inotify still wakes it at once). A parent already gone when it starts exits it immediately. Seven reparented watchers were counted on one host before this; after it there are none, and no GUID, file or pattern-kill is involved — the kernel names the owner.
+
+`reveille-waked` is the opposite case and is deliberately **not** bound to any session: it carries the identity across body swaps, keeps its pid across converge, and must hold the socket while no Claude is running, or a ring that lands between sessions is lost. Tying it to a parent would make every session boundary a deafness window.
+
+### 6.2 The registry: a path, never a secret
+
+A credential lives only in `<workdir>/.claude/settings.local.json`, and nothing mapped an agent *name* to that directory — so a host-wide daemon could not enumerate what it serves. `reveille init`, the one writer of a credential, now also writes `~/.reveille/agents/<name>` holding that absolute path: 0600, atomic, last init wins (move-it-here semantics). The entry carries a path and nothing else, so rotation and swaps need no registry write; the token is read from that directory **at attach time**. A stale entry — no directory, or a directory that now names somebody else — is skipped with its reason logged and **never deleted**: pruning is an operator act.
+
+### 6.3 Ownership is the lock it always was
+
+`reveille-waked --host` is a singleton on `~/.reveille/host.lock`, and then takes **each agent's existing spool flock** before opening that identity's socket. A per-agent waked and a host waked therefore contend on the lock they always did, the loser leaves that identity alone, and the Stop hook's liveness probe — "does somebody hold my spool lock" — is true for either shape without knowing which is running. The hook needed no change at all.
+
+Re-enumeration is one `opendir` every 30 s and immediately on `SIGHUP`, so an identity added while it runs attaches without a restart. Per-identity state that used to come from the process environment and the cwd (token, credential file, parked secret, wedge artifact) is addressed per run, so N identities share a process without sharing any of it. Each situation is reported **once** per name and forgotten when it changes.
+
+**A refused run parks.** Five identities on that host held dead tokens; without a guard the host would attach, take the refusal, release and re-attach every 30 s forever. A run ending on a refusal exit (no_rooms, parked, not-arrived, dead credential) is remembered with the mtime of that directory's credential and skipped while it is unchanged; `SIGHUP` clears the map. A run that ends any other way re-attaches, because an identity nobody serves is the failure this design exists to prevent.
+
+### 6.4 As built, measured
+
+Rolled out on the operator's workstation 2026-09-20 01:44–01:52Z, one identity at a time, killing each per-agent daemon by PID and confirming `serving <name>` before the next: **eleven daemons became two**, ten served by one host waked, zero parked, zero failures. The one left is a native identity whose directory holds no credential — it can serve nothing and is the operator's to retire. The `/proc` census stood in for the lock files, which were empty on daemons predating the pid-in-lock line.
