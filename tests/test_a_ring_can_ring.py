@@ -272,23 +272,79 @@ def test_the_body_is_told_what_rang_not_what_to_allow(tmp_path):
         assert forbidden not in low, f"the doorbell text says {forbidden!r}"
 
 
+def test_the_transport_is_chosen_by_the_path_not_the_platform(tmp_path, monkeypatch):
+    """PORTABILITY (operator, 2026-09-20). We never build the path -- we read
+    messagingSocketPath out of the descriptor -- and the CLI's own flag help
+    says what it writes: `a Unix domain socket on Mac/Linux, a \\\\.\\pipe\\
+    name on Windows`. So macOS is Linux (/tmp, /private/tmp, the sun_path
+    fallback: all the CLI's business), and Windows is a named pipe needing no
+    AF_UNIX at all. Deciding on the path also serves a machine that somehow has
+    both."""
+    assert doorbell.transport_for("/run/user/1000/cc-socks/9.sock") == ("unix", "")
+    assert doorbell.transport_for("/private/tmp/cc-socks-501/9.sock") == ("unix", "")
+    assert doorbell.transport_for(r"\\.\pipe\cc-messaging-9") == ("pipe", "")
+    assert doorbell.transport_for(r"//./pipe/cc-messaging-9") == ("pipe", "")
+
+    # a pipe needs no AF_UNIX -- that is the whole point of branching on shape
+    monkeypatch.delattr(socket, "AF_UNIX")
+    assert doorbell.transport_for(r"\\.\pipe\cc-messaging-9") == ("pipe", "")
+    kind, why = doorbell.transport_for("/run/user/1000/cc-socks/9.sock")
+    assert kind == "" and "AF_UNIX" in why and "wake-watch" in why
+
+
 def test_a_platform_that_cannot_ring_refuses_by_name(tmp_path, monkeypatch):
-    """PORTABILITY (operator, 2026-09-20). The socket PATH is never ours to
-    build -- we read messagingSocketPath out of the descriptor -- so macOS
-    (/tmp, /private/tmp, and its sun_path fallback) and Linux
-    (/run/user/<uid>/cc-socks) cost us nothing. The TRANSPORT is what varies:
-    CPython has no socket.AF_UNIX on Windows, and there the doorbell must say so
-    rather than raise AttributeError inside the ring path."""
+    """With no AF_UNIX and a unix-shaped path there is nothing to try, and the
+    refusal must be a sentence rather than an AttributeError inside the ring
+    path."""
     sess, work, conf = _world(tmp_path)
     sock, got, t = _inbox(tmp_path)
     _descriptor(sess, work, sock)
 
     monkeypatch.delattr(socket, "AF_UNIX")
-    ok, why = doorbell.available()
-    assert ok is False and "AF_UNIX" in why and "wake-watch" in why
     rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
     assert rung == 0 and "AF_UNIX" in why
     assert got == [], "a platform with no unix sockets still tried to send"
+
+
+def test_the_windows_pipe_write_is_the_same_two_lines(tmp_path):
+    """The Windows transport is ordinary file I/O, so a FIFO stands in for the
+    named pipe here: same open(path, "r+b"), same bytes, same framing. This does
+    NOT prove Windows -- there is no Windows body to prove it against, and the
+    code says so -- it proves the writer we would use there emits the protocol
+    rather than something else."""
+    fifo = str(tmp_path / "fake.pipe")
+    os.mkfifo(fifo)
+    payload = b'{"type":"auth","token":"t"}\n{"type":"user"}\n'
+    # The reader is opened FIRST and held: a FIFO discards its buffer when the
+    # last descriptor closes, so reading after _ring_pipe returns would find an
+    # empty pipe and then block for ever waiting for a writer. O_RDWR ("r+b")
+    # so the open itself never blocks either.
+    with open(fifo, "r+b", buffering=0) as reader:
+        assert doorbell._ring_pipe(fifo, payload, 5) == ""
+        assert reader.read(len(payload)) == payload
+
+
+def test_a_pipe_that_blocks_cannot_stall_the_ring_path(tmp_path, monkeypatch):
+    """THE HAZARD THE THREAD EXISTS FOR. File I/O has no timeout, the doorbell
+    runs INLINE in write_ring, and a pipe nobody drains would otherwise hang the
+    daemon's whole ring path -- the one thing this feature promised never to
+    touch. Mutation: call go() directly instead of joining a thread, and this
+    hangs instead of failing."""
+    import builtins
+    import time
+    real_open = builtins.open
+
+    def slow_open(path, *a, **k):
+        if str(path).endswith("slow.pipe"):
+            time.sleep(30)
+        return real_open(path, *a, **k)
+    monkeypatch.setattr(builtins, "open", slow_open)
+
+    started = time.time()
+    why = doorbell._ring_pipe(str(tmp_path / "slow.pipe"), b"x\n", 0.3)
+    elapsed = time.time() - started
+    assert "timed out" in why, why
+    assert elapsed < 5, f"the ring path was stalled for {elapsed:.1f}s"
 
 
 def test_liveness_never_signals_a_process_off_posix(monkeypatch):
