@@ -33,6 +33,7 @@ import glob
 import json
 import os
 import socket
+import threading
 
 # The CLI's session registry: one <pid>.json per live session carrying its cwd
 # and socket path, plus a sibling <pid>.<sha>.key holding the inbox token.
@@ -104,23 +105,38 @@ def mcp_enabled(workdir, config=None):
     return False
 
 
-def available():
-    """Whether this platform can ring at all, with the reason when it cannot.
+PIPE_PREFIX = "\\\\.\\pipe\\"           # r"\\.\pipe\", the Windows inbox shape
 
-    PORTABILITY, checked rather than assumed (operator, 2026-09-20). The socket
-    PATH is never ours to build -- we read `messagingSocketPath` out of the
-    descriptor -- so the CLI's own layout differences cost us nothing: macOS
-    puts its sockets under /tmp or /private/tmp (and falls back there from
-    XDG_RUNTIME_DIR when the path would exceed the 103-byte sun_path limit),
-    Linux uses /run/user/<uid>/cc-socks, Termux its own prefix. We follow
-    whatever it wrote. What DOES stop us is the transport: CPython exposes no
-    socket.AF_UNIX on Windows, so there the doorbell simply does not exist and
-    wake-watch stays the whole delivery. Refusing by name beats an
-    AttributeError inside the ring path.
+
+def _is_pipe(path):
+    return str(path).replace("/", "\\").lower().startswith(PIPE_PREFIX.lower())
+
+
+def transport_for(path):
+    """Which transport `path` needs: ("pipe"|"unix", "") or ("", reason).
+
+    PORTABILITY IS A PROPERTY OF THE PATH, NOT OF THE PLATFORM (operator,
+    2026-09-20). We never build the path -- we read `messagingSocketPath` out of
+    the descriptor -- so the CLI's own layout is never our problem, and the one
+    thing we must get right is how to OPEN what it wrote. Its flag help says
+    exactly what it writes:
+
+        --messaging-socket-path <path>   Cross-session messaging server path: a
+        Unix domain socket on Mac/Linux, a \\\\.\\pipe\\ name on Windows
+
+    So macOS is Linux (unix socket, /tmp or /private/tmp instead of
+    /run/user/<uid>, with a fallback away from XDG_RUNTIME_DIR when the path
+    would pass the 103-byte sun_path limit -- all of it the CLI's business), and
+    Windows is a named pipe, which Python opens as an ordinary file and which
+    needs no AF_UNIX at all. Deciding on the path rather than on sys.platform
+    also means a machine that somehow serves both is served correctly.
     """
+    if _is_pipe(path):
+        return "pipe", ""
     if not hasattr(socket, "AF_UNIX"):
-        return False, "this platform has no AF_UNIX -- wake-watch is the delivery here"
-    return True, ""
+        return "", (f"this platform has no AF_UNIX and {path!r} is not a "
+                    f"{PIPE_PREFIX} name -- wake-watch is the delivery here")
+    return "unix", ""
 
 
 def _alive(pid):
@@ -131,9 +147,12 @@ def _alive(pid):
     `os.kill(pid, 0)` asks GenerateConsoleCtrlEvent to deliver a console Ctrl+C
     rather than probing anything -- the POSIX liveness idiom becomes an
     INTERRUPT aimed at the very session we were asking about (and raises
-    OSError(22) where it does not). The guard is here even though `available()`
-    already turns the doorbell off on Windows, because a probe that can hurt the
-    thing it measures must not rely on a caller remembering that.
+    OSError(22) where it does not). Since 0.2.291 the doorbell RUNS on Windows,
+    so this guard is the only thing standing between a routine liveness check
+    and an interrupt delivered to a working session -- it is load-bearing now,
+    not belt-and-braces. The cost is that a dead CLI's descriptor reads as live
+    on Windows and we ring a pipe nobody is serving; that failure is a refused
+    open, which is cheap and logged.
     """
     if os.name != "posix":
         return True
@@ -189,21 +208,12 @@ def inboxes_for(workdir, base=None):
     return out
 
 
-def ring_one(sock_path, token, text, timeout=CONNECT_TIMEOUT_S):
-    """One line on one inbox. Returns "" on success, else the reason.
-
-    Never raises: a doorbell that can throw is a doorbell that can take the
-    spool write down with it, and the spool write is the part that matters."""
-    lines = []
-    if token:
-        lines.append({"type": "auth", "token": token})
-    lines.append({"type": "user", "message": {"role": "user", "content": text}})
-    payload = "".join(json.dumps(x) + "\n" for x in lines).encode()
+def _ring_unix(path, payload, timeout):
     s = None
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(timeout)
-        s.connect(sock_path)
+        s.connect(path)
         s.sendall(payload)
         s.shutdown(socket.SHUT_WR)
         return ""
@@ -215,6 +225,57 @@ def ring_one(sock_path, token, text, timeout=CONNECT_TIMEOUT_S):
                 s.close()
             except OSError:
                 pass
+
+
+def _ring_pipe(path, payload, timeout):
+    """A Windows named pipe is ordinary file I/O -- and ordinary file I/O has no
+    timeout. ON A THREAD, THEREFORE, AND NOT AS A REFINEMENT: the doorbell runs
+    INLINE in write_ring, so an open that blocks on a pipe nobody is draining
+    would stall the daemon's whole ring path, which is the one thing this
+    feature promised never to touch. The thread is a daemon and bounded by the
+    OS; a stuck one costs a file handle, not a ring.
+
+    UNVERIFIED (0.2.291): written from the CLI's own flag help, never run
+    against a Windows body, because there is none to run it against.
+    """
+    box = {}
+
+    def go():
+        try:
+            with open(path, "r+b", buffering=0) as f:
+                f.write(payload)
+                f.flush()
+            box["err"] = ""
+        except OSError as e:
+            box["err"] = f"{type(e).__name__}: {e}"
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        return f"timed out after {timeout}s writing to {path}"
+    return box.get("err", "the pipe write reported nothing")
+
+
+def ring_one(sock_path, token, text, timeout=CONNECT_TIMEOUT_S):
+    """One line on one inbox, over whichever transport that path needs.
+
+    Never raises: a doorbell that can throw is a doorbell that can take the
+    spool write down with it, and the spool write is the part that matters."""
+    kind, why = transport_for(sock_path)
+    if not kind:
+        return why
+    lines = []
+    if token:
+        lines.append({"type": "auth", "token": token})
+    lines.append({"type": "user", "message": {"role": "user", "content": text}})
+    payload = "".join(json.dumps(x) + "\n" for x in lines).encode()
+    try:
+        if kind == "pipe":
+            return _ring_pipe(sock_path, payload, timeout)
+        return _ring_unix(sock_path, payload, timeout)
+    except Exception as e:                                   # noqa: BLE001
+        return f"{type(e).__name__}: {e}"
 
 
 def ring_text(frame):
@@ -249,9 +310,6 @@ def knock(agent, workdir, frame, base=None, config=None):
     """
     if off():
         return 0, "doorbell is off (REVEILLE_DOORBELL=off)"
-    ok, why = available()
-    if not ok:
-        return 0, why
     if not workdir:
         return 0, "no registered directory for this identity"
     claimed = agent_in(workdir)
