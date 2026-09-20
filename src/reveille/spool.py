@@ -32,6 +32,58 @@ def ensure(agent, base=None):
     return d
 
 
+# THE REGISTRY: A PATH, NEVER A SECRET (operator 24206, ruled 24286). A
+# credential lives only in its own directory (cli.write_credential), and until
+# now nothing mapped an agent NAME to that directory -- so a host-wide waked
+# could not enumerate the identities it is meant to serve. `reveille init`, the
+# one writer of a credential, now also writes the directory it wrote it in.
+# The entry holds the path and nothing else: rotation and body swaps rewrite
+# the credential in place and need no registry write, and a leaked registry
+# leaks nowhere.
+
+
+def agents_dir(base=None):
+    return base or os.environ.get(
+        "REVEILLE_AGENTS", os.path.expanduser("~/.reveille/agents"))
+
+
+def register(name, workdir, base=None):
+    """Record (or move) an agent's directory. Last init wins, which is
+    move-it-here semantics: the act that writes the credential says where the
+    identity now lives. 0600 and atomic, like the credential itself."""
+    d = agents_dir(base)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, name)
+    tmp = f"{path}.tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write(os.path.abspath(workdir) + "\n")
+    os.replace(tmp, path)
+    return path
+
+
+def registered(base=None):
+    """{name: directory} for every registered identity on this host, sorted.
+
+    A missing directory is NOT this reader's business: the entry says where
+    the identity was last initialised, and whether a credential is still
+    there is decided at attach time by whoever attaches (ruled 24286 s2)."""
+    d = agents_dir(base)
+    out = {}
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return out
+    for n in names:
+        if n.startswith(".") or n.endswith(".tmp"):
+            continue
+        try:
+            with open(os.path.join(d, n)) as f:
+                out[n] = f.read().strip()
+        except OSError:
+            continue
+    return out
+
+
 def lock_path(agent, base=None):
     return os.path.join(ensure(agent, base), ".lock")
 

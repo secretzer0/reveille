@@ -46,7 +46,9 @@ broker is unreachable.
 """
 import argparse
 import asyncio
+import contextlib
 import fcntl
+import signal
 import hashlib
 import json
 import os
@@ -141,6 +143,17 @@ def wedge_record(agent):
         f.write(f"{n}\n")
 
 
+# THE LOUD ARTIFACT BELONGS TO ONE IDENTITY (24286). The default is this
+# home's, which is right for the single-agent shape where the home IS the
+# agent. Host mode serves N identities in one process, so each run records
+# its own path here, keyed by the only thing that tells them apart.
+_STATUS_BY_AGENT = {}
+
+
+def _status_for(agent):
+    return _STATUS_BY_AGENT.get(agent)
+
+
 _WEDGE_STATUS = os.path.join(os.path.expanduser("~"), ".claude",
                              ".reveille-repo-status")
 
@@ -151,7 +164,7 @@ def _wedge_marker(agent):
     return f"BUS-DEAF: {agent} waked reconnect wedged"
 
 
-def wedge_clear(agent):
+def wedge_clear(agent, status=None):
     """The broker spoke: the streak is over. Clears the budget, and clears
     the loud artifact ONLY when this healer wrote it -- the status file is
     shared with the busdeaf-probe, and a self-heal must know its own
@@ -161,22 +174,22 @@ def wedge_clear(agent):
     except OSError:
         pass
     try:
-        with open(_WEDGE_STATUS) as f:
+        with open((status or _WEDGE_STATUS)) as f:
             first = f.readline()
         if first.startswith(_wedge_marker(agent)):
-            os.unlink(_WEDGE_STATUS)
+            os.unlink((status or _WEDGE_STATUS))
     except OSError:
         pass
 
 
-def _wedge_loud(agent, cap):
+def _wedge_loud(agent, cap, status=None):
     line = (f"{_wedge_marker(agent)} -- {cap} re-execs without the broker "
             f"speaking; the retry loop continues but a human must look (see "
             f"waked.log; fix the path, and the next spoken frame clears "
             f"this)")
     try:
-        os.makedirs(os.path.dirname(_WEDGE_STATUS), exist_ok=True)
-        with open(_WEDGE_STATUS, "w") as f:
+        os.makedirs(os.path.dirname((status or _WEDGE_STATUS)), exist_ok=True)
+        with open((status or _WEDGE_STATUS), "w") as f:
             f.write(line + "\n")
     except OSError:
         pass                       # the log line below still lands
@@ -192,7 +205,7 @@ def _wedge_heal(agent, fails, why, n=WEDGE_REEXEC_N, cap=WEDGE_REEXEC_MAX):
     k = wedge_count(agent)
     if k >= cap:
         if fails == n:             # first crossing in this process's life
-            _wedge_loud(agent, cap)
+            _wedge_loud(agent, cap, _status_for(agent))
         return fails
     wedge_record(agent)            # written BEFORE the exec, or it never is
     # NOT the converge marker: 13399 reads waked.log by arithmetic (N profile
@@ -385,7 +398,7 @@ async def _session(uri, agent, state):
                 if not state.get("spoke"):
                     state["spoke"] = True
                     state["wedge_fails"] = 0
-                    wedge_clear(agent)
+                    wedge_clear(agent, _status_for(agent))
                 try:
                     obj = json.loads(frame)
                 except (ValueError, TypeError):
@@ -581,7 +594,7 @@ async def _claim(url, secret):
         return "", type(e).__name__
 
 
-def read_env(agent):
+def read_env(agent, workdir=None):
     """The credential THIS DIRECTORY currently holds, or "".
 
     Symmetric with write_env: one home, one writer, and now one reader. A
@@ -593,7 +606,8 @@ def read_env(agent):
     # self-heal -- and this file is three lines of JSON, so borrowing a reader
     # would trade that independence for nothing.
     try:
-        with open(os.path.join(os.getcwd(), ".claude", "settings.local.json")) as f:
+        with open(os.path.join(workdir or os.getcwd(), ".claude",
+                               "settings.local.json")) as f:
             env = json.load(f).get("env") or {}
     except (OSError, ValueError, AttributeError):
         return ""
@@ -622,8 +636,8 @@ def read_env(agent):
 PARKED_NAME = os.path.join(".claude", ".reveille-parked")
 
 
-def parked_path():
-    return os.path.join(os.getcwd(), PARKED_NAME)
+def parked_path(workdir=None):
+    return os.path.join(workdir or os.getcwd(), PARKED_NAME)
 
 
 def _ignore_parked(claude_dir):
@@ -654,13 +668,13 @@ def _ignore_parked(claude_dir):
         f.write(text + ".reveille-parked\n")
 
 
-def write_parked(secret):
+def write_parked(secret, workdir=None):
     """Remember the spent credential, 0600, beside the live one and never in
     it: the credential file is what sessions read, and this must never be
     mistaken for it."""
     if not secret:
         return False
-    path = parked_path()
+    path = parked_path(workdir)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         _ignore_parked(os.path.dirname(path))
@@ -672,20 +686,20 @@ def write_parked(secret):
         return False
 
 
-def read_parked():
+def read_parked(workdir=None):
     """The spent credential this directory was last parked on, or ""."""
     try:
-        with open(parked_path()) as f:
+        with open(parked_path(workdir)) as f:
             return f.read().strip()
     except OSError:
         return ""
 
 
-def clear_parked():
+def clear_parked(workdir=None):
     """An attached credential makes the spent one worthless -- and a secret
     kept past its use is just a secret at rest."""
     try:
-        os.unlink(parked_path())
+        os.unlink(parked_path(workdir))
     except OSError:
         pass
 
@@ -1049,9 +1063,16 @@ def wake_uri(url, sep, agent, token):
 
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                write_env=None, read_env=None, wedge_n=WEDGE_REEXEC_N,
-               mail_probe_s=MAIL_PROBE_S):
+               mail_probe_s=MAIL_PROBE_S, token=None, workdir=None):
+    # ONE IDENTITY'S RUN, ADDRESSABLE (24286). Single-agent mode passes
+    # neither token nor workdir and gets the session env and cwd it always
+    # did; host mode passes THIS identity's, so N runs share one process
+    # without sharing a credential, a parked file or a wedge artifact.
     sep = "&" if "?" in url else "?"
-    token = os.environ.get("REVEILLE_TOKEN", "")
+    token = os.environ.get("REVEILLE_TOKEN", "") if token is None else token
+    if workdir:
+        _STATUS_BY_AGENT[agent] = os.path.join(workdir, ".claude",
+                                               ".reveille-repo-status")
     uri = wake_uri(url, sep, agent, token)
     state = {"last": time.time_ns()}   # daemon start counts as activity
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
@@ -1135,7 +1156,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         # the credential in its env is that claim -- long
                         # swept -- and the spent one it remembered is the only
                         # thing a ticket matches. Claim-only, by invariant.
-                        spent = read_parked() or token
+                        spent = read_parked(workdir) or token
                         print(f"reveille-waked: the broker does not know this "
                               f"credential. If {agent} was moved off this "
                               f"machine while nothing was running here, a "
@@ -1164,7 +1185,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                           f"window has closed -- PARKED again on the one this "
                           f"machine was superseded on, waiting for another "
                           f"return ticket for {agent}.", file=sys.stderr)
-                    write_parked(parked_secret)
+                    write_parked(parked_secret, workdir)
                     got = await _park(url, agent, parked_secret, write_env,
                                       read_env=read_env, tried=tried)
                     if not got:
@@ -1181,7 +1202,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # that lands, the URI is rebuilt on the new secret and the
                     # loop simply carries on.
                     parked_secret = token
-                    write_parked(token)
+                    write_parked(token, workdir)
                     got = await _park(url, agent, token, write_env,
                                       read_env=read_env, tried=tried)
                     if not got:
@@ -1199,7 +1220,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                     # old -- and a secret kept past its use is just a secret at
                     # rest, so the remembered copy goes too.
                     parked_secret = None
-                    clear_parked()
+                    clear_parked(workdir)
                     if code is not None:
                         return code
             except (OSError, websockets.WebSocketException) as e:
@@ -1266,6 +1287,140 @@ class _Stamped:
         return getattr(self._s, name)
 
 
+
+# ---- ONE WAKED PER HOST (operator 24206, ruled 24208/24213/24286) -----------
+# waked is plumbing: it holds a socket and turns rings into spool files, and
+# nothing downstream cares which process wrote the file. So one process can
+# hold N sockets, one per local identity, and feed N spools. Measured on the
+# operator's workstation before this: ELEVEN waked processes, one per agent,
+# each with its own converge, its own lock and its own "which one is mine".
+# The container shape is this same code with N=1 and never notices.
+#
+# WHAT IS NOT CHANGED, deliberately: the per-agent spool flock is still the
+# ownership mechanism, so a host waked and a per-agent waked contend on the
+# lock they always did and the loser exits 0; the Stop hook's liveness probe
+# ("does somebody hold MY spool lock") is true for either shape without
+# knowing which is running.
+HOST_LOCK = os.path.join(os.path.expanduser("~"), ".reveille", "host.lock")
+HOST_RESCAN_S = 30      # opendir of one directory; SIGHUP makes it immediate
+
+
+def host_lock(path=HOST_LOCK):
+    """The host singleton. Returns the held fd, or None if another host waked
+    already runs here -- in which case this process exits 0, exactly as a
+    second per-agent waked does."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = open(path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.close()
+        return None
+    fd.write(f"{os.getpid()}\n")
+    fd.flush()
+    return fd
+
+
+def identity_token(workdir, agent):
+    """This identity's live credential, read from ITS directory at attach
+    time (24286 s3) -- so a rotation or a body swap needs no registry write.
+    Returns "" when the directory holds no credential, or holds somebody
+    else's: both are the stale case, and the caller says so out loud."""
+    return read_env(agent, workdir)
+
+
+def host_plan(entries, held):
+    """(attach, stale) for one enumeration. Pure, so the gate can drive it:
+    `entries` is name -> directory from the registry, `held` the names this
+    process already serves. An entry whose directory no longer names this
+    identity is stale and is SKIPPED WITH ITS REASON, never deleted -- the
+    registry is the operator's to prune (24286 s2)."""
+    attach, stale = [], []
+    for name, workdir in entries.items():
+        if name in held:
+            continue
+        if not workdir or not os.path.isdir(workdir):
+            stale.append((name, f"no such directory: {workdir or '(empty entry)'}"))
+        elif not identity_token(workdir, name):
+            stale.append((name, f"no credential for {name} at {workdir}"))
+        else:
+            attach.append((name, workdir))
+    return attach, stale
+
+
+async def _host_pass(url, opts, tasks, locks, said_stale):
+    """ONE enumeration: reap finished runs, then attach every registered
+    identity this process is not already serving. Separate from the loop so
+    a gate can drive exactly one pass without a test-only flag in the
+    daemon, and so the loop's cleanup owns nothing but the loop.
+
+    Per identity, in this order: take THAT agent's existing spool flock (the
+    unchanged ownership mechanism -- a per-agent waked holding it means this
+    process leaves that identity alone), read its token from its own
+    directory, and run the ordinary per-agent loop with them."""
+    idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s = opts
+    for name, task in list(tasks.items()):
+        if task.done():
+            print(f"reveille-waked: {name} run ended ({_task_why(task)}) "
+                  f"-- releasing its lock", file=sys.stderr)
+            tasks.pop(name)
+            locks.pop(name).close()
+    attach, stale = host_plan(spool.registered(), set(tasks))
+    for name, why in stale:
+        if name not in said_stale:
+            said_stale.add(name)
+            print(f"reveille-waked: agents/{name}: stale ({why})", file=sys.stderr)
+    for name, workdir in attach:
+        said_stale.discard(name)
+        lock = open(spool.lock_path(name), "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock.close()
+            print(f"reveille-waked: {name} already held by another waked "
+                  f"-- leaving it alone", file=sys.stderr)
+            continue
+        lock.write(f"{os.getpid()}\n")
+        lock.flush()
+        locks[name] = lock
+        tasks[name] = asyncio.create_task(_run(
+            url, name, idle_nudge_s, no_rooms_window_s=no_rooms_window_s,
+            read_env=read_env, wedge_n=wedge_n, mail_probe_s=mail_probe_s,
+            token=identity_token(workdir, name), workdir=workdir))
+        print(f"reveille-waked: serving {name} from {workdir}", file=sys.stderr)
+    return tasks
+
+
+async def _host(url, idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s,
+                rescan_s=HOST_RESCAN_S):
+    """Serve every registered identity from one process. Re-enumerates every
+    rescan_s and immediately on SIGHUP: an added identity attaches without a
+    restart, and nothing about the others is disturbed."""
+    opts = (idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s)
+    tasks, locks, said_stale = {}, {}, set()
+    wake = asyncio.Event()
+    with contextlib.suppress(NotImplementedError, AttributeError):
+        asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, wake.set)
+    try:
+        while True:
+            await _host_pass(url, opts, tasks, locks, said_stale)
+            wake.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(wake.wait(), rescan_s)
+    finally:
+        for t in tasks.values():
+            t.cancel()
+        for f in locks.values():
+            f.close()
+
+
+def _task_why(task):
+    if task.cancelled():
+        return "cancelled"
+    e = task.exception()
+    return f"{type(e).__name__}: {e}" if e else f"exit {task.result()}"
+
+
 def main():
     # Installed FIRST, before any line prints: the stamp is only trustworthy
     # if no line can precede it.
@@ -1273,7 +1428,14 @@ def main():
     sys.stderr = _Stamped(sys.stderr)
     ap = argparse.ArgumentParser(prog="reveille-waked")
     ap.add_argument("--url", required=True, help="ws://host:port/wake")
-    ap.add_argument("--name", required=True, help="agent identity (spool + X-Agent)")
+    ap.add_argument("--name", default="", help="agent identity (spool + X-Agent); "
+                                               "required unless --host")
+    ap.add_argument("--host", action="store_true",
+                    help="serve EVERY identity registered in ~/.reveille/agents "
+                         "from this one process: one socket and one spool per "
+                         "identity, each under that agent's own spool lock. "
+                         "Singleton on ~/.reveille/host.lock; re-enumerates on "
+                         f"SIGHUP and every {HOST_RESCAN_S}s.")
     ap.add_argument("--idle-nudge", type=int, default=IDLE_NUDGE_S,
                     metavar="SECONDS",
                     help="write one synthetic reason=idle-nudge ring after this "
@@ -1307,6 +1469,24 @@ def main():
                          "not tunable in production.")
     ap.add_argument("--version", action="version", version=__version__)
     a = ap.parse_args()
+    if a.host:
+        if a.name:
+            ap.error("--name is for one identity; --host serves every registered one")
+        lock = host_lock()
+        if lock is None:
+            print("reveille-waked: another host waked holds this machine -- exiting",
+                  file=sys.stderr)
+            return 0
+        print(f"reveille-waked: timings profile {timings.PROFILE} (host mode)",
+              file=sys.stderr)
+        # _host never returns of its own accord -- it is the supervisor loop;
+        # it ends on a signal or an unhandled error, and either way the lock
+        # frees with the process.
+        asyncio.run(_host(a.url, a.idle_nudge, a.no_rooms_window,
+                          a.wedge_n, a.mail_probe))
+        return 0
+    if not a.name:
+        ap.error("--name is required (or --host to serve every registered identity)")
     lock = open(spool.lock_path(a.name), "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
