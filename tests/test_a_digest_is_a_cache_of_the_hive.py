@@ -361,7 +361,8 @@ def test_the_output_is_sized_to_the_writer_not_only_the_batch():
     assert out < daemon.DIGEST_MAX_TOKENS and b >= daemon.DIGEST_MIN_BATCH_TOKENS
     assert daemon.DIGEST_DIRECTIVE_TOKENS + 2 * out + b <= 6144, (b, out)
     b, out = daemon.digest_budget(32768)
-    assert out == daemon.DIGEST_MAX_TOKENS and b == 32768 - 700 - 2 * 5000
+    assert out == daemon.DIGEST_MAX_TOKENS
+    assert b == 32768 - 700 - daemon.DIGEST_CTX_MARGIN_TOKENS - 2 * 5000
     assert daemon.digest_budget(0) == (store.DIGEST_INPUT_TOKENS, daemon.DIGEST_MAX_TOKENS)
     b, out = daemon.digest_budget(32768, env="3000")
     assert b == 3000 and out == daemon.DIGEST_MAX_TOKENS, "env caps the batch, never the output"
@@ -709,3 +710,24 @@ def test_a_saved_run_is_stale_when_the_hive_moved_under_it(tmp_path, writer, mon
     writer.default = _good_digest(conn, ids)
     daemon._digest_job(conn, _principal(ana, room, "ana"))
     assert not os.path.exists(path) or store.digest_run_load(d, scope, "abc123") is None
+
+
+def test_the_budget_keeps_slack_because_our_tokenizer_is_not_the_writers():
+    """Field defect 2026-09-20 02:35Z, one token over: the first long fold
+    died at `maximum context length is 6144 tokens ... at least 6145`. The
+    old arithmetic summed directive + 2*out + batch to EXACTLY ctx, so any
+    disagreement between chars/4 and the model's real tokenizer landed on
+    the wrong side. Every context keeps a margin now."""
+    for ctx in (6144, 8192, 16384, 32768):
+        batch, out = daemon.digest_budget(ctx)
+        worst = daemon.DIGEST_DIRECTIVE_TOKENS + 2 * out + batch
+        assert worst <= ctx - daemon.DIGEST_CTX_MARGIN_TOKENS, (
+            f"ctx {ctx}: worst case {worst} leaves {ctx - worst} slack, "
+            f"want at least {daemon.DIGEST_CTX_MARGIN_TOKENS}")
+    # the live writer, exactly: 6144 must still fold, with room to be wrong
+    batch, out = daemon.digest_budget(6144)
+    assert batch >= daemon.DIGEST_MIN_BATCH_TOKENS and out >= 500
+    # and the margin is charged to the writer that cannot afford it, not
+    # silently ignored: a context that only fits without slack is refused
+    with pytest.raises(store.BusError, match="too small"):
+        daemon.digest_budget(daemon.DIGEST_DIRECTIVE_TOKENS + daemon.DIGEST_MIN_BATCH_TOKENS + 1000)
