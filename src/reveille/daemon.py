@@ -397,6 +397,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.289",
+     "0.2.289 A FIXED MARGIN IS ITSELF AN EQUALITY (field defect 2026-09-20\n15:31:47Z, the second long fold, one token over AGAIN). shared-dev resumed\nat step 6/327 and died at:\n`This model's maximum context length is 6144 tokens. However, you requested\n1844 output tokens and your prompt contains at least 4301 input tokens, for\na total of at least 6145 tokens.`\n\n0.2.287 reserved a FLAT 256 tokens and that covered the first defect\nexactly and nothing else. Both measurements together say what one could\nnot: we planned 4172 input tokens and the writer counted 4173, then we\nplanned 4044 and it counted 4301 -- off by 1, then by 257. chars/4 is\nwrong by a FRACTION of what it measures, and a constant reserved against a\nproportional error is just a second equality waiting for denser content.\nThe margin is now ctx/8 with 256 as the floor for a small writer: at the\nlive 6144 it reserves 768 and folds with out 1588 and batch 1500, which\ntolerates a 20% disagreement where the worst we have measured is 6.4%.\n\nAND THE RUN THAT KEEPS ITS STEPS MUST STILL BE ABLE TO TAKE THE NEXT ONE.\n0.2.288 rightly keeps a run across a writer refusal -- but when the budget\nIS the bug, resuming replays the same oversized batches into the same 400,\nevery start, for ever, and no fix can reach it. The saved run records the\nwriter and its arithmetic, and the resume gate now reads it: same prior,\nsame budget, under 24 h, else the run is CUT AGAIN. So this deploy re-cuts\nshared-dev instead of resuming it into its own wall.\n\nThe rule the two defects share, since it is now paid for twice: WHEN YOU\nSIZE A REQUEST AGAINST SOMEONE ELSE'S HARD LIMIT, THE SLACK SCALES WITH\nTHE REQUEST."),
     ("0.2.288",
      "0.2.288 WHO REFUSED DECIDES WHAT SURVIVES (architect 24470, from the\nthirty-three steps 0.2.287 could not save). The writer's 400 arrived as a\nplain BusError, and 0.2.285 reads any refusal as \"this run is bad\" and\nthrows its saved steps away -- so a budget bug the next deploy fixed cost\nan entire 243-batch run instead of one step.\n\nThe two refusals are now different kinds. The STORE refuses CONTENT -- an\ninvented citation, no digest shape -- which means the model lied and the\nrun is poisoned: clear it. The WRITER refuses a CALL -- context, 5xx,\ntransport, timeout -- which says nothing about the steps already verified:\nkeep the saved run, end with the reason, and the next start resumes at\nstep k+1, where the same batches now fit under the 0.2.287 margin.\nWriterRefusal is its own class for exactly that reason.\n"),
     ("0.2.287",
@@ -1458,7 +1460,34 @@ DIGEST_MIN_BATCH_TOKENS = 1500  # under this a fold is more digest than batch
 # lands on the wrong side. We do not have the writer's tokenizer and never
 # will for every writer, so the budget keeps a margin instead of pretending
 # to be exact.
-DIGEST_CTX_MARGIN_TOKENS = 256
+#
+# AND A FIXED MARGIN IS ITSELF AN EQUALITY (field defect 2026-09-20
+# 15:31:47Z, shared-dev, ONE token over AGAIN under the 256 this constant
+# used to be: `you requested 1844 output tokens and your prompt contains at
+# least 4301 input tokens, for a total of at least 6145`). Both measurements
+# together say what one could not: the error is not a constant. We planned
+# 4172 input and got 4173 in February's content and planned 4044 and got
+# 4301 in this one -- 1 token, then 257. chars/4 is wrong by a FRACTION of
+# what it measures, so the slack that covers it has to scale with the
+# request. 256 stays as the floor for a small writer; the margin itself is
+# ctx/DIGEST_CTX_MARGIN_DIV, which at the live 6144 reserves 768 and
+# tolerates a 20% tokenizer disagreement against the 6.4% we have seen.
+DIGEST_CTX_MARGIN_TOKENS = 256   # the floor, for a writer too small to scale
+DIGEST_CTX_MARGIN_DIV = 8        # ...and the fraction of ctx above it
+
+
+def digest_margin(ctx):
+    """The tokens of the writer's context that the budget may NOT spend.
+    Proportional, because the estimate's error is. Pure."""
+    return max(DIGEST_CTX_MARGIN_TOKENS, ctx // DIGEST_CTX_MARGIN_DIV)
+
+
+def digest_min_ctx():
+    """The smallest writer context that can fold at all with the margin
+    charged -- what the refusal quotes, so it names a number that works."""
+    need = DIGEST_DIRECTIVE_TOKENS + DIGEST_MIN_BATCH_TOKENS + 2 * 500
+    return max(need + DIGEST_CTX_MARGIN_TOKENS,
+               -(-need * DIGEST_CTX_MARGIN_DIV // (DIGEST_CTX_MARGIN_DIV - 1)))
 
 
 def _writer_context(url, token):
@@ -1484,7 +1513,10 @@ def digest_budget(ctx, env=""):
     the digest cap D and the batch B satisfy
     ctx >= directive + MARGIN + 2*D + B -- the margin because our sizing is
     chars/4 and the writer's is a real tokenizer, and the first long fold
-    died one token over a budget that summed to exactly ctx.
+    died one token over a budget that summed to exactly ctx. The margin
+    SCALES with ctx (digest_margin), because the second long fold died one
+    token over a FIXED margin and the two measurements disagree by a
+    fraction, not by a constant.
     D is the operator's 5000 where the writer allows it and shrinks to fit
     where it does not; B is what is left, never under DIGEST_MIN_BATCH_TOKENS;
     a writer too small for even that is refused by name. env overrides the
@@ -1492,15 +1524,26 @@ def digest_budget(ctx, env=""):
     if not ctx:
         batch = int(env) if env else store.DIGEST_INPUT_TOKENS
         return max(DIGEST_MIN_BATCH_TOKENS, batch), DIGEST_MAX_TOKENS
-    room = ctx - DIGEST_DIRECTIVE_TOKENS - DIGEST_CTX_MARGIN_TOKENS
+    room = ctx - DIGEST_DIRECTIVE_TOKENS - digest_margin(ctx)
     out = min(DIGEST_MAX_TOKENS, (room - DIGEST_MIN_BATCH_TOKENS) // 2)
     if out < 500:
         raise store.BusError(f"the script writer's context is {ctx} tokens -- too small to fold "
-                             f"a digest (needs {DIGEST_DIRECTIVE_TOKENS + DIGEST_CTX_MARGIN_TOKENS + DIGEST_MIN_BATCH_TOKENS + 1000}+)")
+                             f"a digest (needs {digest_min_ctx()}+)")
     batch = room - 2 * out
     if env:
         batch = min(batch, max(DIGEST_MIN_BATCH_TOKENS, int(env)))
     return batch, out
+
+
+def _digest_writer():
+    """The writer AND the arithmetic a run is cut against, as one string. It
+    is provenance in the digest header, and it is the resume gate's identity
+    (0.2.289): a saved run whose budget has moved under it must be RE-CUT,
+    because resuming replays the same oversized batches into the same 400
+    for ever -- which is what keeping the run (0.2.288) bought when the
+    budget was the bug."""
+    return (f"{_script_model or 'server default'} ctx {_digest_ctx or '?'} "
+            f"out {_digest_out} batch {_digest_batch // store.CHARS_PER_TOKEN}")
 
 
 def _digest_data_dir():
@@ -1540,7 +1583,7 @@ def _digest_prepare(conn, p, mentor_name=""):
         # run. Anything else is stale and the file goes.
         prior = store.digest_prior(conn, scope)
         run = None if mentor_name else store.digest_run_load(
-            _digest_data_dir(), scope, prior["uid"] if prior else "")
+            _digest_data_dir(), scope, prior["uid"] if prior else "", _digest_writer())
         if run is not None:
             inputs = run["inputs"]
             with _digest_lock:
@@ -1703,7 +1746,7 @@ def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
     steps = max(1, len(inputs["batches"]))
     running, why, stripped_total, unsectioned_total = "", "", 0, 0
     first, resumed_at = 1, 0
-    writer = f"{_script_model or 'server default'} ctx {_digest_ctx or '?'} out {_digest_out}"
+    writer = _digest_writer()
     if resume:
         running, first = resume["running"], resume["step"] + 1
         resumed_at = first
