@@ -9,11 +9,15 @@ doorbell.reachable() asks the question the hook actually cares about, and these
 gates hold both halves of it plus the one property that makes it safe to put in
 a hook at all: it fails CLOSED.
 """
+import contextlib
+import fcntl
 import json
 import os
 import socket
 import subprocess
 import sys
+
+import pytest
 
 from reveille import doorbell, spool
 
@@ -78,10 +82,44 @@ def _world(tmp_path, monkeypatch, agent="ana", dirname="not-the-agent-name"):
     return work, sess, conf
 
 
+_HELD = []
+
+
 def _hold_lock(agent, pid=None):
-    """What waked leaves behind: the pid in the identity's lock file."""
-    with open(spool.lock_path(agent), "w") as f:
-        f.write(str(pid if pid is not None else os.getpid()))
+    """Stand in for the waked that holds this identity's slot -- BOTH HALVES.
+
+    The pid in the lock file is what reachable() reads. The FLOCK on it is what
+    the Stop hook probes, and the hook SPAWNS A REAL DAEMON whenever that lock
+    is free. Writing only the pid therefore left every hook drive starting
+    `reveille-waked --name ana` against the live broker URL, twice a run, for
+    ever -- twelve were running before anyone looked (2026-09-20). GATES LEAK
+    WHAT THEY SPAWN: a test that drives a real hook inherits everything that
+    hook starts, so it must hold the door it is pretending is already held.
+    """
+    fd = os.open(spool.lock_path(agent), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.ftruncate(fd, 0)
+    os.write(fd, str(os.getpid() if pid is None else pid).encode())
+    _HELD.append(fd)
+    return fd
+
+
+@pytest.fixture(autouse=True)
+def _release_held_locks():
+    yield
+    while _HELD:
+        with contextlib.suppress(OSError):
+            os.close(_HELD.pop())
+
+
+def _wakeds(agent):
+    """Every reveille-waked running for `agent`, by pid. Read from ps rather
+    than `pgrep -f`, which also matches the shell asking the question -- the
+    same self-match that makes `pkill -f` take down its own caller."""
+    out = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True,
+                         text=True).stdout
+    return {ln.split()[0] for ln in out.splitlines()
+            if "reveille-waked" in ln and f"--name {agent}" in ln}
 
 
 def test_a_body_the_doorbell_reaches_needs_no_watcher(tmp_path, monkeypatch):
@@ -198,6 +236,34 @@ def test_a_mismatched_token_on_the_digest_route_is_a_401_not_a_traceback(tmp_pat
     assert r.status_code == 401, f"expected a clean 401, got {r.status_code}: {r.text[:200]}"
     assert r.json()["error"] == "unauthorized"
     assert "bound to" in r.json()["detail"]
+
+
+def test_driving_the_hook_leaks_no_daemon(tmp_path, monkeypatch):
+    """GATES LEAK WHAT THEY SPAWN. The hook starts `reveille-waked --name
+    <role>` whenever the identity's lock is free, and these tests drive the real
+    hook -- so for one afternoon every run left two more daemons dialling the
+    live broker, twelve of them before anyone looked at ps. The fixture now
+    HOLDS the flock, which is what a running waked would do, and this asserts
+    the consequence rather than trusting it. Mutation: drop the flock from
+    _hold_lock and this counts new daemons."""
+    work, sess, conf = _world(tmp_path, monkeypatch)
+    srv = _live_session(sess, work)
+    try:
+        before = _wakeds("ana")
+        _hold_lock("ana")
+        env = _sealed_env()
+        env["REVEILLE_HOOK_PYTHON"] = sys.executable
+        env["PYTHONPATH"] = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+        subprocess.run(["sh", HOOK], input="{}", capture_output=True,
+                       text=True, env=env, timeout=60)
+        leaked = _wakeds("ana") - before
+        for pid in leaked:                      # never leave one running
+            with contextlib.suppress(OSError, ValueError):
+                os.kill(int(pid), 15)
+        assert not leaked, f"the hook spawned {len(leaked)} daemon(s): {leaked}"
+    finally:
+        srv.close()
 
 
 def test_the_hook_gate_never_reaches_a_real_broker(monkeypatch):
