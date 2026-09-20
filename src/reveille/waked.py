@@ -1303,6 +1303,14 @@ class _Stamped:
 # knowing which is running.
 HOST_LOCK = os.path.join(os.path.expanduser("~"), ".reveille", "host.lock")
 HOST_RESCAN_S = 30      # opendir of one directory; SIGHUP makes it immediate
+# A RUN THAT ENDED ON A REFUSAL IS NOT RE-ATTACHED EVERY 30 SECONDS (ruled
+# 24332). Five of the eleven identities on the operator's workstation hold
+# dead tokens; without this the host would attach, take a 401, release and
+# attach again on the next pass forever -- churn in the log and on the
+# broker, and a busy loop that hides the real state. These four exits mean
+# "the broker will not have this identity as it stands"; anything else (a
+# crash, a clean stop) re-attaches as before, because it may be transient.
+REFUSAL_EXITS = (3, PARKED, NOT_ARRIVED, DEAD_CREDENTIAL)
 
 
 def host_lock(path=HOST_LOCK):
@@ -1319,6 +1327,17 @@ def host_lock(path=HOST_LOCK):
     fd.write(f"{os.getpid()}\n")
     fd.flush()
     return fd
+
+
+def credential_mtime(workdir):
+    """When this identity's credential last changed, or 0. The whole parked
+    rule rests on it: a refusal is only worth retrying once the thing that
+    was refused is different."""
+    try:
+        return os.stat(os.path.join(workdir, ".claude",
+                                    "settings.local.json")).st_mtime_ns
+    except OSError:
+        return 0
 
 
 def identity_token(workdir, agent):
@@ -1348,7 +1367,7 @@ def host_plan(entries, held):
     return attach, stale
 
 
-async def _host_pass(url, opts, tasks, locks, said_stale):
+async def _host_pass(url, opts, tasks, locks, said_stale, parked=None):
     """ONE enumeration: reap finished runs, then attach every registered
     identity this process is not already serving. Separate from the loop so
     a gate can drive exactly one pass without a test-only flag in the
@@ -1359,13 +1378,27 @@ async def _host_pass(url, opts, tasks, locks, said_stale):
     process leaves that identity alone), read its token from its own
     directory, and run the ordinary per-agent loop with them."""
     idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s = opts
+    parked = {} if parked is None else parked
+    entries = spool.registered()
     for name, task in list(tasks.items()):
         if task.done():
-            print(f"reveille-waked: {name} run ended ({_task_why(task)}) "
+            why = _task_why(task)
+            print(f"reveille-waked: {name} run ended ({why}) "
                   f"-- releasing its lock", file=sys.stderr)
             tasks.pop(name)
             locks.pop(name).close()
-    attach, stale = host_plan(spool.registered(), set(tasks))
+            code = None if (task.cancelled() or task.exception()) else task.result()
+            if code in REFUSAL_EXITS:
+                parked[name] = credential_mtime(entries.get(name, ""))
+                print(f"reveille-waked: agents/{name}: parked ({why}) -- re-attaches "
+                      f"when its credential changes", file=sys.stderr)
+    attach, stale = host_plan(entries, set(tasks))
+    # A parked identity waits for its credential to change (or SIGHUP, which
+    # clears the map): the mtime AT THE REFUSAL is the whole memory.
+    attach = [(n, d) for n, d in attach
+              if n not in parked or credential_mtime(d) != parked[n]]
+    for n, _ in attach:
+        parked.pop(n, None)
     for name, why in stale:
         if name not in said_stale:
             said_stale.add(name)
@@ -1397,16 +1430,17 @@ async def _host(url, idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s,
     rescan_s and immediately on SIGHUP: an added identity attaches without a
     restart, and nothing about the others is disturbed."""
     opts = (idle_nudge_s, no_rooms_window_s, wedge_n, mail_probe_s)
-    tasks, locks, said_stale = {}, {}, set()
+    tasks, locks, said_stale, parked = {}, {}, set(), {}
     wake = asyncio.Event()
     with contextlib.suppress(NotImplementedError, AttributeError):
         asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, wake.set)
     try:
         while True:
-            await _host_pass(url, opts, tasks, locks, said_stale)
+            await _host_pass(url, opts, tasks, locks, said_stale, parked)
             wake.clear()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(wake.wait(), rescan_s)
+                parked.clear()      # SIGHUP: try every parked identity again
     finally:
         for t in tasks.values():
             t.cancel()
