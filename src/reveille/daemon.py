@@ -394,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.296",
+     "0.2.296 THE TAG FILES THE LINE, NOT THE WRITER (first landed fold,\nd17827da 2026-09-20; operator, on reading it: fix the classification defect\ntoo).\n\nThe first digest ever to complete came back with all 21 lines under RULES --\nlessons, decisions, doctrine and contracts in one pile -- and DECISIONS,\nLESSONS, WORK and OPEN all `- (none)`. Four of five sections empty. The frame\nsays plainly which kind goes where; the writer ignored it. The store could not\ncatch it because every line carried a VALID tag resolving to a LIVE row:\ncorrectly licensed, wrongly filed.\n\nSo filing stops being the model's judgement. It composes the line; the tag it\ncopied decides where the line lives -- doctrine and contract to RULES, decision\nto DECISIONS, lesson to LESSONS, and a kind with no opinion (state, digest)\nstays where the writer put it. Same division that already makes the store, not\nthe model, decide truth.\n\nTHE OTHER HALF IS NOT ROUTING AND IS NOT FIXED BY IT. WORK and OPEN are\nuntagged narrative -- the only record of what the agent itself did and still\nowes -- and the writer produced nothing for either while filling RULES. No\nstore rule can invent them, so the frame now says they are almost never empty,\nthat they come from the agent OWN messages, and that they are written BEFORE\nanything else is trimmed. Whether that holds is a measurement on the next fold,\nnot a claim made here.\n\nGate: four rows, one of each kind, all filed under RULES exactly as the live\nwriter did it, must come back under their own headings. Mutation -- let the\nwriter file them -- reproduces the field symptom, four lines in RULES."),
     ("0.2.295",
      "0.2.295 THE ARM RULE IS DEAD, AND THE TEMPLATE SAYS SO (operator: \"arm rule\nis dead!\"; \"the local CLAUDE.local.md + any other files need to reflect\nthis\").\n\n0.2.292 let a reachable body stop with nothing armed. 0.2.293 recorded that\na duplicate arm SIGTERMs the NEWCOMER -- `Terminated`, exit 143 -- leaving\nthe body UNARMED behind a code that reads as ordinary noise. Neither reached\nthe text a NEW body boots on. native-doorbell-test regenerated its\nCLAUDE.local.md at 0.2.294 and got a BYTE-IDENTICAL body, sha256 unchanged:\nonly the version stamp moved. It found this by trying to comply.\n\nTHAT IS THE DEFECT WORTH NAMING. A correction that lands in a LESSON or in\none agent's memory has not landed: memory is per-agent, and a new body has\nnone to correct with. cli.doctrine_body() is what `reveille init` writes\nbetween the markers, so it is the highest-leverage prose in the system --\nand the doorbell made cold starts cheap to trigger, so it is read more often\nnow, at ~41k tokens of boot a time.\n\nCUT, not shimmed: the arm paragraphs are gone from cli.doctrine_body(), from\ndaemon.USAGE, and from the repo's own CLAUDE.md. What replaces them says who\ndecides -- the Stop hook, which blocks and NAMES THE HALF that failed, with\nthe command that prints the reason -- rather than a standing rule. The\nverdict itself was rewritten to send a deaf body to REACHABILITY FIRST and\nto arming only as a fallback, once, with the SIGTERM named.\n\nAND THE VERDICT'S OLD DEFECT CAME BACK WHILE FIXING IT, which is why the\ngate is worth its line: interpolating a `python -c \"...\"` command into the\nreason put a bare `\"` into the JSON and made the whole block unparseable --\nthe identical failure as PR #274, reintroduced within the hour and caught\nonly by parsing the output. The command now rides argv with no quotes, and\ntwo gates parse the verdict live.\n\nagent-stop-hook is a baked input, so reveille-agent moves 0.2.44 -> 0.2.45."),
     ("0.2.294",
@@ -1426,10 +1428,17 @@ _DIGEST_FRAME = (
     "Every bullet under RULES, DECISIONS and LESSONS ENDS with the tag of the row it "
     "restates, copied EXACTLY from the data: [kind:id8 date]. Never invent a tag, never "
     "alter one, never write an untagged bullet in those three sections; a fact with no "
-    "row to tag does not go there. RULES = doctrine and contracts; DECISIONS = decisions; "
-    "LESSONS = lessons. WORK = what this agent did and shipped, OPEN = what it still owes "
-    "and who owes it, citing messages as [msg:N] where one applies. Plain text only: no "
-    "markdown beyond `- `, no code fences, no preamble, no closing remarks.")
+    "row to tag does not go there. THE TAG'S KIND CHOOSES THE SECTION: doctrine and "
+    "contract go under RULES, decision under DECISIONS, lesson under LESSONS. Put each "
+    "line under the heading its own tag names -- do not pile everything into RULES.\n"
+    "WORK AND OPEN ARE NOT OPTIONAL AND ARE ALMOST NEVER EMPTY. WORK = what this agent "
+    "did and shipped, from its OWN messages in the data; OPEN = what it still owes and who "
+    "owes it, citing messages as [msg:N]. These two are the only record of what the agent "
+    "itself has been doing -- a digest that fills RULES and leaves WORK and OPEN at "
+    "`- (none)` has thrown away the agent's own history and is the WRONG answer whenever "
+    "the data contains any message it sent. Write them before you trim anything else.\n"
+    "Plain text only: no markdown beyond `- `, no code fences, no preamble, no closing "
+    "remarks.")
 _DIGEST_FRAME_PROTEGE = (
     " THIS IS A FIRST DIGEST FOR A NEW AGENT: the MENTOR DIGEST is its baseline -- restate "
     "it, fold in the mentor's rows and the rules that bind everyone, and leave WORK empty "

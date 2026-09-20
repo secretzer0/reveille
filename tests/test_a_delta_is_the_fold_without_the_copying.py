@@ -147,3 +147,65 @@ def test_the_delta_carries_less_than_the_digest_it_updates():
         "the delta is not smaller than the digest it produces, so nothing was saved")
     assert "rule A" in merged and "lesson L" in merged, (
         "the prior's content must survive a delta that never mentions it")
+
+
+def test_the_tag_files_the_line_not_the_writer(tmp_path):
+    """THE FIRST LANDED FOLD PUT EVERYTHING UNDER RULES (d17827da, 2026-09-20):
+    all 21 lines in one pile -- lessons, decisions, doctrine, contracts -- with
+    DECISIONS and LESSONS both `- (none)`. The frame says plainly which goes
+    where and the writer ignored it, and the store could not catch it because
+    every line carried a VALID tag resolving to a LIVE row: correctly licensed,
+    wrongly filed.
+
+    So filing is no longer the writer's judgement. It composes the line; the tag
+    it copied decides where the line lives -- the same division that already
+    makes the store, not the model, decide truth."""
+    import sqlite3
+    db = str(tmp_path / "b.db")
+    conn = store.connect(db)
+    store.migrate(conn, db)
+    u = store.setup_first_admin(conn, "owner", "hunter2hunter2")
+    room = store.create_room(conn, u["id"], "hive")
+    ana = store.create_token(conn, u["id"], "ana", agent_name="ana", create=True)
+    store.assign_room(conn, ana["id"], room["id"], u["id"])
+    conn.row_factory = sqlite3.Row
+    scope = store.agent_scope(conn, ana["agent_id"], ana["agent_id"])
+    kw = dict(author="ana", token_id=ana["id"], agent_id=ana["agent_id"],
+              agent_bound=True, tier="ratify", is_admin=True,
+              rooms={room["id"]: "hive"}, owned_rooms={room["id"]})
+    made = {}
+    for kind in ("doctrine", "contract", "decision"):
+        r = store.memory_add(conn, fact=f"a {kind} fact", kind=kind, **kw)
+        made[kind] = r["id"][:8]
+    # lessons have their own writer -- memory_add refuses them by name
+    les = store.add_lesson(conn, author="ana", slug="a-slug", symptom="s",
+                           root_cause="r", rule="a lesson fact", detection="d",
+                           room_id=room["id"])
+    made["lesson"] = (les["id"] if isinstance(les, dict) else str(les))[:8]
+
+    # every line filed under RULES, exactly as the live writer did it
+    text = "RULES\n" + "\n".join(
+        f"- a {k} fact [{k}:{i} 2026-09-20]" for k, i in made.items()
+    ) + "\nDECISIONS\n- (none)\nLESSONS\n- (none)\nWORK\n- shipped\nOPEN\n- (none)"
+    clean, stripped, _ = store.digest_verify(conn, text, [room["id"]], scope)
+    assert stripped == [], stripped
+
+    def sect(name):
+        keep, out = False, []
+        for raw in clean.splitlines():
+            s = raw.strip()
+            if s in store.DIGEST_SECTIONS:
+                keep = (s == name)
+                continue
+            if keep and s and s != "- (none)":
+                out.append(s)
+        return out
+
+    assert len(sect("RULES")) == 2, f"doctrine+contract belong in RULES: {sect('RULES')}"
+    assert any(made["doctrine"] in x for x in sect("RULES"))
+    assert any(made["contract"] in x for x in sect("RULES"))
+    assert len(sect("DECISIONS")) == 1 and made["decision"] in sect("DECISIONS")[0], \
+        f"a decision was left in the pile: {sect('DECISIONS')}"
+    assert len(sect("LESSONS")) == 1 and made["lesson"] in sect("LESSONS")[0], \
+        f"a lesson was left in the pile: {sect('LESSONS')}"
+    assert sect("WORK") == ["- shipped"], "an untagged narrative line must stay put"

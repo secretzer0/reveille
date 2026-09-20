@@ -7782,6 +7782,18 @@ def _section_name(s):
     return s.strip().strip("#*: ").upper()
 
 
+# A TAG ALREADY NAMES ITS SECTION, SO THE WRITER DOES NOT DECIDE (first landed
+# fold, 2026-09-20: d17827da). All 21 lines came back under RULES whatever their
+# kind -- lessons, decisions, doctrine and contracts in one pile -- with
+# DECISIONS and LESSONS both `(none)`. The frame says plainly which goes where
+# and the writer ignored it, and the store could not catch it because every line
+# carried a VALID tag resolving to a LIVE row: correctly licensed, wrongly filed.
+# So filing stops being the model's judgement. It composes the line; the tag it
+# copied decides where the line lives. A kind with no opinion here (state,
+# digest) stays where the writer put it.
+_KIND_SECTION = {"doctrine": "RULES", "contract": "RULES",
+                 "decision": "DECISIONS", "lesson": "LESSONS"}
+
 _EMPTY_MARKERS = {"", "-", "()", "(none)", "none", "n/a", "- none", "nothing"}
 
 
@@ -7845,6 +7857,7 @@ def digest_verify(conn, text, rooms, scope):
                 [kind, id8 + "%"] + rooms + [scope]).fetchone()
             if live is None:
                 raise BusError(f"digest: tag [{kind}:{id8}] resolves to no live row")
+            section = _KIND_SECTION.get(kind, section)   # the tag files the line
         else:
             for mid in _MSG_TAG.findall(s):
                 if not rooms or not conn.execute(
