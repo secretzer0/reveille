@@ -7688,7 +7688,62 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
                     [ln for _, ln in b]) for i, b in enumerate(batches)]
     return {"base": base, "batches": texts, "rows": total, "dropped": dropped,
             "since_ns": since, "prior": prior["uid"] if prior else "", "scope": scope,
-            "first_window_ns": msg_since if first_window else 0}
+            "first_window_ns": msg_since if first_window else 0,
+            # THE CUT POINT: anything that arrives after this belongs to the
+            # NEXT run, so a resumed fold folds what it started with (24342).
+            "until_ns": time.time_ns()}
+
+
+# A DEPLOY COSTS A FOLD ONE STEP, NEVER THE RUN (operator's cadence, ruled
+# 24342). Three folds died to three deploys in one evening: a 90-minute run
+# on a fleet that ships every 20 minutes can only finish in silence, and a
+# cache that completes only when nobody works is not a cache. The run is
+# persisted after every VERIFIED step -- the batches exactly as they were cut,
+# the step, and the running digest, which together are the whole state -- so a
+# restart costs one step. Not a memories row: drafts are the ratify queue, and
+# half a fold is not a fact.
+DIGEST_RUN_MAX_AGE_S = 24 * 3600
+
+
+def digest_run_path(data_dir, scope):
+    return os.path.join(data_dir, "digest", f"{scope.replace('/', '_')}.json")
+
+
+def digest_run_save(data_dir, scope, inputs, step, running, writer):
+    """Atomic, after every verified step: a half-written run must read as the
+    previous step, never as a truncated one."""
+    path = digest_run_path(data_dir, scope)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump({"inputs": inputs, "step": step, "running": running,
+                   "writer": writer, "saved_ns": time.time_ns()}, f)
+    os.replace(tmp, path)
+    return path
+
+
+def digest_run_load(data_dir, scope, prior_uid):
+    """The unfinished run to resume, or None. Resumable means: it exists, it
+    was cut against the prior digest that is STILL live (or both have none),
+    and it is younger than DIGEST_RUN_MAX_AGE_S. Anything else is stale -- the
+    hive moved under it -- and the file is removed by the caller."""
+    try:
+        with open(digest_run_path(data_dir, scope)) as f:
+            run = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if (run.get("inputs") or {}).get("prior", "") != (prior_uid or ""):
+        return None
+    if (time.time_ns() - run.get("saved_ns", 0)) / 1e9 > DIGEST_RUN_MAX_AGE_S:
+        return None
+    if not run.get("inputs", {}).get("batches") or not run.get("step"):
+        return None
+    return run
+
+
+def digest_run_clear(data_dir, scope):
+    with contextlib.suppress(OSError):
+        os.unlink(digest_run_path(data_dir, scope))
 
 
 def digest_batch_text(running, base, batch, step, steps):
@@ -7759,7 +7814,8 @@ def digest_verify(conn, text, rooms, scope):
     return clean, stripped, unsectioned
 
 
-def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0, unsectioned=0):
+def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
+                  unsectioned=0, resumed_at=0):
     """The provenance lines, written by the STORE, never the model (24015):
     window, rows shown, batches folded, the prior, the writer; a second line
     for a protege's lineage; a third naming any row too large for a batch;
@@ -7769,7 +7825,8 @@ def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0, unse
              f"{_d8(inputs['first_window_ns'])} (first run window)"
              if inputs.get("first_window_ns") else "the beginning")
     head = (f"[digest:{name} {when} | since {since} | input: {inputs['rows']} rows, "
-            f"{batches} batches | prior: {inputs['prior'][:8] or 'none'} | "
+            f"{batches} batches" + (f", resumed at step {resumed_at}" if resumed_at else "") +
+            f" | prior: {inputs['prior'][:8] or 'none'} | "
             f"writer: {model or 'server default'}]")
     if mentor is not None:
         head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
