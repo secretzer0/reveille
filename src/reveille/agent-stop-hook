@@ -164,6 +164,31 @@ fi
 # people assumed would kill it. Both shapes still satisfy the pgrep above.
 pgrep -f "wake-watch (--follow )?$role( |\$)" >/dev/null 2>&1 && exit 0
 
+# ...OR THE DOORBELL REACHES THIS BODY WITHOUT ONE (0.2.292). Since 0.2.290 a
+# ring is not only a file: waked writes the spool entry and then rings the
+# session's own inbox socket, which starts a turn in a body sitting idle. A body
+# the doorbell can reach needs no watcher, and demanding one anyway is asking
+# for a process whose only purpose is to satisfy this line.
+#
+# THIS IS A BETTER GATE THAN THE pgrep ABOVE, not a hole punched in it. The
+# pgrep asks whether a process exists; doorbell.reachable() asks whether a ring
+# would ARRIVE -- a waked holding this identity's spool lock, and a live
+# interactive session in the identity's own directory with the reveille MCP,
+# checked by the same code the delivery uses. The orphaned `cmd &` that went
+# deaf with every control green (2026-08-19) passes the pgrep and fails this.
+#
+# FAILS CLOSED, and that is the whole reason it is safe to put here: any
+# refusal, crash, missing interpreter or unimportable module leaves $? non-zero
+# and falls through to the block below, which demands the watcher exactly as
+# before. Never `|| exit 0`.
+if "${REVEILLE_HOOK_PYTHON:-python3}" - "$role" <<'PY' >/dev/null 2>&1
+import sys
+from reveille import doorbell
+ok, _why = doorbell.reachable(sys.argv[1])
+sys.exit(0 if ok else 1)
+PY
+then exit 0; fi
+
 watch_bin="$bindir/wake-watch"; [ -x "$watch_bin" ] || watch_bin="wake-watch"
 printf '{"decision":"block","reason":"Wake watcher not armed -- you are deaf to bus rings. Arm it with Bash run_in_background=true: %s %s -- bare, nothing prepended or appended. Its task completion IS one ring: inbox(), ack(), act only if owed, DELETE the spool entry you processed -- each ring carries a `spool` key holding its absolute path under %s/new/, so rm that and never a glob -- then RE-ARM, last, after the ack and the rm. An entry left behind is re-printed by the next watcher process. FALLBACK, only where run_in_background does not exist: the Monitor tool with command=\\\"%s --follow %s\\\", persistent=true -- it expires at 1800000 ms and the harness wakes you to re-arm, which is two blind turns an hour."}\n' "$watch_bin" "$role" "$spool" "$watch_bin" "$role"
 exit 0
