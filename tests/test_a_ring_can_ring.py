@@ -30,7 +30,7 @@ def _inbox(tmp_path, name="s.sock"):
             if not b:
                 break
             buf += b
-        got.extend(l for l in buf.decode().split("\n") if l)
+        got.extend(x for x in buf.decode().split("\n") if x)
         conn.close()
         srv.close()
 
@@ -270,6 +270,37 @@ def test_the_body_is_told_what_rang_not_what_to_allow(tmp_path):
     for forbidden in ("settings", "permission", "claude.md", "sudo", "allow",
                       "bypass", "approve"):
         assert forbidden not in low, f"the doorbell text says {forbidden!r}"
+
+
+def test_a_platform_that_cannot_ring_refuses_by_name(tmp_path, monkeypatch):
+    """PORTABILITY (operator, 2026-09-20). The socket PATH is never ours to
+    build -- we read messagingSocketPath out of the descriptor -- so macOS
+    (/tmp, /private/tmp, and its sun_path fallback) and Linux
+    (/run/user/<uid>/cc-socks) cost us nothing. The TRANSPORT is what varies:
+    CPython has no socket.AF_UNIX on Windows, and there the doorbell must say so
+    rather than raise AttributeError inside the ring path."""
+    sess, work, conf = _world(tmp_path)
+    sock, got, t = _inbox(tmp_path)
+    _descriptor(sess, work, sock)
+
+    monkeypatch.delattr(socket, "AF_UNIX")
+    ok, why = doorbell.available()
+    assert ok is False and "AF_UNIX" in why and "wake-watch" in why
+    rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
+    assert rung == 0 and "AF_UNIX" in why
+    assert got == [], "a platform with no unix sockets still tried to send"
+
+
+def test_liveness_never_signals_a_process_off_posix(monkeypatch):
+    """On Windows signal 0 IS signal.CTRL_C_EVENT, so os.kill(pid, 0) delivers a
+    console Ctrl+C instead of probing -- the POSIX idiom turns into an interrupt
+    aimed at the session we were asking about. _alive must not reach os.kill
+    there, and this asserts it by making os.kill fatal to the test."""
+    def never(*a, **k):
+        raise AssertionError("os.kill was called off posix")
+    monkeypatch.setattr(os, "kill", never)
+    monkeypatch.setattr(os, "name", "nt")
+    assert doorbell._alive(12345) is True
 
 
 def test_a_malformed_frame_still_rings(tmp_path):

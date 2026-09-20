@@ -104,9 +104,39 @@ def mcp_enabled(workdir, config=None):
     return False
 
 
+def available():
+    """Whether this platform can ring at all, with the reason when it cannot.
+
+    PORTABILITY, checked rather than assumed (operator, 2026-09-20). The socket
+    PATH is never ours to build -- we read `messagingSocketPath` out of the
+    descriptor -- so the CLI's own layout differences cost us nothing: macOS
+    puts its sockets under /tmp or /private/tmp (and falls back there from
+    XDG_RUNTIME_DIR when the path would exceed the 103-byte sun_path limit),
+    Linux uses /run/user/<uid>/cc-socks, Termux its own prefix. We follow
+    whatever it wrote. What DOES stop us is the transport: CPython exposes no
+    socket.AF_UNIX on Windows, so there the doorbell simply does not exist and
+    wake-watch stays the whole delivery. Refusing by name beats an
+    AttributeError inside the ring path.
+    """
+    if not hasattr(socket, "AF_UNIX"):
+        return False, "this platform has no AF_UNIX -- wake-watch is the delivery here"
+    return True, ""
+
+
 def _alive(pid):
     """A descriptor is a claim about a process, not the process (the claimant is
-    a process, not a file). A CLI killed hard leaves its json behind."""
+    a process, not a file). A CLI killed hard leaves its json behind.
+
+    NEVER os.kill ON WINDOWS. There signal 0 is signal.CTRL_C_EVENT, so
+    `os.kill(pid, 0)` asks GenerateConsoleCtrlEvent to deliver a console Ctrl+C
+    rather than probing anything -- the POSIX liveness idiom becomes an
+    INTERRUPT aimed at the very session we were asking about (and raises
+    OSError(22) where it does not). The guard is here even though `available()`
+    already turns the doorbell off on Windows, because a probe that can hurt the
+    thing it measures must not rely on a caller remembering that.
+    """
+    if os.name != "posix":
+        return True
     try:
         os.kill(int(pid), 0)
         return True
@@ -219,6 +249,9 @@ def knock(agent, workdir, frame, base=None, config=None):
     """
     if off():
         return 0, "doorbell is off (REVEILLE_DOORBELL=off)"
+    ok, why = available()
+    if not ok:
+        return 0, why
     if not workdir:
         return 0, "no registered directory for this identity"
     claimed = agent_in(workdir)
