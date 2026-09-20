@@ -282,6 +282,11 @@ def write_credential(url, name, token, workdir):
     it makes the whole boundary decorative."""
     d = pathlib.Path(workdir) / ".claude"
     d.mkdir(parents=True, exist_ok=True)
+    # THE ONE CREDENTIAL WRITER RECORDS WHERE IT WROTE (ruled 24286): a
+    # host-wide waked enumerates identities from ~/.reveille/agents, and this
+    # is the only act that knows an identity's directory. The entry is a path,
+    # never a secret, and last init wins (move-it-here semantics).
+    spool.register(name, workdir)
     path = d / "settings.local.json"
     cfg = {}
     if path.exists():

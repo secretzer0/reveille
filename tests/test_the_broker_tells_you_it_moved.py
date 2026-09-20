@@ -106,7 +106,10 @@ def test_a_hello_alone_proves_the_broker_spoke(monkeypatch, tmp_path):
     arrive -- the comment claimed 'registration and refusal both speak' while
     registration sent no frame at all. The hello makes that true."""
     cleared = []
-    monkeypatch.setattr(waked, "wedge_clear", lambda agent: cleared.append(agent))
+    # the status path is per-identity since 0.2.283 (host mode); this stub
+    # cares only about WHICH agent was cleared
+    monkeypatch.setattr(waked, "wedge_clear",
+                        lambda agent, status=None: cleared.append(agent))
     state = {"last": time.time_ns(), "wedge_fails": 7}
     state, _events = run_session(monkeypatch, tmp_path, [
         {"wake": False, "reason": "hello", "unread": 0, "direct": 0, "id": 0},
