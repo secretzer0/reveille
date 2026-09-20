@@ -53,6 +53,26 @@ def _tail(path, lines=15):
         return f"(unreadable: {e})"
 
 
+def child_report(label, returncode, stdout=b"", stderr=b"", hint=""):
+    """The message a failed child process deserves: its code, what that code
+    MEANS where we know, and both streams.
+
+    Written because two gate scripts red on the hosted runner inside an hour
+    and neither said why: one asserted `(w.returncode, out)` and threw stderr
+    away, giving CI the whole sentence `AssertionError: (2, b'')`; the other
+    used check=True, whose CalledProcessError carries the argv and the code
+    and never the captured stderr. In both cases the cause had been printed
+    on the stream the assertion discarded. A gate that cannot name its own
+    failure sends the next reader to guess at the harness.
+    """
+    def text(b):
+        return b.decode(errors="replace") if isinstance(b, (bytes, bytearray)) else (b or "")
+    head = f"{label} exited {returncode}"
+    if hint:
+        head += f" ({hint})"
+    return (f"{head}\n--- stdout ---\n{text(stdout)}\n--- stderr ---\n{text(stderr)}")
+
+
 @contextlib.contextmanager
 def scratch_broker(env_extra=None, timeout=None):
     """Start a broker on a free port with a scratch db; ALWAYS stop it.

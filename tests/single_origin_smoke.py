@@ -34,6 +34,7 @@ import urllib.request
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from scratch import child_report  # noqa: E402
 import ui_copy  # noqa: E402  -- the served copy every gate asserts, in ONE place
 from reveille import store  # noqa: E402
 
@@ -94,13 +95,26 @@ def main():
 
         # The SHIPPED Caddyfile, on scratch ports -- the file the deployment runs
         # is the file under test, which is the only way this gate means anything.
-        subprocess.run(
+        # A DOCKER REFUSAL NAMES ITSELF. check=True raises CalledProcessError,
+        # whose message carries the argv and the code and NOT the captured
+        # stderr -- so a CI red read `returned non-zero exit status 125` with
+        # the daemon's own sentence (image pull, name in use, network) sitting
+        # unread in the exception. Exit 125 is the docker DAEMON refusing,
+        # never the container failing, so its stderr is the whole diagnosis.
+        # The name is removed first because a leftover from a killed run is
+        # one of the few things that produces 125 on a reused host.
+        subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
+        run = subprocess.run(
             ["docker", "run", "-d", "--rm", "--name", cname, "--network", "host",
              "-e", f"PROXY_SITE=:{pport}",
              "-e", f"BROKER_UPSTREAM=127.0.0.1:{bport}",
              "-e", f"LAUNCHER_UPSTREAM=127.0.0.1:{lport}",
              "-v", f"{REPO / 'docker' / 'Caddyfile'}:/etc/caddy/Caddyfile:ro",
-             "caddy:2-alpine"], check=True, capture_output=True)
+             "caddy:2-alpine"], capture_output=True, text=True)
+        assert run.returncode == 0, child_report(
+            "docker run caddy:2-alpine", run.returncode, run.stdout, run.stderr,
+            hint="125 = the docker DAEMON refused the run (image, name, network)"
+                 if run.returncode == 125 else "")
         assert wait(f"{proxy}/health"), "proxy never came up"
 
         # -- 1. one login, through the front door ----------------------------

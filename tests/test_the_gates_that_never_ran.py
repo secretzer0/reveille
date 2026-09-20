@@ -152,3 +152,35 @@ def test_every_gate_file_is_either_wired_or_named():
         "GATES, or to NOT_WIRED with the reason it cannot run yet")
     stale = accounted - on_disk
     assert not stale, f"named here but not on disk: {sorted(stale)}"
+
+
+def test_a_failed_child_is_reported_with_its_own_words():
+    """24387: two gate scripts red on the hosted runner inside one hour and
+    neither said why -- `AssertionError: (2, b'')` from an assertion that
+    threw stderr away, and `returned non-zero exit status 125` from
+    check=True, whose CalledProcessError never carries the captured stderr.
+    Both causes had been printed on the discarded stream.
+
+    The message is built in one place now, so this gate is on the thing that
+    builds it rather than on a grep of the scripts that call it.
+    """
+    from scratch import child_report
+    msg = child_report("wake", 2, b"", b"wake: superseded by a newer attachment",
+                       hint="2 = superseded")
+    assert "exited 2" in msg and "2 = superseded" in msg
+    assert "superseded by a newer attachment" in msg, "stderr is the whole diagnosis"
+    assert "--- stdout ---" in msg and "--- stderr ---" in msg
+    # text or bytes, either way it reads
+    assert "boom" in child_report("docker run", 125, "", "boom")
+    # and a hintless failure still names its code and both streams
+    bare = child_report("thing", 1, b"out", b"err")
+    assert "thing exited 1" in bare and "out" in bare and "err" in bare
+
+
+def test_both_flaky_gates_route_their_failure_through_it():
+    """The two scripts that went red must ASK for that message, not rebuild
+    it -- a second copy drifts, and the drift is what hid the cause."""
+    for gate in ("smoke_ws.py", "single_origin_smoke.py"):
+        src = (ROOT / "tests" / gate).read_text()
+        assert "child_report(" in src, f"{gate} does not report its child's words"
+        assert "from scratch import child_report" in src, f"{gate} rebuilt the message"
