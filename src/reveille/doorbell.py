@@ -35,6 +35,8 @@ import os
 import socket
 import threading
 
+from reveille import spool
+
 # The CLI's session registry: one <pid>.json per live session carrying its cwd
 # and socket path, plus a sibling <pid>.<sha>.key holding the inbox token.
 # $REVEILLE_CLAUDE_SESSIONS overrides it for tests and for odd homes.
@@ -293,6 +295,40 @@ def ring_text(frame):
             f"id={obj.get('id', '-')} direct={obj.get('direct', '-')} "
             f"spool={obj.get('spool', '-')} -- inbox(), ack() everything, act "
             f"only if owed, delete the spool file you handled.")
+
+
+def reachable(agent, base=None, config=None, agents_base=None):
+    """Can a ring reach this body WITHOUT a watcher? (True, "") or (False, why).
+
+    THE GATE SHOULD TEST REACHABILITY, NOT A PROCESS (0.2.292). The Stop hook
+    used to decide by `pgrep wake-watch <role>`, and its own comment admits what
+    that costs: a process exists is not the harness will be notified, which is
+    exactly how an architect armed a watcher with `cmd &`, satisfied the pgrep
+    with an orphan writing to nothing, and went deaf with every control green
+    (2026-08-19). This asks the question the hook actually cares about.
+
+    Two halves, and BOTH are required, because each alone is a different kind of
+    deaf: a waked must hold this identity's spool lock (or no ring is ever
+    written), and the identity's directory must hold a session the doorbell can
+    ring (or a written ring never becomes a turn). The second half reuses the
+    delivery checks exactly -- same claim, same MCP, same live interactive
+    session -- so the gate cannot pass on a path the ring itself would refuse.
+    """
+    if off():
+        return False, "the doorbell is off (REVEILLE_DOORBELL=off)"
+    if not spool.holder_pid(agent, base):
+        return False, "no waked holds this identity's spool lock -- nothing is spooling rings"
+    workdir = spool.registered(agents_base).get(agent, "")
+    if not workdir:
+        return False, f"no registered directory for {agent!r} -- `reveille init` writes it"
+    claimed = agent_in(workdir)
+    if claimed and claimed != agent:
+        return False, f"{workdir} claims {claimed!r}, not {agent!r}"
+    if not mcp_enabled(workdir, config):
+        return False, f"no reveille MCP in {workdir} -- a ring it could not answer"
+    if not inboxes_for(workdir, base=None):
+        return False, f"no live interactive session in {workdir} to ring"
+    return True, ""
 
 
 def knock(agent, workdir, frame, base=None, config=None):
