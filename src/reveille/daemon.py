@@ -394,6 +394,20 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.306",
+     "0.2.306 WHAT MOVED SINCE YOU LAST LOOKED (step 7, the march's last).\n\nA BODY COMING BACK AFTER A WEEK WANTS THE DIFF, NOT THE INDEX. The note carries\nevery row an agent may read -- 445 lines for one body here -- and almost all of\nit was already true last time. digest_diff() computes what moved, once, at fold\ntime, and CHANGED puts it where the body already looks: page 1 row 1 of\nrehydrate(). Measured on the live store: a first fold says `(first digest)`, a\nquiet hour says `(nothing moved)`, and an hour with three new rows, one\nrestatement and two drops renders four lines.\n\nPURE SET ARITHMETIC over tag ids, per section, no model. The index is\ndeterministic, so a line differs only when the ROW did -- a supersession\nrewrote it, a title lengthened -- and identity is the id, never the prose. It\nis free because it is the same tags the deleted merge compared, asked a\ndifferent question. Over 40 changes it reports counts instead: a body away a\nmonth is not served by four hundred lines of what it missed.\n\nA DROPPED ROW IS NAMED AND NEVER QUOTED. Repeating what a retired rule used to\nsay is how a retired rule keeps being obeyed; the citation is enough to\nrecall() it deliberately. And CHANGED is NOT tag-licensed, because a row named\nthere may have just been retired -- licensing it would make the one section\nthat reports retirements unable to.\n\nAND THE CHAIN IS SERVED AT LAST. digest_store has SUPERSEDED rather than\ndeleted since it was written, digest_history has walked that chain since\n0.2.297, and NOTHING ON THE WIRE EVER CALLED IT -- unreachable code wearing a\ndocstring, for nine versions. GET /agent/digest/history serves it, an HTTP\nroute and not a verb on purpose: every MCP tool costs schema tokens in EVERY\nagent's context forever, and reading how a mind changed is something a human\ndoes occasionally with curl, while the per-fold delta a body needs each turn\nalready rides in CHANGED.\n\nAND ADDING IT STOLE THE GUARD OFF THE ROUTE BELOW. Inserting\ndigest_history_http above digest_http put my new function under digest_http's\n@_guard and left digest_http bare -- which is EXACTLY the defect /agent/digest\nshipped with once already, an uncaught AuthError answering a bad credential\nwith an ASGI traceback and a 500 instead of a 401. Same file, same day, same\nmistake, caught by reading the decorators rather than the tests. A gate now\nasserts every principal-resolving route carries it."),
+    ("0.2.305",
+     '0.2.305 THE ONE JOB ONLY A MODEL CAN DO (step 6, the march\'s target).\n\nMEASURED BEFORE BUILT, because the last plausible assumption about this corpus\ncost 934 GPU-seconds for 1%:\n\n    1360 live rows, 5 nearest neighbours each   4762 distinct live-live pairs\n    same section, similarity >= 0.10             124 candidates\n    judged by the writer, 250 s                  117 AGREE, 7 CONFLICT\n\nUNLIKE DUPLICATION, THE CONFLICTS ARE REAL. Dedup found 4 pairs and every one\nwas a restatement. This found 7 (6 distinct, one pair caught twice) and each\nnames something an agent would have to do differently: a plain <audio> element\nagainst a mandated MediaSource for one wire; the password door "stays open for\nnow" against any OIDC door closing it; CameraPayload field 52 DELETED against\nfield 52 carrying the trigger ROI; about:blank + navigate against\nlocation.reload(); "the manifest is not sufficient" against "the manifest\ncannot hide one"; and an audit-surface rule explicitly superseded by a later\none, still live. The store CHOOSES the pairs and the model only JUDGES them --\nthe same division as everywhere else.\n\nAND THE FOLD STOPPED BEING A LOOP. Step 2 built digest_index and measured it\nand never cut over to it, which left two paths where the rule is one. The\nthree tagged sections now come from the STORE -- one line per selected row,\nits own first sentence, ending in its tag -- and what replaced 22 batches of\nwriter calls also replaced everything those calls needed. Deleted, because\nnothing reaches them any more: the running digest, the per-step verify, the\ntag-id merge and its DROP grammar, digest_batch_text, coverage (which could\nonly ever report a shortfall), and the entire compaction pass from 0.2.300 --\ncorrect, gated, 16 tests, and unreachable the moment each line became one row.\nResume went with it: it existed because a 90-minute batch fold on a fleet that\nships every 20 minutes could only finish in silence, and the index takes 11 ms.\n\nMEASURED END TO END against the live store and the live writer, for one agent:\n\n    index   445 rows -> 445 lines in 11 ms, 0 left out\n    pairs   22 candidates in 1.3 s\n    judge   22 judged in 47 s -> 1 conflict\n    note    15810 real tokens, 31% of the ceiling\n\nagainst the written fold\'s 258 of 445 rows, 29951 tokens and 1244 seconds.\nEvery row carried, half the tokens, a twenty-sixth of the time.\n\nWHAT SURVIVED THE CUTOVER BECAUSE THE LESSON OUTLIVED THE MACHINE: one retry\nthen give up; a writer refusal surfaces with its HTTP BODY, where "maximum\ncontext length is 6144" actually lives; every writer call yields to the voice\nfirst; and a protege inherits its mentor\'s digest. Each of those was a field\ndefect once, each was re-proved against the new shape, and three of them were\nregressions I had already introduced before the tests caught them.\n\nTHE RECALL LIMIT IS NAMED: candidates are each row\'s k nearest neighbours, so\na conflict at rank k+1 is never offered. k buys recall linearly and costs the\njudge linearly.'),
+    ("0.2.304",
+     '0.2.304 REACH WHAT THE NOTE LEFT OUT (step 4).\n\nmemory_similar() -- sparse TF-IDF over word unigrams, word bigrams and\ncharacter 5-grams. Stdlib, no model, no vector database, 1.4 ms a query over\n1741 rows behind a 0.65 s index cached until the corpus moves.\n\nMEASURED AGAINST GROUND TRUTH RATHER THAN ASSUMED, and the ground truth was\nalready in the schema: supersedes_id gives 164 LABELLED PAIRS, because a row\nand the row it replaced are definitionally about the same thing, usually worded\ndifferently -- median word overlap 0.34, and 77 of the 164 share under 0.30,\nwhich is exactly where keyword search should fail.\n\n    whole-row query, all 164 pairs   R@1 72%  R@5 95%  R@10 98%\n    whole-row query, the 77 HARD     R@1 50%  R@5 90%  R@10 97%\n\nTHAT IS THE SHAPE THE REST OF THE MARCH ISSUES. A retirement pass asks "what\ndoes this replace?" and a contradiction check asks "what is this about?" --\nboth hand over a WHOLE ROW. The goal is served, today, by 200 lines of stdlib.\n\nTHE SHORT-QUERY CASE IS NOT SOLVED AND IS NOT PRETENDED TO BE. An agent\'s\nad-hoc "what binds X?" in 6-12 words scores FTS 64-77%, BM25 57-71%, the union\nof both 70-81%; BM25 with RM3 pseudo-relevance feedback DRIFTED, dropping R@1\nfrom 44% to 20% on a corpus this small. 81% was the ceiling of everything free.\nDense retrieval is the known fix for short queries, and when it comes it is an\nHTTP endpoint like the writer, never a dependency: 1741 vectors is ~2 MB, exact\ncosine is one pass, and no ANN index earns its keep three orders of magnitude\nbelow where they start to.\n\nAND I HAD THE NOISE FILTER BACKWARDS. `df >= 2` reads like a dedup heuristic\nthat should HURT retrieval -- a rare term is the most discriminative thing a\nquery carries -- so I removed it, and recall fell from R@10 98/97 to 91/81. The\nreason is the feature mix: character 5-grams outnumber words by an order of\nmagnitude, and a 5-gram seen ONCE in the whole corpus is a unique byte\nsequence rather than a rare concept, thousands per document, each carrying\nmaximum IDF and drowning the words that mean something. The filter removes\nnoise, not signal. It relaxes below 50 documents, where there is no second\noccurrence of anything to find and it would otherwise empty every vector --\nmeasured, a three-row store scored nothing at all.\n\nTWO THINGS ONE AT A TIME. That removal also changed the IDF formula in the same\nedit, and the formula was what cost the first 7 points; separating them was the\nonly way to learn that the filter was the win.'),
+    ("0.2.303",
+     '0.2.303 A NOTE PER AGENT, NOT PER ROOM (step 3 of the march).\n\nFIRST, A FIGURE I QUOTED THAT NO AGENT EVER SEES. "1360 rows, 92% of the\nceiling, two weeks of headroom" was the ALL-LIVE count; room scope already\nseparates the fleet, and the real per-body views are:\n\n    Reveille2.0   445 rows   30% of ceiling    8 rows/day   18.3 weeks\n    OverSiteAI    922 rows   62% of ceiling   32 rows/day    2.4 weeks\n\nSo the pressure is not the hive, it is the BIG ROOM, where 17 agents share 915\nrows and every one of them carries all of it.\n\nTHE SIGNAL WAS ALREADY IN THE SCHEMA. The fleet names bodies after what they\nown and the entity extractor pulls the same words out of the rows -- measured\non those 915 rows, the top of the entity vocabulary IS the roster: roc-api 175,\nshared 133, controller-api 102, mobile 100, roc-ui 85, minimal-mobile 74,\ndeployment 37, streaming 16, vendor-api 15, controller-ui 12. A correspondence\nthat good is a scoping signal sitting in the database, and it costs no model\nand no embedding.\n\nFOUR TIERS, deterministic, newest-first inside each:\n  0  IT BINDS -- doctrine, contract, global. A peer breaks these by not knowing\n     them, so they are never what gets dropped.\n  1  I WROTE IT.\n  2  IT NAMES MY COMPONENT, by the entities already stored.\n  3  EVERYTHING ELSE.\n\nMeasured across the OverSiteAI roster, the first three tiers come to 158-417\nrows against 922 unscoped -- 10-28% of the ceiling instead of 62% -- and\nroc-api-dev\'s headroom goes from 2.4 weeks to about 35.\n\nIT IS AN ORDER, NOT A FILTER. Every tier still fits today; the ranking decides\nwhat survives the day the store outgrows the ceiling, which is the only day the\ndistinction matters. Driven at budget 200 on the real corpus, every agent keeps\nall 151 binding rows, authored rows fill the rest, and a body that has written\nlittle falls through to recency rather than to nothing.\n\nAND A GENERIC NAME PART CANNOT OVER-MATCH. roc-api-dev claims the tokens\n{roc-api, roc, api}, and entities compare WHOLE -- so `api` matches an entity\nliterally called `api` and never `vendor-api`. Of the 175 rows it matched, the\nentity that did it was `roc-api` every time.\n\nSTILL OPEN, and it grows: the binding tier took 151 of a 200-row squeeze. As\ndoctrine and contracts accumulate they will crowd out every other tier, and the\nanswer then is a rule for which binding rules bind THIS agent -- not a bigger\nnumber.'),
+    ("0.2.302",
+     '0.2.302 A TABLE OF CONTENTS, NOT A PHOTOCOPY (steps 1 and 2 of the march the\noperator set: reach contradiction detection, testing each step, course\ncorrecting).\n\nTHE CITATION LOST ITS DATE. `[lesson:9d384223 2026-09-16]` costs 22.94 tokens a\nrow and `[lesson:9d384223]` costs 11.94 -- 19175 tokens across the live store,\nfor a field created_ns already holds and every read already returns. A\ncitation\'s whole job is to RESOLVE; anything in it the lookup returns anyway is\nrent. EIGHT HEX STAYS: 4 hex already collides 8 times in today\'s 2169 rows and\nprojects to 1636 collisions at a year of growth, 6 hex to 6.4, 8 hex to 0.02.\nThe cheap citation was worth 19175 tokens; a short id is worth 2 a row and a\nwrong row. 19 tests carried the old shape and were cut over with it -- a\ngrammar change has exactly that blast radius, and existing digests are a CACHE,\nregenerable from the store, which is the whole reason the store decides truth.\n\nAND THE NOTE STOPPED BEING WRITTEN. digest_index() builds RULES, DECISIONS and\nLESSONS from the store alone: each row\'s own first sentence, truncated, ending\nin its tag. No model, no batches, no step that can decline a row, no invented\ntag to license, no retry, no 22-batch first fold.\n\n    written fold   431 of 1360 rows   49996 tok   ~20 GPU-min   57% coverage\n    index         1360 of 1360 rows   45848 tok      32 ms     100% coverage\n\nFidelity goes UP. A written restatement is a paraphrase that can drift from the\nrow it cites; a truncation IS the row\'s words, and the exact text is one\nrecall() away for any line a reader wants whole. What falls is prose quality,\nwhich was never the thing being stored. COVERAGE STOPS BEING A MEASUREMENT AND\nBECOMES A PROPERTY: every selected row appears, because appearing is what the\nfunction does.\n\nTWO COURSE CORRECTIONS, both from measuring the output rather than trusting the\ndesign. Splitting the first sentence on ":" as well as ".!?" produced 47 stubs\nlike "S3 review rulings:" -- a colon in this corpus INTRODUCES the content\nrather than ending a thought. And one title length for every kind starved the\nrules while spending characters where a lesson\'s SLUG had already said it:\nlesson@30 with other@70 gives 7 stubs at 45848 tokens, against 17 stubs at\n43596 for a flat 45.\n\nTHE ROW BUDGET MOVED WITH THE LINE FORMAT. DIGEST_INDEX_ROW_TOKENS was 116 when\na model wrote each line and is 34 now, so the same 50000 ceiling carries 1470\nrows rather than 431 -- the whole live store, with nothing left out. A derived\nnumber that outlives what it was derived from is how a budget starts lying.\n\nWHAT THIS DOES NOT FIX, and the growth curve says so plainly: the store adds\n36-150 rows a day and the index is at 91% of the ceiling. Two weeks. Per-agent\nscoping is the next step and it is the one that divides the problem instead of\nshaving a constant off it.'),
+    ("0.2.301",
+     '0.2.301 MERGING CANNOT BOUND IT; SELECTION CAN.\n\nTHE HYPOTHESIS WAS FALSIFIED BEFORE IT COST A DEPENDENCY. Compaction shipped in\n0.2.300 on the assumption that a rolling digest accumulates duplicates. Three\nindependent measurements over the same 1360 live rows say it does not:\n\n  word-Jaccard, exact all-pairs within kind   4 near-duplicate pairs (0.5s CPU)\n  TF-IDF, word bigrams + char 5-grams         the same 4; ZERO at cosine >= 0.40\n  the writer itself, 15 windows, 934 GPU-s    7 lines of 258, 1% of tokens\n\nThe rows genuinely differ. A stronger similarity signal did not find more,\nwhich is the evidence that a still stronger one -- an embedding model -- would\nnot either: the best real pair in the store (one ruling restated by two agents)\nscores 0.35, and that IS the ceiling of duplication here. So NO embedding\nmodel, NO vector database. At 1360 rows a vector set is ~2 MB and exact cosine\nis one matmul; FAISS and every ANN index exist to trade recall for speed at a\nscale three orders of magnitude away. If the store ever reaches ~500k rows,\nsqlite-vec keeps the vectors in the file that already exists.\n\nWHAT WAS ACTUALLY WRONG IS THAT NOTHING BOUNDED WHAT A FOLD WAS OFFERED. A\nfirst run pulled every live row the agent could read: 1360 rows, ~910k chars,\n59 batches, and the note stopped wherever the batches ran out. That was\nreported as 57% COVERAGE -- a number measuring the size of the STORE, not the\nquality of the fold. 0.2.278 said rows were "the small, load-bearing part" and\nwindowed only messages; at 1360 rows that is no longer true.\n\ndigest_select() bounds it, deterministically, BEFORE any GPU runs. Every\nbinding rule first -- doctrine and contract, what a peer breaks by not knowing\nit -- then decisions and lessons newest-first with what is left, and time order\nrestored so the note still reads chronologically. The budget is not a second\nnumber kept in step with the ceiling by hand: it is the ceiling CONVERTED,\nonce, through a MEASURED cost of 116 tokens per stored row (29951 tokens over\n258 folded rows). 50000/116 = 431 rows.\n\nMEASURED ON THE LIVE STORE: 1360 rows -> 431 offered, 929 left out. 59 batches\n-> 22, so the first-fold penalty falls 63%. Kept: all 57 doctrine, all 189\ncontracts, then 141 lessons and 44 decisions back to 2026-07-28.\n\nA ROW LEFT OUT IS NOT LOST. It is live, queryable, one recall() away -- the\nnote is a CACHE of the hive and never the hive, and the header says so:\n`[bounded: 929 older row(s) not carried -- live in the store, reachable with\nrecall()]`. The note must never imply it is the store.\n\nAND COVERAGE FINALLY MEANS SOMETHING. A bounded fold offers what it INTENDS to\ncarry, so the number measures the fold rather than the store.\n\nNAMED BECAUSE IT IS NOT SOLVED: the binding kinds take 246 of 431 and they only\ngrow. Contracts alone will eventually fill the budget, and when they do the\npolicy needs a rule for which binding rules bind THIS agent -- not a bigger\nnumber.'),
+    ("0.2.300",
+     "0.2.300 THE ONLY STEP THAT MAY SYNTHESIZE.\n\nMEASURED FIRST, because the question was the operator's: as the digest rolls\nforward, what stops it being the store with extra steps? Dedup is by ROW\nIDENTITY and it works -- every line in RULES/DECISIONS/LESSONS ends in\n[kind:id8 date], digest_verify refuses a tag naming no live row and strips a\nline carrying none, _KIND_SECTION files each line by its tag's kind so a row\nhas one home, digest_merge replaces IN PLACE by that id, an untagged line\ncannot enter a tagged section (which is what makes the merge idempotent on\nreplay), and _verdicts hands the writer the STORE's ruling on every tag the\nprior note carried. On the 43-batch fold that landed: 266 lines, 263 tag\noccurrences, 258 DISTINCT rows. Not one row twice.\n\nAND IT WAS STILL A COMPRESSED COPY. 258 source rows are 50206 real tokens and\nthe note was 29951 -- 0.60x, 116 tokens per row stored against 195 at source.\nThat is transcription, and it is the direct cost of the extractive frame: a\nstep is told to write one line for EVERY row and never to decide which matter,\nbecause the day it decided it kept 9%. Coverage and synthesis wanted opposite\ninstructions, and nothing in the fold could see two lines at once to notice\nthey were one fact. The note grew linearly in rows: at 116 tok/row the 50000\nceiling is ~430 rows and the live store holds 1546.\n\nCOMPACTION IS WHERE THE OPPOSITE INSTRUCTION IS SAFE. One section, one window\nof its lines, handed over together, with the frame inverted: MERGE LINES THAT\nSAY THE SAME THING; a merged line ends with the tags of EVERY line it merged;\nevery tag given must come back exactly once; a line nothing else duplicates is\nreturned UNCHANGED; merging nothing is a correct answer.\n\nTHE GATE IS A SET COMPARISON, NOT A COUNT. digest_compact_verify compares the\ntag ids in against the tag ids out -- a compaction is SUPPOSED to return fewer\nlines, so counting lines cannot tell a good collapse from a lost row, and\ncounting ids can. A dropped row, an invented tag, an untagged line or a line\nnot ending in its tag all fail, and a failed window is kept EXACTLY as it was.\nProven on the real note against a dead endpoint: six windows refused, 258 rows\nout of 258, text byte-identical.\n\nTHE GRAMMAR NOW ADMITS A LINE THAT NAMES SEVERAL ROWS, so three things moved\nwith it. digest_verify licenses EVERY tag on a line, not just the one at the\nend -- otherwise a compaction is a way to smuggle an unreadable id in behind a\nreadable one -- and refuses a line whose tags belong to two different sections.\ndigest_merge retires a line only when EVERY row it names is retired: retiring\non the primary tag alone would take live rows down with it.\n\nTHE PEAK IS A WINDOW, NEVER THE NOTE. A window is held twice, in and out at\nthe SAME size, because reserving less assumes the shrink -- so the window is\nhalf the room after directive and margin, and directive + 2*W bounds the call\nwhatever the note weighs. digest_section_cap is the ceiling divided by the\nthree sections that grow, so bounding each one bounds the note by construction\nrather than by a second term kept in step with the first.\n\nSYNTHESIS IS WINDOW-LOCAL and that is named, not hidden: two lines that say\nthe same thing forty apart will not meet. The section is in time order because\nthat is the cheap order to have; clustering by similarity before windowing is\nthe upgrade when the measured collapse rate says so.\n\nAND digest_oversize RETURNS THE WORST SECTION, which stays the worst after\nbeing compacted -- so the loop that asked it, remembered what it had seen and\nbroke on a repeat compacted exactly ONE section and left the other two for\never. It takes `skip` now and is asked for the worst UNHANDLED one."),
     ("0.2.299",
      "0.2.299 ONE TRY AROUND NINE SWEEPS.\n\nTHE HOURLY SWEEP HAS BEEN FAILING ON EVERY PASS and the log said only `sweep\nfailed`, naming nothing. sweep_expired_state hard-deletes the expired state\nbatch in one transaction, memories.supersedes_id is a REAL foreign key, and\ndistill() chains each state note to the one it replaces -- so an expired note\npinned by the live note that superseded it raises FOREIGN KEY constraint\nfailed and sweeps nothing. Not a rare shape, the ORDINARY one: 98 expired\nrows in the field with 63 of them pinned. The old test seeded a single state\nrow with no successor, which is why it stayed green through all of it.\n\nTHE PART THAT ACTUALLY COST SOMETHING: nine sweeps shared one try/except and\nthis one runs FIFTH, so its failure also skipped tombstones, knocks and\nrecalls -- silently, hourly, for as long as the first defect has existed. The\nfield snapshot still holds 3 spent return tickets sweep_recalls should have\ntaken. _sweep_one(label, fn) isolates each sweep and NAMES it in the log;\nevery sweep already owned its transaction, so isolation costs nothing.\n\nTHE DELETE ITSELF IS LEFT REFUSING, ON PURPOSE (operator). The one-line\nunblock is known and is not applied: this is a HARD delete of the last copy,\nand the operator is keeping expired state for later training. Nothing READS\nthose rows either way -- _readable_live and recall both filter\nexpires_ns > now, so the 30-day expiry took them out of the fold and out of\nevery query a month before the sweep ever reached them. Deletion is not the\nloss event; expiry is, and it already happened. The real fix is retention\npolicy -- a terminal status that KEEPS the row, which needs 'expired' in the\nmemories CHECK constraint -- not a tidy-up inside the sweep. A test now\nasserts the refusal, so the day somebody unblocks it they do it deliberately.\n\nThe lesson is this release's own, in a new place: a failure caught too far out\nreports the SYMPTOM and hides both the cause and everything downstream of it.\nOne try around nine calls is one budget around nine terms."),
     ("0.2.298",
@@ -1455,7 +1469,7 @@ _DIGEST_FRAME = (
     "OUTPUT FORMAT, these headings on their own lines, each followed by `- ` bullet lines:\n"
     "RULES\nDECISIONS\nLESSONS\nDROP\nWORK\nOPEN\n"
     "Every bullet under RULES, DECISIONS and LESSONS ENDS with the tag of the row it restates, "
-    "copied EXACTLY from the data: [kind:id8 date]. Never invent a tag, never alter one, never "
+    "copied EXACTLY from the data: [kind:id8]. Never invent a tag, never alter one, never "
     "write an untagged bullet in those three sections. Put each line under the heading its own "
     "tag names: doctrine and contract under RULES, decision under DECISIONS, lesson under "
     "LESSONS.\n"
@@ -1684,6 +1698,22 @@ def digest_budget(ctx, env=""):
     return batch, out
 
 
+def digest_row_budget():
+    """How many ROWS a fold may carry, derived from the token ceiling.
+
+    The operator's ceiling is a TOKEN budget, and the fold's cost is per ROW,
+    so one of them has to be converted -- and it is converted here, once, from
+    a MEASURED cost per stored row rather than from a guess. At 50000 tokens
+    and 116 tokens a row that is 431 rows.
+
+    This is the term the digest never had. Nothing bounded what a fold was
+    offered: a first run pulled every live row the agent could read, 1360 of
+    them today, ~265000 tokens of source, and the note simply stopped wherever
+    the batches ran out -- reported as 57% coverage, which measured the size of
+    the store and not the quality of the fold."""
+    return max(1, DIGEST_MAX_TOKENS // store.DIGEST_INDEX_ROW_TOKENS)
+
+
 def _digest_writer():
     """The writer AND the arithmetic a run is cut against, as one string. It
     is provenance in the digest header, and it is the resume gate's identity
@@ -1693,12 +1723,6 @@ def _digest_writer():
     budget was the bug."""
     return (f"{_script_model or 'server default'} ctx {_digest_ctx or '?'} "
             f"out {_digest_out} batch {_digest_batch // store.CHARS_PER_TOKEN}")
-
-
-def _digest_data_dir():
-    """Where the broker keeps its data -- the db's directory, so a resumable
-    run lives beside the thing it is a cache of and dies with it."""
-    return os.path.dirname(os.path.abspath(_db_path or "."))
 
 
 def _digest_prepare(conn, p, mentor_name=""):
@@ -1726,21 +1750,13 @@ def _digest_prepare(conn, p, mentor_name=""):
         _digest_running[scope] = [0, 0]
         _digest_active = (p.name, scope)
     try:
-        # A FOLD SURVIVES A DEPLOY (24342): an unfinished run cut against the
-        # prior digest that is still live resumes at its next step, over the
-        # SAME batches -- what arrived since its cut point belongs to the next
-        # run. Anything else is stale and the file goes.
-        prior = store.digest_prior(conn, scope)
-        run = None if mentor_name else store.digest_run_load(
-            _digest_data_dir(), scope, prior["uid"] if prior else "", _digest_writer())
-        if run is not None:
-            inputs = run["inputs"]
-            with _digest_lock:
-                _digest_running[scope] = [run["step"], max(1, len(inputs["batches"]))]
-            log.info("%s digest resuming at step %d/%d", p.name, run["step"] + 1,
-                     max(1, len(inputs["batches"])))
-            return scope, None, inputs, run
-        store.digest_run_clear(_digest_data_dir(), scope)
+        # RESUME IS GONE, and it is gone because the thing it defended against
+        # is gone with it. It existed because a 90-minute batch fold on a fleet
+        # that ships every 20 minutes could only finish in silence (24342). The
+        # index takes 32 ms and the conflict pass 250 s, so a deploy now costs
+        # a fold four minutes of writer time and no state at all -- and a
+        # checkpoint nothing needs is a second source of truth about what a run
+        # was cut against.
         mentor = None
         if mentor_name:
             if store.digest_prior(conn, scope) is not None:
@@ -1753,10 +1769,11 @@ def _digest_prepare(conn, p, mentor_name=""):
                                      batch_chars=_digest_batch,
                                      batch_rows=_digest_batch_rows,
                                      tokens_of=lambda s: writer_tokens(s)[0],
-                                     max_tokens=_digest_batch // store.CHARS_PER_TOKEN)
+                                     max_tokens=_digest_batch // store.CHARS_PER_TOKEN,
+                                     row_budget=digest_row_budget())
         with _digest_lock:
             _digest_running[scope] = [0, max(1, len(inputs["batches"]))]
-        return scope, mentor, inputs, None
+        return scope, mentor, inputs
     except (store.BusError, store.AccessError, store.AuthError) as e:
         with _digest_lock:
             _digest_running.pop(scope, None)
@@ -1774,42 +1791,29 @@ def _digest_prepare(conn, p, mentor_name=""):
                              f"digest stays live")
 
 
-def _digest_run(conn, p, scope, mentor, inputs, resume=None):
+def _digest_run(conn, p, scope, mentor, inputs):
     """The fold, on whatever thread holds `conn`: write -> verify -> store,
     with the bookkeeping every path shares -- progress in _digest_running,
     the outcome in _digest_last_try, the scope released at the end. Any
     failure the broker did not foresee is reported with its class and
     message rather than withheld."""
-    reason, refused = "", False
+    reason = ""
     try:
-        return _digest_fold(conn, p, scope, mentor, inputs, resume)
+        return _digest_fold(conn, p, scope, mentor, inputs)
     except (store.BusError, store.AccessError, store.AuthError) as e:
-        # WHO REFUSED DECIDES WHAT SURVIVES (24470). The STORE refusing means
-        # the content is bad -- an invented citation, no digest shape -- and
-        # the run is poisoned. The WRITER refusing means the CALL failed --
-        # context, 5xx, transport, timeout -- and every verified step so far
-        # is still good, so the saved run is kept and the next start resumes
-        # it. Thirty-three steps were thrown away once for want of this line.
+        # WHO REFUSED NO LONGER DECIDES WHAT SURVIVES, because nothing is
+        # saved mid-run any more: a refusal of either kind leaves the PRIOR
+        # digest live and the next attempt starts clean. That distinction
+        # existed to protect 33 verified steps; there are no steps now.
         reason = str(e)
-        refused = not isinstance(e, store.WriterRefusal)
         raise
     except Exception as e:
-        # A CRASH IS NOT A REFUSAL, and this is the deploy case in miniature:
-        # the run's saved state survives an unexpected end exactly as it
-        # survives a container restart, and the next start resumes it. Only a
-        # REFUSAL -- the broker or the store saying no to this run as it
-        # stands -- throws the saved work away (24342 s3).
         reason = f"{type(e).__name__}: {e}"
         log.exception("%s digest failed inside the broker", p.name)
         raise store.BusError(f"digest failed inside the broker: {reason} -- the prior "
                              f"digest stays live")
     finally:
         global _digest_active
-        if refused:
-            # The STORE refused: the content is poisoned, so its saved state
-            # dies with it and the prior digest stays live (24342 s3). A
-            # crash and a WRITER refusal both KEEP it (24470).
-            store.digest_run_clear(_digest_data_dir(), scope)
         with _digest_lock:
             _digest_running.pop(scope, None)
             _digest_active = None
@@ -1819,8 +1823,8 @@ def _digest_run(conn, p, scope, mentor, inputs, resume=None):
 def _digest_job(conn, p, mentor_name=""):
     """Prepare + run on THIS thread: the synchronous whole, for gates and for
     a body that wants to wait in-process. The wire never calls this (24173)."""
-    scope, mentor, inputs, resume = _digest_prepare(conn, p, mentor_name)
-    return _digest_run(conn, p, scope, mentor, inputs, resume)
+    scope, mentor, inputs = _digest_prepare(conn, p, mentor_name)
+    return _digest_run(conn, p, scope, mentor, inputs)
 
 
 def _digest_start(conn, p, mentor_name=""):
@@ -1844,11 +1848,11 @@ def _digest_start(conn, p, mentor_name=""):
         tried, reason = _digest_last_try.get(scope, (0, ""))
     if reason and (time.time_ns() - tried) / 1e9 < DIGEST_MIN_INTERVAL:
         return {"started": False, "why": f"last attempt failed: {reason}"}
-    scope, mentor, inputs, resume = _digest_prepare(conn, p, mentor_name)
+    scope, mentor, inputs = _digest_prepare(conn, p, mentor_name)
 
     def bg():
         try:
-            _digest_run(_conn_for_worker(), p, scope, mentor, inputs, resume)
+            _digest_run(_conn_for_worker(), p, scope, mentor, inputs)
         except Exception as e:                   # the wire has gone; the log and the next call carry it
             log.warning("%s digest not written: %s", p.name, e)
     threading.Thread(target=bg, name="digest", daemon=True).start()
@@ -1856,8 +1860,6 @@ def _digest_start(conn, p, mentor_name=""):
     out = {"started": True, "batches": max(1, len(inputs["batches"])),
            "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since / 1e9)) if since else "",
            "first_run": bool(inputs["first_window_ns"])}
-    if resume:
-        out["resumed_at"] = resume["step"] + 1
     return out
 
 
@@ -1889,99 +1891,200 @@ def _digest_yield(step, steps):
         time.sleep(1)
 
 
-def _digest_fold(conn, p, scope, mentor, inputs, resume=None):
-    """The SEQUENTIAL FOLD (24015): each writer call sees the running digest
-    beside ONE batch and hands back the next running digest, verified and
-    normalized before the next batch. Progress is written to _digest_running
-    so a concurrent asker is told the step. ONE fold holds the writer at a
-    time fleet-wide, and every step yields to the voice first (24223)."""
-    steps = max(1, len(inputs["batches"]))
-    # SEED FROM THE PRIOR, or every fold after the first replaces the whole
-    # note with one hour of traffic. The carried fold got this for free by
-    # re-transcribing; a stateless step has to be handed its own past.
-    running = inputs.get("prior_text", "") or ""
-    why, stripped_total, unsectioned_total = "", 0, 0
-    first, resumed_at = 1, 0
-    writer = _digest_writer()
-    if resume:
-        running, first = resume["running"], resume["step"] + 1
-        resumed_at = first
-    for step in range(first, steps + 1):
-        _digest_yield(step, steps)
-        with _digest_lock:
-            _digest_running[scope] = [step, steps]
-        batch = inputs["batches"][step - 1] if inputs["batches"] else "(nothing since)"
-        data = store.digest_batch_text(store.digest_tags(running), inputs["base"],
-                                       batch, step, steps, tag_cap=digest_tag_cap())
-        messages = digest_prompt(data, protege=mentor is not None, cap=_digest_out)
-        out = None
-        for attempt in (1, 2):
-            # A WRITER'S REFUSAL IS A REFUSAL, NOT A CRASH: a 400 from vLLM
-            # (context exceeded, bad request) or a dead endpoint surfaces
-            # with its text, where "Error executing tool digest" told the
-            # first field caller nothing (2026-09-19).
-            try:
-                text = strip_think("".join(_llm_stream(
-                    _script_url, _script_model, _script_token, messages,
-                    timeout=DIGEST_TIMEOUT_S, max_tokens=_digest_out))).strip()
-            except urllib.error.HTTPError as e:
-                detail = e.read(300).decode("utf-8", "replace") if e.fp else ""
-                raise store.WriterRefusal(f"the script writer refused the fold: HTTP {e.code} "
-                                          f"{detail.strip()} -- the prior digest stays live, "
-                                          f"and this run's saved steps are kept")
-            except (urllib.error.URLError, OSError, TimeoutError) as e:
-                raise store.WriterRefusal(f"the script writer is unreachable: {e} -- the prior "
-                                          f"digest stays live, and this run's saved steps "
-                                          f"are kept")
-            try:
-                add, stripped, unsectioned = store.digest_verify(conn, text, p.rooms, scope)
-                # THE STEP ADDS; THE STORE KEEPS. The writer sees only this
-                # batch, so what it returns is this batch's lines -- merged in
-                # by tag, never swapped for the note.
-                body, dropped = store.digest_delta_split(add)
-                out = store.digest_merge(running, body, dropped)
-                for line in stripped:      # a body can look (24138)
-                    log.info("%s digest step %d/%d stripped untagged: %s",
-                             p.name, step, steps, line[:200])
-                for line in unsectioned:   # 24144: prose before the first heading
-                    log.info("%s digest step %d/%d stripped unsectioned: %s",
-                             p.name, step, steps, line[:200])
-                stripped_total += len(stripped)
-                unsectioned_total += len(unsectioned)
-                break
-            except store.BusError as e:
-                why = str(e)
-                log.warning("%s digest step %d/%d attempt %d refused: %s",
-                            p.name, step, steps, attempt, why)
-        if out is None:
-            raise store.BusError(f"digest refused twice at step {step}/{steps}: {why} "
-                                 f"-- the prior digest stays live")
-        running = out
-        # SAVED AFTER EVERY VERIFIED STEP, never before: what is on disk has
-        # always passed the store's own check.
-        store.digest_run_save(_digest_data_dir(), scope, inputs, step, running, writer)
-    # COVERAGE IS THE NUMBER THAT SAYS A FOLD WORKED, not that it finished
-    # (measured 2026-09-20: 37%, 82 of 132 rows lost, every gate green). Said
-    # out loud and carried in the header; it never REFUSES a fold -- the
-    # operator's ceiling and this are targets, not gates.
-    kept_n, offered_n, missed = store.digest_coverage(inputs["batches"], running)
-    pct = kept_n * 100 // max(offered_n, 1)
-    if missed:
-        log.warning("%s digest coverage %d%% -- %d of %d offered rows never reached "
-                    "the note: %s", p.name, pct, len(missed), offered_n,
-                    " ".join(missed[:20]) + (" ..." if len(missed) > 20 else ""))
-    else:
-        log.info("%s digest coverage %d%% (%d rows)", p.name, pct, offered_n)
-    body = running
-    fact = store.digest_header(name=p.name, inputs=inputs, model=writer,
-                               batches=steps, mentor=mentor, stripped=stripped_total,
-                               unsectioned=unsectioned_total,
-                               resumed_at=resumed_at) + "\n" + body
+_CONFLICT_FRAME = (
+    "You judge whether two RULES from one engineering team's memory can both be obeyed.\n"
+    "Answer with exactly one word on the first line, then one short line of reason.\n"
+    "CONFLICT  -- an agent obeying A would be BREAKING B, or A and B give different "
+    "answers to the same question: a different value, a different owner, a different "
+    "order, a different verdict on the same thing.\n"
+    "AGREE     -- they say the same thing, or one is a restatement, a refinement or a "
+    "special case of the other. Two rules about one topic that can BOTH hold are AGREE, "
+    "not CONFLICT.\n"
+    "UNRELATED -- they are about different things and never interact.\n"
+    "Be CONSERVATIVE: say CONFLICT only when you can name what an agent would have to do "
+    "differently. Wording differences, different levels of detail, and different examples "
+    "of one rule are AGREE. Most pairs are AGREE or UNRELATED.\n"
+    "Format exactly:\nCONFLICT|AGREE|UNRELATED\n<one line naming what differs, or why not>")
+
+CONFLICT_VERDICTS = ("CONFLICT", "AGREE", "UNRELATED")
+DIGEST_CONFLICT_OUT_TOKENS = 120        # one word and one line
+
+
+def conflict_prompt(a, b):
+    """The two messages a conflict judgement is sent. Pure."""
+    return [{"role": "system", "content": _CONFLICT_FRAME},
+            {"role": "user", "content": f"A: {a[:1400]}\n\nB: {b[:1400]}"}]
+
+
+def conflict_verdict(reply):
+    """(verdict, reason) from the writer's answer. UNPARSED is not CONFLICT.
+
+    A judgement that cannot be read is not evidence of anything, and treating
+    it as a finding would put a human on a hunt the model never actually sent
+    them on."""
+    lines = [ln.strip() for ln in (reply or "").splitlines() if ln.strip()]
+    if not lines:
+        return "UNPARSED", ""
+    head = lines[0].upper()
+    verdict = next((v for v in CONFLICT_VERDICTS if v in head), "UNPARSED")
+    return verdict, " ".join(lines[1:])[:300]
+
+
+def _digest_conflicts(conn, p, rows):
+    """Judge the store's candidate pairs. Returns OPEN lines, newest score first.
+
+    THE ONE JOB ONLY A MODEL CAN DO, and the first on this march that measured
+    out worth doing: 124 candidates, 250 seconds, 7 conflicts that each name
+    something an agent would have to do differently. Deduplication measured the
+    other way -- 4 pairs, every one a restatement -- which is why compaction
+    delivered 1% and this does not.
+
+    THE STORE CHOOSES THE PAIRS, THE MODEL ONLY JUDGES THEM. Same division as
+    everywhere else: a deterministic neighbour sweep decides what is worth
+    looking at, and the writer answers one bounded question about each.
+
+    NEVER RAISES UPWARD. A conflict pass that cannot reach the writer leaves a
+    note without a CONFLICTS line, which is exactly what it had before.
+    """
+    pairs = store.digest_conflict_pairs(conn, rows)
+    if not pairs:
+        return []
+    by_uid = {r["uid"]: r for r in rows}
+    found, judged = [], 0
+    for score, a_uid, b_uid in pairs:
+        a, b = by_uid[a_uid], by_uid[b_uid]
+        _digest_yield(judged + 1, len(pairs))
+        try:
+            reply = strip_think("".join(_llm_stream(
+                _script_url, _script_model, _script_token, conflict_prompt(
+                    a["rule"] or a["fact"], b["rule"] or b["fact"]),
+                timeout=DIGEST_TIMEOUT_S, max_tokens=DIGEST_CONFLICT_OUT_TOKENS))).strip()
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
+            log.warning("%s conflict pass stopped after %d of %d: %s",
+                        p.name, judged, len(pairs), e)
+            break
+        judged += 1
+        verdict, why = conflict_verdict(reply)
+        if verdict != "CONFLICT":
+            continue
+        log.info("%s digest CONFLICT %s vs %s (%.3f): %s",
+                 p.name, a_uid[:8], b_uid[:8], score, why[:200])
+        found.append((score, f"- CONFLICT: {why} {store._tag(a)} {store._tag(b)}"))
+    log.info("%s digest conflict pass: %d judged of %d candidates, %d conflict(s)",
+             p.name, judged, len(pairs), len(found))
+    return [line for _s, line in sorted(found, reverse=True)]
+
+
+_STORY_FRAME = (
+    "You write TWO SHORT SECTIONS of one agent's working memory. You are given the "
+    "messages it sent and received. You do NOT write its rules, decisions or lessons -- "
+    "the store indexes those itself and they are not your job.\n"
+    "WORK -- what this agent did and shipped, in the past tense, concrete: versions, "
+    "PR numbers, file names, what landed.\n"
+    "OPEN -- what it still owes and who owes it something, citing messages as [msg:N].\n"
+    "Both are short. At most {cap} tokens for the whole reply. Facts, ids and numbers "
+    "exact; no preamble, no commentary, no code fences.\n"
+    "Emit exactly these two headings, each followed by `- ` bullet lines:\nWORK\nOPEN\n"
+    "A section with nothing to say gets exactly one bullet: `- (none)`.")
+
+DIGEST_STORY_OUT_TOKENS = 500
+
+
+def story_prompt(text, cap=DIGEST_STORY_OUT_TOKENS):
+    """The two messages the WORK/OPEN writer is sent. Pure."""
+    return [{"role": "system", "content": _STORY_FRAME.format(cap=cap)},
+            {"role": "user", "content": text}]
+
+
+def _digest_story(conn, p, scope, inputs):
+    """WORK and OPEN, written by the model. The only sections it still writes.
+
+    Everything with a source row is INDEXED, deterministically and completely;
+    this is the part with no row to copy -- the agent's own narrative -- so it
+    is the one place a writer earns its keep. One call, not a loop: the
+    material is the message window, which a first run already bounds to seven
+    days.
+    """
+    text = inputs["base"] + "\n\n" if inputs.get("base") else ""
+    text += "\n\n".join(inputs["batches"]) if inputs["batches"] else "(nothing since)"
+    # EVERY WRITER CALL YIELDS TO THE VOICE FIRST (24227): a deferrable job on
+    # the interactive model's queue is an outage, not a cost.
+    _digest_yield(1, 1)
+    why = ""
+    for attempt in (1, 2):
+        # ONE RETRY, THEN GIVE UP (24138). The systematic failure class is gone
+        # -- the writer no longer emits tags it could drop -- but a reply with
+        # no recognisable heading is still a reply the store cannot read, and
+        # one retry is cheap where a second only doubles the cost of a class a
+        # retry rarely cures.
+        try:
+            return _story_once(conn, p, scope, text)
+        except store.BusError as e:
+            why = str(e)
+            log.warning("%s digest story attempt %d refused: %s", p.name, attempt, why)
+    raise store.BusError(f"digest refused twice: {why} -- the prior digest stays live")
+
+
+def _story_once(conn, p, scope, text):
+    try:
+        reply = strip_think("".join(_llm_stream(
+            _script_url, _script_model, _script_token, story_prompt(text),
+            timeout=DIGEST_TIMEOUT_S, max_tokens=DIGEST_STORY_OUT_TOKENS))).strip()
+    except urllib.error.HTTPError as e:
+        # A WRITER'S REFUSAL IS A REFUSAL, NOT A CRASH, and the BODY is where
+        # it says why: "maximum context length is 6144" lives there, and
+        # dropping it told the first field caller nothing (2026-09-19).
+        detail = e.read(300).decode("utf-8", "replace") if e.fp else ""
+        raise store.WriterRefusal(f"the script writer refused WORK/OPEN: HTTP {e.code} "
+                                  f"{detail.strip()} -- the prior digest stays live")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        raise store.WriterRefusal(f"the script writer is unreachable: {e} -- the prior "
+                                  f"digest stays live")
+    got, _stripped, _un = store.digest_verify(conn, reply, p.rooms, scope)
+    sections, _said = store._digest_sections(got)
+    return {k: sections.get(k) or ["- (none)"] for k in ("WORK", "OPEN")}
+
+
+def _digest_fold(conn, p, scope, mentor, inputs):
+    """Build the note. THE FOLD IS NO LONGER A LOOP.
+
+    The three tagged sections come from the STORE -- one line per selected row,
+    its own first sentence, ending in its tag -- in milliseconds, with every
+    row present because presence is what the function does. What replaced 22
+    batches of writer calls also replaced everything those calls needed: the
+    running digest, the per-step verify, the tag-id merge, the coverage
+    measurement that could only ever report a shortfall, and the compaction
+    pass that existed to undo the duplication a written fold produced and a
+    written fold alone.
+
+    The model keeps the two sections with no source row to copy, WORK and OPEN,
+    in ONE call. And it gains the job only it can do: judging whether two rules
+    the store found near each other can both be obeyed. Measured on this store,
+    124 candidates in 250 seconds found 7 real conflicts -- against 4 duplicate
+    pairs, all of them restatements, which is why compaction returned 1% and
+    this does not.
+    """
+    rows = inputs.get("rows_kept") or []
+    sections = store.digest_index(rows)
+    changed = store.digest_diff(inputs.get("prior_text", ""), sections)
+    story = _digest_story(conn, p, scope, inputs)
+    conflicts = _digest_conflicts(conn, p, rows)
+    body = "\n".join(
+        f"{k}\n" + ("\n".join(v) if v else "- (none)")
+        for k, v in (("RULES", sections["RULES"]),
+                     ("DECISIONS", sections["DECISIONS"]),
+                     ("LESSONS", sections["LESSONS"]),
+                     ("CHANGED", changed),
+                     ("WORK", story["WORK"]),
+                     ("OPEN", conflicts + story["OPEN"])))
+    fact = store.digest_header(name=p.name, inputs=inputs, model=_digest_writer(),
+                               batches=len(inputs["batches"]), mentor=mentor,
+                               conflicts=len(conflicts)) + "\n" + body
     uid = store.digest_store(conn, scope=scope, author=p.name, fact=fact)
-    store.digest_run_clear(_digest_data_dir(), scope)
-    log.info("%s digest -> %s (%d chars, %d rows in %d batches, %d dropped)", p.name, uid,
-             len(fact), inputs["rows"], steps, len(inputs["dropped"]))
-    return {"id": uid, "chars": len(fact), "batches": steps,
+    log.info("%s digest -> %s (%d chars, %d rows indexed, %d left out, %d conflict(s))",
+             p.name, uid, len(fact), len(rows), inputs.get("left_out", 0), len(conflicts))
+    return {"id": uid, "chars": len(fact), "rows": len(rows),
+            "conflicts": len(conflicts),
             "inputs": {k: inputs[k] for k in ("rows", "dropped", "since_ns", "prior")}}
 
 
@@ -6819,6 +6922,36 @@ async def activity_http(request):
 
 
 @_guard
+async def digest_history_http(request):
+    """GET /agent/digest/history (the AGENT's own bearer + X-Agent): the mind
+    over time, newest first.
+
+    THE CHAIN WAS ALWAYS KEPT AND NEVER SERVED. digest_store has SUPERSEDED
+    rather than deleted since it was written, and digest_history has walked
+    that chain since 0.2.297 -- with nothing on the wire calling it, which
+    makes it unreachable code wearing a docstring. It is an HTTP route rather
+    than a verb on purpose: every MCP tool costs schema tokens in EVERY
+    agent's context forever, and looking at how a mind changed is something a
+    human does occasionally with curl, not something a body does each turn.
+    The per-fold delta a body actually needs already rides in CHANGED.
+
+    `?limit=` bounds the walk; `?full=1` includes each note's text.
+    """
+    p = _acting(request)
+    scope = store.agent_scope(_conn, p.token_id, p.agent_id)
+    try:
+        limit = max(1, min(100, int(request.query_params.get("limit", "20"))))
+    except ValueError:
+        return JSONResponse({"error": "limit must be a number"}, status_code=400)
+    full = request.query_params.get("full") in ("1", "true", "yes")
+    out = store.digest_history(_conn, scope, limit=limit)
+    if not full:
+        for row in out:
+            row.pop("fact", None)
+    return JSONResponse({"agent": p.name, "digests": out, "count": len(out)})
+
+
+@_guard
 async def digest_http(request):
     """POST /agent/digest (the AGENT's own bearer token + X-Agent): the Stop
     hook's fire-and-forget trigger (23979 s6). Answers BEFORE the writer does:
@@ -7594,6 +7727,7 @@ def build_app():
             Route("/rooms/{rid}/owner", room_owner_http, methods=["PATCH"]),
             Route("/agent/activity", activity_http),
             Route("/agent/digest", digest_http, methods=["POST"]),
+            Route("/agent/digest/history", digest_history_http),
             Route("/visits", visits_http, methods=["GET", "POST"]),
             Route("/recalls", recalls_http, methods=["GET", "POST"]),
             Route("/recalls/claim", recall_claim_http, methods=["POST"]),
