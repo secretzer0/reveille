@@ -83,7 +83,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -727,6 +727,37 @@ CREATE TABLE IF NOT EXISTS memory_entities (
 CREATE INDEX IF NOT EXISTS idx_mement_mem ON memory_entities(memory_id);
 """
 _SCHEMA += _MEMORIES_SCHEMA
+
+# A CONFLICT VERDICT IS JUDGED ONCE (v47). Every agent in a room folds over the
+# same rows, so every agent's conflict pass offered the writer the SAME pairs:
+# measured, roc-api-dev and shared-dev shared 95 of 95, and roughly seventeen
+# OverSiteAI bodies each paid ~2.6 minutes of writer time for identical answers.
+#
+# THE KEY IS THE PAIR OF FULL UIDS, sorted, AND THE JUDGE. A uid never changes --
+# an edit writes a new row with a new uid -- so a verdict about two uids can
+# never go stale on CONTENT. It can go stale on the JUDGE: a changed frame or a
+# different model is a different question, so `judge` fingerprints both, and a
+# lookup under a new judge simply misses and re-asks.
+#
+# Every verdict is kept, not only CONFLICT: AGREE and UNRELATED are the 94% that
+# save the work. An UNPARSED or failed judgement is never stored -- it is not
+# evidence of anything, and caching it would make the absence permanent.
+#
+# ponytail: no pruning. A row per candidate pair (~100 per room today) whose
+# uid is retired just stops being asked about; prune by joining to live
+# memories if the table ever measures large.
+_CONFLICT_VERDICTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS conflict_verdicts (
+    a_uid      TEXT NOT NULL,          -- the lesser uid of the pair
+    b_uid      TEXT NOT NULL,          -- the greater
+    judge      TEXT NOT NULL,          -- fingerprint of frame + model
+    verdict    TEXT NOT NULL CHECK (verdict IN ('CONFLICT','AGREE','UNRELATED')),
+    reason     TEXT NOT NULL DEFAULT '',
+    judged_ns  INTEGER NOT NULL,
+    PRIMARY KEY (a_uid, b_uid, judge)
+);
+"""
+_SCHEMA += _CONFLICT_VERDICTS_SCHEMA
 _SCHEMA += _VOICES_SCHEMA
 # messages_fts (DES-001 S1; tokenizer measured on the live corpus, bus msg 8366):
 # unicode61 with tokenchars '-_' keeps fleet vocabulary (ADR-061, wake-127, run_id) as
@@ -2392,10 +2423,19 @@ def _upgrade_v45(conn, db_path):
         conn.execute("PRAGMA user_version=46")
 
 
+def _upgrade_v46(conn, db_path):
+    """v46 -> v47: conflict_verdicts -- a pair judged once is not judged again
+    by the next agent in the room. Additive and idempotent: a new table, no
+    existing row touched, so no snapshot is owed."""
+    with tx(conn):
+        _exec_script(conn, _CONFLICT_VERDICTS_SCHEMA)
+        conn.execute("PRAGMA user_version=47")
+
+
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43, 44, 45)}
+              37, 38, 39, 40, 41, 42, 43, 44, 45, 46)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -8387,6 +8427,35 @@ def memory_similar(conn, text, *, scopes=(), k=10, exclude=(), live_only=True):
 DIGEST_CONFLICT_NEIGHBOURS = 5
 DIGEST_CONFLICT_MIN_SCORE = 0.10
 DIGEST_CONFLICT_MAX_PAIRS = 150     # a fold's budget, ~2 s a judgement
+
+
+CONFLICT_VERDICTS = ("CONFLICT", "AGREE", "UNRELATED")
+
+
+def _pair(a_uid, b_uid):
+    return (a_uid, b_uid) if a_uid < b_uid else (b_uid, a_uid)
+
+
+def conflict_verdict_get(conn, a_uid, b_uid, judge):
+    """(verdict, reason) this judge already gave for the pair, or None."""
+    a, b = _pair(a_uid, b_uid)
+    r = conn.execute("SELECT verdict, reason FROM conflict_verdicts "
+                     "WHERE a_uid=? AND b_uid=? AND judge=?", (a, b, judge)).fetchone()
+    return (r["verdict"], r["reason"]) if r else None
+
+
+def conflict_verdict_put(conn, a_uid, b_uid, judge, verdict, reason=""):
+    """Record a judgement. Anything that is not a real verdict is REFUSED
+    rather than stored: an unparsed reply is not evidence, and caching one
+    would make a missing answer permanent."""
+    if verdict not in CONFLICT_VERDICTS:
+        return False
+    a, b = _pair(a_uid, b_uid)
+    with tx(conn):
+        conn.execute("INSERT OR REPLACE INTO conflict_verdicts"
+                     "(a_uid, b_uid, judge, verdict, reason, judged_ns) VALUES (?,?,?,?,?,?)",
+                     (a, b, judge, verdict, (reason or "")[:300], time.time_ns()))
+    return True
 
 
 def digest_conflict_pairs(conn, rows, *, k=DIGEST_CONFLICT_NEIGHBOURS,
