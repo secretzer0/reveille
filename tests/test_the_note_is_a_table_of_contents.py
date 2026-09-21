@@ -96,3 +96,31 @@ def test_the_whole_live_store_fits_under_the_ceiling():
     budget = daemon.digest_row_budget()
     assert budget >= 1360, "the live store no longer fits -- scope it per agent"
     assert budget * store.DIGEST_INDEX_ROW_TOKENS <= daemon.DIGEST_MAX_TOKENS
+
+
+def test_a_later_fold_indexes_the_WHOLE_hive_not_one_hour_of_it():
+    """SHIPPED AND MEASURED IN THE FIELD: `input: 1 rows`, RULES/DECISIONS/
+    LESSONS all `(none)`, a 732-character note where the prior had 445 rows.
+
+    A MERGING fold accumulated -- each step added to the prior note -- so
+    feeding it only what arrived since that note was right. The INDEX rebuilds
+    the note from rows_kept every time, so windowing the rows by the prior's
+    timestamp makes every fold after the first emit one hour of hive and call
+    it the whole mind. Exactly the defect `running = ""` was, one layer over:
+    the input side stayed incremental after the output side stopped being.
+    """
+    from test_store import _mem_kw, fixture
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    for i in range(4):
+        store.memory_add(c, **kw(kind="decision", fact=f"an early ruling {i}"))
+    scope = store.agent_scope(c, tok["id"], None)
+    store.digest_store(c, scope=scope, author="alice", fact="[digest:x]\nRULES\n- (none)")
+    store.memory_add(c, **kw(kind="decision", fact="one late ruling"))
+    inp = store.digest_inputs(c, name="alice", agent_id=None, token_id=tok["id"],
+                              rooms=[room["id"]], row_budget=500)
+    assert inp["since_ns"], "the prior must still window the messages"
+    assert len(inp["rows_kept"]) == 5, \
+        f"a later fold indexed {len(inp['rows_kept'])} rows, not the whole hive"
+    idx = store.digest_index(inp["rows_kept"])
+    assert len(idx["DECISIONS"]) == 5
