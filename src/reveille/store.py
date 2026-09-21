@@ -7519,7 +7519,13 @@ DIGEST_FIRST_WINDOW_S = 7 * 86400   # a FIRST run folds this much message histor
                                     # activity", not since ever -- measured, since
                                     # ever was 371 batches (~6 h) on a 6144 writer.
                                     # Live hive ROWS are never windowed.
-DIGEST_SECTIONS = ("RULES", "DECISIONS", "LESSONS", "WORK", "OPEN")
+# CHANGED sits between the index and the story because that is the reading
+# order: here is what binds you, here is WHAT MOVED SINCE YOU LAST LOOKED, here
+# is what you were doing. Its lines carry citations rather than claims, so like
+# WORK and OPEN it is not tag-licensed -- a row named there may have just been
+# retired, and refusing the note because a retirement is no longer live would
+# make the one section that reports retirements unable to.
+DIGEST_SECTIONS = ("RULES", "DECISIONS", "LESSONS", "CHANGED", "WORK", "OPEN")
 DIGEST_TAGGED = ("RULES", "DECISIONS", "LESSONS")
 # THE DATE LEFT THE CITATION (measured 2026-09-20). `[lesson:9d384223 2026-09-16]`
 # costs 22.94 tokens a row and `[lesson:9d384223]` costs 11.94 -- 19175 tokens
@@ -8529,6 +8535,63 @@ def digest_header(*, name, inputs, model, batches, mentor=None, conflicts=0):
     if conflicts:
         head += f"\n[conflicts: {conflicts} pair(s) the store found and the writer judged]"
     return head
+
+
+DIGEST_DIFF_MAX = 40        # lines of CHANGED before it summarises instead
+
+
+def digest_diff(prior_text, sections, limit=DIGEST_DIFF_MAX):
+    """What moved between the prior note and this one, as CHANGED lines.
+
+    A BODY COMING BACK AFTER A WEEK WANTS THE DIFF, NOT THE INDEX. The note
+    carries every row it may read -- 445 lines for one agent here -- and almost
+    all of it was already true last time. The part worth a turn's attention is
+    the part that moved, so the store computes it once, at fold time, and puts
+    it where the body already looks: page 1 row 1 of rehydrate().
+
+    PURE SET ARITHMETIC over tag ids, per section, no model. The index is
+    deterministic, so a line differs only when the ROW did -- a supersession
+    rewrote it, or a title lengthened -- and identity is the id, never the
+    prose. That is why this is free: it is the same tags the merge used to
+    compare, asked a different question.
+
+    Over `limit` changes it reports the counts instead of the rows. A body that
+    has been away a month is not served by four hundred lines of what it
+    missed; it is served by knowing that it missed a month.
+    """
+    if not (prior_text or "").strip():
+        # A FIRST FOLD HAS NOTHING TO DIFF AGAINST. Reporting all 445 rows as
+        # "added" would bury the one thing this section exists to surface.
+        return ["- (first digest)"]
+    old, _said = _digest_sections(prior_text)
+    out, added, gone, moved = [], [], [], []
+    for name in DIGEST_TAGGED:
+        was = {i: ln for ln in old.get(name, [])
+               for i in [_digest_tag_id(ln)] if i}
+        now = {i: ln for ln in sections.get(name, [])
+               for i in [_digest_tag_id(ln)] if i}
+        added += [(name, i, now[i]) for i in now.keys() - was.keys()]
+        gone += [(name, i, was[i]) for i in was.keys() - now.keys()]
+        moved += [(name, i, now[i]) for i in now.keys() & was.keys()
+                  if now[i] != was[i]]
+    if not (added or gone or moved):
+        return ["- (nothing moved)"] if prior_text else ["- (first digest)"]
+    total = len(added) + len(gone) + len(moved)
+    if total > limit:
+        return [f"- {len(added)} row(s) added, {len(moved)} restated, "
+                f"{len(gone)} no longer carried -- too many to list; "
+                f"the sections above are current"]
+    for name, _i, line in sorted(added):
+        out.append(f"- NEW {name}: {line[2:]}" if line.startswith("- ") else f"- NEW {name}: {line}")
+    for name, _i, line in sorted(moved):
+        out.append(f"- RESTATED {name}: {line[2:]}" if line.startswith("- ")
+                   else f"- RESTATED {name}: {line}")
+    for name, i, _line in sorted(gone):
+        # The row is NOT quoted: it is gone from the note, and repeating what
+        # it used to say is how a retired rule keeps being obeyed.
+        out.append(f"- DROPPED {name}: [{i}] no longer carried -- retired, or "
+                   f"past this body's budget; recall() still reaches it")
+    return out
 
 
 def digest_history(conn, scope, limit=20):

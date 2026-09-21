@@ -394,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.306",
+     "0.2.306 WHAT MOVED SINCE YOU LAST LOOKED (step 7, the march's last).\n\nA BODY COMING BACK AFTER A WEEK WANTS THE DIFF, NOT THE INDEX. The note carries\nevery row an agent may read -- 445 lines for one body here -- and almost all of\nit was already true last time. digest_diff() computes what moved, once, at fold\ntime, and CHANGED puts it where the body already looks: page 1 row 1 of\nrehydrate(). Measured on the live store: a first fold says `(first digest)`, a\nquiet hour says `(nothing moved)`, and an hour with three new rows, one\nrestatement and two drops renders four lines.\n\nPURE SET ARITHMETIC over tag ids, per section, no model. The index is\ndeterministic, so a line differs only when the ROW did -- a supersession\nrewrote it, a title lengthened -- and identity is the id, never the prose. It\nis free because it is the same tags the deleted merge compared, asked a\ndifferent question. Over 40 changes it reports counts instead: a body away a\nmonth is not served by four hundred lines of what it missed.\n\nA DROPPED ROW IS NAMED AND NEVER QUOTED. Repeating what a retired rule used to\nsay is how a retired rule keeps being obeyed; the citation is enough to\nrecall() it deliberately. And CHANGED is NOT tag-licensed, because a row named\nthere may have just been retired -- licensing it would make the one section\nthat reports retirements unable to.\n\nAND THE CHAIN IS SERVED AT LAST. digest_store has SUPERSEDED rather than\ndeleted since it was written, digest_history has walked that chain since\n0.2.297, and NOTHING ON THE WIRE EVER CALLED IT -- unreachable code wearing a\ndocstring, for nine versions. GET /agent/digest/history serves it, an HTTP\nroute and not a verb on purpose: every MCP tool costs schema tokens in EVERY\nagent's context forever, and reading how a mind changed is something a human\ndoes occasionally with curl, while the per-fold delta a body needs each turn\nalready rides in CHANGED.\n\nAND ADDING IT STOLE THE GUARD OFF THE ROUTE BELOW. Inserting\ndigest_history_http above digest_http put my new function under digest_http's\n@_guard and left digest_http bare -- which is EXACTLY the defect /agent/digest\nshipped with once already, an uncaught AuthError answering a bad credential\nwith an ASGI traceback and a 500 instead of a 401. Same file, same day, same\nmistake, caught by reading the decorators rather than the tests. A gate now\nasserts every principal-resolving route carries it."),
     ("0.2.305",
      '0.2.305 THE ONE JOB ONLY A MODEL CAN DO (step 6, the march\'s target).\n\nMEASURED BEFORE BUILT, because the last plausible assumption about this corpus\ncost 934 GPU-seconds for 1%:\n\n    1360 live rows, 5 nearest neighbours each   4762 distinct live-live pairs\n    same section, similarity >= 0.10             124 candidates\n    judged by the writer, 250 s                  117 AGREE, 7 CONFLICT\n\nUNLIKE DUPLICATION, THE CONFLICTS ARE REAL. Dedup found 4 pairs and every one\nwas a restatement. This found 7 (6 distinct, one pair caught twice) and each\nnames something an agent would have to do differently: a plain <audio> element\nagainst a mandated MediaSource for one wire; the password door "stays open for\nnow" against any OIDC door closing it; CameraPayload field 52 DELETED against\nfield 52 carrying the trigger ROI; about:blank + navigate against\nlocation.reload(); "the manifest is not sufficient" against "the manifest\ncannot hide one"; and an audit-surface rule explicitly superseded by a later\none, still live. The store CHOOSES the pairs and the model only JUDGES them --\nthe same division as everywhere else.\n\nAND THE FOLD STOPPED BEING A LOOP. Step 2 built digest_index and measured it\nand never cut over to it, which left two paths where the rule is one. The\nthree tagged sections now come from the STORE -- one line per selected row,\nits own first sentence, ending in its tag -- and what replaced 22 batches of\nwriter calls also replaced everything those calls needed. Deleted, because\nnothing reaches them any more: the running digest, the per-step verify, the\ntag-id merge and its DROP grammar, digest_batch_text, coverage (which could\nonly ever report a shortfall), and the entire compaction pass from 0.2.300 --\ncorrect, gated, 16 tests, and unreachable the moment each line became one row.\nResume went with it: it existed because a 90-minute batch fold on a fleet that\nships every 20 minutes could only finish in silence, and the index takes 11 ms.\n\nMEASURED END TO END against the live store and the live writer, for one agent:\n\n    index   445 rows -> 445 lines in 11 ms, 0 left out\n    pairs   22 candidates in 1.3 s\n    judge   22 judged in 47 s -> 1 conflict\n    note    15810 real tokens, 31% of the ceiling\n\nagainst the written fold\'s 258 of 445 rows, 29951 tokens and 1244 seconds.\nEvery row carried, half the tokens, a twenty-sixth of the time.\n\nWHAT SURVIVED THE CUTOVER BECAUSE THE LESSON OUTLIVED THE MACHINE: one retry\nthen give up; a writer refusal surfaces with its HTTP BODY, where "maximum\ncontext length is 6144" actually lives; every writer call yields to the voice\nfirst; and a protege inherits its mentor\'s digest. Each of those was a field\ndefect once, each was re-proved against the new shape, and three of them were\nregressions I had already introduced before the tests caught them.\n\nTHE RECALL LIMIT IS NAMED: candidates are each row\'s k nearest neighbours, so\na conflict at rank k+1 is never offered. k buys recall linearly and costs the\njudge linearly.'),
     ("0.2.304",
@@ -2064,6 +2066,7 @@ def _digest_fold(conn, p, scope, mentor, inputs):
     """
     rows = inputs.get("rows_kept") or []
     sections = store.digest_index(rows)
+    changed = store.digest_diff(inputs.get("prior_text", ""), sections)
     story = _digest_story(conn, p, scope, inputs)
     conflicts = _digest_conflicts(conn, p, rows)
     body = "\n".join(
@@ -2071,6 +2074,7 @@ def _digest_fold(conn, p, scope, mentor, inputs):
         for k, v in (("RULES", sections["RULES"]),
                      ("DECISIONS", sections["DECISIONS"]),
                      ("LESSONS", sections["LESSONS"]),
+                     ("CHANGED", changed),
                      ("WORK", story["WORK"]),
                      ("OPEN", conflicts + story["OPEN"])))
     fact = store.digest_header(name=p.name, inputs=inputs, model=_digest_writer(),
@@ -6918,6 +6922,36 @@ async def activity_http(request):
 
 
 @_guard
+async def digest_history_http(request):
+    """GET /agent/digest/history (the AGENT's own bearer + X-Agent): the mind
+    over time, newest first.
+
+    THE CHAIN WAS ALWAYS KEPT AND NEVER SERVED. digest_store has SUPERSEDED
+    rather than deleted since it was written, and digest_history has walked
+    that chain since 0.2.297 -- with nothing on the wire calling it, which
+    makes it unreachable code wearing a docstring. It is an HTTP route rather
+    than a verb on purpose: every MCP tool costs schema tokens in EVERY
+    agent's context forever, and looking at how a mind changed is something a
+    human does occasionally with curl, not something a body does each turn.
+    The per-fold delta a body actually needs already rides in CHANGED.
+
+    `?limit=` bounds the walk; `?full=1` includes each note's text.
+    """
+    p = _acting(request)
+    scope = store.agent_scope(_conn, p.token_id, p.agent_id)
+    try:
+        limit = max(1, min(100, int(request.query_params.get("limit", "20"))))
+    except ValueError:
+        return JSONResponse({"error": "limit must be a number"}, status_code=400)
+    full = request.query_params.get("full") in ("1", "true", "yes")
+    out = store.digest_history(_conn, scope, limit=limit)
+    if not full:
+        for row in out:
+            row.pop("fact", None)
+    return JSONResponse({"agent": p.name, "digests": out, "count": len(out)})
+
+
+@_guard
 async def digest_http(request):
     """POST /agent/digest (the AGENT's own bearer token + X-Agent): the Stop
     hook's fire-and-forget trigger (23979 s6). Answers BEFORE the writer does:
@@ -7693,6 +7727,7 @@ def build_app():
             Route("/rooms/{rid}/owner", room_owner_http, methods=["PATCH"]),
             Route("/agent/activity", activity_http),
             Route("/agent/digest", digest_http, methods=["POST"]),
+            Route("/agent/digest/history", digest_history_http),
             Route("/visits", visits_http, methods=["GET", "POST"]),
             Route("/recalls", recalls_http, methods=["GET", "POST"]),
             Route("/recalls/claim", recall_claim_http, methods=["POST"]),
