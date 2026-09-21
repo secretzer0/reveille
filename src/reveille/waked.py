@@ -24,6 +24,7 @@ reason           producer              means
 message/backlog  the socket            the broker pushed a fact
 mail             the mail probe        direct mail is waiting (F1)
 idle-nudge       the idle timer        time passed; nothing is claimed
+boot             the session watcher   a body appeared; it has no memory yet
 ===============  ====================  ==================================
 
 Mail probe (DES-003 W4, ruling 20404 F1): every ``--mail-probe`` seconds
@@ -31,6 +32,18 @@ Mail probe (DES-003 W4, ruling 20404 F1): every ``--mail-probe`` seconds
 ``GET /agent/activity`` and writes a ``reason=mail`` ring ONLY when DIRECT
 mail is waiting whose newest id it has not already rung for. The agent spends
 a turn when something is addressed to it, and not otherwise.
+
+Session watch (operator, 2026-09-20). The daemon polls the CLI session
+descriptors in each agent's directory -- the same ones the doorbell rings --
+and acts on the two edges only it can see. A session ARRIVING gets a
+``reason=boot`` ring, because a body that has just started has no hive memory
+and, until now, nothing made the doctrine's "rehydrate at boot" actually
+happen. The LAST session leaving triggers ``POST /agent/digest``, so whatever
+that body did is folded while it is gone and the next one rehydrates something
+current rather than an hour stale. A departure that leaves other sessions alive
+is not an exit. On the FIRST census nothing has arrived: those bodies already
+booted, and ringing them would wake every live session on the machine each time
+this daemon restarts -- which is every deploy.
 
 Idle nudge (DES-003 W3): the daemon is the only component that outlives a
 turn boundary, so it is the one that can restart a parked agent whose
@@ -416,6 +429,89 @@ def probe_tick(agent, state, act):
     state["last"] = time.time_ns()       # a ring is activity: it resets W3
     state["armed"] = True                # ...and re-arms the nudge behind it
     return True
+
+
+SESSION_WATCH_S = 5          # how often the session census runs; 0 disables
+
+
+def session_events(was, now, first):
+    """(arrived, departed) -- the pure census decision.
+
+    `first` means this process has not looked before, and then NOTHING has
+    arrived: the sessions it can see have already booted and already have
+    whatever memory they asked for. Ringing them would wake every live body on
+    the machine each time this daemon restarts, which is the opposite of the
+    point -- and the daemon restarts on every deploy.
+    """
+    if first:
+        return set(), set()
+    return set(now) - set(was), set(was) - set(now)
+
+
+def boot_frame():
+    """A CLI with the reveille MCP just appeared: it has no hive memory yet."""
+    return json.dumps({"wake": True, "reason": "boot"})
+
+
+def _reconcile(url, token):
+    """POST /agent/digest -- ask the broker to bring this agent's digest up to
+    date. Fire and forget, and the BROKER decides: it has an interval guard, a
+    one-fold-at-a-time lock and an activity check, none of which belong out
+    here. A refusal is an answer, not an error."""
+    import urllib.request
+    base = url.replace("wss://", "https://").replace("ws://", "http://")
+    base = base.split("/wake")[0]
+    req = urllib.request.Request(base + "/agent/digest", data=b"",
+                                 headers={"Authorization": "Bearer " + token},
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        return {"started": False, "why": f"{type(e).__name__}: {e}"}
+
+
+async def _session_watcher(agent, workdir, interval_s, state, url, token):
+    """Watch the CLI sessions in this agent's directory (operator, 2026-09-20).
+
+    ON ARRIVAL, RING reason=boot. A body that has just started has no hive
+    memory and, until now, no way to learn it should go and get some: the
+    doctrine said rehydrate at boot and nothing made it happen. waked is
+    already the component that can SEE a session appear -- it reads the same
+    descriptors it rings -- so noticing is free and the ring costs the one turn
+    the body was going to spend booting anyway.
+
+    ON THE LAST DEPARTURE, RECONCILE. The agent is gone and whatever it did is
+    not in its digest yet; asking the broker to fold now means the next body
+    rehydrates something current instead of something an hour stale. The
+    request is fire-and-forget because the broker owns every reason to say no.
+
+    A departure that leaves OTHER sessions alive is not an exit -- the identity
+    is still working in another window, and folding mid-work would just be
+    superseded by the next fold.
+    """
+    if interval_s <= 0 or not workdir:
+        return
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            live = {pid for pid, _s, _t in doorbell.inboxes_for(workdir)}
+        except OSError:
+            continue
+        first = "sessions" not in state
+        arrived, departed = session_events(state.get("sessions", set()), live, first)
+        state["sessions"] = live
+        for pid in sorted(arrived):
+            print(f"reveille-waked: {agent}: session {pid} arrived -- ring boot",
+                  file=sys.stderr)
+            write_ring(agent, boot_frame())
+            state["last"] = time.time_ns()
+            state["armed"] = True
+        if departed and not live and token:
+            out = await asyncio.to_thread(_reconcile, url, token)
+            print(f"reveille-waked: {agent}: last session left -- digest "
+                  f"{'started' if out.get('started') else out.get('why', 'refused')}",
+                  file=sys.stderr)
 
 
 async def _mail_prober(agent, interval_s, state, url, token):
@@ -1153,6 +1249,10 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     # probe is worth most exactly when the socket is down.
     prober = asyncio.create_task(
         _mail_prober(agent, mail_probe_s, state, url, token))
+    # THE THIRD THING THAT OUTLIVES A TURN. The nudger knows the clock, the
+    # probe knows the broker, and this one knows whether a BODY is there.
+    watcher = asyncio.create_task(
+        _session_watcher(agent, workdir, SESSION_WATCH_S, state, url, token))
     delay = 1
     first_no_rooms = None   # monotonic stamp of the FIRST refusal of a streak
     last_arrival_ring = None   # monotonic stamp of the last join-me ring
@@ -1326,6 +1426,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
             delay = min(delay * 2, 15)
     finally:
         nudger.cancel()
+        watcher.cancel()
         prober.cancel()
 
 
