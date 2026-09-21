@@ -245,13 +245,16 @@ USE:
    decision is logged with the counter and the effective K with its source
    (override|default) -- the room's OWNER may tune K per room from the web
    room panel (0 = thread-wake off there; empty = the measured default).
-   IDLE NUDGE (W3): after 15 min without any ring (tunable --idle-nudge on
-   waked; 0 disables) the daemon writes one synthetic ring with
-   reason=idle-nudge. On a nudge: inbox() first; resume any owed work (an
-   unfinished slice, an unpushed branch); if blocked on a peer, re-ping that
-   peer ONCE; otherwise do NOTHING and end the turn -- silence is a valid
-   response to a nudge and never a fault. A nudge is a restart of YOUR parked
-   work, not an invitation to manufacture traffic.
+   IDLE NUDGE (W3): after the idle interval without any ring (tunable
+   --idle-nudge on waked; 0 disables) the daemon writes ONE synthetic ring with
+   reason=idle-nudge -- and then waits for a real ring before it will write
+   another. ONE NUDGE PER REAL RING (operator, 2026-09-20): a nudge that finds
+   nothing has spent a model turn, so asking again on a timer only spends more.
+   On a nudge: inbox() first; resume any owed work (an unfinished slice, an
+   unpushed branch); if blocked on a peer, re-ping that peer ONCE; otherwise do
+   NOTHING and end the turn -- silence is a valid response to a nudge and never
+   a fault. A nudge is a restart of YOUR parked work, not an invitation to
+   manufacture traffic.
    ARRIVAL (DES-012 s15): a ring with reason=recalled or reason=not-arrived
    means the credential in THIS directory is a successor that has not landed.
    join() -- that call IS the arrival and commits the swap. Until it happens
@@ -369,7 +372,8 @@ A reason=mail ring is the daemon's probe finding DIRECT mail (60 s, W4); broadca
 unread never rings, because a parentless broadcast is read on my next turn.
 A reason=idle-nudge ring is the daemon restarting my parked work (55 min idle, W3) and it
 is BLIND -- it claims nothing about mail: inbox, resume anything owed, re-ping a blocking
-peer once, else NOTHING -- silence stays valid.
+peer once, else NOTHING -- silence stays valid. It fires ONCE per real ring: having asked
+and found nothing, it does not ask again until something actually arrives.
 Rooms: every message carries room/room_name. I reply in the room it came from (reply_to
 infers it). New thread with 2+ rooms -> I pass room=; I never guess. Cross-room reply is
 refused -- to carry knowledge across, I post a new root message in the target room.
@@ -394,6 +398,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.310",
+     '0.2.310 ONE NUDGE PER REAL RING (operator, 2026-09-20: "there is NO REASON to\nforce tokens to be wasted by communicating a poll that had no data to return...\nthe waked daemon knows if there was anything there and if nothing was and it\nwrote no rings there is no reason to disturb").\n\nMEASURED ON THE HOST THE SAME DAY: 33 idle-nudges against 18 messages and 1\nmail -- and TEN of them inside the same second, because the host daemon serves\neleven identities whose idle timers run together. Every one of those spent a\nmodel turn to find nothing owed.\n\nTHE MAIL PROBE HAS ALWAYS REASONED THIS WAY and the nudge was the one producer\nnobody applied it to. mail_ring_due says it outright: "a spurious ring SPENDS A\nMODEL TURN and is not idempotent, so here the safe fall is to stay quiet", and\nit declines to ring on an undecidable probe for exactly that reason. The nudge\nmeanwhile fired on a bare timer, forever, asking an idle agent hourly whether\nit had become busy.\n\nA REAL RING ARMS IT; FIRING DISARMS IT. The nudge still does the whole of its\njob -- restarting an agent that parked work in an earlier turn, whose ring is\nalready spent -- because it still fires once after any activity, daemon start\nincluded, and whatever was parked before the daemon existed has never been\nasked about. What it no longer does is ask again, on a timer, of an agent that\nanswered the first one by having nothing to do. An agent that parked nothing\nafter its last ring will park nothing by the fifth asking, and a STOPPED agent\nthat ignored the first nudge does not behave differently on the next.\n\nNOT BACKOFF, WHICH IS STILL REFUSED BY RULING: backoff would make an agent\nharder to reach the longer it had been stuck, which is backwards. The interval\nis unchanged; what changed is that the nudge now has a PRECONDITION.\n\nThe W3 gate that asserted a SECOND nudge one interval after the first is\nrewritten rather than deleted -- "never a burst" is still the property, and it\nnow reads five intervals of silence and asserts exactly one ring where the old\nrule would have spent five turns.'),
     ("0.2.309",
      "0.2.309 MEASURE WHAT ACTUALLY SHIPS (the sixth instance, inside the fix for\nthe fifth -- native-doorbell-test again, minutes after that fix landed).\n\n0.2.308 measured the INDEX with the writer's tokenizer and then subtracted a\nCONSTANT for everything beside it: DIGEST_NON_INDEX_TOKENS = 2500 for CHANGED,\nthe conflict lines, WORK and OPEN. Three of those four are variable and none\nwas tokenized. CHANGED is capped at 40 LINES -- the row-count-versus-tokens\nsubstitution deleted from digest_select in the very same commit, one field\nover. The conflict lines have no cap and their count grows with the store. WORK\nand OPEN are writer narrative bounded by nothing but the step cap. And the\novershoot would land in the one part a fit over the index can never weigh, so\nthe trim loop could not see it and would not correct it.\n\nTHE BODY IS THE ARTIFACT, so the body is what is weighed. The assembled note\ngoes through digest_note_fits with the real tokenizer and rows come off the\ntail until it fits. The reserve survives as a REFUSAL THRESHOLD -- the size\npast which the non-index sections are shouted about -- rather than a number\nquietly taken off the ceiling before anything is measured.\n\nEvery earlier bound in this release weighed one part and assumed the rest, and\nevery time the assumption was exactly where the overshoot landed: chars/4\nagainst a real tokenizer, a flat margin against a proportional error, a row\ncount against a token total, and then an index measured beside a constant for\nthe sections next to it. There is no part beside this one.\n\nAND THE INVARIANT NO UNIT TEST ON EITHER SIDE COULD HOLD. On the 0.2.305\nregression they pointed out what the gates could not: the store windows the\nrows, the daemon rebuilds the note from them, BOTH WERE LOCALLY CORRECT, and\nevery gate stayed green while the fold emitted `input: 1 rows` against a\n445-row prior. The test that catches that is not a unit test on either side but\nan assertion ACROSS them. digest_window_check() compares the rows indexed\nagainst the tag count the PRIOR note carried and names the disagreement; the\nheader carries the verdict and the log raises it at ERROR.\n\nCoverage died in 0.2.305 as a measure of the WRITER, which the index made\nvacuous. This is coverage of the WINDOW, which it did not: `input: 1 rows`\nagainst a 445-row prior fails it instantly."),
     ("0.2.308",
