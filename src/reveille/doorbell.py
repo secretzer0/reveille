@@ -180,6 +180,22 @@ def _token_for(pid, base):
     return ""
 
 
+def session_id(pid, base=None):
+    """The CONVERSATION a CLI process is carrying, or "" when unknown.
+
+    A process is not a conversation. `claude --resume` starts a NEW pid that
+    carries the SAME sessionId -- measured: an interrupt-and-continue replaced
+    pid 1691395 with 1700106, both 4a8f2471-..., five seconds apart. The pid
+    says a body arrived; the sessionId says whether it arrived WITH its memory.
+    """
+    try:
+        with open(os.path.join(sessions_dir(base), f"{pid}.json")) as f:
+            d = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return ""
+    return d.get("sessionId") or "" if isinstance(d, dict) else ""
+
+
 def inboxes_for(workdir, base=None):
     """Every live session whose cwd IS `workdir`, as (pid, socket, token).
 

@@ -448,6 +448,31 @@ def session_events(was, now, first):
     return set(now) - set(was), set(was) - set(now)
 
 
+KNOWN_SESSIONS_MAX = 256       # conversations remembered per identity
+
+
+def boot_due(sid, known):
+    """Ring boot for a conversation this daemon has never seen. Pure.
+
+    An EMPTY id rings: a descriptor that does not say which conversation it
+    carries is a body we cannot prove has memory, and the safe fall for a body
+    that might have none is to tell it where its memory is.
+    """
+    return not sid or sid not in known
+
+
+def remember_sessions(known, sids):
+    """Record conversations as seen, oldest evicted past the cap -- a daemon
+    that outlives a year of resumes must not grow a set for each one."""
+    for sid in sids:
+        if not sid:
+            continue
+        known.pop(sid, None)
+        known[sid] = True
+    while len(known) > KNOWN_SESSIONS_MAX:
+        known.pop(next(iter(known)))
+
+
 def boot_frame():
     """A CLI with the reveille MCP just appeared: it has no hive memory yet."""
     return json.dumps({"wake": True, "reason": "boot"})
@@ -501,12 +526,25 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token):
         first = "sessions" not in state
         arrived, departed = session_events(state.get("sessions", set()), live, first)
         state["sessions"] = live
+        known = state.setdefault("known_sessions", {})
         for pid in sorted(arrived):
+            sid = doorbell.session_id(pid)
+            if not boot_due(sid, known):
+                # A RESUME IS NOT A BODY WITHOUT MEMORY. `claude --resume`
+                # starts a new pid carrying the SAME conversation, so its
+                # context already holds whatever it read at its real boot --
+                # ringing it to rehydrate spends a turn and the whole digest
+                # on memory it has (operator: no token spent on a poll with
+                # nothing to return).
+                print(f"reveille-waked: {agent}: session {pid} resumed "
+                      f"{sid[:8]} -- no boot ring", file=sys.stderr)
+                continue
             print(f"reveille-waked: {agent}: session {pid} arrived -- ring boot",
                   file=sys.stderr)
             write_ring(agent, boot_frame())
             state["last"] = time.time_ns()
             state["armed"] = True
+        remember_sessions(known, (doorbell.session_id(pid) for pid in live))
         if departed and not live and token:
             out = await asyncio.to_thread(_reconcile, url, token)
             print(f"reveille-waked: {agent}: last session left -- digest "

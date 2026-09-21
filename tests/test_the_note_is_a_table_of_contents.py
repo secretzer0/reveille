@@ -124,3 +124,26 @@ def test_a_later_fold_indexes_the_WHOLE_hive_not_one_hour_of_it():
         f"a later fold indexed {len(inp['rows_kept'])} rows, not the whole hive"
     idx = store.digest_index(inp["rows_kept"])
     assert len(idx["DECISIONS"]) == 5
+
+
+def test_rows_counts_rows_and_messages_count_messages():
+    """A COUNT THAT CHANGED MEANING KEPT ITS NAME. `items` held rows AND
+    messages until the index cut over, then held MESSAGES ONLY, and
+    `rows = len(items)` went on being called rows. Measured in the field on the
+    first healthy fold after the fix for the last regression: the header said
+    `input: 4 rows` over a 453-row index, and the window check built to catch
+    a truncation raised `[WINDOW: indexed 453 rows but the store only offered
+    4]` -- a false alarm on every fold, which is how an alarm stops being read.
+    """
+    from test_store import _mem_kw, fixture
+    c, admin, room, tok = fixture()
+    kw = lambda **o: _mem_kw(c, admin, room, tok, **o)      # noqa: E731
+    for i in range(7):
+        store.memory_add(c, **kw(kind="decision", fact=f"ruling {i}"))
+    inp = store.digest_inputs(c, name="alice", agent_id=None, token_id=tok["id"],
+                              rooms=[room["id"]], row_budget=500)
+    assert inp["rows"] == len(inp["rows_kept"]) == 7, (inp["rows"], len(inp["rows_kept"]))
+    assert inp["messages"] == 0
+    # and the check that caught nothing but itself stays quiet on a healthy fold
+    prior = "RULES\n" + "\n".join(f"- r [decision:{i:08x}]" for i in range(7))
+    assert store.digest_window_check(inp["rows"], len(inp["rows_kept"]), prior) == ""
