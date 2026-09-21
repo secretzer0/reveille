@@ -7658,14 +7658,14 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
     scopes = rooms + [scope]
     prior = digest_prior(conn, scope)
     items, since, base = [], 0, ""          # items: (ns, line), time order
-    first_window, left_out = False, 0
+    first_window, left_out, rows_kept = False, 0, []
     if mentor is not None:
         mprior = digest_prior(conn, f"agent:{mentor['id']}")
         if mprior is None:
             raise BusError(f"mentor {mentor['name']!r} has no digest yet -- a protege "
                            f"inherits a digest, not a history")
-        base = _block("MENTOR DIGEST -- your baseline: inherit it, then fold the rows below",
-                      [mprior["fact"]])
+        base = _block("MENTOR DIGEST -- the baseline this body inherits",
+                      [_digest_body(mprior["fact"])])
         authored = conn.execute(
             f"SELECT * FROM memories WHERE author=? AND status='live' AND kind!='digest' "
             f"AND (scope='global' OR scope IN ({_ph(rooms)})) ORDER BY created_ns",
@@ -7678,7 +7678,7 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
         for r in list(authored) + _rows_for_tags(conn, mprior["fact"], rooms) + list(binding):
             if r["uid"] not in seen:
                 seen.add(r["uid"])
-                items.append((r["created_ns"], _mem_line(r)))
+                rows_kept.append(r)
     else:
         if prior is not None:
             since = prior["created_ns"]
@@ -7688,8 +7688,7 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
         live = _readable_live(conn, scopes, since)
         if row_budget:
             live, left_out = digest_select(live, row_budget, who=name)
-        for r in live:
-            items.append((r["created_ns"], _mem_line(r)))
+        rows_kept = list(live)
         # A FIRST RUN WINDOWS THE MESSAGES, NEVER THE ROWS (24138): rows are
         # the small, load-bearing part; messages are the bulk, and the
         # operator asked for the last stretch of high activity, not history.
@@ -7762,6 +7761,10 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
             # ROWS THE BUDGET LEFT OUT -- live, queryable, one recall() away,
             # and named in the header so the note never implies it is the store.
             "left_out": left_out,
+            # THE SELECTED ROWS THEMSELVES. digest_index builds the three
+            # tagged sections straight from these -- no batches, no writer, no
+            # step that can decline a row.
+            "rows_kept": rows_kept,
             # THE NOTE THE NEXT FOLD BUILDS ON. Under the carried fold the prior
             # survived by being RE-TRANSCRIBED into step 1's output; the step no
             # longer carries it and the writer is told not to restate recorded
@@ -7788,53 +7791,6 @@ DIGEST_RUN_MAX_AGE_S = 24 * 3600
 
 def digest_run_path(data_dir, scope):
     return os.path.join(data_dir, "digest", f"{scope.replace('/', '_')}.json")
-
-
-def digest_run_save(data_dir, scope, inputs, step, running, writer):
-    """Atomic, after every verified step: a half-written run must read as the
-    previous step, never as a truncated one."""
-    path = digest_run_path(data_dir, scope)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-        json.dump({"inputs": inputs, "step": step, "running": running,
-                   "writer": writer, "saved_ns": time.time_ns()}, f)
-    os.replace(tmp, path)
-    return path
-
-
-def digest_run_load(data_dir, scope, prior_uid, writer=""):
-    """The unfinished run to resume, or None. Resumable means: it exists, it
-    was cut against the prior digest that is STILL live (or both have none),
-    it was cut by the SAME writer under the SAME budget, and it is younger
-    than DIGEST_RUN_MAX_AGE_S. Anything else is stale -- the hive or the
-    arithmetic moved under it -- and the file is removed by the caller.
-
-    The budget belongs in that list because of what it cost when it was not
-    (2026-09-20 15:31:47Z): shared-dev's run was kept across a writer refusal
-    exactly as 0.2.288 intends, and then resumed at the same step with the
-    same oversized batches into the same HTTP 400, every start, for ever. A
-    run whose budget has changed has to be CUT AGAIN; keeping the steps is
-    only worth anything when the next step can still fit."""
-    try:
-        with open(digest_run_path(data_dir, scope)) as f:
-            run = json.load(f)
-    except (OSError, ValueError):
-        return None
-    if (run.get("inputs") or {}).get("prior", "") != (prior_uid or ""):
-        return None
-    if writer and run.get("writer", "") != writer:
-        return None
-    if (time.time_ns() - run.get("saved_ns", 0)) / 1e9 > DIGEST_RUN_MAX_AGE_S:
-        return None
-    if not run.get("inputs", {}).get("batches") or not run.get("step"):
-        return None
-    return run
-
-
-def digest_run_clear(data_dir, scope):
-    with contextlib.suppress(OSError):
-        os.unlink(digest_run_path(data_dir, scope))
 
 
 def digest_batch_text(kept_tags, base, batch, step, steps, tag_cap=0):
@@ -8199,43 +8155,6 @@ def digest_tags(text):
     return out
 
 
-def digest_oversize(text, cap_tokens, tokens_of=None, skip=()):
-    """The worst over-cap section, or "" -- measured in REAL TOKENS.
-
-    `skip` names sections already dealt with this pass. Without it the caller
-    that loops on this function stops at the FIRST section it has handled --
-    the worst one stays the worst after being compacted, so it is returned
-    again and a "have I seen this?" break ends the pass with the other two
-    sections untouched. Asking for the worst UNHANDLED one is the whole fix.
-
-    `tokens_of` is the writer's own counter when we have one; without it this
-    falls back to chars/CHARS_PER_TOKEN, which is an ESTIMATE and is named as
-    one wherever its answer is used. The operator's ceiling is a TOKEN budget
-    (2026-09-20) and a character count is not a token count.
-
-    PER SECTION, NOT PER NOTE, and that is the whole reason a big digest is
-    affordable: compacting one section holds only that section twice, so the
-    peak is directive + 2*S_max rather than directive + 2*D. The note may be
-    far larger than any single context window; no section may be.
-    """
-    count = tokens_of or (lambda s: len(s) // CHARS_PER_TOKEN)
-    sections, _said = _digest_sections(text)
-    worst, worst_n = "", 0
-    for name, lines in sections.items():
-        # ONLY THE SECTIONS THAT GROW. WORK and OPEN are untagged narrative,
-        # rewritten whole by every step and never accumulating, so there is
-        # nothing in them to merge -- and a compaction of them is guaranteed
-        # to fail its own gate, because that gate requires every returned line
-        # to name the rows it speaks for. Measured: two writer calls per pass
-        # spent to be refused, and two alarming lines in the log.
-        if name not in DIGEST_TAGGED or name in skip:
-            continue
-        n = count("\n".join(lines))
-        if n > cap_tokens and n > worst_n:
-            worst, worst_n = name, n
-    return worst
-
-
 # MEASURED, not chosen: 29951 real tokens of stored note across 258 folded
 # rows on the 43-batch run of 2026-09-20. It is what one row COSTS once it is
 # in the note, and it is the only honest way to turn a token ceiling into a
@@ -8393,6 +8312,61 @@ def memory_similar(conn, text, *, scopes=(), k=10, exclude=(), live_only=True):
     return out
 
 
+# CONTRADICTION CANDIDATES (step 6). Measured before built, because the last
+# time a plausible assumption about this corpus went straight to code it cost
+# 934 GPU-seconds for a 1% return.
+#
+#   1360 live rows, 5 nearest neighbours each   4762 distinct live-live pairs
+#   same section and score >= 0.10               124 candidates
+#   judged by the writer, 250 s                  117 AGREE, 7 CONFLICT
+#
+# UNLIKE DUPLICATION, THE CONFLICTS ARE REAL. Dedup found 4 pairs and every one
+# was a restatement; this found 7 (6 distinct -- one pair was caught twice) and
+# each names something an agent would have to do differently:
+#   * a plain <audio> element against a mandated MediaSource, for one wire
+#   * the password door "stays open for now" against any OIDC door closing it
+#   * CameraPayload field 52 DELETED against field 52 carrying the trigger ROI
+#   * about:blank + navigate against location.reload(), for one task
+#   * "the manifest is not sufficient" against "the manifest cannot hide one"
+#   * an audit surface rule explicitly superseded by a later one, still live
+#
+# THE RECALL LIMIT IS NAMED: candidates come from each row's k nearest
+# neighbours, so a conflict sitting at rank k+1 is never offered. k buys recall
+# linearly and costs the judge linearly; 5 found these at 250 seconds.
+DIGEST_CONFLICT_NEIGHBOURS = 5
+DIGEST_CONFLICT_MIN_SCORE = 0.10
+DIGEST_CONFLICT_MAX_PAIRS = 150     # a fold's budget, ~2 s a judgement
+
+
+def digest_conflict_pairs(conn, rows, *, k=DIGEST_CONFLICT_NEIGHBOURS,
+                          min_score=DIGEST_CONFLICT_MIN_SCORE,
+                          limit=DIGEST_CONFLICT_MAX_PAIRS):
+    """[(score, a_uid, b_uid)] -- rows near enough to be about one thing.
+
+    Deterministic and store-side: the model never chooses what to look at, it
+    only judges what the store hands it. Pairs are within ONE SECTION, because
+    a doctrine and a lesson do not contradict -- they operate at different
+    levels -- and mixing them produced noise rather than findings.
+
+    Ordered by score so a truncated run judges the most likely pairs first.
+    """
+    by_uid = {r["uid"]: r for r in rows}
+    best = {}
+    for r in rows:
+        text = r["rule"] if r["kind"] == "lesson" and r["rule"] else r["fact"]
+        for uid, score in memory_similar(conn, text, k=k, exclude=[r["uid"]]):
+            other = by_uid.get(uid)
+            if other is None or score < min_score:
+                continue
+            if _KIND_SECTION.get(r["kind"]) != _KIND_SECTION.get(other["kind"]):
+                continue
+            key = (r["uid"], uid) if r["uid"] < uid else (uid, r["uid"])
+            if score > best.get(key, 0):
+                best[key] = score
+    out = sorted(((s, a, b) for (a, b), s in best.items()), reverse=True)
+    return out[:limit] if limit else out
+
+
 def digest_agent_tokens(name):
     """The component words an agent's NAME claims, for matching row entities.
 
@@ -8533,86 +8507,7 @@ def digest_index(rows, chars=0):
     return out
 
 
-def digest_compact_windows(lines, max_tokens, tokens_of=None):
-    """Cut one section's lines into WINDOWS that each fit `max_tokens`.
-
-    Compaction is the only step that sees lines side by side, so it is the only
-    step that can notice two of them are one fact. It cannot see the whole
-    section: a window is held TWICE (in, and out at the same size, because
-    assuming the shrink is assuming the answer), so the window is bounded by
-    half the writer's room and a large section takes several.
-
-    ponytail: synthesis is therefore WINDOW-LOCAL -- two lines that say the
-    same thing forty lines apart will not meet. The section is in time order
-    and that is the cheap order to have; clustering by similarity before
-    windowing is the upgrade if the measured collapse rate is poor.
-
-    A single line larger than a window is its own window: it cannot be split
-    and refusing it would stall the pass on one row.
-    """
-    count = tokens_of or (lambda s: len(s) // CHARS_PER_TOKEN)
-    out, cur, size = [], [], 0
-    for line in lines:
-        n = count(line)
-        if cur and size + n > max_tokens:
-            out.append(cur)
-            cur, size = [], 0
-        cur.append(line)
-        size += n
-    if cur:
-        out.append(cur)
-    return out
-
-
-def digest_compact_verify(before, after):
-    """Refuse a compaction that moved any ROW. Returns the collapsed line count.
-
-    THE WHOLE SAFETY OF COMPACTION IS THIS COMPARISON. The writer is asked to
-    merge lines that say one thing, and the one thing it must not do is decide
-    a row was not worth carrying -- the same inversion that made the fold keep
-    9% of what it was given. So the tag SET is compared, not the prose: every
-    id that went in must come out, on some line, and no id may appear that did
-    not go in. A writer that drops a row, invents a tag, or silently rewrites
-    an id fails here and the section is left exactly as it was.
-
-    Coverage is a set comparison and NOT a count: a compaction is supposed to
-    return fewer LINES, so counting lines cannot tell a good collapse from a
-    lost row. Counting ids can.
-    """
-    was = {i for _k, i in (tg for ln in before for tg in _digest_line_tags(ln))}
-    now = {i for _k, i in (tg for ln in after for tg in _digest_line_tags(ln))}
-    lost, made = sorted(was - now), sorted(now - was)
-    if lost:
-        raise BusError(f"digest compaction dropped {len(lost)} row(s): "
-                       f"{', '.join(lost[:6])} -- a compaction merges rows, "
-                       f"it never decides one was not worth carrying")
-    if made:
-        raise BusError(f"digest compaction invented {len(made)} tag(s): "
-                       f"{', '.join(made[:6])} -- every id must come from the "
-                       f"lines it was given")
-    for ln in after:
-        tags = _digest_line_tags(ln)
-        if not tags:
-            raise BusError("digest compaction returned an untagged line -- every "
-                           "line in a tagged section names the rows it speaks for")
-        if not _TAG_END.search(ln):
-            raise BusError(f"digest compaction returned a line not ending in a tag: "
-                           f"{ln[:80]}")
-    return len(before) - len(after)
-
-
-def digest_replace_section(text, name, lines):
-    """The note with ONE section swapped for `lines`. Order and every other
-    section are untouched, because compaction is a rewrite of one shelf and
-    must not be a way to reorder the library."""
-    sections, _said = _digest_sections(text)
-    sections[name] = list(lines)
-    return "\n".join(f"{k}\n" + ("\n".join(v) if v else "- (none)")
-                      for k, v in sections.items())
-
-
-def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
-                  unsectioned=0, resumed_at=0):
+def digest_header(*, name, inputs, model, batches, mentor=None, conflicts=0):
     """The provenance lines, written by the STORE, never the model (24015):
     window, rows shown, batches folded, the prior, the writer; a second line
     for a protege's lineage; a third naming any row too large for a batch;
@@ -8622,8 +8517,7 @@ def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
              f"{_d8(inputs['first_window_ns'])} (first run window)"
              if inputs.get("first_window_ns") else "the beginning")
     head = (f"[digest:{name} {when} | since {since} | input: {inputs['rows']} rows, "
-            f"{batches} batches" + (f", resumed at step {resumed_at}" if resumed_at else "") +
-            f" | prior: {inputs['prior'][:8] or 'none'} | "
+            f"{batches} message batches | prior: {inputs['prior'][:8] or 'none'} | "
             f"writer: {model or 'server default'}]")
     if mentor is not None:
         head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
@@ -8632,8 +8526,8 @@ def digest_header(*, name, inputs, model, batches, mentor=None, stripped=0,
                  f"live in the store, reachable with recall()]")
     if inputs["dropped"]:
         head += "\n[dropped: " + ", ".join(inputs["dropped"]) + "]"
-    if stripped or unsectioned:
-        head += f"\n[stripped: {stripped} untagged, {unsectioned} unsectioned]"
+    if conflicts:
+        head += f"\n[conflicts: {conflicts} pair(s) the store found and the writer judged]"
     return head
 
 
