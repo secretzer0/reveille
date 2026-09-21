@@ -7691,7 +7691,15 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
             base = (_block("PRIOR DIGEST -- fold it: keep, update, drop; never append",
                            [prior["fact"]]) + "\n\n" +
                     _block("THE STORE'S VERDICT ON EVERY TAG ABOVE", _verdicts(conn, prior["fact"])))
-        live = _readable_live(conn, scopes, since)
+        # THE ROWS ARE NOT WINDOWED BY `since`, and the index is why. A merging
+        # fold ACCUMULATED -- each step added to the prior note, so feeding it
+        # only what arrived since that note was correct. The index REBUILDS the
+        # note from rows_kept every time, so windowing the rows makes each fold
+        # emit one hour of hive and call it the whole mind: shipped, and
+        # measured in the field at `input: 1 rows` with all three tagged
+        # sections `(none)`. `since` still windows the MESSAGES, which is the
+        # only thing it was ever for.
+        live = _readable_live(conn, scopes, 0)
         if row_budget:
             live, left_out = digest_select(live, row_budget, who=name)
         rows_kept = list(live)
