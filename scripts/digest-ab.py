@@ -71,27 +71,47 @@ def _ask(url, model, token, messages, cap, timeout):
         url, model, token, messages, timeout=timeout, max_tokens=cap))).strip()
 
 
+def _carried_batch_text(running, base, batch, step, steps):
+    """The RETIRED step input: the whole running digest beside one batch. Kept
+    here, outside src/, purely so the shape it replaced can still be measured."""
+    head = (store._block(f"RUNNING DIGEST AFTER STEP {step - 1} OF {steps} -- fold the "
+                         f"batch into it", [running])
+            if running else (base or store._block("NO PRIOR DIGEST", [])))
+    return head + "\n\n" + batch
+
+
 def fold(conn, shape, inputs, scope, rooms, *, url, model, token, cap, steps, timeout):
-    """Run one shape over `inputs['batches']`. Returns (text, stats)."""
-    running, t0, calls, out_chars = "", time.time(), 0, 0
+    """Run one shape over `inputs['batches']`. Returns (text, stats).
+
+    carried = what shipped through 0.2.296: the step holds the whole note.
+    flat    = what ships now: the step holds the batch and the TAG IDS only.
+    """
+    running, t0, calls = "", time.time(), 0
+    out_tok, in_tok = 0, 0
     batches = inputs["batches"][:steps] if steps else inputs["batches"]
     for i, batch in enumerate(batches, 1):
-        data = store.digest_batch_text(running, inputs["base"], batch, i, len(batches))
-        msgs = (daemon.digest_prompt(data, cap=cap) if shape == "linear"
-                else delta_prompt(data, cap))
-        raw = _ask(url, model, token, msgs, cap, timeout)
-        calls += 1
-        out_chars += len(raw)
-        if shape == "linear":
-            running, _stripped, _un = store.digest_verify(conn, raw, list(rooms), scope)
+        if shape == "carried":
+            data = _carried_batch_text(running, inputs["base"], batch, i, len(batches))
         else:
-            body, dropped = store.digest_delta_split(raw)
-            clean, _stripped, _un = store.digest_verify(conn, body, list(rooms), scope)
-            running = store.digest_merge(running, clean, dropped)
-        print(f"  [{shape}] step {i}/{len(batches)}  out {len(raw):5d} chars  "
-              f"digest {len(running):5d} chars", flush=True)
+            data = store.digest_batch_text(store.digest_tags(running), inputs["base"],
+                                           batch, i, len(batches))
+        raw = _ask(url, model, token, daemon.digest_prompt(data, cap=cap), cap, timeout)
+        u = daemon.last_usage()          # THE WRITER'S OWN COUNT, never chars/4
+        calls += 1
+        in_tok += u.get("prompt_tokens", 0)
+        out_tok += u.get("completion_tokens", 0)
+        clean, _stripped, _un = store.digest_verify(conn, raw, list(rooms), scope)
+        if shape == "carried":
+            running = clean
+        else:
+            body, dropped = store.digest_delta_split(clean)
+            running = store.digest_merge(running, body, dropped)
+        print(f"  [{shape:7s}] step {i}/{len(batches)}  prompt {u.get('prompt_tokens', 0):5d} "
+              f"out {u.get('completion_tokens', 0):4d} tok   digest "
+              f"{len(running) // store.CHARS_PER_TOKEN:5d} tok", flush=True)
     return running, {"calls": calls, "seconds": round(time.time() - t0, 1),
-                     "out_chars": out_chars, "digest_chars": len(running)}
+                     "prompt_tokens": in_tok, "completion_tokens": out_tok,
+                     "digest_tokens": len(running) // store.CHARS_PER_TOKEN}
 
 
 def main():
@@ -103,8 +123,11 @@ def main():
     ap.add_argument("--token", default="")
     ap.add_argument("--steps", type=int, default=0, help="0 = the whole window")
     ap.add_argument("--batch-tokens", type=int, default=1500)
-    ap.add_argument("--cap", type=int, default=1588, help="output cap for BOTH shapes")
+    ap.add_argument("--cap", type=int, default=800, help="output cap for BOTH shapes")
     ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--only", choices=("carried", "flat"), default="",
+                    help="run ONE shape -- for finding where a fold lands, "
+                         "where the comparison is already known")
     a = ap.parse_args()
 
     conn = sqlite3.connect(a.db, check_same_thread=False)
@@ -113,33 +136,51 @@ def main():
     scope = store.agent_scope(conn, agent_id, agent_id)
     inputs = store.digest_inputs(conn, name=a.agent, agent_id=agent_id, token_id=token_id,
                                  rooms=rooms, mentor=None,
-                                 batch_chars=a.batch_tokens * store.CHARS_PER_TOKEN)
+                                 batch_chars=a.batch_tokens * store.CHARS_PER_TOKEN,
+                                 batch_rows=daemon.digest_batch_rows(a.cap),
+                                 tokens_of=lambda s: daemon.writer_tokens(s, url=a.url, token=a.token)[0],
+                                 max_tokens=a.batch_tokens)
     n = len(inputs["batches"])
     print(f"{a.agent}: {n} batches, running {a.steps or n} of them, cap {a.cap}\n")
 
     kw = dict(url=a.url, model=a.model, token=a.token, cap=a.cap,
               steps=a.steps, timeout=a.timeout)
-    lin, lin_st = fold(conn, "linear", inputs, scope, rooms, **kw)
+    batches_all = inputs["batches"][:a.steps] if a.steps else inputs["batches"]
+    if a.only:
+        text, st = fold(conn, a.only, inputs, scope, rooms, **kw)
+        real, exact = daemon.writer_tokens(text, url=a.url, token=a.token)
+        kept, offered, missed = store.digest_coverage(batches_all, text)
+        print(f"\n== {a.only} ==\n" + text)
+        print(f"\ncoverage: {kept}/{offered} = {kept*100//max(offered,1)}%  missed {len(missed)}")
+        print("\n== verdict ==")
+        print(json.dumps({a.only: st, "stored_tokens_real": real,
+                          "stored_tokens_exact": exact,
+                          "ceiling": daemon.DIGEST_MAX_TOKENS}, indent=2))
+        return
+    lin, lin_st = fold(conn, "carried", inputs, scope, rooms, **kw)
     print()
-    dlt, dlt_st = fold(conn, "delta", inputs, scope, rooms, **kw)
+    dlt, dlt_st = fold(conn, "flat", inputs, scope, rooms, **kw)
 
-    print("\n== linear ==\n" + lin)
-    print("\n== delta ==\n" + dlt)
-    print("\n== diff (linear -> delta) ==")
+    print("\n== carried (retired) ==\n" + lin)
+    print("\n== flat (shipping) ==\n" + dlt)
+    print("\n== diff (carried -> flat) ==")
     for line in difflib.unified_diff(lin.splitlines(), dlt.splitlines(),
-                                     "linear", "delta", lineterm="", n=1):
+                                     "carried", "flat", lineterm="", n=1):
         print(line)
     lin_tags = {t for t in (store._digest_tag_id(x) for x in lin.splitlines()) if t}
     del_tags = {t for t in (store._digest_tag_id(x) for x in dlt.splitlines()) if t}
     print("\n== verdict ==")
     print(json.dumps({
-        "linear": lin_st, "delta": dlt_st,
+        "carried": lin_st, "flat": dlt_st,
         "tags_linear": len(lin_tags), "tags_delta": len(del_tags),
         "tags_only_in_linear": sorted(lin_tags - del_tags),
         "tags_only_in_delta": sorted(del_tags - lin_tags),
-        "output_chars_saved_pct": (
-            round(100 * (1 - dlt_st["out_chars"] / lin_st["out_chars"]))
-            if lin_st["out_chars"] else None),
+        "prompt_tokens_saved_pct": (
+            round(100 * (1 - dlt_st["prompt_tokens"] / lin_st["prompt_tokens"]))
+            if lin_st["prompt_tokens"] else None),
+        "completion_tokens_saved_pct": (
+            round(100 * (1 - dlt_st["completion_tokens"] / lin_st["completion_tokens"]))
+            if lin_st["completion_tokens"] else None),
     }, indent=2))
 
 

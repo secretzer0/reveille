@@ -11,8 +11,6 @@ The writer is STUBBED at daemon._llm_stream: what it returns is what a model
 would, and the store's verification is the thing under test, not the model.
 """
 
-import json
-import os
 import re
 import sqlite3
 import sys
@@ -76,10 +74,12 @@ def _tag_of(conn, uid):
 
 
 def _good_digest(conn, ids, work="- shipped #305 [msg:%d]"):
+    """WHAT THE WRITER STILL RETURNS: two sections, not five.
+
+    RULES, DECISIONS and LESSONS are INDEXED from the store now -- one line per
+    selected row, in milliseconds, with every row present. The model writes
+    only the part with no source row to copy."""
     return "\n".join([
-        "RULES", f"- never truncate a digest {_tag_of(conn, ids['doctrine'])}",
-        "DECISIONS", f"- fold in batches {_tag_of(conn, ids['decision'])}",
-        "LESSONS", f"- length before signal {_tag_of(conn, ids['lesson'])}",
         "WORK", work % ids["msg"] if "%d" in work else work,
         "OPEN", "- nothing owed",
     ])
@@ -101,9 +101,18 @@ def _principal(tok, room, name):
 def writer(monkeypatch):
     """The stubbed script LLM: `answers` is what successive calls return;
     `calls` records every user turn it was shown."""
-    st = SimpleNamespace(answers=[], calls=[], delay=0.0)
+    st = SimpleNamespace(answers=[], calls=[], delay=0.0, verdicts=[], judged=[])
 
     def fake(url, model, token, messages, timeout, max_tokens=300):
+        # TWO FRAMES REACH THE WRITER NOW. The story call asks for WORK/OPEN;
+        # the conflict pass asks one bounded question per candidate pair. A
+        # stub that answered them both from one queue would let a conflict
+        # judgement eat the story's answer, so they are told apart by the
+        # frame the daemon actually sent.
+        if "CONFLICT|AGREE|UNRELATED" in messages[0]["content"]:
+            st.judged.append(messages[-1]["content"])
+            yield st.verdicts.pop(0) if st.verdicts else "AGREE\nnothing differs"
+            return
         st.calls.append(messages[-1]["content"])
         if st.delay:
             time.sleep(st.delay)
@@ -130,16 +139,19 @@ def test_a_client_cannot_write_a_digest(tmp_path):
         store.memory_add(conn, fact="I am a digest", kind="digest", **_kw(ana, room, "ana"))
 
 
-# g2 ---------------------------------------------------------------------------
 def test_an_invented_tag_refuses_the_whole_digest_and_the_prior_stays_live(tmp_path, writer):
+    """THE STORE STILL DECIDES TRUTH, on the only citations the writer still
+    makes. It no longer writes the tagged sections -- those are indexed -- so
+    the tag it can invent is a [msg:N], and one outside the caller's rooms
+    refuses the run exactly as an invented row id used to."""
     conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
     ids = _seed(conn, room, ana, bob)
     scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
-    prior = store.digest_store(conn, scope=scope, author="ana", fact="[digest:ana]\n" + _good_digest(conn, ids))
-    bad = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
-                                          "[decision:deadbeef 2026-09-19]")
+    prior = store.digest_store(conn, scope=scope, author="ana",
+                               fact="[digest:ana]\n" + _good_digest(conn, ids))
+    bad = _good_digest(conn, ids, work="- shipped [msg:999999]")
     writer.answers = [bad, bad]
-    with pytest.raises(store.BusError, match=r"refused twice.*resolves to no live row"):
+    with pytest.raises(store.BusError, match=r"refused twice.*not a message in your rooms"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
     assert len(writer.calls) == 2, "one retry, then refuse"
     live = store.digest_prior(conn, scope)
@@ -152,10 +164,10 @@ def test_an_untagged_line_is_stripped_and_the_shape_faults_still_refuse(tmp_path
     ids = _seed(conn, room, ana, bob)
     scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
     # 24138: an untagged line is a claim wearing nothing -- STRIPPED, never a refusal
-    text = _good_digest(conn, ids).replace("LESSONS\n", "LESSONS\n- a bare claim with no row\n")
+    text = "LESSONS\n- a bare claim with no row\n" + _good_digest(conn, ids)
     clean, stripped, unsectioned = store.digest_verify(conn, text, {room["id"]: "hive"}, scope)
     assert stripped == ["LESSONS: - a bare claim with no row"] and unsectioned == []
-    assert "a bare claim" not in clean and "length before signal" in clean
+    assert "a bare claim" not in clean and "nothing owed" in clean
     # 24144: a missing section is `(none)`, never a refusal
     clean, _, _ = store.digest_verify(conn, _good_digest(conn, ids).replace("OPEN\n- nothing owed", ""),
                                       {room["id"]: "hive"}, scope)
@@ -234,10 +246,13 @@ def test_a_protege_reads_its_mentor_not_the_room(tmp_path, writer):
     inp = store.digest_inputs(conn, name="cat", agent_id=tok["agent_id"], token_id=tok["id"],
                               rooms={room["id"]: "hive"}, mentor={"id": m["id"], "name": "ana"})
     text = inp["base"] + "\n".join(inp["batches"])
-    assert "MENTOR DIGEST" in inp["base"] and "never truncate a digest" in inp["base"]
-    assert "BOB'S PRIVATE CALL" not in text, "another agent's row reached the protege"
-    assert "a rule that binds everyone" in text, "global lessons bind everyone"
-    assert "fold in batches" in text, "the mentor's authored rows are the skill set"
+    assert "MENTOR DIGEST" in inp["base"]
+    facts = [(r["fact"] or r["rule"] or "") for r in inp["rows_kept"]]
+    assert any("never truncate a digest" in f for f in facts), facts
+    assert "BOB'S PRIVATE CALL" not in text and not any(
+        "BOB'S PRIVATE CALL" in f for f in facts), "another agent's row reached the protege"
+    assert any("a rule that binds everyone" in f for f in facts), "global lessons bind everyone"
+    assert any("fold in batches" in f for f in facts), "the mentor's rows are the skill set"
     assert "[msg:" not in "\n".join(inp["batches"]), "a new body has no messages to fold"
     # not yours: a name the owner does not have
     with pytest.raises(store.AccessError, match="not yours"):
@@ -264,58 +279,39 @@ def test_rehydrate_page_one_row_one_is_the_digest(tmp_path, writer):
     assert page["items"][1]["kind"] == "state"
     head = page["items"][0]["fact"].splitlines()[0]
     assert re.match(r"\[digest:ana \d{4}-\d{2}-\d{2} \| since \d{4}-\d{2}-\d{2} \(first run window\) "
-                    r"\| input: \d+ rows, \d+ batches \| prior: none \| writer: stub-model ctx \? "
+                    r"\| input: \d+ rows, \d+ message batches \| prior: none \| writer: stub-model ctx \? "
                     r"out \d+ batch \d+\]",
                     head), head
 
 
-# g7 ---------------------------------------------------------------------------
-def test_a_writer_smaller_than_the_hive_gets_batches_not_a_truncation(tmp_path, writer, monkeypatch):
-    """24015's gate: a writer whose context holds TWO rows, five rows in ->
-    three calls observed, the final digest cites all five, the header says
-    `5 rows, 3 batches`, nothing dropped."""
+def test_a_writer_smaller_than_the_hive_cannot_truncate_it(tmp_path, writer, monkeypatch):
+    """24015's gate, met a stronger way: the writer's context no longer bounds
+    what the note carries, because the rows never reach the writer.
+
+    The old shape cut the hive into batches sized to the writer and folded them
+    one at a time -- five rows into a two-row context meant three calls, and a
+    step that declined a row dropped it for ever (measured: 57% coverage). The
+    rows are INDEXED now, from the store, in milliseconds. A context of two
+    tokens or two million produces the same note, every selected row present,
+    because presence is what digest_index does rather than something a step
+    might achieve.
+    """
     conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
     ids = _seed(conn, room, ana, bob)
-    # exactly five rows for ana to fold: the four memories ana may read that
-    # _seed made (doctrine, decision, lesson, bob's decision, global lesson
-    # if any) are already there; count what the extractor will see and size
-    # the batch to two lines of it
-    inp = store.digest_inputs(conn, name="ana", agent_id=ana["agent_id"], token_id=ana["id"],
-                              rooms={room["id"]: "hive"}, batch_chars=10**6)
-    lines = "\n".join(inp["batches"]).splitlines()[1:]
-    assert len(lines) >= 5, lines
-    two = max(len(ln) for ln in lines) * 2 + 2
-    monkeypatch.setattr(daemon, "_digest_batch", two)
-    # the stub cites every tagged row it was ever shown, like a faithful fold
-    tags = [store._TAG_ANY.search(ln).group(0) for ln in lines if store._TAG_ANY.search(ln)]
-    writer.default = "\n".join(
-        ["RULES"] + [f"- kept {t}" for t in tags if t.startswith(("[doctrine", "[contract"))] +
-        ["DECISIONS"] + [f"- kept {t}" for t in tags if t.startswith("[decision")] +
-        ["LESSONS"] + [f"- kept {t}" for t in tags if t.startswith("[lesson")] +
-        ["WORK", f"- shipped #305 [msg:{ids['msg']}]", "OPEN", "- nothing owed"])
+    writer.default = _good_digest(conn, ids)
+    monkeypatch.setattr(daemon, "_digest_batch", 40)      # absurdly small
+    monkeypatch.setattr(daemon, "_digest_ctx", 64)
+    kept = store.digest_inputs(conn, name="ana", agent_id=ana["agent_id"],
+                               token_id=ana["id"], rooms={room["id"]: "hive"})["rows_kept"]
+    assert kept, "nothing to fold"
     out = daemon._digest_job(conn, _principal(ana, room, "ana"))
-    expect = -(-len(lines) // 2)
-    assert out["batches"] == expect and len(writer.calls) == expect, (out, len(writer.calls))
-    # THE NOTE IS NOT IN THE PROMPT. Step 1 says nothing is recorded; step 2
-    # names the TAGS already kept, never the lines -- that is what makes the
-    # step's cost flat in the size of the digest.
-    assert "BATCH 1 OF" in writer.calls[0]
-    assert "NOTHING RECORDED YET" in writer.calls[0]
-    assert "ALREADY RECORDED" in writer.calls[1], writer.calls[1][:200]
-    assert "RUNNING DIGEST" not in writer.calls[1], "the step carried the note"
-    shown = "".join(writer.calls)
-    assert all(ln in shown for ln in lines), "a row was truncated away"
     final = store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["fact"]
-    assert all(t in final for t in tags), "the final digest must cite every row folded"
-    assert f"input: {len(lines)} rows, {expect} batches" in final.splitlines()[0], final.splitlines()[0]
-    assert out["inputs"]["dropped"] == [] and "[dropped:" not in final
-    # THE ONE DROP: a single row larger than a whole batch, named by tag
-    big = store.memory_add(conn, fact="Z" * 6000, kind="state", **_kw(ana, room, "ana"))["id"]
-    monkeypatch.setattr(daemon, "_digest_batch", 3000)
-    daemon._digest_job(conn, _principal(ana, room, "ana"))
-    head = store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["fact"]
-    assert f"[dropped: state:{big[:8]} (" in head, head.splitlines()[:3]
-    assert "Z" * 100 not in "".join(writer.calls), "an oversize row was shown anyway"
+    rows = kept
+    for r in rows:
+        assert f"[{r['kind']}:{r['uid'][:8]}]" in final, f"{r['kind']} row was truncated away"
+    assert out["rows"] == len(rows)
+    # ONE call for the story, and the tagged sections cost none at all.
+    assert len(writer.calls) == 1, writer.calls
 
 
 def test_a_broker_without_a_writer_says_so(tmp_path, monkeypatch):
@@ -371,7 +367,10 @@ def test_the_output_is_sized_to_the_writer_not_only_the_batch():
     assert daemon.DIGEST_DIRECTIVE_TOKENS + b + out <= 6144 - daemon.digest_margin(6144)
     b, out = daemon.digest_budget(32768)
     assert out == daemon.DIGEST_STEP_OUT_TOKENS, "a step's output never scales with ctx"
-    assert b == 32768 - 700 - daemon.digest_margin(32768) - daemon.DIGEST_STEP_OUT_TOKENS
+    # the ALREADY RECORDED list is a budgeted term too -- unbudgeted, it grew
+    # with the row count and overflowed a fold at step 19 (2026-09-20)
+    assert b == (32768 - 700 - daemon.DIGEST_TAGS_TOKENS - daemon.digest_margin(32768)
+                 - daemon.DIGEST_STEP_OUT_TOKENS)
     assert daemon.digest_budget(0) == (store.DIGEST_INPUT_TOKENS, daemon.DIGEST_STEP_OUT_TOKENS)
     b, out = daemon.digest_budget(32768, env="3000")
     assert b == 3000 and out == daemon.DIGEST_STEP_OUT_TOKENS, "env caps the batch, never the output"
@@ -440,25 +439,6 @@ def test_an_unforeseen_failure_is_reported_not_withheld(tmp_path, monkeypatch):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
 
 
-def test_a_dropped_tag_does_not_throw_away_the_run(tmp_path, writer):
-    """24138: the stub emits one tagged and one untagged line under LESSONS ->
-    the digest lands with the tagged line only and the header counts the
-    strip; an invented id is still a refusal and the prior stays live."""
-    conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
-    ids = _seed(conn, room, ana, bob)
-    writer.default = _good_digest(conn, ids).replace(
-        "LESSONS\n", "LESSONS\n- the writer forgot this one's tag\n")
-    out = daemon._digest_job(conn, _principal(ana, room, "ana"))
-    fact = store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["fact"]
-    assert "[stripped: 1 untagged, 0 unsectioned]" in fact.splitlines()[1], fact.splitlines()[:3]
-    assert "forgot this one" not in fact and "length before signal" in fact
-    writer.default = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
-                                                     "[decision:deadbeef 2026-09-19]")
-    with pytest.raises(store.BusError, match="resolves to no live row"):
-        daemon._digest_job(conn, _principal(ana, room, "ana"))
-    assert store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["uid"] == out["id"]
-
-
 def test_a_first_run_windows_the_messages_never_the_rows(tmp_path, monkeypatch):
     conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
     ids = _seed(conn, room, ana, bob)
@@ -475,7 +455,9 @@ def test_a_first_run_windows_the_messages_never_the_rows(tmp_path, monkeypatch):
                               rooms={room["id"]: "hive"})
     text = "\n".join(inp["batches"])
     assert "two days old" in text and "thirty days old" not in text
-    assert "never truncate a digest" in text, "a 30-day-old LIVE row is never windowed"
+    facts = [(r["fact"] or r["rule"] or "") for r in inp["rows_kept"]]
+    assert any("never truncate a digest" in f for f in facts), \
+        "a 30-day-old LIVE row is never windowed -- it rides in rows_kept"
     assert inp["first_window_ns"] and "FIRST RUN WINDOW" in text
     head = store.digest_header(name="ana", inputs=inp, model="m", batches=1)
     assert "(first run window)" in head, head
@@ -488,39 +470,33 @@ def test_a_first_run_windows_the_messages_never_the_rows(tmp_path, monkeypatch):
 
 
 def test_section_shape_is_normalized_never_refused(tmp_path, writer):
-    """24144: the writer emits the sections it has, in the order it thinks of
-    them, sometimes with prose first; the store re-emits the canonical five."""
+    """24144 survives the cutover, narrowed to what the writer still emits.
+
+    It returns WORK and OPEN, in whatever order it thinks of them, sometimes
+    with prose first; the store re-emits the canonical shape and strips the
+    prose. Only a reply with NO recognised heading is refused. The three tagged
+    sections are no longer the writer's to shape -- they are indexed -- so the
+    scrambling that used to reach them cannot any more.
+    """
     conn, u, room, ana, bob = _world(str(tmp_path / "b.db"))
     ids = _seed(conn, room, ana, bob)
     writer.default = "\n".join([
         "Here is the digest you asked for.",
-        "lessons", f"- length before signal {_tag_of(conn, ids['lesson'])}",
-        "RULES:", f"- never truncate a digest {_tag_of(conn, ids['doctrine'])}",
-        "## Rules", f"- never truncate a digest, again {_tag_of(conn, ids['doctrine'])}",
+        "open", "- nothing owed",
+        "WORK:", f"- shipped #305 [msg:{ids['msg']}]",
     ])
     daemon._digest_job(conn, _principal(ana, room, "ana"))
     fact = store.digest_prior(conn, store.agent_scope(conn, ana["id"], ana["agent_id"]))["fact"]
-    body = fact.split("\n", 2)[2]
+    body = fact.split("\n", 1)[1]
     heads = [ln for ln in body.splitlines() if ln in store.DIGEST_SECTIONS]
     assert heads == list(store.DIGEST_SECTIONS), heads
-    assert "DECISIONS\n- (none)" in body and "WORK\n- (none)" in body and "OPEN\n- (none)" in body
-    # A TAG NAMES ONE ROW, so the two RULES lines sharing a doctrine id collapse
-    # to the LAST statement of it -- that is the merge rule, not a loss. The
-    # ordering that still matters is between SECTIONS, and the lesson is filed
-    # under LESSONS by its own tag rather than left wherever the writer put it.
-    assert body.count("never truncate a digest") == 1, body
-    assert "never truncate a digest, again" in body, body
-    assert body.index("never truncate a digest") < body.index("length before signal")
-    assert "LESSONS\n- length before signal" in body, body
+    assert "WORK\n- shipped #305" in body, body
     assert "Here is the digest" not in body
-    assert "[stripped: 0 untagged, 1 unsectioned]" in fact.splitlines()[1], fact.splitlines()[:3]
-    # the next step is shown the NORMALIZED running digest
-    writer.default = _good_digest(conn, ids)
-    daemon._digest_job(conn, _principal(ana, room, "ana"))
-    assert "RUNNING DIGEST" not in writer.calls[-1] or True   # single batch: base carries the prior
-    assert "DECISIONS\n- (none)" in writer.calls[-1], "the prior fed forward was not the normalized text"
-    # prose with no heading at all is not a digest
+    # AND THE INDEX FILLED WHAT THE WRITER NEVER TOUCHED.
+    assert "RULES\n- RULE: never truncate a digest" in body, body
+    # prose with no heading at all is still not a digest
     writer.default = "no headings here, only opinions"
+    writer.answers = []
     with pytest.raises(store.BusError, match="not a digest"):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
 
@@ -567,8 +543,8 @@ def test_the_verb_starts_and_never_waits_and_rehydrate_reads(tmp_path, writer, m
     # a failed run: the next call carries the reason, not a bare refusal
     monkeypatch.setattr(daemon, "_digest_last_try", {})
     writer.delay = 0.0
-    writer.default = _good_digest(conn, ids).replace(_tag_of(conn, ids["decision"]),
-                                                     "[decision:deadbeef 2026-09-19]")
+    # the citation the writer can still get wrong is a [msg:N] it cannot read
+    writer.default = _good_digest(conn, ids, work="- shipped [msg:999999]")
     out2 = asyncio.run(daemon.digest(mentor="", ctx=ctx))
     assert out2["started"] is True
     deadline = time.monotonic() + 10
@@ -576,7 +552,7 @@ def test_the_verb_starts_and_never_waits_and_rehydrate_reads(tmp_path, writer, m
         time.sleep(0.05)
     out3 = asyncio.run(daemon.digest(mentor="", ctx=ctx))
     assert out3["started"] is False and "last attempt failed" in out3["why"] \
-        and "resolves to no live row" in out3["why"], out3
+        and "not a message in your rooms" in out3["why"], out3
 
 
 def test_the_fold_yields_to_the_voice(tmp_path, writer, monkeypatch):
@@ -652,86 +628,6 @@ def test_the_kill_switch_answers_both_paths_by_name(tmp_path, monkeypatch):
         daemon._digest_job(conn, _principal(ana, room, "ana"))
 
 
-def test_a_fold_survives_a_deploy_and_resumes_at_the_next_step(tmp_path, writer, monkeypatch):
-    """24342: three folds died to three deploys in one evening. A run is
-    saved after every verified step; the next start resumes it over the SAME
-    batches and the writer is called once per REMAINING step, not per step."""
-    db = str(tmp_path / "b.db")
-    conn, u, room, ana, bob = _world(db)
-    ids = _seed(conn, room, ana, bob)
-    for i in range(12):
-        store.send(conn, store.agent_principal(ana["agent_id"]), "*", "y" * 300,
-                   subject=f"note {i}", room=room["id"])
-    monkeypatch.setattr(daemon, "_db_path", db)
-    monkeypatch.setattr(daemon, "_digest_batch", 1200)
-    writer.default = _good_digest(conn, ids)
-
-    # the deploy: the fold dies after step 2, exactly as a container restart
-    # kills it -- nothing is cleaned up, the file on disk is all that is left
-    class Killed(RuntimeError):
-        pass
-
-    real = store.digest_run_save
-    saves = []
-
-    def save_then_die(data_dir, scope, inputs, step, running, wr):
-        saves.append(step)
-        real(data_dir, scope, inputs, step, running, wr)
-        if step == 2:
-            raise Killed("deploy")
-    monkeypatch.setattr(store, "digest_run_save", save_then_die)
-    with pytest.raises(store.BusError, match="Killed"):
-        daemon._digest_job(conn, _principal(ana, room, "ana"))
-    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
-    # a CRASH is not a refusal: the saved run must still be there
-    run = store.digest_run_load(daemon._digest_data_dir(), scope, "")
-    assert run is not None and run["step"] == 2, run and run["step"]
-    steps = len(run["inputs"]["batches"])
-    assert steps > 3, "the batch size must force a multi-step run or this proves nothing"
-
-    monkeypatch.setattr(store, "digest_run_save", real)
-    writer.calls.clear()
-    out = daemon._digest_job(conn, _principal(ana, room, "ana"))
-    assert len(writer.calls) == steps - 2, (
-        f"resumed run called the writer {len(writer.calls)} times, expected {steps - 2}")
-    fact = store.digest_prior(conn, scope)["fact"]
-    assert "resumed at step 3" in fact.splitlines()[0], fact.splitlines()[0]
-    assert out["id"]
-    # landed -> the run file is gone
-    assert store.digest_run_load(daemon._digest_data_dir(), scope, out["id"]) is None
-    assert not os.path.exists(store.digest_run_path(daemon._digest_data_dir(), scope))
-
-
-def test_a_saved_run_is_stale_when_the_hive_moved_under_it(tmp_path, writer, monkeypatch):
-    """Resumable means cut against the prior digest that is STILL live, and
-    younger than a day. Anything else is a fresh run."""
-    db = str(tmp_path / "b.db")
-    conn, u, room, ana, bob = _world(db)
-    ids = _seed(conn, room, ana, bob)
-    monkeypatch.setattr(daemon, "_db_path", db)
-    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
-    inputs = {"batches": ["b1", "b2"], "prior": "abc123"}
-    d = daemon._digest_data_dir()
-    store.digest_run_save(d, scope, inputs, 1, "running text", "w")
-    assert store.digest_run_load(d, scope, "abc123")["step"] == 1
-    assert store.digest_run_load(d, scope, "different") is None, "the prior moved: not resumable"
-    assert store.digest_run_load(d, scope, "") is None
-    # ...and cut by the same writer under the same budget (0.2.289)
-    assert store.digest_run_load(d, scope, "abc123", "w")["step"] == 1
-    assert store.digest_run_load(d, scope, "abc123", "w out 1588") is None, (
-        "the budget moved: the batches were cut against arithmetic that no longer holds")
-    # too old
-    path = store.digest_run_path(d, scope)
-    stale = json.loads(open(path).read())
-    stale["saved_ns"] = time.time_ns() - (store.DIGEST_RUN_MAX_AGE_S + 60) * 10**9
-    open(path, "w").write(json.dumps(stale))
-    assert store.digest_run_load(d, scope, "abc123") is None, "a day-old run is not resumable"
-    # and a fresh start clears whatever was there
-    writer.default = _good_digest(conn, ids)
-    daemon._digest_job(conn, _principal(ana, room, "ana"))
-    assert not os.path.exists(path) or store.digest_run_load(d, scope, "abc123") is None
-
-
 def test_the_budget_keeps_slack_because_our_tokenizer_is_not_the_writers():
     """Field defect 2026-09-20 02:35Z, one token over: the first long fold
     died at `maximum context length is 6144 tokens ... at least 6145`. The
@@ -781,100 +677,3 @@ def test_the_slack_scales_with_the_request_because_the_error_does():
         daemon.digest_budget(2500)
 
 
-def test_a_run_whose_budget_moved_is_cut_again_not_resumed(tmp_path, writer, monkeypatch):
-    """The other half of 15:31:47Z. 0.2.288 keeps a run across a writer
-    refusal -- right -- but when the BUDGET is what refused, resuming replays
-    the same oversized batches into the same HTTP 400 at every start, for
-    ever, and the fix that ships next can never reach it. A saved run carries
-    the writer and its arithmetic; when they move, the run is re-cut."""
-    db = str(tmp_path / "b.db")
-    conn, u, room, ana, bob = _world(db)
-    ids = _seed(conn, room, ana, bob)
-    for i in range(12):
-        store.send(conn, store.agent_principal(ana["agent_id"]), "*", "y" * 300,
-                   subject=f"note {i}", room=room["id"])
-    monkeypatch.setattr(daemon, "_db_path", db)
-    monkeypatch.setattr(daemon, "_digest_batch", 1200)
-    monkeypatch.setattr(daemon, "_digest_out", 1844)
-    writer.default = _good_digest(conn, ids)
-
-    class Killed(RuntimeError):
-        pass
-
-    real = store.digest_run_save
-
-    def save_then_die(data_dir, scope, inputs, step, running, wr):
-        real(data_dir, scope, inputs, step, running, wr)
-        if step == 2:
-            raise Killed("deploy")
-    monkeypatch.setattr(store, "digest_run_save", save_then_die)
-    with pytest.raises(store.BusError, match="Killed"):
-        daemon._digest_job(conn, _principal(ana, room, "ana"))
-    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
-    run = store.digest_run_load(daemon._digest_data_dir(), scope, "")
-    assert run is not None and run["step"] == 2
-    steps = len(run["inputs"]["batches"])
-    assert steps > 3, "the batch size must force a multi-step run or this proves nothing"
-
-    # the deploy that fixes the budget: out shrinks under the bigger margin
-    monkeypatch.setattr(store, "digest_run_save", real)
-    monkeypatch.setattr(daemon, "_digest_out", 1588)
-    writer.calls.clear()
-    daemon._digest_job(conn, _principal(ana, room, "ana"))
-    assert len(writer.calls) == steps, (
-        f"the budget moved and the run was RESUMED anyway: {len(writer.calls)} writer calls, "
-        f"expected a fresh cut of {steps}")
-    fact = store.digest_prior(conn, scope)["fact"]
-    assert "resumed at step" not in fact.splitlines()[0], fact.splitlines()[0]
-
-
-def test_a_writer_refusal_keeps_the_run_and_a_store_refusal_clears_it(tmp_path, writer, monkeypatch):
-    """24470: the writer's 400 threw away 33 verified steps because it
-    arrived as a plain BusError and read as 'this run is bad'. Who refused
-    decides what survives: the STORE refuses CONTENT (poisoned, clear), the
-    WRITER refuses a CALL (the steps are still good, keep and resume)."""
-    import io
-    import urllib.error
-    db = str(tmp_path / "b.db")
-    conn, u, room, ana, bob = _world(db)
-    ids = _seed(conn, room, ana, bob)
-    for i in range(12):
-        store.send(conn, store.agent_principal(ana["agent_id"]), "*", "y" * 300,
-                   subject=f"note {i}", room=room["id"])
-    monkeypatch.setattr(daemon, "_db_path", db)
-    monkeypatch.setattr(daemon, "_digest_batch", 1200)
-    good = _good_digest(conn, ids)
-    scope = store.agent_scope(conn, ana["id"], ana["agent_id"])
-
-    # ONE stub for the whole test, reading live state: the fixture's own
-    # patch would otherwise be replaced and later phases would never see the
-    # text they set (caught by this gate's first run).
-    st = {"calls": 0, "die_on": 3, "text": good}
-
-    def stub(url, model, token, messages, timeout, max_tokens=300):
-        st["calls"] += 1
-        if st["calls"] == st["die_on"]:
-            raise urllib.error.HTTPError(
-                "http://stub/v1/chat/completions", 400, "Bad Request", {},
-                io.BytesIO(b'{"error":{"message":"maximum context length is 6144 tokens"}}'))
-        yield st["text"]
-    monkeypatch.setattr(daemon, "_llm_stream", stub)
-    with pytest.raises(store.WriterRefusal, match="maximum context length"):
-        daemon._digest_job(conn, _principal(ana, room, "ana"))
-    run = store.digest_run_load(daemon._digest_data_dir(), scope, "")
-    assert run is not None and run["step"] == 2, (
-        "a writer refusal threw away the verified steps")
-
-    # and it resumes: the writer recovers, the run picks up at step 3
-    st["die_on"] = 0
-    out = daemon._digest_job(conn, _principal(ana, room, "ana"))
-    fact = store.digest_prior(conn, scope)["fact"]
-    assert "resumed at step 3" in fact.splitlines()[0], fact.splitlines()[0]
-    assert out["id"]
-
-    # the STORE's refusal is the other kind: content poisoned, run cleared
-    st["text"] = good.replace(_tag_of(conn, ids["decision"]), "[decision:deadbeef 2026-09-20]")
-    with pytest.raises(store.BusError, match="resolves to no live row"):
-        daemon._digest_job(conn, _principal(ana, room, "ana"))
-    assert store.digest_run_load(daemon._digest_data_dir(), scope, out["id"]) is None, (
-        "a poisoned run was kept")
