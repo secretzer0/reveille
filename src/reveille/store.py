@@ -7640,7 +7640,8 @@ DIGEST_LINE_TOKENS = 40     # measured: a restated row plus its [kind:id8]
 
 def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
                   batch_chars=DIGEST_INPUT_TOKENS * CHARS_PER_TOKEN,
-                  batch_rows=0, tokens_of=None, max_tokens=0, row_budget=0):
+                  batch_rows=0, tokens_of=None, max_tokens=0, row_budget=0,
+                  index_ceiling=0):
     """Deterministic extraction (23979 s2/s8'), cut into BATCHES for a writer
     whose context is smaller than the hive (operator 24003): the caller folds
     them in order, each call = the running digest + one batch.
@@ -7664,7 +7665,7 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
     scopes = rooms + [scope]
     prior = digest_prior(conn, scope)
     items, since, base = [], 0, ""          # items: (ns, line), time order
-    first_window, left_out, rows_kept = False, 0, []
+    first_window, left_out, cut_binding, rows_kept = False, 0, 0, []
     if mentor is not None:
         mprior = digest_prior(conn, f"agent:{mentor['id']}")
         if mprior is None:
@@ -7701,7 +7702,9 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
         # only thing it was ever for.
         live = _readable_live(conn, scopes, 0)
         if row_budget:
-            live, left_out = digest_select(live, row_budget, who=name)
+            live, left_out, cut_binding = digest_select(
+                live, row_budget, who=name, tokens_of=tokens_of,
+                max_tokens=max(0, (index_ceiling or 0) - DIGEST_NON_INDEX_TOKENS))
         rows_kept = list(live)
         # A FIRST RUN WINDOWS THE MESSAGES, NEVER THE ROWS (24138): rows are
         # the small, load-bearing part; messages are the bulk, and the
@@ -7775,6 +7778,7 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
             # ROWS THE BUDGET LEFT OUT -- live, queryable, one recall() away,
             # and named in the header so the note never implies it is the store.
             "left_out": left_out,
+            "cut_binding": cut_binding,
             # THE SELECTED ROWS THEMSELVES. digest_index builds the three
             # tagged sections straight from these -- no batches, no writer, no
             # step that can decline a row.
@@ -8421,8 +8425,56 @@ def digest_rank(row, who, toks):
     return 3
 
 
-def digest_select(rows, budget, who=""):
-    """(kept, left_out) -- the rows a fold may carry, bounded BEFORE any GPU.
+# WHAT THE NOTE HOLDS BESIDE THE INDEX, reserved rather than discovered:
+# CHANGED at its 40-line cap (~35 tok a line), the conflict lines, WORK and
+# OPEN. The index must not spend the ceiling it does not own.
+DIGEST_NON_INDEX_TOKENS = 2500
+
+
+def digest_fit(rows, max_tokens, tokens_of, chars=0):
+    """(kept, dropped) -- the longest prefix of `rows` whose INDEX fits.
+
+    THE FIFTH INSTANCE OF A BUDGET SOLVED AS AN EQUALITY, found by
+    native-doorbell-test from my own published numbers. The bound was a ROW
+    COUNT derived from an ASSUMED cost of 34 tokens a row, while the thing
+    being bounded is TOKENS -- so nothing measured the real total and any
+    corpus whose rows run wordier silently went over. Measured: the whole store
+    indexes at 33.71 tok/row and 1470 rows land at 49556 against a 50000
+    ceiling, 0.9% of headroom; one room's mix measured 35.53 and the same 1470
+    rows would land at 52229, over by 2229. Per-line cost runs 18 to 54 tokens.
+    A constant cannot bound that and was never asked to.
+
+    So the ceiling is MEASURED, once, with the writer's own tokenizer -- one
+    call for the whole index, not one per row -- and the tail is dropped until
+    it fits. `rows` arrives in SELECTION order, which is tier order, so the
+    tail is the least binding material and the rules a peer could break are
+    never what gets cut.
+
+    The loop halves its overshoot rather than stepping, so a wildly oversized
+    corpus converges in a handful of calls instead of a thousand.
+    """
+    if not tokens_of or max_tokens <= 0 or not rows:
+        return list(rows), 0
+    kept = list(rows)
+    for _ in range(12):
+        lines = [ln for v in digest_index(kept, chars).values() for ln in v]
+        if not lines:
+            return kept, len(rows) - len(kept)
+        total = tokens_of("\n".join(lines))
+        if total <= max_tokens:
+            return kept, len(rows) - len(kept)
+        # Cut by the measured overshoot, never by one row at a time.
+        per = total / len(lines)
+        drop = max(1, int((total - max_tokens) / per) + 1)
+        kept = kept[:max(0, len(kept) - drop)]
+        if not kept:
+            break
+    return kept, len(rows) - len(kept)
+
+
+def digest_select(rows, budget, who="", tokens_of=None, max_tokens=0):
+    """(kept, left_out, cut_binding) -- the rows a fold may carry, bounded
+    BEFORE any GPU, and how many BINDING rules the ceiling forced out.
 
     THE NOTE IS A CACHE, NOT THE STORE. A row left out here is not lost: it is
     live, queryable, and one recall() away. What is bounded is what an agent
@@ -8452,8 +8504,23 @@ def digest_select(rows, budget, who=""):
     toks = digest_agent_tokens(who)
     ranked = sorted(rows, key=lambda r: (digest_rank(r, who, toks), -r["created_ns"]))
     kept = ranked[:budget]
+    # THE ROW BUDGET IS THE CHEAP GUARD; THE TOKEN CEILING IS THE REAL ONE.
+    # A count derived from an assumed per-row cost cannot bound a token total
+    # whose per-row cost measures 18 to 54 -- so when a tokenizer is available
+    # the index is measured and the tail is trimmed until it actually fits.
+    binding = sum(1 for r in kept if digest_rank(r, who, toks) == 0)
+    kept, _over = digest_fit(kept, max_tokens, tokens_of)
+    # THE BOUND THAT EXPIRES RATHER THAN HOLDS (native-doorbell-test). The tier
+    # order means the tail is always the least binding material -- until the
+    # binding tier alone exceeds the ceiling, and then there is no tier left to
+    # cut and doctrine starts going. That day is not hypothetical: binding took
+    # 151 of a 200-row squeeze and grows 2.8 doctrine and 6.9 contracts a day.
+    # It must not pass in silence, so the count comes back and the header says
+    # it. A rule a peer breaks by not knowing it is the one thing this whole
+    # order exists to keep.
+    cut_binding = binding - sum(1 for r in kept if digest_rank(r, who, toks) == 0)
     kept.sort(key=lambda r: r["created_ns"])
-    return kept, len(rows) - len(kept)
+    return kept, len(rows) - len(kept), cut_binding
 
 
 # MEASURED over the 1360-row live store, swept together. Two findings.
@@ -8535,6 +8602,9 @@ def digest_header(*, name, inputs, model, batches, mentor=None, conflicts=0):
             f"writer: {model or 'server default'}]")
     if mentor is not None:
         head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
+    if inputs.get("cut_binding"):
+        head += (f"\n[OVER CEILING: {inputs['cut_binding']} BINDING rule(s) did not fit "
+                 f"-- doctrine and contracts alone now exceed the budget]")
     if inputs.get("left_out"):
         head += (f"\n[bounded: {inputs['left_out']} older row(s) not carried -- "
                  f"live in the store, reachable with recall()]")
