@@ -38,10 +38,12 @@ descriptors in each agent's directory -- the same ones the doorbell rings --
 and acts on the two edges only it can see. A session ARRIVING gets a
 ``reason=boot`` ring, because a body that has just started has no hive memory
 and, until now, nothing made the doctrine's "rehydrate at boot" actually
-happen. The LAST session leaving triggers ``POST /agent/digest``, so whatever
+happen. The LAST session leaving starts a RECONCILE_GRACE_S cool-down, and if
+no body returns inside it the daemon sends ``POST /agent/digest``, so whatever
 that body did is folded while it is gone and the next one rehydrates something
-current rather than an hour stale. A departure that leaves other sessions alive
-is not an exit. On the FIRST census nothing has arrived: those bodies already
+current rather than an hour stale. A body back inside the cool-down -- a
+``claude --resume`` measured at five seconds -- cancels it. A departure that
+leaves other sessions alive is not an exit. On the FIRST census nothing has arrived: those bodies already
 booted, and ringing them would wake every live session on the machine each time
 this daemon restarts -- which is every deploy.
 
@@ -432,6 +434,14 @@ def probe_tick(agent, state, act):
 
 
 SESSION_WATCH_S = 5          # how often the session census runs; 0 disables
+# THE COOL-DOWN BEFORE AN EXIT COUNTS. Measured 2026-09-20: an interrupt-and-
+# continue took the session away and brought it back as `claude --resume` five
+# seconds later -- one census tick -- and the departure had already asked the
+# broker to fold; the first time it did, the fold ran. Sixty seconds covers a
+# resume with an order of magnitude to spare and a human re-running the command
+# by hand, and waiting costs nothing: the fold exists so the NEXT boot is
+# current, and a body back inside the minute is a resume carrying its memory.
+RECONCILE_GRACE_S = 60
 
 
 def session_events(was, now, first):
@@ -473,6 +483,12 @@ def remember_sessions(known, sids):
         known.pop(next(iter(known)))
 
 
+def reconcile_due(cooling_since, now, grace_s, live):
+    """The whole exit decision, pure: fold only once the identity has been
+    gone for the whole cool-down. `cooling_since` is None when nothing left."""
+    return cooling_since is not None and not live and now - cooling_since >= grace_s
+
+
 def boot_frame():
     """A CLI with the reveille MCP just appeared: it has no hive memory yet."""
     return json.dumps({"wake": True, "reason": "boot"})
@@ -496,7 +512,8 @@ def _reconcile(url, token):
         return {"started": False, "why": f"{type(e).__name__}: {e}"}
 
 
-async def _session_watcher(agent, workdir, interval_s, state, url, token):
+async def _session_watcher(agent, workdir, interval_s, state, url, token,
+                           grace_s=RECONCILE_GRACE_S):
     """Watch the CLI sessions in this agent's directory (operator, 2026-09-20).
 
     ON ARRIVAL, RING reason=boot. A body that has just started has no hive
@@ -506,10 +523,14 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token):
     descriptors it rings -- so noticing is free and the ring costs the one turn
     the body was going to spend booting anyway.
 
-    ON THE LAST DEPARTURE, RECONCILE. The agent is gone and whatever it did is
-    not in its digest yet; asking the broker to fold now means the next body
-    rehydrates something current instead of something an hour stale. The
-    request is fire-and-forget because the broker owns every reason to say no.
+    ON THE LAST DEPARTURE, COOL DOWN, THEN RECONCILE. The agent is gone and
+    whatever it did is not in its digest yet; asking the broker to fold means
+    the next body rehydrates something current instead of something an hour
+    stale. But only once it has STAYED gone for grace_s: an interrupt-and-
+    continue is a departure and an arrival five seconds apart, and folding on
+    the first half ran a GPU pass for a body that was back before it finished.
+    The request is fire-and-forget because the broker owns every reason to say
+    no.
 
     A departure that leaves OTHER sessions alive is not an exit -- the identity
     is still working in another window, and folding mid-work would just be
@@ -545,9 +566,22 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token):
             state["last"] = time.time_ns()
             state["armed"] = True
         remember_sessions(known, (doorbell.session_id(pid) for pid in live))
-        if departed and not live and token:
+        # THE LAST DEPARTURE STARTS A COOL-DOWN; IT DOES NOT FOLD. Any body
+        # back inside it -- a resume, or a fresh session -- means the identity
+        # is working again and its own next exit reconciles; nothing is lost,
+        # because the cool-down only ever DELAYS a fold, never drops one.
+        now = time.monotonic()
+        if departed and not live and token and state.get("cooling_since") is None:
+            state["cooling_since"] = now
+            print(f"reveille-waked: {agent}: last session left -- reconcile in "
+                  f"{grace_s:.0f}s unless a body returns", file=sys.stderr)
+        if live and state.pop("cooling_since", None) is not None:
+            print(f"reveille-waked: {agent}: a body returned inside the cool-down "
+                  f"-- no reconcile", file=sys.stderr)
+        if reconcile_due(state.get("cooling_since"), now, grace_s, live):
+            state.pop("cooling_since", None)
             out = await asyncio.to_thread(_reconcile, url, token)
-            print(f"reveille-waked: {agent}: last session left -- digest "
+            print(f"reveille-waked: {agent}: gone {grace_s:.0f}s -- digest "
                   f"{'started' if out.get('started') else out.get('why', 'refused')}",
                   file=sys.stderr)
 

@@ -37,7 +37,7 @@ def test_arrivals_and_departures_are_a_set_difference():
     assert waked.session_events({101}, {101}, False) == (set(), set())
 
 
-def _drive(monkeypatch, script, sids=None):
+def _drive(monkeypatch, script, sids=None, grace=0):
     """Run the watcher over a scripted sequence of session censuses. `sids`
     maps pid -> conversation id; by default every pid is its own conversation,
     which is what a fresh `claude` is."""
@@ -56,7 +56,8 @@ def _drive(monkeypatch, script, sids=None):
 
     async def run():
         task = asyncio.create_task(
-            waked._session_watcher("ana", "/w", 0.02, state, "ws://x/wake", "tok"))
+            waked._session_watcher("ana", "/w", 0.02, state, "ws://x/wake", "tok",
+                                   grace_s=grace))
         for step in script:
             live["pids"] = set(step)
             await asyncio.sleep(0.08)
@@ -174,3 +175,56 @@ def test_the_session_id_reader_survives_a_missing_or_torn_descriptor(tmp_path):
     assert doorbell.session_id(7, base=str(tmp_path)) == ""
     (tmp_path / "8.json").write_text('{"sessionId": "abc"}')
     assert doorbell.session_id(8, base=str(tmp_path)) == "abc"
+
+
+# ---------------------------------------------------------------------------
+# THE COOL-DOWN. Measured the evening the watcher shipped: an interrupt-and-
+# continue took the session away and brought it back as `claude --resume` five
+# seconds later -- one census tick -- and the departure had already asked the
+# broker to fold. The first time, the fold RAN: a GPU pass for a body that was
+# back before it finished, carrying its memory. The last departure now starts
+# a cool-down instead, and only an identity that stays gone for all of it folds.
+
+def test_the_field_sequence_a_resume_inside_the_cool_down_folds_nothing(monkeypatch):
+    rings, posts, _s = _drive(monkeypatch, [{1691395}, set(), {1700106}],
+                              sids={1691395: "4a8f2471", 1700106: "4a8f2471"},
+                              grace=60)
+    assert posts == [], "a resume five seconds later still asked the broker to fold"
+    assert rings == [], "and it was rung to re-read memory it holds"
+
+
+def test_an_exit_that_stays_gone_folds_once_the_cool_down_ends(monkeypatch):
+    _r, posts, _s = _drive(monkeypatch, [{101}, set(), set(), set(), set()], grace=0.15)
+    assert posts == ["tok"], posts
+
+
+def test_nothing_folds_before_the_cool_down_ends(monkeypatch):
+    _r, posts, state = _drive(monkeypatch, [{101}, set()], grace=60)
+    assert posts == [] and state.get("cooling_since") is not None
+
+
+def test_one_departure_is_one_fold_however_long_it_stays_gone(monkeypatch):
+    """The cool-down clears when it fires; an idle directory must not ask the
+    broker again every census tick for the rest of the night."""
+    _r, posts, _s = _drive(monkeypatch, [{101}] + [set()] * 8, grace=0.1)
+    assert posts == ["tok"], posts
+
+
+def test_a_fresh_body_inside_the_cool_down_also_cancels_it(monkeypatch):
+    """The identity is working again, and its own next exit reconciles. The
+    cool-down only ever DELAYS a fold, never drops one."""
+    _r, posts, _s = _drive(monkeypatch, [{101}, set(), {202}],
+                           sids={101: "conv-a", 202: "conv-b"}, grace=60)
+    assert posts == []
+
+
+def test_the_exit_decision_is_pure():
+    assert waked.reconcile_due(None, 100.0, 60, set()) is False       # nothing left
+    assert waked.reconcile_due(50.0, 100.0, 60, set()) is False       # still cooling
+    assert waked.reconcile_due(40.0, 100.0, 60, set()) is True        # gone the whole time
+    assert waked.reconcile_due(40.0, 100.0, 60, {7}) is False         # a body is back
+
+
+def test_the_cool_down_covers_the_measured_resume_with_room():
+    """5 s measured; the constant must clear it by far more than one census."""
+    assert waked.RECONCILE_GRACE_S >= 10 * waked.SESSION_WATCH_S
