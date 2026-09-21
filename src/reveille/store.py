@@ -8138,6 +8138,31 @@ def _digest_body(fact):
     return "\n".join(lines).strip()
 
 
+def digest_window_check(offered, indexed, prior_text):
+    """"" when the window is sane, else what is wrong with it.
+
+    THE INVARIANT NO UNIT TEST ON EITHER SIDE COULD HOLD (native-doorbell-test,
+    on the 0.2.305 regression). The store windows the rows; the daemon rebuilds
+    the note from them. Both were LOCALLY correct and every gate stayed green
+    while the fold emitted `input: 1 rows` against a 445-row prior -- a
+    well-formed digest of one hour of the hive presented as the whole mind.
+
+    Coverage died as a measurement of the WRITER, which the index made vacuous.
+    This is coverage of the WINDOW, which it did not: a note that indexes far
+    fewer rows than its own predecessor carried has been truncated by something
+    upstream of anything either layer can see alone.
+    """
+    if not prior_text:
+        return ""
+    had = len({i for _k, i in _TAG_ANY.findall(prior_text)})
+    if had and indexed * 4 < had:
+        return (f"the fold indexed {indexed} row(s) where the prior digest carried "
+                f"{had} -- the row window has truncated the hive, not the hive shrunk")
+    if offered and indexed > offered:
+        return f"indexed {indexed} rows but the store only offered {offered}"
+    return ""
+
+
 def digest_offered(batches):
     """Every row id the fold was GIVEN. The denominator nothing was computing.
 
@@ -8425,10 +8450,33 @@ def digest_rank(row, who, toks):
     return 3
 
 
-# WHAT THE NOTE HOLDS BESIDE THE INDEX, reserved rather than discovered:
-# CHANGED at its 40-line cap (~35 tok a line), the conflict lines, WORK and
-# OPEN. The index must not spend the ceiling it does not own.
+# WHAT THE NOTE HOLDS BESIDE THE INDEX. This is a REFUSAL THRESHOLD, not a
+# subtrahend: the non-index sections are MEASURED like everything else, and
+# this is the size past which they are shouted about rather than quietly
+# absorbed. Reserving a constant for them was the sixth instance of the same
+# class in one release (native-doorbell-test) -- CHANGED is capped in LINES,
+# which is the row-count-versus-tokens substitution just deleted from
+# digest_select one field over; the conflict lines have no cap at all and grow
+# with the store; WORK and OPEN are writer narrative bounded by nothing but the
+# step cap. Worse, an overshoot there lands in the one part a fit over the
+# INDEX can never weigh, so the trim loop could not see it and would not
+# correct it.
 DIGEST_NON_INDEX_TOKENS = 2500
+
+
+def digest_note_fits(body, max_tokens, tokens_of):
+    """(fits, measured) for the WHOLE assembled note.
+
+    MEASURE WHAT ACTUALLY SHIPS. Every earlier bound weighed one part and
+    assumed the rest, and each time the assumption was where the overshoot
+    landed: chars/4 against a real tokenizer, a row count against a token
+    total, and then an index measured beside a constant for the sections next
+    to it. There is no part beside this one -- the body is the artifact.
+    """
+    if not tokens_of or max_tokens <= 0:
+        return True, 0
+    n = tokens_of(body or "")
+    return n <= max_tokens, n
 
 
 def digest_fit(rows, max_tokens, tokens_of, chars=0):
@@ -8588,7 +8636,8 @@ def digest_index(rows, chars=0):
     return out
 
 
-def digest_header(*, name, inputs, model, batches, mentor=None, conflicts=0):
+def digest_header(*, name, inputs, model, batches, mentor=None, conflicts=0,
+                  window=""):
     """The provenance lines, written by the STORE, never the model (24015):
     window, rows shown, batches folded, the prior, the writer; a second line
     for a protege's lineage; a third naming any row too large for a batch;
@@ -8602,6 +8651,8 @@ def digest_header(*, name, inputs, model, batches, mentor=None, conflicts=0):
             f"writer: {model or 'server default'}]")
     if mentor is not None:
         head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
+    if window:
+        head += f"\n[WINDOW: {window}]"
     if inputs.get("cut_binding"):
         head += (f"\n[OVER CEILING: {inputs['cut_binding']} BINDING rule(s) did not fit "
                  f"-- doctrine and contracts alone now exceed the budget]")
