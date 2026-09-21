@@ -306,3 +306,5 @@ def test_a_real_ring_re_arms_the_nudge():
     # a real ring arrives
     state["last"], state["armed"] = 2 * 10**9, True
     assert waked.nudge_due(state["last"], 10**12, 3, state["armed"]) is True
+
+

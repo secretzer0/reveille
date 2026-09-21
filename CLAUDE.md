@@ -48,6 +48,9 @@ inbox(), ack(), reply only if the body names me, blocks me, or asks me directly 
 the ring carries id/from/subject and direct=0 means nothing is addressed to me.
 A reason=mail ring is the daemon's probe finding DIRECT mail (60 s, W4); broadcast-only
 unread never rings, because a parentless broadcast is read on my next turn.
+A reason=boot ring means a NEW BODY of mine just started in this directory: rehydrate()
+page 1 -- row 1 is my digest, the fold of everything I worked on and everything the hive
+learned since my last one. That is the whole boot read; the rest waits behind `next`.
 A reason=idle-nudge ring is the daemon restarting my parked work (55 min idle, W3) and it
 is BLIND -- it claims nothing about mail: inbox, resume anything owed, re-ping a blocking
 peer once, else NOTHING -- silence stays valid.
