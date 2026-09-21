@@ -394,6 +394,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.309",
+     "0.2.309 MEASURE WHAT ACTUALLY SHIPS (the sixth instance, inside the fix for\nthe fifth -- native-doorbell-test again, minutes after that fix landed).\n\n0.2.308 measured the INDEX with the writer's tokenizer and then subtracted a\nCONSTANT for everything beside it: DIGEST_NON_INDEX_TOKENS = 2500 for CHANGED,\nthe conflict lines, WORK and OPEN. Three of those four are variable and none\nwas tokenized. CHANGED is capped at 40 LINES -- the row-count-versus-tokens\nsubstitution deleted from digest_select in the very same commit, one field\nover. The conflict lines have no cap and their count grows with the store. WORK\nand OPEN are writer narrative bounded by nothing but the step cap. And the\novershoot would land in the one part a fit over the index can never weigh, so\nthe trim loop could not see it and would not correct it.\n\nTHE BODY IS THE ARTIFACT, so the body is what is weighed. The assembled note\ngoes through digest_note_fits with the real tokenizer and rows come off the\ntail until it fits. The reserve survives as a REFUSAL THRESHOLD -- the size\npast which the non-index sections are shouted about -- rather than a number\nquietly taken off the ceiling before anything is measured.\n\nEvery earlier bound in this release weighed one part and assumed the rest, and\nevery time the assumption was exactly where the overshoot landed: chars/4\nagainst a real tokenizer, a flat margin against a proportional error, a row\ncount against a token total, and then an index measured beside a constant for\nthe sections next to it. There is no part beside this one.\n\nAND THE INVARIANT NO UNIT TEST ON EITHER SIDE COULD HOLD. On the 0.2.305\nregression they pointed out what the gates could not: the store windows the\nrows, the daemon rebuilds the note from them, BOTH WERE LOCALLY CORRECT, and\nevery gate stayed green while the fold emitted `input: 1 rows` against a\n445-row prior. The test that catches that is not a unit test on either side but\nan assertion ACROSS them. digest_window_check() compares the rows indexed\nagainst the tag count the PRIOR note carried and names the disagreement; the\nheader carries the verdict and the log raises it at ERROR.\n\nCoverage died in 0.2.305 as a measure of the WRITER, which the index made\nvacuous. This is coverage of the WINDOW, which it did not: `input: 1 rows`\nagainst a 445-row prior fails it instantly."),
     ("0.2.308",
      "0.2.308 THE FIFTH INSTANCE: A ROW COUNT CANNOT BOUND A TOKEN TOTAL\n(native-doorbell-test, from my own published numbers, within minutes of them\nbeing published).\n\nTHE BOUND WAS A ROW COUNT DERIVED FROM AN ASSUMED PER-ROW COST while the thing\nbeing bounded is TOKENS. digest_row_budget divided the 50000 ceiling by a\nconstant 34 and selected 1470 rows; nothing then measured what those rows\nactually cost, so any corpus whose rows run wordier went over in silence.\n\n    whole store   33.71 tok/row   1470 rows -> 49556 of 50000   0.9% headroom\n    one room      35.53 tok/row   1470 rows -> 52229            OVER by 2229\n    per-line cost 18 to 54 tokens\n\nTheir arithmetic used 35.53 -- the rate from my own end-to-end, which was one\nROOM's mix; the whole store measures 33.71 and lands just under. So the number\nwas right for the corpus they had and the CLASS was right everywhere: 0.9% of\nheadroom is a budget solved as an equality, which is the shape that has cost\nthis release five separate runs today.\n\ndigest_fit() measures instead. The index is tokenized ONCE with the writer's\nown tokenizer -- one call for the whole thing, never one per row -- and the\ntail is dropped until it actually fits, cutting by the measured overshoot so it\nconverges in a handful of calls. Measured: the whole store fits in 1 call, a\ntripled corpus trims 4080 rows to 1384 in 2 calls and 0.7 s. ROW COUNT IS NOW\nAN OUTPUT OF SELECTION, which is what it always was.\n\nAND THE INDEX NO LONGER SPENDS THE CEILING IT DOES NOT OWN: CHANGED at its\n40-line cap, the conflict lines, WORK and OPEN are reserved by name\n(DIGEST_NON_INDEX_TOKENS) rather than discovered afterwards.\n\nTHE BOUND THAT EXPIRES RATHER THAN HOLDS, also theirs, now visible. Rows reach\nthe trim in TIER order, so the tail is always the least binding material --\nuntil doctrine and contracts alone exceed the ceiling, and then there is no\ntier left to cut. That day is not hypothetical: binding took 151 of a 200-row\nsqueeze and grows 2.8 doctrine and 6.9 contracts a day. digest_select returns\nhow many binding rules the ceiling forced out and the header SHOUTS it:\n`[OVER CEILING: N BINDING rule(s) did not fit]`. A rule a peer breaks by not\nknowing it is the one thing this whole order exists to keep, so it may not\nleave in silence.\n\nSaid plainly because it is the fifth: I have a tokenizer wired, I used it to\nmake the ceiling REAL rather than chars/4, and then selected against a constant\nanyway. An estimate may guess where to cut. It may never decide that the cut\nfits."),
     ("0.2.307",
@@ -2070,21 +2072,56 @@ def _digest_fold(conn, p, scope, mentor, inputs):
     this does not.
     """
     rows = inputs.get("rows_kept") or []
-    sections = store.digest_index(rows)
-    changed = store.digest_diff(inputs.get("prior_text", ""), sections)
+    prior_text = inputs.get("prior_text", "")
     story = _digest_story(conn, p, scope, inputs)
     conflicts = _digest_conflicts(conn, p, rows)
-    body = "\n".join(
-        f"{k}\n" + ("\n".join(v) if v else "- (none)")
-        for k, v in (("RULES", sections["RULES"]),
-                     ("DECISIONS", sections["DECISIONS"]),
-                     ("LESSONS", sections["LESSONS"]),
-                     ("CHANGED", changed),
-                     ("WORK", story["WORK"]),
-                     ("OPEN", conflicts + story["OPEN"])))
+
+    def assemble(keep):
+        sections = store.digest_index(keep)
+        changed = store.digest_diff(prior_text, sections)
+        non_index = ["CHANGED"] + changed + ["WORK"] + story["WORK"] + \
+                    ["OPEN"] + conflicts + story["OPEN"]
+        return "\n".join(
+            f"{k}\n" + ("\n".join(v) if v else "- (none)")
+            for k, v in (("RULES", sections["RULES"]),
+                         ("DECISIONS", sections["DECISIONS"]),
+                         ("LESSONS", sections["LESSONS"]),
+                         ("CHANGED", changed),
+                         ("WORK", story["WORK"]),
+                         ("OPEN", conflicts + story["OPEN"]))), non_index
+
+    # MEASURE WHAT ACTUALLY SHIPS. digest_select already trimmed the INDEX to
+    # fit; what it could not weigh is everything beside it -- CHANGED, the
+    # conflict lines, WORK and OPEN -- and an overshoot there lands exactly
+    # where a fit over the index alone can never see it. So the assembled body
+    # is weighed, and if it is over, rows come off the tail until it is not.
+    body, non_index = assemble(rows)
+    if _digest_ctx or _script_url:
+        def count(s):
+            return writer_tokens(s, _script_url, _script_token)[0]
+        spent = count("\n".join(non_index))
+        if spent > store.DIGEST_NON_INDEX_TOKENS:
+            log.warning("%s digest non-index sections cost %d tokens, over their "
+                        "%d reserve -- CHANGED/conflicts/WORK/OPEN are variable and "
+                        "this is the shout, not a silent subtraction",
+                        p.name, spent, store.DIGEST_NON_INDEX_TOKENS)
+        for _ in range(8):
+            fits, measured = store.digest_note_fits(body, DIGEST_MAX_TOKENS, count)
+            if fits or not rows:
+                break
+            per = max(1, measured // max(1, len(rows)))
+            rows = rows[:max(0, len(rows) - max(1, (measured - DIGEST_MAX_TOKENS) // per + 1))]
+            log.warning("%s digest note measured %d tokens over the %d ceiling -- "
+                        "trimmed to %d rows", p.name, measured, DIGEST_MAX_TOKENS, len(rows))
+            body, non_index = assemble(rows)
+    # THE WINDOW, CHECKED ACROSS THE LAYERS. Both sides of the 0.2.305
+    # regression were locally correct; only their disagreement was the defect.
+    bad = store.digest_window_check(inputs.get("rows", 0), len(rows), prior_text)
+    if bad:
+        log.error("%s digest WINDOW: %s", p.name, bad)
     fact = store.digest_header(name=p.name, inputs=inputs, model=_digest_writer(),
                                batches=len(inputs["batches"]), mentor=mentor,
-                               conflicts=len(conflicts)) + "\n" + body
+                               conflicts=len(conflicts), window=bad) + "\n" + body
     uid = store.digest_store(conn, scope=scope, author=p.name, fact=fact)
     log.info("%s digest -> %s (%d chars, %d rows indexed, %d left out, %d conflict(s))",
              p.name, uid, len(fact), len(rows), inputs.get("left_out", 0), len(conflicts))

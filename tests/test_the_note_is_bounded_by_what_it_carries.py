@@ -289,3 +289,67 @@ def test_a_healthy_fold_says_nothing_about_binding():
               "left_out": 0, "cut_binding": 0}
     assert "OVER CEILING" not in store.digest_header(name="ana", inputs=inputs,
                                                      model="w", batches=1)
+
+
+# ---------------------------------------------------------------------------
+# THE SIXTH INSTANCE, INSIDE THE FIX FOR THE FIFTH (native-doorbell-test).
+# digest_fit measured the INDEX and subtracted a CONSTANT for everything else.
+# Three of those four sections are variable and none was tokenized: CHANGED is
+# capped in LINES -- the row-count-versus-tokens substitution just deleted from
+# digest_select, one field over -- the conflict lines have no cap and grow with
+# the store, and WORK/OPEN are writer narrative. Worse, an overshoot there
+# lands in the one part a fit over the index can never weigh.
+
+def test_the_whole_assembled_note_is_what_gets_weighed():
+    """There is no part beside this one: the body IS the artifact."""
+    body = "RULES\n- a [doctrine:aaaaaaaa]\nOPEN\n- b"
+    fits, n = store.digest_note_fits(body, 10**6, lambda s: len(s.split()))
+    assert fits and n == len(body.split())
+    fits, n = store.digest_note_fits(body, 2, lambda s: len(s.split()))
+    assert not fits and n > 2
+
+
+def test_without_a_tokenizer_it_does_not_pretend_to_know():
+    assert store.digest_note_fits("anything", 10, None) == (True, 0)
+    assert store.digest_note_fits("anything", 0, lambda s: 99) == (True, 0)
+
+
+def test_the_reserve_is_a_threshold_to_shout_at_not_a_subtrahend():
+    """It names the size past which the non-index sections are reported, rather
+    than a number quietly taken off the ceiling before anything is measured."""
+    assert store.DIGEST_NON_INDEX_TOKENS > 0
+
+
+# ---------------------------------------------------------------------------
+# THE INVARIANT NO UNIT TEST ON EITHER SIDE COULD HOLD. The store windows the
+# rows; the daemon rebuilds the note from them. In 0.2.305 both were locally
+# correct and every gate stayed green while the fold emitted `input: 1 rows`
+# against a 445-row prior. Coverage died as a measure of the WRITER, which the
+# index made vacuous; this is coverage of the WINDOW, which it did not.
+
+def test_a_fold_that_indexes_far_less_than_its_own_prior_is_named():
+    prior = "RULES\n" + "\n".join(f"- r [doctrine:{i:08x}]" for i in range(445))
+    bad = store.digest_window_check(offered=1, indexed=1, prior_text=prior)
+    assert "truncated the hive" in bad and "445" in bad
+
+
+def test_a_healthy_fold_says_nothing():
+    prior = "RULES\n" + "\n".join(f"- r [doctrine:{i:08x}]" for i in range(100))
+    assert store.digest_window_check(offered=120, indexed=118, prior_text=prior) == ""
+
+
+def test_a_first_fold_has_no_prior_to_disagree_with():
+    assert store.digest_window_check(offered=0, indexed=0, prior_text="") == ""
+
+
+def test_indexing_more_than_the_store_offered_is_also_wrong():
+    assert "only offered" in store.digest_window_check(
+        offered=5, indexed=9, prior_text="RULES\n- r [doctrine:aaaaaaaa]")
+
+
+def test_the_header_carries_the_window_verdict():
+    inputs = {"since_ns": 0, "rows": 1, "dropped": [], "prior": "",
+              "left_out": 0, "cut_binding": 0}
+    head = store.digest_header(name="ana", inputs=inputs, model="w", batches=1,
+                               window="the row window has truncated the hive")
+    assert "[WINDOW: the row window has truncated the hive]" in head
