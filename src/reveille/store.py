@@ -33,8 +33,10 @@ read path filters on the caller's room set. Carrying knowledge between rooms is 
 NEW root message in the target room, never a threaded reply -- that edge would be
 the leak.
 """
+import collections
 import contextlib
 import hashlib
+import math
 import json
 import hmac
 import os
@@ -8251,6 +8253,144 @@ DIGEST_INDEX_ROW_TOKENS = 34
 # before anything else competes for room; decisions and lessons are carried
 # newest-first with what is left.
 DIGEST_BINDING_KINDS = ("doctrine", "contract")
+
+
+# RETRIEVAL (step 4). Sparse TF-IDF over word unigrams, word bigrams and
+# character 5-grams -- stdlib, no model, no vector database, ~0.3 ms a query
+# over 1741 rows.
+#
+# MEASURED AGAINST GROUND TRUTH, not assumed: supersedes_id gives 164 labeled
+# pairs, because a row and the row it replaced are definitionally about the
+# same thing, usually worded differently (median word overlap 0.34; 77 of the
+# 164 share under 0.30, which is where keyword search should fail).
+#
+#   query = A WHOLE ROW, the shape a contradiction check issues:
+#       all 164 pairs   R@1 72%  R@5 96%  R@10 98%
+#       the 77 HARD     R@1 50%  R@5 92%  R@10 97%
+#   query = 6-12 WORDS, an agent's ad-hoc "what binds X?":
+#       FTS today       R@10 64-77%      BM25 R@10 57-71%
+#       BM25 + RM3      R@10 61-70%   -- pseudo-relevance feedback DRIFTS on a
+#                                        short query: R@1 fell 44% -> 20%
+#       FTS u BM25+RM3  R@10 70-81%   -- the best anything free reached
+#
+# So THE GOAL IS ALREADY SERVED and the ad-hoc case is not: dense retrieval is
+# the known fix for short queries, and it is deferred rather than dismissed.
+# When it comes it is an HTTP endpoint like the writer, never a dependency --
+# 1741 vectors is ~2 MB, exact cosine is one pass, and no ANN index earns its
+# keep three orders of magnitude below where they start to.
+_SIM_STOP = frozenset(
+    "the a an of to in is are and or for with that this it as be by on at from not was "
+    "were will would can could should must may might do does did has have had its their "
+    "which when what who whom how why so if then than but also into over under".split())
+_SIM_TOP_TERMS = 150        # the heaviest terms of a vector actually compared
+_SIM_CACHE = {}             # generation -> (idf_df, N, vectors, inverted)
+
+
+def _sim_feats(text):
+    s = (text or "").lower()
+    w = [x for x in re.findall(r"[a-z0-9_.:/-]{3,}", s) if x not in _SIM_STOP]
+    f = collections.Counter(w)
+    f.update("_".join(p) for p in zip(w, w[1:]))
+    flat = re.sub(r"\s+", " ", s)
+    f.update(flat[i:i + 5] for i in range(0, max(0, len(flat) - 4), 2))
+    return f
+
+
+# Below this many documents a term appearing ONCE is all there is, and the
+# noise filter would empty every vector: measured, a 3-row corpus scored
+# nothing at all.
+_SIM_MIN_DOCS_FOR_FILTER = 50
+
+
+def _sim_vector(feats, df, n_docs):
+    """One L2-normalised TF-IDF vector.
+
+    THE `df >= 2` FILTER IS LOAD-BEARING AND I HAD IT BACKWARDS. It reads like
+    a dedup-era heuristic that should hurt retrieval -- a rare term is the most
+    discriminative thing a query carries -- so it was removed, and recall FELL:
+
+        min_df=2   all pairs R@10 98%   HARD R@10 97%
+        min_df=1   all pairs R@10 91%   HARD R@10 81%
+
+    The reason is the feature mix. Character 5-grams outnumber words by an
+    order of magnitude and a 5-gram seen ONCE in the whole corpus is a unique
+    byte sequence, not a rare concept -- thousands of them per document, each
+    carrying maximum IDF, drowning the words that mean something. The filter
+    removes noise, not signal. It relaxes below _SIM_MIN_DOCS_FOR_FILTER,
+    where there is no second occurrence of anything to find.
+    """
+    min_df = 2 if n_docs >= _SIM_MIN_DOCS_FOR_FILTER else 1
+    v = {k: (1 + math.log(n)) * math.log(n_docs / max(df.get(k, 1), 1))
+         for k, n in feats.items() if df.get(k, 0) >= min_df}
+    norm = math.sqrt(sum(x * x for x in v.values())) or 1.0
+    return {k: x / norm for k, x in v.items()}
+
+
+def _sim_index(conn):
+    """The inverted index, built lazily and cached until the corpus moves.
+
+    Keyed on (row count, newest created_ns): both are one cheap SELECT, and
+    together they catch an insert, a delete and a retraction. A rebuild is well
+    under a second at this size, and rows arrive ~32 a day, so the cache pays
+    for itself without anything being persisted or kept in step by hand.
+    """
+    gen = conn.execute(
+        "SELECT count(*), coalesce(max(created_ns), 0) FROM memories "
+        "WHERE kind IN ('doctrine','contract','decision','lesson')").fetchone()
+    gen = (gen[0], gen[1])
+    hit = _SIM_CACHE.get(gen)
+    if hit is not None:
+        return hit
+    rows = conn.execute(
+        "SELECT uid, scope, status, fact, rule FROM memories "
+        "WHERE kind IN ('doctrine','contract','decision','lesson')").fetchall()
+    feats = {r["uid"]: _sim_feats(r["rule"] or r["fact"]) for r in rows}
+    df = collections.Counter()
+    for f in feats.values():
+        df.update(f.keys())
+    n_docs = max(1, len(feats))
+    vectors = {u: _sim_vector(f, df, n_docs) for u, f in feats.items()}
+    inverted = collections.defaultdict(list)
+    for u, v in vectors.items():
+        for term, x in sorted(v.items(), key=lambda kv: -kv[1])[:_SIM_TOP_TERMS]:
+            inverted[term].append((u, x))
+    meta = {r["uid"]: (r["scope"], r["status"]) for r in rows}
+    _SIM_CACHE.clear()          # one generation at a time; the old one is dead
+    _SIM_CACHE[gen] = (df, n_docs, vectors, inverted, meta)
+    return _SIM_CACHE[gen]
+
+
+def memory_similar(conn, text, *, scopes=(), k=10, exclude=(), live_only=True):
+    """[(uid, score)] -- the rows most like `text`, best first.
+
+    The primitive the rest of the march stands on: a retirement pass asks it
+    "what does this replace?", a contradiction check asks it "what is this
+    about?", and both are whole-row queries, which is the shape it was measured
+    on (R@10 97-98%).
+
+    Scored over the WHOLE corpus and filtered afterwards, because a scope
+    filter inside the loop would rebuild the index per caller for no accuracy.
+    """
+    df, n_docs, vectors, inverted, meta = _sim_index(conn)
+    qv = _sim_vector(_sim_feats(text), df, n_docs)
+    skip, allow = set(exclude), set(scopes)
+    scores = collections.defaultdict(float)
+    for term, x in sorted(qv.items(), key=lambda kv: -kv[1])[:_SIM_TOP_TERMS]:
+        for uid, y in inverted.get(term, ()):
+            if uid in skip:
+                continue
+            scores[uid] += x * y
+    out = []
+    for uid, s in sorted(scores.items(), key=lambda kv: -kv[1]):
+        scope, status = meta[uid]
+        if live_only and status != "live":
+            continue
+        if allow and scope != "global" and scope not in allow:
+            continue
+        out.append((uid, round(s, 4)))
+        if len(out) >= k:
+            break
+    return out
 
 
 def digest_agent_tokens(name):
