@@ -122,6 +122,32 @@ def _wakeds(agent):
             if "reveille-waked" in ln and f"--name {agent}" in ln}
 
 
+@pytest.fixture(autouse=True)
+def _reap_what_the_hook_spawns():
+    """EVERY test in this file reaps, not just the one that thought to.
+
+    A leak gate existed and was scoped to the fixture name `ana`, so the gate
+    that drives the hook as `nobody-is-reachable-here` walked straight past it:
+    the hook finds no doorbell, spawns a waked exactly as designed, and the
+    subprocess.run returns while the daemon outlives it. Measured 2026-09-20:
+    63 of them, one per suite run, the oldest 5h56m old -- the second instance
+    of "gates leak what they spawn" in one day, in the same file as the first.
+
+    A per-test reaper cannot be forgotten by the next test, which a per-test
+    assertion demonstrably can. Reads ps rather than `pgrep -f`, for the same
+    reason the helper does: the pattern would match the shell asking.
+    """
+    def live():
+        out = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True,
+                             text=True).stdout
+        return {ln.split()[0] for ln in out.splitlines() if "reveille-waked" in ln}
+    before = live()
+    yield
+    for pid in live() - before:
+        with contextlib.suppress(ProcessLookupError, ValueError, PermissionError):
+            os.kill(int(pid), 15)
+
+
 def test_a_body_the_doorbell_reaches_needs_no_watcher(tmp_path, monkeypatch):
     work, sess, conf = _world(tmp_path, monkeypatch)
     srv = _live_session(sess, work)
