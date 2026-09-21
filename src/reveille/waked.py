@@ -39,10 +39,20 @@ carried is already spent). After ``--idle-nudge`` seconds without writing a
 ring (default IDLE_NUDGE_S = 3300; 0 disables) it writes ONE synthetic entry
 with ``reason=idle-nudge`` and resets its timer -- same spool, same watcher,
 no new plumbing. It is BLIND and claims nothing: it is not a delivery, and
-the probe above is what makes mail arrive quickly. Fixed interval by ruling:
-backoff would make an agent harder to reach the longer it has been stuck,
-which is backwards. The nudge fires on the daemon's wall clock even while the
-broker is unreachable.
+the probe above is what makes mail arrive quickly. The nudge fires on the
+daemon's wall clock even while the broker is unreachable.
+
+ONE NUDGE PER REAL RING (operator, 2026-09-20). A real ring ARMS the nudge and
+firing DISARMS it, so an agent that answered a nudge by having nothing to do is
+not asked again until something actually arrives. Measured on the host that
+day: 33 idle-nudges against 18 messages and 1 mail, ten of them in the SAME
+SECOND because this daemon serves eleven identities whose idle timers run
+together -- every one a model turn spent to find nothing. The mail probe has
+always reasoned this way (a spurious ring spends a turn and is not idempotent,
+so the safe fall is quiet); the nudge was the one producer it was never applied
+to. Fixed interval still, by ruling: backoff would make an agent harder to
+reach the longer it has been stuck, which is backwards -- and this is not
+backoff, it is a precondition.
 """
 import argparse
 import asyncio
@@ -226,9 +236,35 @@ def no_rooms_exit_due(first_s, now_s, window_s):
     return first_s is not None and now_s - first_s >= window_s
 
 
-def nudge_due(last_write_ns, now_ns, interval_s):
-    """The whole idle decision, pure: an interval of 0 never nudges."""
-    return interval_s > 0 and now_ns - last_write_ns >= interval_s * 10**9
+def nudge_due(last_write_ns, now_ns, interval_s, armed=True):
+    """The whole idle decision, pure: an interval of 0 never nudges.
+
+    ONE NUDGE PER REAL RING (operator, 2026-09-20: "there is NO REASON to force
+    tokens to be wasted by communicating a poll that had no data to return...
+    if nothing was there and it wrote no rings there is no reason to disturb").
+
+    Measured on this host the same day: 33 idle-nudges against 18 messages and
+    1 mail, and ten of them landed in the SAME SECOND because the host daemon
+    serves eleven identities whose idle timers run together. Every one of those
+    spent a model turn to find nothing.
+
+    The mail probe already reasons this way -- "a spurious ring SPENDS A MODEL
+    TURN and is not idempotent, so the safe fall is to stay quiet" -- and the
+    nudge was the one producer the rule was never applied to.
+
+    A REAL RING ARMS IT; FIRING DISARMS IT. The nudge exists to restart a
+    parked agent whose instructions came in an earlier turn, so it still fires
+    once after any activity, which is the whole of that job. What it no longer
+    does is ask again, hourly, of an agent that answered the first one by
+    having nothing to do -- an agent that parked nothing after its last ring
+    will park nothing by the fifth asking, and a STOPPED agent that ignored the
+    first nudge does not behave differently on the next.
+
+    Daemon start counts as armed: whatever was parked before it came up has
+    never been asked about.
+    """
+    return (armed and interval_s > 0
+            and now_ns - last_write_ns >= interval_s * 10**9)
 
 
 def nudge_frame(interval_s):
@@ -300,9 +336,11 @@ async def _nudger(agent, interval_s, state):
     broker still deserves its nudge."""
     while True:
         await asyncio.sleep(1)
-        if nudge_due(state["last"], time.time_ns(), interval_s):
+        if nudge_due(state["last"], time.time_ns(), interval_s,
+                     state.get("armed", True)):
             write_ring(agent, nudge_frame(interval_s))
             state["last"] = time.time_ns()
+            state["armed"] = False      # asked once; the next one needs a reason
 
 
 def mail_ring_due(act, last_rung_id):
@@ -376,6 +414,7 @@ def probe_tick(agent, state, act):
     state["last_rung_id"] = act["newest_id"]
     write_ring(agent, mail_frame(act))
     state["last"] = time.time_ns()       # a ring is activity: it resets W3
+    state["armed"] = True                # ...and re-arms the nudge behind it
     return True
 
 
@@ -503,6 +542,7 @@ async def _session(uri, agent, state):
                 if obj.get("wake"):
                     write_ring(agent, frame)
                     state["last"] = time.time_ns()   # real rings reset the nudge
+                    state["armed"] = True            # ...and re-arm it
                     # THE TWO PRODUCERS SHARE ONE HIGH-WATER MARK, or the probe
                     # rings again a minute later for mail the socket already
                     # delivered. The socket's message frame carries the newest
@@ -1105,7 +1145,9 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
         _STATUS_BY_AGENT[agent] = os.path.join(workdir, ".claude",
                                                ".reveille-repo-status")
     uri = wake_uri(url, sep, agent, token)
-    state = {"last": time.time_ns()}   # daemon start counts as activity
+    # Daemon start counts as activity AND arms one nudge: whatever the agent
+    # parked before this daemon existed has never been asked about.
+    state = {"last": time.time_ns(), "armed": True}
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
     # BESIDE the connect loop, like the nudger and for the same reason: the
     # probe is worth most exactly when the socket is down.

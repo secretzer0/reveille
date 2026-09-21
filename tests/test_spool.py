@@ -111,44 +111,41 @@ def _wait_for_entries(tmp_path, n, timeout_s, what):
         time.sleep(0.05)
 
 
-def test_idle_nudge_one_per_interval_never_a_burst(tmp_path):
-    # W3 gate: no rings -> one nudge per interval, never a burst.
-    #
-    # THE CLOCK COVERS THE ASSERT WINDOW ONLY. It used to start at Popen and run
-    # a flat 3.5s, so python's start-up and imports came out of the measuring
-    # budget -- the daemon sets its own `last` at waked.py:816, AFTER that, and
-    # the checker ticks at 1s granularity. On a loaded box the first tick landed
-    # past the window and the test read zero. Manufactured on demand with 24
-    # `yes` hogs on 8 cores: `AssertionError: 0 nudges in 3.5s at interval 1`.
-    #
-    # So this is an INSTRUMENT race, not a product defect, and the repair is to
-    # remove the race rather than widen the sleep (145fa749, 13760): wait for the
-    # FIRST nudge, then measure the interval from IT. The assertion is the same
-    # statement it always was -- one per interval, no burst -- now anchored on an
-    # event instead of on when Popen happened to return.
+def test_the_idle_nudge_asks_once_and_then_waits_for_a_reason(tmp_path):
+    """W3 gate, REWRITTEN to the rule it now follows.
+
+    It used to assert a SECOND nudge arrived one interval after the first --
+    "one per interval, never a burst" -- and that is exactly the behaviour the
+    operator cut on 2026-09-20: "there is NO REASON to force tokens to be
+    wasted by communicating a poll that had no data to return... if nothing was
+    there and it wrote no rings there is no reason to disturb".
+
+    Measured on the host that day: 33 idle-nudges against 18 messages and one
+    mail, TEN of them inside the same second because the host daemon serves
+    eleven identities whose idle timers run together. Every one spent a model
+    turn to find nothing.
+
+    The nudge still does its whole job -- restart an agent that parked work in
+    an earlier turn -- by firing once after any activity, daemon start
+    included. What it no longer does is ask again, on a timer, of an agent that
+    answered the first one by having nothing to do.
+    """
     p = _waked_nudging(tmp_path, 1)
     try:
-        _wait_for_entries(tmp_path, 1, 10.0, "no first nudge within 10s")
-        entries = _wait_for_entries(
-            tmp_path, 2, 5.0, "no second nudge within 5s of the first")
+        entries = _wait_for_entries(tmp_path, 1, 10.0, "no first nudge within 10s")
+        with open(entries[0]) as f:
+            obj = json.loads(f.read())
+        assert obj["reason"] == "idle-nudge" and obj["idle_seconds"] == 1
+        # FIVE intervals pass with no real ring. Under the old rule that was
+        # five more nudges and five more model turns.
+        time.sleep(5.0)
+        again = spool.entries("a1", base=str(tmp_path))
+        assert len(again) == 1, (
+            f"{len(again)} nudges in 5 intervals with nothing to report -- "
+            f"the nudge is polling again")
     finally:
         p.terminate()
         p.wait(timeout=5)
-    stamps = []
-    for e in entries:
-        with open(e) as f:
-            obj = json.loads(f.read())
-        assert obj["reason"] == "idle-nudge" and obj["idle_seconds"] == 1
-        stamps.append(int(os.path.basename(e).split(".")[0]))
-    stamps.sort()
-    # NO BURST, measured over the span the nudges themselves define: at one per
-    # second, the count can never exceed the elapsed seconds plus the one at the
-    # start of the window.
-    span_s = (stamps[-1] - stamps[0]) / 10**9
-    assert len(stamps) <= span_s + 1 + 1e-6, (
-        f"{len(stamps)} nudges across {span_s:.2f}s at interval 1: a burst")
-    for a, b in zip(stamps, stamps[1:]):
-        assert b - a >= 0.9 * 10**9, "nudges closer than the interval: a burst"
 
 
 def test_idle_nudge_zero_writes_none_ever(tmp_path):
@@ -273,3 +270,39 @@ def test_the_watch_backend_is_chosen_per_os_and_kqueue_is_wired(tmp_path, monkey
         raise AssertionError("close() left the directory fd open")
     except OSError:
         pass
+
+
+def test_one_nudge_per_real_ring():
+    """THE NUDGE ASKS ONCE, THEN WAITS FOR A REASON (operator, 2026-09-20:
+    "there is NO REASON to force tokens to be wasted by communicating a poll
+    that had no data to return").
+
+    Measured on the host that day: 33 idle-nudges against 18 messages and one
+    mail, ten of them in the SAME SECOND because the host daemon serves eleven
+    identities whose idle timers run together. Each spent a model turn to find
+    nothing. The mail probe already reasoned this way -- a spurious ring spends
+    a turn and is not idempotent -- and the nudge was the one producer nobody
+    applied it to.
+    """
+    from reveille import waked
+    S = 10**9
+    # armed at start: whatever was parked before the daemon existed gets asked
+    assert waked.nudge_due(0, 3 * S, 3, armed=True) is True
+    # having asked, it does not ask again
+    assert waked.nudge_due(0, 3 * S, 3, armed=False) is False
+    # ...however long it waits
+    assert waked.nudge_due(0, 3000 * S, 3, armed=False) is False
+    # and 0 still disables it outright, armed or not
+    assert waked.nudge_due(0, 10**15, 0, armed=True) is False
+
+
+def test_a_real_ring_re_arms_the_nudge():
+    """The nudge still does its whole job: restart an agent that parked work in
+    an earlier turn. It fires once after ANY activity -- it just stops asking
+    an agent that answered by having nothing to do."""
+    from reveille import waked
+    state = {"last": 10**9, "armed": False}      # a nudge has just fired
+    assert waked.nudge_due(state["last"], 10**12, 3, state["armed"]) is False
+    # a real ring arrives
+    state["last"], state["armed"] = 2 * 10**9, True
+    assert waked.nudge_due(state["last"], 10**12, 3, state["armed"]) is True
