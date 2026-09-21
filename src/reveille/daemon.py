@@ -401,6 +401,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.316",
+     "0.2.316 A CONFLICT VERDICT IS JUDGED ONCE (schema v47).\n\nEvery agent in a room folds over the same rows, so every agent's conflict pass\noffered the writer the SAME pairs. Measured 2026-09-21: roc-api-dev and\nshared-dev shared 95 of 95 candidate pairs; roc-api-dev's pass ran 03:16:02 to\n03:18:38, and roughly seventeen OverSiteAI bodies were each going to pay that\nagain for identical answers -- on the writer the voice path shares.\n\nconflict_verdicts holds every judgement keyed on the sorted pair of FULL uids\nand the JUDGE. A uid never changes -- an edit writes a new row with a new uid --\nso a verdict can never go stale on content. It CAN go stale on the judge: the\nkey fingerprints the frame and the model, so changing either misses and\nre-asks rather than answering a new question with an old verdict.\n\nEvery verdict is kept, not only CONFLICT: AGREE and UNRELATED are the ~94% that\nsave the work. An UNPARSED reply is never stored -- not evidence of anything,\nand caching it would make a missing answer permanent. Verdicts land one at a\ntime, so a pass the writer abandons half-way is resumed by the next fold, not\nrepeated. A cached CONFLICT still reaches the note; the log line now says\n`N judged, M from cache`.\n\nv46 -> v47 is additive: a new table, no row touched, no snapshot owed. The\nfirst OverSiteAI fold after this deploy pays for the room's pairs; every other\nbody in it should log `95 from cache`."),
     ("0.2.315",
      "0.2.315 THE STORY IS ONE CALL, SO ITS INPUT IS ONE CALL'S WORTH (field, roc-api-dev,\n2026-09-21 02:52Z).\n\n    HTTP 400 ... your prompt contains 2290998 characters (more than 722432\n    characters, which is the upper bound for 5644 input tokens)\n\n0.2.305 joined EVERY message batch into the single WORK/OPEN call on the\nreasoning that a first run bounds the window to seven days -- which bounds\nTIME, not TOKENS. roc-api-dev's seven days is 2680 messages in 333 batches.\nThe batches had each been cut to fit one call; joining them undid exactly that.\nstory_material() now takes the NEWEST batches that fit, measured with the\nwriter's own tokenizer: the same window becomes 3695 real tokens, the whole\nprompt 3860 + 500 reply against 6144, and the writer answers in 18 s with a\nverified WORK and OPEN. Newest-first is also what the written fold delivered:\nits WORK and OPEN were replaced wholesale at every step, so the note always\ncarried the last batch's story.\n\nTWO MORE ON THE SAME PATH, FOUND READING IT.\nA WRITER REFUSAL WAS RETRIED. WriterRefusal is a BusError, so the one-retry\nloop sent the identical 2.29 MB request twice -- the `refused twice` and the\ndoubled suffix in the field log. A context overflow is the same request\nrefused the same way a second later; the retry is for an unreadable reply,\nthe one failure a second attempt can cure.\nEVERY SECOND FOLD WOULD HAVE OVERFLOWED. The story was shown the WHOLE prior\ndigest and the verdict on every tag -- affordable while a note was prose, ~15k\ntokens for one body and ~45k for another once the note became an index. It now\ncarries only the prior WORK and OPEN (story_carry), charged against the same\nbudget, so an open debt still carries forward and the index never reaches the\nwriter. Found by the gate that pinned the old behaviour, not by reading.\nA PROTEGE'S STORY IS INHERITED, NOT WRITTEN: WORK is `(new body, nothing\nshipped yet)` and OPEN is the mentor's, straight from the store -- the old path\nsent the mentor's whole index to the writer, a certain overflow.\n\nSAME CLASS AS 0.2.307 AND 0.2.313, ONE CALL OVER: the cutover changed what an\ninput was -- one batch, a prose note -- and every consumer kept the old size."),
     ("0.2.314",
@@ -1932,7 +1934,14 @@ _CONFLICT_FRAME = (
     "of one rule are AGREE. Most pairs are AGREE or UNRELATED.\n"
     "Format exactly:\nCONFLICT|AGREE|UNRELATED\n<one line naming what differs, or why not>")
 
-CONFLICT_VERDICTS = ("CONFLICT", "AGREE", "UNRELATED")
+def conflict_judge_id():
+    """What makes two verdicts comparable: the question and who answered it.
+
+    A cached verdict is only reusable under the SAME frame and the SAME model;
+    change either and the fingerprint changes, so every lookup misses and the
+    pair is asked again rather than answered with a stale judgement."""
+    h = hashlib.sha256((_CONFLICT_FRAME + "\0" + (_script_model or "")).encode())
+    return h.hexdigest()[:16]
 DIGEST_CONFLICT_OUT_TOKENS = 120        # one word and one line
 
 
@@ -1952,7 +1961,7 @@ def conflict_verdict(reply):
     if not lines:
         return "UNPARSED", ""
     head = lines[0].upper()
-    verdict = next((v for v in CONFLICT_VERDICTS if v in head), "UNPARSED")
+    verdict = next((v for v in store.CONFLICT_VERDICTS if v in head), "UNPARSED")
     return verdict, " ".join(lines[1:])[:300]
 
 
@@ -1976,28 +1985,37 @@ def _digest_conflicts(conn, p, rows):
     if not pairs:
         return []
     by_uid = {r["uid"]: r for r in rows}
-    found, judged = [], 0
+    judge = conflict_judge_id()
+    found, judged, cached = [], 0, 0
     for score, a_uid, b_uid in pairs:
         a, b = by_uid[a_uid], by_uid[b_uid]
-        _digest_yield(judged + 1, len(pairs))
-        try:
-            reply = strip_think("".join(_llm_stream(
-                _script_url, _script_model, _script_token, conflict_prompt(
-                    a["rule"] or a["fact"], b["rule"] or b["fact"]),
-                timeout=DIGEST_TIMEOUT_S, max_tokens=DIGEST_CONFLICT_OUT_TOKENS))).strip()
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
-            log.warning("%s conflict pass stopped after %d of %d: %s",
-                        p.name, judged, len(pairs), e)
-            break
-        judged += 1
-        verdict, why = conflict_verdict(reply)
+        # A PAIR JUDGED ONCE IS NOT JUDGED AGAIN. Every agent in a room offers
+        # the same pairs, so the first fold pays and every later one reads.
+        hit = store.conflict_verdict_get(conn, a_uid, b_uid, judge)
+        if hit is not None:
+            cached += 1
+            verdict, why = hit
+        else:
+            _digest_yield(judged + 1, len(pairs))
+            try:
+                reply = strip_think("".join(_llm_stream(
+                    _script_url, _script_model, _script_token, conflict_prompt(
+                        a["rule"] or a["fact"], b["rule"] or b["fact"]),
+                    timeout=DIGEST_TIMEOUT_S, max_tokens=DIGEST_CONFLICT_OUT_TOKENS))).strip()
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
+                log.warning("%s conflict pass stopped after %d of %d: %s",
+                            p.name, judged + cached, len(pairs), e)
+                break
+            judged += 1
+            verdict, why = conflict_verdict(reply)
+            store.conflict_verdict_put(conn, a_uid, b_uid, judge, verdict, why)
         if verdict != "CONFLICT":
             continue
         log.info("%s digest CONFLICT %s vs %s (%.3f): %s",
                  p.name, a_uid[:8], b_uid[:8], score, why[:200])
         found.append((score, f"- CONFLICT: {why} {store._tag(a)} {store._tag(b)}"))
-    log.info("%s digest conflict pass: %d judged of %d candidates, %d conflict(s)",
-             p.name, judged, len(pairs), len(found))
+    log.info("%s digest conflict pass: %d candidates, %d judged, %d from cache, "
+             "%d conflict(s)", p.name, len(pairs), judged, cached, len(found))
     return [line for _s, line in sorted(found, reverse=True)]
 
 
