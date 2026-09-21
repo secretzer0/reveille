@@ -37,10 +37,15 @@ def test_arrivals_and_departures_are_a_set_difference():
     assert waked.session_events({101}, {101}, False) == (set(), set())
 
 
-def _drive(monkeypatch, script):
-    """Run the watcher over a scripted sequence of session censuses."""
+def _drive(monkeypatch, script, sids=None):
+    """Run the watcher over a scripted sequence of session censuses. `sids`
+    maps pid -> conversation id; by default every pid is its own conversation,
+    which is what a fresh `claude` is."""
     rings, posts = [], []
     live = {"pids": set(script[0])}
+    sids = sids or {}
+    monkeypatch.setattr(waked.doorbell, "session_id",
+                        lambda pid, base=None: sids.get(pid, f"conv-{pid}"))
     monkeypatch.setattr(waked, "write_ring",
                         lambda a, f: rings.append((a, json.loads(f)["reason"])))
     monkeypatch.setattr(waked, "_reconcile",
@@ -122,3 +127,50 @@ def test_a_broker_refusal_is_an_answer_not_an_error():
     check; waked asks and takes whatever it is told."""
     out = waked._reconcile("ws://127.0.0.1:1/wake", "tok")
     assert out["started"] is False and out["why"]
+
+
+# ---------------------------------------------------------------------------
+# A RESUME IS NOT A BODY WITHOUT MEMORY. Measured the day this shipped: an
+# interrupt-and-continue made `claude --resume` replace pid 1691395 with
+# 1700106, five seconds apart, BOTH carrying conversation 4a8f2471 -- and the
+# watcher rang boot, asking a body that had read its digest two minutes
+# earlier to read all 44k characters of it again. The pid says a body arrived;
+# the sessionId says whether it arrived with its memory.
+
+def test_a_resume_of_a_known_conversation_gets_no_boot_ring(monkeypatch):
+    rings, _posts, _state = _drive(
+        monkeypatch, [{1691395}, set(), {1700106}],
+        sids={1691395: "4a8f2471", 1700106: "4a8f2471"})
+    assert rings == [], rings
+
+
+def test_a_fresh_conversation_in_the_same_directory_still_boots(monkeypatch):
+    rings, _posts, _state = _drive(
+        monkeypatch, [{101}, {101, 202}], sids={101: "conv-a", 202: "conv-b"})
+    assert rings == [("ana", "boot")], rings
+
+
+def test_a_session_that_cannot_say_which_conversation_it_is_boots():
+    """Unknown is not known: a body we cannot prove has memory is told where
+    its memory is, because that fall costs a turn and the other costs a mind."""
+    assert waked.boot_due("", {"x": True}) is True
+    assert waked.boot_due("x", {"x": True}) is False
+    assert waked.boot_due("y", {"x": True}) is True
+
+
+def test_remembered_conversations_are_bounded():
+    known = {}
+    waked.remember_sessions(known, (f"c{i}" for i in range(waked.KNOWN_SESSIONS_MAX + 50)))
+    assert len(known) == waked.KNOWN_SESSIONS_MAX
+    assert "c0" not in known and f"c{waked.KNOWN_SESSIONS_MAX + 49}" in known
+    waked.remember_sessions(known, ["", None])
+    assert len(known) == waked.KNOWN_SESSIONS_MAX
+
+
+def test_the_session_id_reader_survives_a_missing_or_torn_descriptor(tmp_path):
+    from reveille import doorbell
+    assert doorbell.session_id(424242, base=str(tmp_path)) == ""
+    (tmp_path / "7.json").write_text("{not json")
+    assert doorbell.session_id(7, base=str(tmp_path)) == ""
+    (tmp_path / "8.json").write_text('{"sessionId": "abc"}')
+    assert doorbell.session_id(8, base=str(tmp_path)) == "abc"
