@@ -7725,7 +7725,14 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
                     f"ORDER BY ts_ns", mine + rooms + [msg_since]):
                 items.append((m["ts_ns"], _msg_line(m)))
     items.sort(key=lambda t: t[0])
-    total = len(items)
+    # A COUNT THAT CHANGED MEANING KEPT ITS NAME. `items` held rows AND
+    # messages until the index cut over, and then held MESSAGES ONLY -- so
+    # `rows = len(items)` went on being called rows while it counted messages.
+    # The header printed `input: 4 rows` over a 453-row index, and the window
+    # check built to catch a truncation compared 453 indexed rows against those
+    # 4 and raised `[WINDOW: indexed 453 rows but the store only offered 4]` on
+    # a perfectly healthy fold. Each is named for what it counts now.
+    n_messages = len(items)
     # SLICE into batches by chars, in time order; the writer sees one at a time
     # beside the running digest, so no single call outgrows a small context.
     batches, cur, size, dropped = [], [], 0, []
@@ -7773,7 +7780,8 @@ def digest_inputs(conn, *, name, agent_id, token_id, rooms, mentor=None,
         batches = split
     texts = [_block(f"BATCH {i + 1} OF {len(batches)}: HIVE ROWS AND MESSAGES {label}, IN TIME ORDER",
                     [ln for _, ln in b]) for i, b in enumerate(batches)]
-    return {"base": base, "batches": texts, "rows": total, "dropped": dropped,
+    return {"base": base, "batches": texts, "rows": len(rows_kept),
+            "messages": n_messages, "dropped": dropped,
             "since_ns": since, "prior": prior["uid"] if prior else "", "scope": scope,
             # ROWS THE BUDGET LEFT OUT -- live, queryable, one recall() away,
             # and named in the header so the note never implies it is the store.
@@ -8647,8 +8655,8 @@ def digest_header(*, name, inputs, model, batches, mentor=None, conflicts=0,
              f"{_d8(inputs['first_window_ns'])} (first run window)"
              if inputs.get("first_window_ns") else "the beginning")
     head = (f"[digest:{name} {when} | since {since} | input: {inputs['rows']} rows, "
-            f"{batches} message batches | prior: {inputs['prior'][:8] or 'none'} | "
-            f"writer: {model or 'server default'}]")
+            f"{inputs.get('messages', 0)} messages in {batches} batch(es) | "
+            f"prior: {inputs['prior'][:8] or 'none'} | writer: {model or 'server default'}]")
     if mentor is not None:
         head += f"\n[protege-of:{mentor['name']} {mentor.get('digest_uid', '')[:8]} {when}]"
     if window:

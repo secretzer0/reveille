@@ -279,7 +279,7 @@ def test_rehydrate_page_one_row_one_is_the_digest(tmp_path, writer):
     assert page["items"][1]["kind"] == "state"
     head = page["items"][0]["fact"].splitlines()[0]
     assert re.match(r"\[digest:ana \d{4}-\d{2}-\d{2} \| since \d{4}-\d{2}-\d{2} \(first run window\) "
-                    r"\| input: \d+ rows, \d+ message batches \| prior: none \| writer: stub-model ctx \? "
+                    r"\| input: \d+ rows, \d+ messages in \d+ batch\(es\) \| prior: none \| writer: stub-model ctx \? "
                     r"out \d+ batch \d+\]",
                     head), head
 
