@@ -401,6 +401,8 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.315",
+     "0.2.315 THE STORY IS ONE CALL, SO ITS INPUT IS ONE CALL'S WORTH (field, roc-api-dev,\n2026-09-21 02:52Z).\n\n    HTTP 400 ... your prompt contains 2290998 characters (more than 722432\n    characters, which is the upper bound for 5644 input tokens)\n\n0.2.305 joined EVERY message batch into the single WORK/OPEN call on the\nreasoning that a first run bounds the window to seven days -- which bounds\nTIME, not TOKENS. roc-api-dev's seven days is 2680 messages in 333 batches.\nThe batches had each been cut to fit one call; joining them undid exactly that.\nstory_material() now takes the NEWEST batches that fit, measured with the\nwriter's own tokenizer: the same window becomes 3695 real tokens, the whole\nprompt 3860 + 500 reply against 6144, and the writer answers in 18 s with a\nverified WORK and OPEN. Newest-first is also what the written fold delivered:\nits WORK and OPEN were replaced wholesale at every step, so the note always\ncarried the last batch's story.\n\nTWO MORE ON THE SAME PATH, FOUND READING IT.\nA WRITER REFUSAL WAS RETRIED. WriterRefusal is a BusError, so the one-retry\nloop sent the identical 2.29 MB request twice -- the `refused twice` and the\ndoubled suffix in the field log. A context overflow is the same request\nrefused the same way a second later; the retry is for an unreadable reply,\nthe one failure a second attempt can cure.\nEVERY SECOND FOLD WOULD HAVE OVERFLOWED. The story was shown the WHOLE prior\ndigest and the verdict on every tag -- affordable while a note was prose, ~15k\ntokens for one body and ~45k for another once the note became an index. It now\ncarries only the prior WORK and OPEN (story_carry), charged against the same\nbudget, so an open debt still carries forward and the index never reaches the\nwriter. Found by the gate that pinned the old behaviour, not by reading.\nA PROTEGE'S STORY IS INHERITED, NOT WRITTEN: WORK is `(new body, nothing\nshipped yet)` and OPEN is the mentor's, straight from the store -- the old path\nsent the mentor's whole index to the writer, a certain overflow.\n\nSAME CLASS AS 0.2.307 AND 0.2.313, ONE CALL OVER: the cutover changed what an\ninput was -- one batch, a prose note -- and every consumer kept the old size."),
     ("0.2.314",
      '0.2.314 THE COOL-DOWN BEFORE AN EXIT COUNTS.\n\nMeasured the evening the session watcher shipped: an interrupt-and-continue took\nthe session away and brought it back as `claude --resume` five seconds later --\none census tick -- and the departure had already asked the broker to fold. The\nfirst time it did, the fold RAN: a GPU pass, and the conflict judge behind it,\nfor a body that was back before it finished and was carrying its memory the\nwhole time. 0.2.313 stopped the resume being rung to re-read that memory; the\nfold on the way out was the other half of the same event.\n\nThe last departure now starts a cool-down (RECONCILE_GRACE_S = 60) instead of\nfolding. Any body back inside it -- a resume, or a fresh session -- cancels\nit, because the identity is working again and its own next exit reconciles.\nAn identity that stays gone for the whole minute folds exactly once, however\nlong it then stays gone. The cool-down only ever DELAYS a fold and never drops\none, and waiting costs nothing: the fold exists so the NEXT boot is current,\nand a body back inside a minute is a resume.\n\nSixty seconds against a measured five: an order of magnitude over the resume,\nand room for a human re-running the command by hand. Proven red on behaviour\nwith the old logic behind the new signature -- the field sequence folds, and a\nfresh body does not cancel.'),
     ("0.2.313",
@@ -2006,6 +2008,8 @@ _STORY_FRAME = (
     "WORK -- what this agent did and shipped, in the past tense, concrete: versions, "
     "PR numbers, file names, what landed.\n"
     "OPEN -- what it still owes and who owes it something, citing messages as [msg:N].\n"
+    "If you are shown the agent's PRIOR WORK and OPEN, carry forward what still holds and "
+    "drop only what the messages show is done -- an open debt is not closed by silence.\n"
     "Both are short. At most {cap} tokens for the whole reply. Facts, ids and numbers "
     "exact; no preamble, no commentary, no code fences.\n"
     "Emit exactly these two headings, each followed by `- ` bullet lines:\nWORK\nOPEN\n"
@@ -2014,23 +2018,115 @@ _STORY_FRAME = (
 DIGEST_STORY_OUT_TOKENS = 500
 
 
+def story_input_budget(ctx):
+    """Tokens of message material ONE story call may carry, or 0 when the
+    writer's context is unknown. The same terms every other call here pays:
+    the frame, a margin that scales with ctx, and the reply."""
+    if not ctx:
+        return 0
+    return max(0, ctx - DIGEST_DIRECTIVE_TOKENS - digest_margin(ctx) - DIGEST_STORY_OUT_TOKENS)
+
+
+def story_carry(prior_text):
+    """The prior note's WORK and OPEN -- and nothing else of it -- for the next
+    story to carry forward, or "" on a first fold.
+
+    THE STORY USED TO BE SHOWN THE WHOLE PRIOR DIGEST, with the store's verdict
+    on every tag in it. That was affordable while a note was a few thousand
+    tokens of prose. Once the note became an INDEX of every row it is ~15k
+    tokens for one body and ~45k for another, so every agent's SECOND fold
+    would have overflowed a 6144-token writer whatever its message window was.
+    The index is the store's job and the verdicts belonged to the tagged
+    sections the writer no longer writes; what the story actually needs from
+    the past is continuity -- what was shipped, and what is still owed, so an
+    open debt is not forgotten because the batch that closed it never came.
+
+    CONFLICT lines are not carried: the store recomputes them every fold, and a
+    carried copy would come back from the writer as a duplicate the next pass
+    could not tell from the real one.
+    """
+    if not (prior_text or "").strip():
+        return ""
+    secs, _said = store._digest_sections(prior_text)
+    work = secs.get("WORK") or ["- (none)"]
+    owed = [ln for ln in (secs.get("OPEN") or []) if not ln.startswith("- CONFLICT:")]
+    return store._block("YOUR PRIOR WORK AND OPEN -- carry forward what still holds, "
+                        "drop what the messages below show is done",
+                        ["WORK"] + work + ["OPEN"] + (owed or ["- (none)"]))
+
+
+def story_material(batches, budget, tokens_of):
+    """The NEWEST message batches whose joined text fits `budget` tokens.
+
+    THE STORY IS ONE CALL, SO ITS INPUT IS ONE CALL'S WORTH. 0.2.305 joined
+    EVERY batch into a single prompt on the reasoning that a first run bounds
+    the window to seven days -- which bounds TIME, not TOKENS. Measured in the
+    field: roc-api-dev's seven days is 2680 messages in 24 batches, 2.29
+    million characters against a 6144-token writer, refused with HTTP 400 on
+    every fold. The batches were already cut to fit a call each; joining them
+    undid that.
+
+    NEWEST FIRST, because WORK and OPEN are about the present: what it just
+    shipped and what it still owes. That is also exactly what the written fold
+    delivered -- its WORK and OPEN were replaced wholesale at every step, so
+    the note always carried the LAST batch's story. This keeps that, in one
+    call instead of twenty-four. Older work is not lost: it is in the rows the
+    index carries, and in the digest chain.
+
+    Measured, never assumed: batches are joined newest-backwards while the
+    writer's own tokenizer says they fit, and a single batch that does not fit
+    loses its OLDEST lines until it does.
+    """
+    if not batches:
+        return "(nothing since)"
+    picked = [batches[-1]]
+    if budget and tokens_of:
+        for b in reversed(batches[:-1]):
+            if tokens_of("\n\n".join([b] + picked)) > budget:
+                break
+            picked.insert(0, b)
+    text = "\n\n".join(picked)
+    if budget and tokens_of:
+        for _ in range(16):
+            if tokens_of(text) <= budget:
+                break
+            lines = text.split("\n")
+            text = "\n".join(lines[max(1, len(lines) // 4):])
+    return text
+
+
 def story_prompt(text, cap=DIGEST_STORY_OUT_TOKENS):
     """The two messages the WORK/OPEN writer is sent. Pure."""
     return [{"role": "system", "content": _STORY_FRAME.format(cap=cap)},
             {"role": "user", "content": text}]
 
 
-def _digest_story(conn, p, scope, inputs):
+def _digest_story(conn, p, scope, inputs, mentor=None):
     """WORK and OPEN, written by the model. The only sections it still writes.
 
     Everything with a source row is INDEXED, deterministically and completely;
     this is the part with no row to copy -- the agent's own narrative -- so it
-    is the one place a writer earns its keep. One call, not a loop: the
-    material is the message window, which a first run already bounds to seven
-    days.
+    is the one place a writer earns its keep. One call, not a loop, and so
+    one call's worth of material: story_material.
     """
-    text = inputs["base"] + "\n\n" if inputs.get("base") else ""
-    text += "\n\n".join(inputs["batches"]) if inputs["batches"] else "(nothing since)"
+    if mentor is not None:
+        # A PROTEGE'S STORY IS NOT WRITTEN, IT IS INHERITED. A new body has
+        # shipped nothing, and what it owes is what its mentor left open -- so
+        # both come from the store. The old path handed the writer the
+        # mentor's WHOLE digest, which is an index of every row now (~45k
+        # tokens), so every protege fold would overflow a 6144-token writer.
+        mine, _said = store._digest_sections(inputs.get("base") or "")
+        return {"WORK": ["- (new body, nothing shipped yet)"],
+                "OPEN": mine.get("OPEN") or ["- (none)"]}
+    def count(s):
+        return writer_tokens(s, _script_url, _script_token)[0]
+    carry = story_carry(inputs.get("prior_text") or "")
+    budget = story_input_budget(_digest_ctx)
+    if budget and carry:
+        budget = max(1, budget - count(carry))
+    text = story_material(inputs["batches"], budget, count)
+    if carry:
+        text = carry + "\n\n" + text
     # EVERY WRITER CALL YIELDS TO THE VOICE FIRST (24227): a deferrable job on
     # the interactive model's queue is an outage, not a cost.
     _digest_yield(1, 1)
@@ -2043,6 +2139,13 @@ def _digest_story(conn, p, scope, inputs):
         # retry rarely cures.
         try:
             return _story_once(conn, p, scope, text)
+        except store.WriterRefusal:
+            # THE WRITER'S NO IS NOT RETRIED. A context overflow or a 5xx is
+            # the same request refused the same way a second later; retrying it
+            # only doubled the cost and the log line (`refused twice`, the
+            # suffix printed twice). The retry is for a reply the store could
+            # not read, which is the one failure a second attempt can cure.
+            raise
         except store.BusError as e:
             why = str(e)
             log.warning("%s digest story attempt %d refused: %s", p.name, attempt, why)
@@ -2090,7 +2193,7 @@ def _digest_fold(conn, p, scope, mentor, inputs):
     """
     rows = inputs.get("rows_kept") or []
     prior_text = inputs.get("prior_text", "")
-    story = _digest_story(conn, p, scope, inputs)
+    story = _digest_story(conn, p, scope, inputs, mentor)
     conflicts = _digest_conflicts(conn, p, rows)
 
     def assemble(keep):

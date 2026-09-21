@@ -191,8 +191,14 @@ def test_two_runs_leave_exactly_one_live_digest_with_a_chain(tmp_path, writer):
                         "ORDER BY created_ns").fetchall()
     assert [r["status"] for r in rows] == ["superseded", "live"]
     assert rows[1]["supersedes_id"] is not None, "the chain keeps history"
-    # the second run was shown the first digest AND the store's verdicts on its tags
-    assert "PRIOR DIGEST" in writer.calls[-1] and "KEEP doctrine:" in writer.calls[-1]
+    # THE SECOND RUN CARRIES THE FIRST ONE'S STORY, NOT ITS INDEX. It used to be
+    # shown the whole prior digest and the verdict on every tag -- affordable
+    # while a note was prose, an overflow on every second fold once the note
+    # became an index (~15-45k tokens against a 6144-token writer).
+    assert "YOUR PRIOR WORK AND OPEN" in writer.calls[-1]
+    assert "shipped #305" in writer.calls[-1], "the prior WORK was not carried"
+    assert "[doctrine:" not in writer.calls[-1], "the prior INDEX reached the writer"
+    assert "KEEP doctrine:" not in writer.calls[-1], "tag verdicts reached the writer"
     # never the text back
     assert "never truncate" not in str(second)
     assert second["inputs"]["prior"] == first["id"]
