@@ -46,6 +46,38 @@ class RuntimeAdapter(ABC):
         except (OSError, ValueError, AttributeError):
             return {}
 
+    def state_dir(self, project: Path) -> Path:
+        """Where this runtime's per-agent files live in a project.
+
+        The credential's own directory, which is also where the parked marker,
+        the repo-status artifact and the ignore rule that covers them belong:
+        `.claude/` for one runtime, `.codex/` for the other. One answer, so a
+        daemon never spells either of them.
+        """
+        return self.credential_path(Path(project)).parent
+
+    def credential_env(self, project: Path) -> dict:
+        """The credential file's `env` object, or {} -- read loosely.
+
+        Both runtimes keep the identity in the same shape, so this is read once
+        here. Loose on purpose: callers that need a COMPLETE credential use
+        identity(), and callers that need to know who a directory belongs to
+        use claimed_agent(), which is true of half a credential too.
+        """
+        try:
+            data = json.loads(self.credential_path(Path(project)).read_text())
+            env = data.get("env")
+            return env if isinstance(env, dict) else {}
+        except (OSError, ValueError, AttributeError):
+            return {}
+
+    def credential_mtime(self, project: Path) -> int:
+        """When this identity's credential last changed, or 0."""
+        try:
+            return self.credential_path(Path(project)).stat().st_mtime_ns
+        except OSError:
+            return 0
+
     def claimed_agent(self, project: Path) -> str:
         """The identity this directory CLAIMS, complete credential or not.
 
@@ -59,12 +91,8 @@ class RuntimeAdapter(ABC):
         Both runtimes keep the same {"env": {...}} shape in their own file, so
         the claim is read once here rather than re-derived per runtime.
         """
-        try:
-            data = json.loads(self.credential_path(Path(project)).read_text())
-            name = (data.get("env") or {}).get("REVEILLE_AGENT_ROLE", "")
-            return name if isinstance(name, str) else ""
-        except (OSError, ValueError, AttributeError):
-            return ""
+        name = self.credential_env(project).get("REVEILLE_AGENT_ROLE", "")
+        return name if isinstance(name, str) else ""
 
     @abstractmethod
     def instruction_path(self, project: Path) -> Path: ...

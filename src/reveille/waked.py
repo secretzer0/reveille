@@ -841,6 +841,34 @@ async def _claim(url, secret):
         return "", type(e).__name__
 
 
+def _adapter_env(workdir):
+    """The credential env this directory holds, whichever runtime wrote it."""
+    from reveille.adapters import AdapterError, select_adapter
+    try:
+        return select_adapter(workdir or os.getcwd()).credential_env(
+            workdir or os.getcwd())
+    except (AdapterError, OSError, ValueError):
+        return {}
+
+
+def _adapter_state_dir(workdir):
+    """Where this directory's runtime keeps its per-agent files.
+
+    A directory that names no runtime yet still has to answer: a parked marker
+    is written by a daemon that may be the first thing to touch the directory,
+    and refusing to name a path there would lose the one secret the recall
+    claim is matched against. Claude's is the shape every existing body has,
+    so it is what an unclaimed directory gets.
+    """
+    from reveille.adapters import AdapterError, get_adapter, select_adapter
+    base = workdir or os.getcwd()
+    try:
+        adapter = select_adapter(base)
+    except (AdapterError, OSError, ValueError):
+        adapter = get_adapter("claude")
+    return str(adapter.state_dir(base))
+
+
 def read_env(agent, workdir=None):
     """The credential THIS DIRECTORY currently holds, or "".
 
@@ -848,16 +876,12 @@ def read_env(agent, workdir=None):
     daemon parked on a spent secret has no other way to learn that a live one
     arrived by a path it did not take.
     """
-    # READ, NOT IMPORTED. waked deliberately does not depend on the CLI at
-    # module scope -- a daemon that will not start is worse than one that cannot
-    # self-heal -- and this file is three lines of JSON, so borrowing a reader
-    # would trade that independence for nothing.
-    try:
-        with open(os.path.join(workdir or os.getcwd(), ".claude",
-                               "settings.local.json")) as f:
-            env = json.load(f).get("env") or {}
-    except (OSError, ValueError, AttributeError):
-        return ""
+    # THE FILE IS THE RUNTIME'S, SO THE RUNTIME NAMES IT. waked still does not
+    # depend on the CLI -- reveille.adapters touches no broker, no process and
+    # no credential at import -- but it stopped spelling `.claude` itself the
+    # moment a second runtime existed, because a daemon reading one CLI's path
+    # in another CLI's directory reads nothing and calls the identity absent.
+    env = _adapter_env(workdir)
     # ONE DIRECTORY, ONE AGENT: if this file now names somebody else, its
     # credential is not ours to adopt -- taking it would be the clobber bug
     # wearing a daemon's face.
@@ -880,11 +904,11 @@ def read_env(agent, workdir=None):
 # session -- the only call that may read it is the recall claim. It is a secret
 # already spent for every purpose except proving which machine this is, and it
 # is unlinked the moment any credential attaches.
-PARKED_NAME = os.path.join(".claude", ".reveille-parked")
+PARKED_BASENAME = ".reveille-parked"
 
 
 def parked_path(workdir=None):
-    return os.path.join(workdir or os.getcwd(), PARKED_NAME)
+    return os.path.join(_adapter_state_dir(workdir), PARKED_BASENAME)
 
 
 def _ignore_parked(claude_dir):
@@ -1318,7 +1342,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     sep = "&" if "?" in url else "?"
     token = os.environ.get("REVEILLE_TOKEN", "") if token is None else token
     if workdir:
-        _STATUS_BY_AGENT[agent] = os.path.join(workdir, ".claude",
+        _STATUS_BY_AGENT[agent] = os.path.join(_adapter_state_dir(workdir),
                                                ".reveille-repo-status")
     uri = wake_uri(url, sep, agent, token)
     # Daemon start counts as activity AND arms one nudge: whatever the agent
@@ -1587,10 +1611,10 @@ def credential_mtime(workdir):
     """When this identity's credential last changed, or 0. The whole parked
     rule rests on it: a refusal is only worth retrying once the thing that
     was refused is different."""
+    from reveille.adapters import AdapterError, select_adapter
     try:
-        return os.stat(os.path.join(workdir, ".claude",
-                                    "settings.local.json")).st_mtime_ns
-    except OSError:
+        return select_adapter(workdir).credential_mtime(workdir)
+    except (AdapterError, OSError, ValueError):
         return 0
 
 
