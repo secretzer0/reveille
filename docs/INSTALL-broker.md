@@ -69,24 +69,14 @@ manage: uv brings the interpreter the repo pins.
 6. **The launcher as a service.** `make up` pins the launcher clone
    (`~/.reveille/launcher-src`, fast-forwarded to the deployed tree) and
    the live host runs it under systemd — the launcher is INFRASTRUCTURE
-   (it restarts itself; agent bodies never do). The unit as installed,
-   verbatim from the live host:
+   (it restarts itself; agent bodies never do). The unit is a FILE in the
+   repo, like the auto-deploy units and for the same reason — what gains
+   privilege on this host is reviewable in the diff that added it. Edit the
+   paths inside it if this box is not reveille-server:
 
-       # /etc/systemd/system/reveille-launcher.service
-       [Unit]
-       Description=Reveille launcher (agents API, port 8766)
-       After=docker.service network-online.target
-       Wants=network-online.target
-
-       [Service]
-       User=<you>
-       EnvironmentFile=/home/<you>/.reveille/launcher.env
-       ExecStart=/home/<you>/.reveille/launcher-src/.venv/bin/python /home/<you>/.reveille/launcher-src/scripts/reveille_launch.py serve --auth-url http://127.0.0.1:8765 --port 8766
-       Restart=always
-       RestartSec=3
-
-       [Install]
-       WantedBy=multi-user.target
+       sudo cp systemd/reveille-launcher.service /etc/systemd/system/
+       sudo systemctl daemon-reload
+       sudo systemctl enable --now reveille-launcher
 
    with `~/.reveille/launcher.env` declaring its homes:
 
@@ -94,7 +84,13 @@ manage: uv brings the interpreter the repo pins.
        REVEILLE_LAUNCH_DB=/home/<you>/.reveille/launcher.db
        REVEILLE_LAUNCH_REPO=/home/<you>/.reveille/launcher-src
 
-       sudo systemctl enable --now reveille-launcher
+   `Restart=always` covers a launcher that DIES. A launcher that is
+   **stopped** is the case it cannot cover — a stop is not a restart
+   trigger — and that is the outage measured 2026-09-23: the unit was
+   stopped at 14:35:56, the 0.2.317 deploy ran two minutes later, and
+   `/agents/agents` served 502 with every check green until a human asked.
+   `scripts/deploy-launcher` now closes it: on a host that carries this
+   unit, a silent 8766 is an outage, so the deploy pins and starts it.
 
 7. **PROVE IT** — every deploy this fleet runs ends on these three reads:
 

@@ -1,0 +1,29 @@
+# Installed by hand, once, per docs/INSTALL-broker.md step 6. It is a FILE in
+# the repo for the same reason the auto-deploy units are: what gains privilege
+# on the deploy host is reviewable in the diff that adds it, and the doc quotes
+# one source instead of a copy that drifts from it.
+#
+# THE LAUNCHER IS INFRASTRUCTURE (doctrine 19bdbfcf: infra restarts itself,
+# bodies never do). Before this file existed in the repo, the unit lived only on
+# reveille-server and the only supervisor NAMED anywhere was the agent Stop
+# hook -- which runs at the end of an agent's turn, and a box that serves the
+# bus and runs no agents has no turns. Restart=always is what makes a killed
+# launcher come back in RestartSec; `scripts/deploy-launcher` is what makes a
+# STOPPED one come back, because a stop is not a restart trigger.
+#
+# The paths below are reveille-server's (user vyzon). Another host edits them at
+# install time; nothing reads them from here.
+[Unit]
+Description=Reveille launcher (agents API, port 8766)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=vyzon
+EnvironmentFile=/home/vyzon/.reveille/launcher.env
+ExecStart=/home/vyzon/.reveille/launcher-src/.venv/bin/python /home/vyzon/.reveille/launcher-src/scripts/reveille_launch.py serve --auth-url http://127.0.0.1:8765 --port 8766
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
