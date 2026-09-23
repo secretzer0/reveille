@@ -253,20 +253,6 @@ def agent_of_directory(workdir):
         return ""
 
 
-def mcp_registered(workdir):
-    """Is the local-scope registration for this directory already in
-    ~/.claude.json? Read-only, shape-tolerant: the file is claude's, not ours,
-    and the only thing this answer guards is whether a boot with no claude
-    binary may DEGRADE instead of refusing -- so anything unreadable is False,
-    which fails toward the hard refusal."""
-    try:
-        cfg = json.loads((pathlib.Path.home() / ".claude.json").read_text())
-        proj = (cfg.get("projects") or {}).get(str(workdir)) or {}
-        return "reveille" in (proj.get("mcpServers") or {})
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-        return False
-
-
 def write_credential(url, name, token, workdir):
     """THE DIRECTORY IS THE AGENT (operator ruling, 2026-08-13). The credential
     goes in <workdir>/.claude/settings.local.json's env block, which Claude Code

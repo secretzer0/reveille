@@ -1273,6 +1273,10 @@ def test_a_configured_directory_boots_degraded_without_the_binary(tmp_path, brok
     assert cli.main(argv) == 0
     (home / ".claude.json").write_text(json.dumps(
         {"projects": {str(work): {"mcpServers": {"reveille": {}}}}}))
+    # ONE implementation of "is it registered", and it is the adapter's -- the
+    # doorbell and the installer now ask the same question of the same file, so
+    # the test points that one reader at this fake home.
+    monkeypatch.setenv("REVEILLE_CLAUDE_CONFIG", str(home / ".claude.json"))
     capsys.readouterr()
     calls_before = log.read_text()
     # second init: the binary is gone -- and ONLY the binary. The refusal test

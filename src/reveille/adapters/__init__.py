@@ -46,6 +46,26 @@ class RuntimeAdapter(ABC):
         except (OSError, ValueError, AttributeError):
             return {}
 
+    def claimed_agent(self, project: Path) -> str:
+        """The identity this directory CLAIMS, complete credential or not.
+
+        A DIRECTORY NAME IS NOT AN IDENTITY (operator, 2026-09-20): the registry
+        maps name -> path and paths get reused, so a ring asks the directory
+        who it belongs to. This read is deliberately LOOSER than identity():
+        half a credential still names an owner, and ringing a directory that
+        says it belongs to somebody else is the failure being prevented --
+        whether or not that somebody can currently authenticate.
+
+        Both runtimes keep the same {"env": {...}} shape in their own file, so
+        the claim is read once here rather than re-derived per runtime.
+        """
+        try:
+            data = json.loads(self.credential_path(Path(project)).read_text())
+            name = (data.get("env") or {}).get("REVEILLE_AGENT_ROLE", "")
+            return name if isinstance(name, str) else ""
+        except (OSError, ValueError, AttributeError):
+            return ""
+
     @abstractmethod
     def instruction_path(self, project: Path) -> Path: ...
 
@@ -75,7 +95,18 @@ class RuntimeAdapter(ABC):
     def register_mcp(self, project: Path, url: str, executable: str) -> str: ...
 
     @abstractmethod
-    def install_hooks(self, project: Path) -> None: ...
+    def install_hooks(self, project: Path) -> str: ...
+
+    @abstractmethod
+    def sessions(self, project: Path) -> list:
+        """Every LIVE session in `project` a ring could start a turn in.
+
+        Opaque handles: what a session IS differs per runtime (Claude publishes
+        a descriptor per session, Codex holds threads in one app-server), and
+        nothing outside the adapter may care which. The doorbell asks only
+        whether the list is empty, so `no live session` means the same thing
+        for both.
+        """
 
     @abstractmethod
     def deliver(self, project: Path, agent: str, frame: dict) -> tuple[int, str]: ...
@@ -92,8 +123,8 @@ class ClaudeAdapter(RuntimeAdapter):
         return write_credential(url, name, token, project)
 
     def mcp_registered(self, project, url):
-        from reveille.cli import mcp_registered
-        return mcp_registered(project)
+        from reveille import doorbell
+        return doorbell.mcp_enabled(project, expect_url=url)
 
     def instruction_path(self, project):
         """CLAUDE.local.md, NOT CLAUDE.md (architect 12167).
@@ -120,10 +151,31 @@ class ClaudeAdapter(RuntimeAdapter):
         from reveille import install
         if install.main():
             raise AdapterError("Claude Stop hook installation failed")
+        return "Stop hook installed"
+
+    def sessions(self, project):
+        from reveille import doorbell
+        return doorbell.inboxes_for(str(project))
 
     def deliver(self, project, agent, frame):
+        """Write the ring on every live session's own inbox socket.
+
+        ALL of them, not the newest: a duplicate ring costs one turn and a
+        skipped one costs every ring.
+        """
         from reveille import doorbell
-        return doorbell.knock(agent, str(project), frame)
+        found = self.sessions(project)
+        if not found:
+            return 0, "no live session in that directory"
+        text = doorbell.ring_text(frame)
+        rung, why = 0, []
+        for pid, sock_path, token in found:
+            err = doorbell.ring_one(sock_path, token, text)
+            if err:
+                why.append(f"pid {pid}: {err}")
+            else:
+                rung += 1
+        return rung, "" if rung else "; ".join(why)
 
 
 class CodexAdapter(RuntimeAdapter):
@@ -157,10 +209,28 @@ class CodexAdapter(RuntimeAdapter):
         return register(project, url)
 
     def install_hooks(self, project):
-        raise AdapterError("Codex trusted lifecycle hooks are not implemented yet")
+        """Codex hooks are OFFERED, never installed silently.
+
+        A non-managed Codex hook does nothing until a human reviews it under
+        `/hooks`, and trust is recorded against the hook's HASH -- so every
+        later edit silently un-trusts it again. An installer that wrote one and
+        reported success would be claiming a gate that is not running. Nothing
+        on this runtime's reachability path depends on a hook: the host waked
+        censuses sessions through the app-server, which is why this can be an
+        offer rather than a requirement.
+        """
+        return ("no hook installed -- Codex reachability runs through waked and "
+                "the app-server. A Stop-hook gate is available but must be "
+                "trusted by a human under `/hooks` before it runs")
+
+    def sessions(self, project):
+        from .codex_app_server import sessions
+        return sessions(project)
 
     def deliver(self, project, agent, frame):
-        return 0, "Codex app-server delivery is not implemented yet; ring remains spooled"
+        from reveille import doorbell
+        from .codex_app_server import ring
+        return ring(project, doorbell.ring_text(frame))
 
 
 ADAPTERS = {adapter.name: adapter for adapter in (ClaudeAdapter(), CodexAdapter())}
@@ -190,6 +260,30 @@ def select_adapter(project, runtime="auto") -> RuntimeAdapter:
         return found[0]
     reason = "multiple runtime credentials" if found else "no runtime credentials"
     raise AdapterError(f"{reason} in {project}; select --runtime explicitly")
+
+
+def find_project(start=".", runtime="auto"):
+    """The nearest directory at or above `start` that a runtime has claimed.
+
+    A session does not always start at the agent's own root -- `codex --cd
+    sub` and a shell one directory in both hand the headers helper nothing but
+    that cwd. Measured 2026-09-23: Codex runs `http_headers_helper` with the
+    SESSION's cwd and no CODEX_HOME in its environment, and Claude Code runs
+    its headersHelper with the project directory. So the project is found the
+    way git finds its root, by walking up -- which is also what keeps an
+    absolute path OUT of the config file that names the helper, because a path
+    written into a project file is wrong on every other machine and leaks a
+    home directory into a shared repo.
+
+    Returns `start` when nothing above it is an agent directory, so a caller
+    that is simply not in one gets the same inert answer as before.
+    """
+    start = Path(start).resolve()
+    names = [runtime] if runtime != "auto" else list(ADAPTERS)
+    for directory in (start, *start.parents):
+        if any(get_adapter(name).credential_path(directory).exists() for name in names):
+            return directory
+    return start
 
 
 def runtime_path(project):

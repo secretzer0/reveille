@@ -41,7 +41,11 @@ http_headers = { Authorization = "old-secret" }
     assert data["mcp_servers"]["other"]["url"] == "https://other.test/mcp"
     assert spec["disabled_tools"] == ["send"] and spec["tool_timeout_sec"] == 120
     assert not {"command", "args", "bearer_token_env_var", "http_headers"} & spec.keys()
-    assert shlex.split(spec["http_headers_helper"])[-1] == str(project)
+    # NO PATH IN THE COMMAND: measured 2026-09-23, Codex runs the helper with
+    # the session's own cwd, so the helper finds the project by walking up and
+    # this file stays portable and free of a home directory.
+    assert shlex.split(spec["http_headers_helper"]) == ["reveille-headers", "--runtime", "codex"]
+    assert str(project) not in spec["http_headers_helper"]
     assert adapter.mcp_registered(project, "https://broker.test")
     before = config.stat().st_mtime_ns
     adapter.register_mcp(project, "https://broker.test", "codex")

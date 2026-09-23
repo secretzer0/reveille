@@ -1,6 +1,7 @@
 """Codex project configuration, independent of lifecycle and broker access."""
 from collections.abc import MutableMapping
 import json
+import os
 from pathlib import Path
 import shlex
 from urllib.parse import urlsplit
@@ -20,9 +21,72 @@ def load_config(project):
     return path, doc
 
 
+def codex_home():
+    """Codex's own home, which CODEX_HOME moves (agents-md doc, verified live)."""
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
 def helper_command(project):
-    return shlex.join(["reveille-headers", "--runtime", "codex", "--project",
-                       str(Path(project).resolve())])
+    """The headers command, carrying NO path.
+
+    MEASURED 2026-09-23 against codex-cli 0.156.1: the helper runs with the
+    SESSION's cwd (`cwd=/home/.../reveille`) and no CODEX_HOME in its
+    environment, so it can find the agent directory by walking up from there.
+    An absolute path written here would be correct on exactly one machine,
+    would break the moment the checkout moved, and would put a home directory
+    into a file a team can commit -- for a fact the process can read off its
+    own cwd.
+    """
+    return shlex.join(["reveille-headers", "--runtime", "codex"])
+
+
+def trusted(project):
+    """Codex loads a project's `.codex/` layer ONLY for a trusted project.
+
+    Config reference, `projects.<path>.trust_level`: "Untrusted projects skip
+    project-scoped `.codex/` layers, including project-local config, hooks, and
+    rules." So a registration written into an untrusted project is a file
+    nothing reads -- installed, and not reachable. The entry lives in Codex's
+    OWN home config and is keyed by the project's absolute path; Codex writes
+    it itself when a human trusts the folder in the TUI.
+    """
+    path = codex_home() / "config.toml"
+    try:
+        doc = tomlkit.parse(path.read_text()) if path.exists() else tomlkit.document()
+    except (OSError, ValueError) as e:
+        raise AdapterError(f"Cannot read Codex configuration at {path}") from e
+    entry = (doc.get("projects") or {}).get(str(Path(project).resolve()), {})
+    try:
+        return entry.get("trust_level") == "trusted"
+    except AttributeError:
+        raise AdapterError(f"Invalid projects entry for {project} in {path}") from None
+
+
+def trust(project):
+    """Mark the project trusted in Codex's home config. The human's decision.
+
+    Trust is what lets this project's `.codex/` run HOOKS, so it is never
+    granted as a side effect of installing: `reveille init` refuses and names
+    this, the wizard asks, and --trust-project is the unattended yes.
+    """
+    path = codex_home() / "config.toml"
+    try:
+        doc = tomlkit.parse(path.read_text()) if path.exists() else tomlkit.document()
+    except (OSError, ValueError) as e:
+        raise AdapterError(f"Cannot read Codex configuration at {path}") from e
+    projects = doc.setdefault("projects", tomlkit.table())
+    if not isinstance(projects, MutableMapping):
+        raise AdapterError(f"Codex projects must be a table in {path}")
+    entry = projects.setdefault(str(Path(project).resolve()), tomlkit.table())
+    if not isinstance(entry, MutableMapping):
+        raise AdapterError(f"Invalid projects entry for {project} in {path}")
+    entry["trust_level"] = "trusted"
+    rendered = tomlkit.dumps(doc)
+    tomlkit.parse(rendered)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, rendered,
+                 mode=path.stat().st_mode & 0o777 if path.exists() else 0o600)
+    return str(path)
 
 
 def mcp_spec(project, url):

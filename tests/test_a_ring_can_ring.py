@@ -11,6 +11,8 @@ import os
 import socket
 import threading
 
+import pytest
+
 from reveille import doorbell, spool, waked
 
 
@@ -70,13 +72,36 @@ def _config(tmp_path, workdir, servers=("reveille",)):
     return p
 
 
+@pytest.fixture(autouse=True)
+def _claude_locations():
+    """The runtime's OWN file locations, which the generic doorbell never names.
+
+    These used to ride `knock(..., base=, config=)`. They are Claude's session
+    directory and Claude's config file: words a runtime-generic front door has
+    no business carrying, now that Codex answers the same questions from an
+    app-server socket. They stay overridable where they always were -- the
+    environment the adapter itself reads.
+    """
+    keys = ("REVEILLE_CLAUDE_SESSIONS", "REVEILLE_CLAUDE_CONFIG")
+    before = {k: os.environ.get(k) for k in keys}
+    yield
+    for key, value in before.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def _world(tmp_path, agent="ana", dirname="some-other-name"):
     """A directory whose NAME is nothing like the agent's, on purpose."""
     sess = str(tmp_path / "sessions")
     work = str(tmp_path / dirname)
     os.makedirs(work, exist_ok=True)
     _claims(work, agent)
-    return sess, work, _config(tmp_path, work)
+    conf = _config(tmp_path, work)
+    os.environ["REVEILLE_CLAUDE_SESSIONS"] = sess
+    os.environ["REVEILLE_CLAUDE_CONFIG"] = conf
+    return sess, work, conf
 
 
 def test_the_doorbell_speaks_the_clis_own_protocol(tmp_path):
@@ -89,7 +114,7 @@ def test_the_doorbell_speaks_the_clis_own_protocol(tmp_path):
     _descriptor(sess, work, sock, token="s3cret")
 
     rung, why = doorbell.knock("ana", work, {"reason": "mail", "id": 24950,
-                                             "direct": 3}, base=sess, config=conf)
+                                             "direct": 3})
     t.join(timeout=5)
     assert (rung, why) == (1, ""), why
     assert len(got) == 2, got
@@ -108,8 +133,7 @@ def test_the_directory_name_is_not_the_identity(tmp_path):
     assert os.path.basename(work) == "some-other-name"
     sock, got, t = _inbox(tmp_path)
     _descriptor(sess, work, sock)
-    rung, why = doorbell.knock("native-reveille-devops", work, {"reason": "mail"},
-                               base=sess, config=conf)
+    rung, why = doorbell.knock("native-reveille-devops", work, {"reason": "mail"})
     t.join(timeout=5)
     assert (rung, why) == (1, ""), why
 
@@ -124,13 +148,13 @@ def test_a_directory_that_claims_another_identity_is_never_rung(tmp_path):
     sock, got, t = _inbox(tmp_path)
     _descriptor(sess, work, sock)
 
-    rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
+    rung, why = doorbell.knock("ana", work, {"reason": "mail"})
     assert rung == 0
     assert "claims 'bob'" in why and "'ana'" in why, why
     assert got == [], "a line was sent to another identity's session"
 
     # the same directory, asked for by the identity that owns it, rings
-    rung, why = doorbell.knock("bob", work, {"reason": "mail"}, base=sess, config=conf)
+    rung, why = doorbell.knock("bob", work, {"reason": "mail"})
     t.join(timeout=5)
     assert (rung, why) == (1, ""), why
 
@@ -140,11 +164,11 @@ def test_a_session_without_the_reveille_mcp_is_not_rung(tmp_path):
     verbs, so ringing it spends a turn on an instruction it cannot follow and
     leaves the body no way to say why. Worse than silence."""
     sess, work, _ = _world(tmp_path)
-    conf = _config(tmp_path, work, servers=("playwright",))
+    _config(tmp_path, work, servers=("playwright",))   # rewrites the same file
     sock, got, t = _inbox(tmp_path)
     _descriptor(sess, work, sock)
 
-    rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
+    rung, why = doorbell.knock("ana", work, {"reason": "mail"})
     assert rung == 0 and "no reveille MCP" in why, why
     assert got == [], "a line was sent to a session that cannot answer it"
 
@@ -191,8 +215,7 @@ def test_a_session_in_another_directory_is_not_ours(tmp_path):
     _descriptor(sess, theirs, sock)
 
     assert doorbell.inboxes_for(mine, base=sess) == []
-    rung, why = doorbell.knock("ana", mine, {"reason": "idle-nudge"},
-                               base=sess, config=conf)
+    rung, why = doorbell.knock("ana", mine, {"reason": "idle-nudge"})
     assert rung == 0 and "no live session in that directory" in why
 
 
@@ -201,12 +224,12 @@ def test_no_session_is_not_a_defect_but_a_refusal_is(tmp_path):
     waits) versus somebody is home and would not take the line (a defect)."""
     sess, work, conf = _world(tmp_path)
     os.makedirs(sess, exist_ok=True)
-    rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
+    rung, why = doorbell.knock("ana", work, {"reason": "mail"})
     assert rung == 0 and why == "no live session in that directory"
 
     # a descriptor pointing at a socket nobody is listening on
     pid = _descriptor(sess, work, str(tmp_path / "dead.sock"))
-    rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
+    rung, why = doorbell.knock("ana", work, {"reason": "mail"})
     assert rung == 0 and f"pid {pid}" in why and "no live session" not in why
 
     # and a session that published no inbox is skipped, not counted as a failure
@@ -220,7 +243,7 @@ def test_the_kill_switch_is_one_env_line(tmp_path, monkeypatch):
     sock, got, t = _inbox(tmp_path)
     _descriptor(sess, work, sock)
     monkeypatch.setenv("REVEILLE_DOORBELL", "off")
-    rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
+    rung, why = doorbell.knock("ana", work, {"reason": "mail"})
     assert rung == 0 and "off" in why
     assert got == [], "the switch is off and a line was still written"
 
@@ -301,7 +324,7 @@ def test_a_platform_that_cannot_ring_refuses_by_name(tmp_path, monkeypatch):
     _descriptor(sess, work, sock)
 
     monkeypatch.delattr(socket, "AF_UNIX")
-    rung, why = doorbell.knock("ana", work, {"reason": "mail"}, base=sess, config=conf)
+    rung, why = doorbell.knock("ana", work, {"reason": "mail"})
     assert rung == 0 and "AF_UNIX" in why
     assert got == [], "a platform with no unix sockets still tried to send"
 
@@ -365,7 +388,7 @@ def test_a_malformed_frame_still_rings(tmp_path):
     sess, work, conf = _world(tmp_path)
     sock, got, t = _inbox(tmp_path)
     _descriptor(sess, work, sock, token="")
-    rung, why = doorbell.knock("ana", work, "{not json", base=sess, config=conf)
+    rung, why = doorbell.knock("ana", work, "{not json")
     t.join(timeout=5)
     assert (rung, why) == (1, ""), why
     assert len(got) == 1, "no token means no auth line, and still a user line"

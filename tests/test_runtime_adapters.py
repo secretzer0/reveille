@@ -77,25 +77,42 @@ def test_codex_instructions_preserve_discovery_semantics(tmp_path):
     assert normal.read_text() == "Project rules"
 
 
-def test_unimplemented_codex_cannot_claim_install_or_delivery(tmp_path):
-    adapter = get_adapter("codex")
-    with pytest.raises(AdapterError, match="not implemented"):
-        adapter.validate_install(tmp_path)
-    with pytest.raises(AdapterError, match="not implemented"):
-        adapter.install_hooks(tmp_path)
-    count, reason = adapter.deliver(tmp_path, "bob", {})
-    assert count == 0 and "spooled" in reason
+def test_codex_hooks_are_offered_and_never_silently_installed(tmp_path):
+    """A Codex hook does nothing until a human trusts its HASH under /hooks, so
+    an installer that wrote one and reported success would claim a gate that is
+    not running."""
+    said = get_adapter("codex").install_hooks(tmp_path)
+    assert "no hook installed" in said and "/hooks" in said
+    assert list(tmp_path.iterdir()) == []
 
 
-def test_claude_adapter_preserves_existing_transport(tmp_path, monkeypatch):
+def test_codex_delivery_without_an_app_server_leaves_the_ring_spooled(tmp_path, monkeypatch):
+    """No socket is not a delivery: it is a reason, and the spool entry stands."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    count, reason = get_adapter("codex").deliver(tmp_path, "bob", {"reason": "mail"})
+    assert count == 0 and "app-server socket" in reason
+    assert get_adapter("codex").sessions(tmp_path) == []
+
+
+def test_claude_adapter_rings_every_live_session_itself(tmp_path, monkeypatch):
+    """Claude's transport is the ADAPTER's, not the doorbell's: the doorbell
+    routes and refuses, the runtime speaks its own protocol."""
     from reveille import doorbell
-    calls = []
-    def knock(agent, project, frame):
-        calls.append((agent, project, frame))
-        return 1, ""
-    monkeypatch.setattr(doorbell, "knock", knock)
-    assert get_adapter("claude").deliver(tmp_path, "alice", {"id": 4}) == (1, "")
-    assert calls == [("alice", str(tmp_path), {"id": 4})]
+    rung = []
+    monkeypatch.setattr(doorbell, "inboxes_for",
+                        lambda project: [(11, "/s1.sock", "t1"), (12, "/s2.sock", "t2")])
+    monkeypatch.setattr(doorbell, "ring_one",
+                        lambda sock, token, text: rung.append((sock, token, text)) or "")
+    assert get_adapter("claude").deliver(tmp_path, "alice", {"reason": "mail"}) == (2, "")
+    assert [r[0] for r in rung] == ["/s1.sock", "/s2.sock"]
+    assert "reason=mail" in rung[0][2]
+
+
+def test_claude_delivery_with_nobody_home_is_a_reason_not_a_delivery(tmp_path, monkeypatch):
+    from reveille import doorbell
+    monkeypatch.setattr(doorbell, "inboxes_for", lambda project: [])
+    assert get_adapter("claude").deliver(tmp_path, "alice", {"reason": "mail"}) == (
+        0, "no live session in that directory")
 
 
 def test_saved_selection_resolves_ambiguity_and_is_idempotent(tmp_path):
