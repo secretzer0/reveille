@@ -333,6 +333,12 @@ def _doorbell(agent, obj, path):
         workdir = spool.registered().get(agent, "")
         rung, why = doorbell.knock(agent, workdir, dict(obj, spool=path))
         if rung:
+            # THE INBOUND DIRECTION, AND ONLY THIS MACHINE SAW IT. The ring went
+            # from the bus INTO a session here; the broker handed it over and
+            # has no way to learn it landed. It means the write to the session
+            # succeeded -- not that the body read it, which is the body's to
+            # say by calling the bus.
+            report(rung=True)
             print(f"reveille-waked: doorbell rang {rung} session(s) for {agent}",
                   file=sys.stderr)
         elif why:
@@ -573,6 +579,12 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
                   f"{type(e).__name__}: {e}", file=sys.stderr)
             continue
         live = set(found)
+        # WHAT THE BROKER CANNOT SEE. `connected` used to mean "a waked holds a
+        # wake socket", which one host daemon makes true for every identity it
+        # serves, body or no body. The count is the honest answer and this is
+        # the only place that knows it. Sent on CHANGE: a state, not a stream.
+        if live != state.get("sessions"):
+            report(sessions=len(live))
         first = "sessions" not in state
         arrived, departed = session_events(state.get("sessions", set()), live, first)
         state["sessions"] = live
@@ -649,11 +661,55 @@ async def _heartbeat(ws):
         await ws.send("hb")
 
 
+# WHAT ONLY THIS MACHINE CAN SEE, on its way to the broker. The broker cannot
+# look in an agent's directory: it cannot count the sessions standing there and
+# it never sees a doorbell ring, which happens entirely on this host. Both are
+# things presence is WRONG about without them -- a body with no session read as
+# connected because the daemon's socket was up, and an arriving ring was
+# invisible. A dict rather than a queue: these are STATES, so the newest value
+# of each is the only one worth sending, and a flush that misses a tick coalesces
+# instead of falling behind.
+REPORT_FLUSH_S = 2
+_report = {}
+
+
+def report(**facts):
+    """Queue what this daemon observed. Sync, so any caller can reach it."""
+    _report.update(facts)
+
+
+async def _reporter(ws):
+    """Flush observations onto the socket the daemon already holds.
+
+    NO NEW CONNECTION AND NO NEW ENDPOINT: the wake socket is open, is already
+    authenticated as this identity, and its client frames are read by a broker
+    that treats anything it cannot name as a heartbeat -- so a new daemon
+    reporting to an old broker is harmless, and an old daemon's `hb` still
+    means what it always did.
+    """
+    while True:
+        await asyncio.sleep(REPORT_FLUSH_S)
+        if not _report:
+            continue
+        facts = dict(_report)
+        _report.clear()
+        try:
+            await ws.send(json.dumps(facts))
+        except Exception:                                        # noqa: BLE001
+            # PUT THEM BACK. `sessions` is sent only when it CHANGES, so a
+            # dropped send would leave the broker on a stale count until the
+            # next change -- which for a body that just went quiet is never.
+            # Newer facts win: this fills gaps, it does not overwrite.
+            for key, value in facts.items():
+                _report.setdefault(key, value)
+
+
 async def _session(uri, agent, state):
     """One connection: spool every ring. Returns an exit code, or None to
     reconnect."""
     async with websockets.connect(uri) as ws:
         hb = asyncio.create_task(_heartbeat(ws))
+        rep = asyncio.create_task(_reporter(ws))
         try:
             async for frame in ws:
                 # THE BROKER SPOKE. Registration and refusal both arrive as
@@ -781,6 +837,7 @@ async def _session(uri, agent, state):
                 # hold the socket; a close leads to the reconnect loop.
         finally:
             hb.cancel()
+            rep.cancel()
     return None
 
 
@@ -1337,7 +1394,7 @@ def _converge_inner(raw, state):
     os.execv(me, [me, *sys.argv[1:]])
 
 
-def wake_uri(url, sep, agent, token):
+def wake_uri(url, sep, agent, token, workdir=None):
     """The wake socket's address, built in ONE place.
 
     It was four hand-built copies of one f-string -- the reconnect loop's and
@@ -1350,7 +1407,15 @@ def wake_uri(url, sep, agent, token):
     out = f"{url}{sep}name={agent}"
     if token:
         out += f"&token={token}"
-    return out + f"&toolchain={urllib.parse.quote(__version__)}"
+    out += f"&toolchain={urllib.parse.quote(__version__)}"
+    # WHICH CLI THIS BODY IS. A fleet has flavours now, and which one a body
+    # runs decides what can reach it; the broker cannot see a directory, so the
+    # daemon that can says it here -- same seam, same attach-only rule.
+    runtime = ""
+    with contextlib.suppress(Exception):
+        from reveille.adapters import select_adapter
+        runtime = select_adapter(workdir).name if workdir else ""
+    return out + (f"&runtime={urllib.parse.quote(runtime)}" if runtime else "")
 
 
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
@@ -1365,7 +1430,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     if workdir:
         _STATUS_BY_AGENT[agent] = os.path.join(_adapter_state_dir(workdir),
                                                ".reveille-repo-status")
-    uri = wake_uri(url, sep, agent, token)
+    uri = wake_uri(url, sep, agent, token, workdir)
     # Daemon start counts as activity AND arms one nudge: whatever the agent
     # parked before this daemon existed has never been asked about.
     state = {"last": time.time_ns(), "armed": True}
@@ -1476,7 +1541,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         parked_secret = spent
                         token = got
                         tried.add(token)
-                        uri = wake_uri(url, sep, agent, token)
+                        uri = wake_uri(url, sep, agent, token, workdir)
                         delay = 1
                         continue
                     print(f"reveille-waked: that credential never landed and the "
@@ -1490,7 +1555,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = wake_uri(url, sep, agent, token)
+                    uri = wake_uri(url, sep, agent, token, workdir)
                     delay = 1
                 elif code == PARKED:
                     # SUPERSEDED IS NOT DEAD (s14). The old shape exited here and
@@ -1507,7 +1572,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = wake_uri(url, sep, agent, token)
+                    uri = wake_uri(url, sep, agent, token, workdir)
                     delay = 1
                 else:
                     first_no_rooms = None

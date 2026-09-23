@@ -123,7 +123,10 @@ def test_the_parked_daemon_polls_and_writes_what_it_gets():
     # so the pin follows the BUILDER rather than the f-string spelling it
     # happened to have. The property is unchanged and now stated more exactly:
     # on return the URI is rebuilt, and rebuilt on the NEW token.
-    assert "uri = wake_uri(url, sep, agent, token)" in loop, (
+    # The property is that the loop REBUILDS the uri through the one builder --
+    # not the exact argument list, which grows every time the attach carries a
+    # new fact (toolchain, then runtime).
+    assert "uri = wake_uri(" in loop, (
         "on return it rebuilds the URI on the new secret and carries on")
 
 
