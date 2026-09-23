@@ -37,6 +37,7 @@ import gzip
 import html
 import ipaddress
 import io
+import zipfile
 import json
 import logging
 import math
@@ -6190,6 +6191,187 @@ async def audio_http(request):
     return StreamingResponse(tail(), media_type="audio/webm", headers=headers)
 
 
+EXPORT_CSS = """
+ body{margin:0;background:#0e1116;color:#dce3ec;
+  font:15px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+ .wrap{max-width:52rem;margin:0 auto;padding:2rem 1.2rem 4rem}
+ h1{font-size:1.2rem;letter-spacing:.14em;color:#e2a63d;margin:0 0 .3rem}
+ .meta{color:#7b8797;font-size:.82rem;margin-bottom:2rem}
+ .meta b{color:#dce3ec;font-weight:600}
+ .day{color:#7b8797;font-size:.75rem;text-align:center;margin:2rem 0 1rem;
+  letter-spacing:.1em;border-top:1px solid #242c37;padding-top:.9rem}
+ .m{display:flex;gap:.8rem;margin:1.1rem 0}
+ .av{width:2.1rem;height:2.1rem;border-radius:.5rem;flex:none;display:flex;
+  align-items:center;justify-content:center;font-size:.72rem;font-weight:700}
+ .hd{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap;
+  font-size:.86rem;margin-bottom:.15rem}
+ .who{font-weight:600}
+ .to{color:#dcb86a}.all{color:#e2a63d;font-weight:600}
+ time{color:#7b8797;font-size:.76rem}
+ .sub{font-weight:600;margin:.1rem 0 .15rem}
+ .body{white-space:pre-wrap;word-wrap:break-word;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86rem}
+ .atts{margin-top:.5rem;display:flex;flex-wrap:wrap;gap:.6rem}
+ .atts img{max-width:100%;border:1px solid #242c37;border-radius:6px;display:block}
+ .atts a{color:#dcb86a;font-size:.8rem}
+ .missing{color:#7b8797;font-size:.8rem;font-style:italic}
+"""
+
+
+def export_hue(name):
+    """THE UI's OWN HUE, ported exactly (`hue()` in the bus page).
+
+    An export that gave the same agent a different colour than the room does
+    is a second answer to "who is what colour" -- and the two get compared,
+    because a person reads the export beside the screen it came from. The
+    32-bit wrap is what JavaScript's >>>0 does, and is the whole reason this
+    is a port rather than any hash that fits.
+    """
+    h = 0
+    for ch in name or "":
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return h % 360
+
+
+def export_initials(name):
+    """The UI's own rule: first letters of the parts, not the first two
+    characters -- every `local-*` agent reads `LO` under that."""
+    parts = [p for p in re.split(r"[-_.]", name or "") if p]
+    if not parts:
+        return "?"
+    second = parts[1][0] if len(parts) > 1 else (parts[0][1:2] or "")
+    return (parts[0][0] + second).upper()
+
+
+def export_html(msgs, meta, files=None):
+    """One self-contained HTML page for a set of messages. Pure, so it is gated.
+
+    EVERY BYTE IS ESCAPED AND NOTHING IS FETCHED. The bodies are other people's
+    text and the attachment names are other people's filenames, so this renders
+    them as TEXT -- an export opened from a mail client is exactly the place a
+    stored script would want to run, and there is no origin here to protect it.
+    No stylesheet, no font and no script is loaded from anywhere: the file is
+    readable on a machine with no network and no bus.
+    """
+    files = files or {}
+    out = ["<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+           f"<title>{html.escape(meta.get('title') or 'Reveille conversation')}</title>",
+           f"<style>{EXPORT_CSS}</style></head><body><div class=\"wrap\">",
+           f"<h1>{html.escape(meta.get('title') or 'REVEILLE')}</h1>",
+           "<div class=\"meta\">"]
+    for line in meta.get("lines") or []:
+        out.append(f"<div>{line}</div>")
+    out.append("</div>")
+    day = None
+    for m in msgs:
+        when = datetime.fromtimestamp(m["ts_ns"] / 10**9)
+        if when.date() != day:
+            day = when.date()
+            out.append(f"<div class=\"day\">{when.strftime('%a %b %d %Y')}</div>")
+        who = html.escape(m.get("from") or "")
+        hue = export_hue(m.get("from"))
+        initials = html.escape(export_initials(m.get("from")))
+        to = m.get("to") or ""
+        target = ("<span class=\"all\">ALL</span>" if to == "*"
+                  else f"<span class=\"to\">{html.escape(to)}</span>")
+        out.append(
+            f"<div class=\"m\"><div class=\"av\" style=\"color:hsl({hue} 62% 64%);"
+            f"background:hsl({hue} 45% 26%)\">{initials}</div>"
+            f"<div><div class=\"hd\"><span class=\"who\" "
+            f"style=\"color:hsl({hue} 62% 64%)\">{who}</span>"
+            f"<span>&rarr;</span>{target}"
+            f"<time>{when.strftime('%I:%M %p')}</time></div>")
+        if m.get("subject"):
+            out.append(f"<div class=\"sub\">{html.escape(m['subject'])}</div>")
+        out.append(f"<div class=\"body\">{html.escape(m.get('body') or '')}</div>")
+        atts = m.get("attachments") or []
+        if atts:
+            out.append("<div class=\"atts\">")
+            for a in atts:
+                name = html.escape(a.get("name") or "attachment")
+                local = files.get(a.get("url") or "")
+                if not local:
+                    # SAID, NOT SWALLOWED: a reader must not think an export
+                    # that omitted a file is a conversation that had none.
+                    out.append(f"<div class=\"missing\">[attachment not included: "
+                               f"{name}]</div>")
+                elif local.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+                    out.append(f"<figure><img src=\"{html.escape(local)}\" alt=\"{name}\">"
+                               f"<figcaption class=\"missing\">{name}</figcaption></figure>")
+                else:
+                    out.append(f"<a href=\"{html.escape(local)}\">{name}</a>")
+            out.append("</div>")
+        out.append("</div></div>")
+    out.append("</div></body></html>")
+    return "\n".join(out)
+
+
+@_guard
+async def export_http(request):
+    """POST /export {ids, attachments, title} -> a zip of the conversation.
+
+    THE CLIENT SAYS WHICH MESSAGES. Its filters -- selected agents, FROM or TO,
+    the text box -- run in the browser, so the only way an export can match
+    WHAT IS ON SCREEN is for the screen to name its rows. Re-deriving them here
+    would be a second copy of a predicate that already exists, and the two
+    would drift. Every id is still checked against the caller's rooms, which is
+    what makes trusting the list safe.
+
+    ADMIN ONLY. Reading one room in a browser and walking out with its whole
+    history in a file are different acts, and only the second one is worth a
+    gate. Widening it is one condition, deliberately not taken here.
+    """
+    p = _principal(request)
+    if not p.is_admin:
+        return JSONResponse({"error": "export is an admin action"}, status_code=403)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        return JSONResponse({"error": "nothing to export"}, status_code=400)
+    try:
+        msgs = store.messages_by_ids(_conn, ids, p.rooms)
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "ids must be integers"}, status_code=400)
+    if not msgs:
+        return JSONResponse({"error": "none of those messages are in your rooms"},
+                            status_code=404)
+    want_files = bool(body.get("attachments"))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    title = str(body.get("title") or "Reveille conversation")[:200]
+    lines = [html.escape(str(x)[:300]) for x in (body.get("lines") or [])][:8]
+    lines.append(f"<b>{len(msgs)}</b> message(s) &middot; exported {html.escape(stamp)}")
+
+    buf = io.BytesIO()
+    included = {}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if want_files:
+            for m in msgs:
+                for a in m.get("attachments") or []:
+                    url = a.get("url") or ""
+                    stored = url.rsplit("/", 1)[-1]
+                    safe = _FNAME_RE.sub("_", stored)
+                    # THE SAME ROOM CHECK THE FILE ROUTE MAKES. An export may
+                    # not become the one door that hands out an attachment the
+                    # caller could not have fetched by its url.
+                    rid = store.file_room(_conn, safe)
+                    path = _files_dir / safe if _files_dir else None
+                    if rid is None or rid not in p.rooms or not path or not path.is_file():
+                        continue
+                    local = f"attachments/{safe}"
+                    if local not in included.values():
+                        zf.write(path, local)
+                    included[url] = local
+        zf.writestr("conversation.html",
+                    export_html(msgs, {"title": title, "lines": lines}, included))
+    name = f"reveille-{stamp}.zip"
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"content-disposition": f'attachment; filename="{name}"',
+                             "x-content-type-options": "nosniff"})
+
+
 @_guard
 async def search_http(request):
     """GET /search?keywords=&since=&until=&agent=&thread_id=&limit=[&room=][&entity=]
@@ -7978,6 +8160,7 @@ def build_app():
                   methods=["POST"]),
             Route("/messages", messages_http),
             Route("/search", search_http),
+            Route("/export", export_http, methods=["POST"]),
             Route("/presence", presence_http),
             Route("/agents-seen", agents_seen_http),
             Route("/send", send_http, methods=["POST"]),

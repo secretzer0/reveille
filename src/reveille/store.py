@@ -6235,6 +6235,11 @@ def _msg(r):
 # (sender_agent_id NULL = the sender was a person, written under their
 # username). Every message surface an agent reads renders through this, which
 # is what makes 14056 one seam instead of five.
+# One export is one READ of a conversation, not a way to walk the whole store
+# a thousand rows at a time: the UI can only show what it has loaded, and this
+# is comfortably above that.
+MAX_EXPORT = 5000
+
 _SEL = ("SELECT m.*, ro.name AS room_name, "
         "us.name AS s_uname, us.nickname AS s_nick, "
         "us.persona AS s_pers, us.moniker_order AS s_mord "
@@ -6344,6 +6349,30 @@ def tail(conn, since_id=0, limit=200, rooms=(), before_id=0):
         f"{_SEL} WHERE m.room IN ({_ph(rooms)}) ORDER BY m.id DESC LIMIT ?",
         rooms + [limit]).fetchall()
     return _with_attachments(conn, [_msg(r) for r in reversed(rows)])
+
+
+def messages_by_ids(conn, ids, rooms):
+    """Exactly these messages, and only the ones the caller may read.
+
+    THE CALLER SAYS WHICH MESSAGES, NOT WHICH FILTER. The bus UI filters in the
+    browser -- selected agents, FROM or TO, a text box -- so the only way for
+    an export to match WHAT IS ON SCREEN is for the screen to name its rows.
+    Re-deriving that server-side would mean a second copy of a predicate that
+    already exists, and two copies of one rule is the drift this store keeps
+    being bitten by.
+
+    An id outside the caller's rooms is DROPPED, not refused: ids are a client's
+    account of what it is showing, and one stale row must not cost the export.
+    The room check is what makes that safe.
+    """
+    ids = [int(i) for i in ids][:MAX_EXPORT]
+    if not ids or not rooms:
+        return []
+    rooms = list(rooms)
+    rows = conn.execute(
+        f"{_SEL} WHERE m.id IN ({_ph(ids)}) AND m.room IN ({_ph(rooms)}) "
+        f"ORDER BY m.id", list(ids) + rooms).fetchall()
+    return _with_attachments(conn, [_msg(r) for r in rows])
 
 
 def search(conn, *, keywords=None, since_ns=None, until_ns=None,

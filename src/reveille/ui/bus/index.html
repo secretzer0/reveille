@@ -633,6 +633,19 @@
  #send:hover{filter:brightness(1.1)}
 
  /* ---- notice modal ---- */
+ #expDlg{position:fixed;inset:0;background:rgba(6,8,11,.82);backdrop-filter:blur(4px);
+  display:none;align-items:center;justify-content:center;z-index:26}
+ #expDlg.on{display:flex}
+ #expCard{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:1.4rem 1.6rem;width:27rem;max-width:92vw;box-shadow:0 12px 48px rgba(0,0,0,.5)}
+ #expTitle{font-weight:600;margin-bottom:.5rem}
+ #expWhat{color:var(--dim);font-size:.85rem;margin-bottom:1rem;line-height:1.5}
+ #expAtts{display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.88rem}
+ #expNote{color:var(--faint);font-size:.76rem;margin:.6rem 0 1.2rem;line-height:1.45}
+ #expRow{display:flex;justify-content:flex-end;gap:.6rem}
+ #expRow button{border-radius:8px;padding:.45rem 1.1rem;font:inherit;cursor:pointer;
+  border:1px solid var(--line);background:var(--gold);color:#12161c;font-weight:600}
+ #expRow .ghost{background:none;color:var(--fg)}
  #dlg{position:fixed;inset:0;background:rgba(6,8,11,.82);backdrop-filter:blur(4px);
   display:none;align-items:center;justify-content:center;z-index:25}
  #dlg.on{display:flex}
@@ -1118,6 +1131,8 @@
   <button type="button" id="voice" aria-pressed="false"
    title="speak new messages aloud, in the order they arrive">voice off</button>
   <button id="histBtn" title="search the entire bus log">history</button>
+  <button id="expBtn" title="export what is on screen as an HTML file"
+   style="display:none">export</button>
   <button type="button" id="toolsBtn" class="ph" aria-label="filter and history"
    title="filter messages, search history">find</button>
   <button type="button" id="meBtn" class="ph" aria-label="settings, logout"
@@ -1287,6 +1302,20 @@
      returns to the control that opened it -- the tab icon you were on. -->
 <div id="agDlg" role="dialog" aria-modal="true" aria-labelledby="agDlgTitle">
  <div id="agDlgCard"></div>
+</div>
+<div id="expDlg" role="dialog" aria-modal="true" aria-labelledby="expTitle">
+ <div id="expCard">
+  <div id="expTitle">Export this conversation</div>
+  <div id="expWhat"></div>
+  <label id="expAtts"><input type="checkbox" id="expFiles" checked>
+   <span>include attachments</span></label>
+  <div id="expNote">Delivered as a zip: one HTML file you can email, plus an
+   attachments folder it shows inline.</div>
+  <div id="expRow">
+   <button type="button" id="expCancel" class="ghost">Cancel</button>
+   <button type="button" id="expOk">OK</button>
+  </div>
+ </div>
 </div>
 <div id="dlg">
  <div id="dlgCard">
@@ -1562,6 +1591,12 @@ for(const id of ['liName','liPass'])
 // The room name is finally printable: it stopped being the credential, which is the
 // only reason it was ever masked to 'room ....N0w'.
 function paintMe(){
+ // SHOWN ONLY WHERE IT WORKS. /export refuses a non-admin, and a button that
+ // always refuses teaches people to distrust the row it sits in. Painted with
+ // the rest of the identity -- it was first hung off the settings panel's
+ // renderer, which only runs when somebody OPENS settings, so the control
+ // stayed hidden for the admin it exists for.
+ if($('expBtn'))$('expBtn').style.display=(me&&me.is_admin)?'':'none';
  if($('mic'))$('mic').hidden=!(me&&me.ear);if($('listen'))$('listen').hidden=!(me&&me.ear);if($('autosendWrap'))$('autosendWrap').hidden=!(me&&me.ear);     // DES-014: the mic exists only where the ear does
  $('meName').textContent=myName;
  $('meName').style.color=color(myName);
@@ -2982,6 +3017,70 @@ $('histBtn').onclick=()=>{
  if(mode==='history'){toLive();return;}
  $('histBar').classList.toggle('on');
 };
+// EXPORT WHAT IS ON SCREEN. The filters run HERE -- selected agents, FROM or
+// TO, the text box, and history mode's own result set -- so the rows the feed
+// is showing are the only honest definition of "this conversation", and the
+// browser is the only thing that knows them. It sends their ids; the server
+// checks every one against the caller's rooms and renders the file. Nothing
+// re-implements `matches()` on the other side, which is how two copies of one
+// rule start disagreeing.
+function shownIds(){
+ return [...$('inner').children]
+   .filter(el=>el.dataset.id&&el.style.display!=='none')
+   .map(el=>+el.dataset.id);
+}
+
+function exportDescribe(n){
+ const bits=[];
+ bits.push(mode==='history'
+   ? ($('histLabel').textContent||'history').trim()
+   : 'the live feed');
+ if(selAgents.size)bits.push(filterMode.toUpperCase()+': '+[...selAgents].join(' + '));
+ const f=$('filter').value.trim();
+ if(f)bits.push('filter '+JSON.stringify(f));
+ const r=(me.rooms||[]).find(x=>x.id===room);
+ if(r)bits.push('room '+r.name);
+ return {count:n,bits};
+}
+
+$('expBtn').onclick=()=>{
+ const ids=shownIds();
+ const d=exportDescribe(ids.length);
+ // A COUNT THE READER CAN CHECK, before anything is built: an export that
+ // quietly carried a different set than the screen would be worse than none.
+ $('expWhat').innerHTML=ids.length
+   ? '<b>'+ids.length+'</b> message'+(ids.length===1?'':'s')+' as shown &mdash; '
+     +esc(d.bits.join(' &middot; ')).replace(/&amp;middot;/g,'&middot;')
+   : 'Nothing is on screen to export.';
+ $('expOk').disabled=!ids.length;
+ $('expDlg').classList.add('on');
+};
+$('expCancel').onclick=()=>$('expDlg').classList.remove('on');
+$('expDlg').onclick=e=>{if(e.target===$('expDlg'))$('expDlg').classList.remove('on');};
+$('expOk').onclick=async()=>{
+ const ids=shownIds();
+ if(!ids.length)return;
+ const d=exportDescribe(ids.length);
+ $('expOk').disabled=true;$('expOk').textContent='building…';
+ try{
+  const r=await fetch('/export',{method:'POST',
+    headers:{'content-type':'application/json'},
+    body:JSON.stringify({ids,attachments:$('expFiles').checked,
+      title:'Reveille — '+d.bits[d.bits.length-1],lines:d.bits})});
+  if(!r.ok){toast('export failed: '+(await r.text()).slice(0,140));return;}
+  const blob=await r.blob();
+  // The name the server chose, so the file says when it was taken.
+  const cd=r.headers.get('content-disposition')||'';
+  const name=(cd.match(/filename="([^"]+)"/)||[])[1]||'reveille-export.zip';
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download=name;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),10000);
+  $('expDlg').classList.remove('on');
+  toast('exported '+ids.length+' message'+(ids.length===1?'':'s'),true);
+ }catch(e){toast('export failed: '+e.message);}
+ finally{$('expOk').disabled=false;$('expOk').textContent='OK';}
+};
+
 $('voice').onclick=toggleVoice;
 paintVoice();                                 // a remembered voice paints "tap to resume" before any socket
 // NEXT / PREVIOUS, not STOP (operator 2026-09-16). The old stop button was
