@@ -198,21 +198,40 @@
     that stopped updating looks exactly like a room where nobody moved -- the
     phantom-watcher class in the UI layer, so say which one it is. */
  #agents.stale{opacity:.55}
- /* The working indicator. Four bars, staggered delays, one keyframe -- no JS loop,
-    no timer, nothing to leak. It runs ONLY while the row is `active`, which is the
-    only state the bus actually observed. */
- .agent .eq{display:inline-flex;align-items:flex-end;gap:1px;height:9px;flex:none}
- .agent .eq i{width:2px;height:100%;background:var(--grn,#5cd6a0);border-radius:1px;
-  transform-origin:bottom;animation:eqbounce .9s ease-in-out infinite}
- .agent .eq i:nth-child(2){animation-delay:.15s;animation-duration:1.1s}
- .agent .eq i:nth-child(3){animation-delay:.35s;animation-duration:.75s}
- .agent .eq i:nth-child(4){animation-delay:.5s;animation-duration:1.25s}
- @keyframes eqbounce{0%,100%{transform:scaleY(.25)}50%{transform:scaleY(1)}}
+ /* THE FLOW INDICATOR. Two lanes, each its own direction, each moving only while
+    its own traffic is moving -- and the two are independent, because a body can be
+    answering while another message arrives.
+
+      top lane, travelling RIGHT   in:  the bus reached this body (a ring landed
+                                        on one of its sessions)
+      bottom lane, travelling LEFT out: this body called the bus
+
+    EACH RUN IS ONE SHOT, NOT A LOOP. A loop says "still happening" for as long as
+    it spins, which is the inference ruling 8676 forbids: the bus saw an EVENT, so
+    the animation is an event too -- it plays once and the lane goes still. What
+    used to run here was a four-bar equalizer looping for a 60s grace, and a wake
+    heartbeat refreshed that grace, so a body whose daemon merely breathed looked
+    like a body at work. */
+ .agent .eq{display:inline-flex;flex-direction:column;justify-content:center;gap:2px;
+  width:14px;height:9px;flex:none;overflow:hidden}
+ .agent .eq b{display:block;height:2px;border-radius:1px;background:var(--faint);
+  opacity:.35;position:relative;overflow:hidden}
+ .agent .eq b::after{content:'';position:absolute;top:0;bottom:0;width:6px;
+  border-radius:1px;background:var(--grn,#5cd6a0);left:-6px;opacity:0}
+ .agent .eq b.go{opacity:1}
+ .agent .eq b.in.go::after{animation:flowin .7s ease-out 1}
+ .agent .eq b.out.go::after{animation:flowout .7s ease-out 1}
+ @keyframes flowin{0%{left:-6px;opacity:.25}50%{opacity:1}100%{left:14px;opacity:0}}
+ @keyframes flowout{0%{left:14px;opacity:.25}50%{opacity:1}100%{left:-6px;opacity:0}}
+ /* THE FLAVOUR THIS BODY RUNS. Carried, never computed -- the body said it at its
+    last attach, and a body that has not said gets no mark rather than a guess. */
+ .agent .rt{font-size:9px;line-height:1;opacity:.7;flex:none;letter-spacing:.02em}
  /* Rung and unanswered: PRESENT and still. Motion here would be the inference we
     refuse to make. Faded once "no answer yet" stops being an honest description. */
  .agent.act-waiting .nm{color:var(--gold)}
  .agent.act-unsure .nm{color:var(--gold);opacity:.6}
- @media (prefers-reduced-motion:reduce){.agent .eq i{animation:none;transform:scaleY(.6)}}
+ @media (prefers-reduced-motion:reduce){
+  .agent .eq b::after{animation:none!important;left:4px;opacity:.9}}
  #agents.stale::before{content:'last known -- live updates down';display:block;
   font-size:.62rem;letter-spacing:.04em;text-transform:uppercase;color:var(--gold);
   padding:.2rem .4rem .35rem}
@@ -2671,6 +2690,30 @@ async function loadPresence(){
 // The room pushes presence the moment it CHANGES (0.2.38); the poll above is the
 // fallback that repairs a stream which missed one. Both land here, so there is one
 // renderer and no chance of the two paths drifting into different rails.
+// One short mark per flavour. A name this does not know renders its first two
+// letters rather than nothing: a new runtime must be VISIBLE before anyone gets
+// around to choosing its glyph.
+const RUNTIME_MARK={claude:'\u25c6',codex:'\u25b3'};
+
+// The last timestamps each row was rendered with. A CHANGE is the event; the
+// first sight of a row is not one, or every reload would light the whole rail.
+const flowSeen=new Map();
+
+function flow(el,a){
+ const was=flowSeen.get(a.name);
+ const now={in:a.rung_ns||0,out:a.spoke_ns||0};
+ flowSeen.set(a.name,now);
+ if(!was)return;
+ for(const dir of ['in','out']){
+  if(!(now[dir]>was[dir]))continue;
+  const lane=el.querySelector('.eq b.'+dir);
+  if(!lane)continue;
+  // Re-arm by removing the class, forcing a reflow, and adding it back: the
+  // same lane must be able to fire again before the previous run has ended.
+  lane.classList.remove('go');void lane.offsetWidth;lane.classList.add('go');
+ }
+}
+
 function renderPresence(agents){
  agentList=agents
   .sort((a,b)=>(b.connected-a.connected)||(b.live-a.live)||a.name.localeCompare(b.name));
@@ -2713,8 +2756,20 @@ function renderPresence(agents){
   // because confidence must not outlive evidence.
   if(!web&&(a.activity==='active'||a.activity==='waiting'||a.activity==='unsure'))
    el.classList.add('act-'+a.activity);
-  const eq=(!web&&a.activity==='active')
-   ? '<span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>' : '';
+  // THE TWO LANES ARE ALWAYS DRAWN and almost always still. Motion is added
+  // below, by comparing the timestamps this row carries against the ones the
+  // last render saw -- an EVENT derived from a change in state, so a client
+  // that missed an update catches up on the next one instead of missing a
+  // pulse forever, and nothing on the server has to decide when motion stops.
+  const eq=!web ? '<span class="eq" aria-hidden="true" title="top: the bus '
+   +'reached this body -- bottom: this body called the bus">'
+   +'<b class="in"></b><b class="out"></b></span>' : '';
+  // WHICH CLI THIS BODY IS, as it said at its last attach. No mark at all when
+  // it has not said: an empty space is the honest rendering of "unknown", and
+  // a default would be a claim about a body that never spoke.
+  const rt=(!web&&a.runtime)
+   ? '<span class="rt" title="this body runs '+esc(a.runtime)+'">'
+     +esc(RUNTIME_MARK[a.runtime]||a.runtime.slice(0,2))+'</span>' : '';
   // F8.4: what this body's LOCAL TOOLCHAIN is running, as it said at its last
   // attach. NO COLOUR RULE and nothing computed: whether it is behind the
   // broker is the reader's comparison, not a state this row asserts (14469 --
@@ -2727,7 +2782,8 @@ function renderPresence(agents){
    ? '<span class="cnt" title="toolchain this body reported at its last wake attach">'
      +esc(a.toolchain)+'</span>' : '';
   el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
-    +'<span class="nm">'+esc(a.name)+'</span>'+eq+tc+'<span class="st"></span>';
+    +'<span class="nm">'+esc(a.name)+'</span>'+rt+eq+tc+'<span class="st"></span>';
+  flow(el,a);
   // Same three states, said in the vocabulary of what the row actually is: a person has
   // a tab where an agent has a waiter, and telling a human their "waiter is down" is noise
   // about a thing they were never going to run.
