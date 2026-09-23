@@ -118,3 +118,76 @@ def test_credential_never_lands_in_mcp_config(tmp_path, adapter):
     text = (tmp_path / ".codex/config.toml").read_text()
     assert "private-token" not in text and "alice" not in text
     assert not adapter.mcp_registered(tmp_path, "https://another.test")
+
+
+def test_a_codex_project_installs_every_local_artifact(tmp_path, monkeypatch, capsys):
+    """THE WHOLE INSTALL, on the runtime that has no `claude` binary anywhere.
+
+    Every artifact a Codex agent needs is local: the registration Codex reads
+    (in a project it trusts), the credential its headers helper reads, the
+    ignore that keeps that credential out of the repo, the shared instruction
+    block, and the runtime selection that makes the choice durable. Nothing
+    here shells out to a CLI, because for Codex nothing has to.
+    """
+    import http.server
+    import threading
+    from reveille import cli
+
+    class Broker(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"rooms": {}}')
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Broker)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        home = tmp_path / "home"
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+        monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+        monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
+        monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+        rc = cli.main(["init", url, "codex-agent", "-", "--runtime", "codex",
+                       "--dir", str(work), "--trust-project", "--no-prompt"])
+    finally:
+        srv.shutdown()
+    said = capsys.readouterr()
+    assert rc == 0, said.err
+
+    config = tomllib.loads((work / ".codex" / "config.toml").read_text())
+    assert config["mcp_servers"]["reveille"]["url"] == url + "/mcp"
+    assert config["mcp_servers"]["reveille"]["enabled"] is True
+    credential = json.loads((work / ".codex" / "reveille.json").read_text())
+    assert credential["env"]["REVEILLE_AGENT_ROLE"] == "codex-agent"
+    assert credential["env"]["REVEILLE_TOKEN"] == "sekrit"
+    assert (work / ".codex" / "reveille.json").stat().st_mode & 0o777 == 0o600
+    assert "/reveille.json" in (work / ".codex" / ".gitignore").read_text()
+    assert json.loads((work / ".reveille" / "runtime.json").read_text())["runtime"] == "codex"
+
+    agents = (work / "AGENTS.md").read_text()
+    assert "reveille:begin" in agents and "codex-agent" not in agents
+    assert not (work / "CLAUDE.local.md").exists()
+    # No hook was installed, and the install says so rather than claiming one.
+    assert "no hook installed" in said.out
+    assert not (work / ".codex" / "hooks.json").exists()
+
+
+def test_an_untrusted_codex_project_installs_nothing(tmp_path, monkeypatch, capsys):
+    """The refusal lands BEFORE any file: a registration Codex will not read is
+    worse than no registration, because it reads as configured."""
+    from reveille import cli
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home" / ".codex"))
+    monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+    work = tmp_path / "work"
+    work.mkdir()
+    assert cli.main(["init", "http://127.0.0.1:1", "codex-agent", "-",
+                     "--runtime", "codex", "--dir", str(work), "--no-prompt"]) == 1
+    assert "does not trust" in capsys.readouterr().err
+    assert list(work.iterdir()) == []

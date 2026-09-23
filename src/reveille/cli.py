@@ -1192,6 +1192,9 @@ def cmd_init(a):
     # self-update deleted the binary, and every docker start of that container
     # died on the traceback instead of a sentence.
     claude = shutil.which(a.claude) if a.claude else shutil.which("claude")
+    # WHOSE BINARY. `claude mcp add-json` writes Claude's registration, so its
+    # absence is Claude's problem: a Codex project has no use for it and must
+    # not be refused, degraded or explained in terms of a CLI it does not run.
     workdir = pathlib.Path(a.dir or os.getcwd()).resolve()
 
     # ONE DIRECTORY, ONE AGENT (measured 2026-08-19, and it cost an identity).
@@ -1249,7 +1252,7 @@ def cmd_init(a):
     # A first boot with nothing configured refuses hard, by name, before any
     # local step: there is nothing to degrade into.
     degraded = ""
-    if not claude:
+    if not claude and adapter.name == "claude":
         if agent_of_directory(workdir) == name and adapter.mcp_registered(workdir, url):
             degraded = ("the claude binary was not found on PATH; this "
                         "directory's registration and credential already "
@@ -1287,8 +1290,9 @@ def cmd_init(a):
         # export or as nobody -- both wrong, and the second one silently. The
         # remove is idempotent and cheap; the local-scope add-json below is the
         # registration.
-        subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
-                       capture_output=True, text=True)
+        if adapter.name == "claude":
+            subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
+                           capture_output=True, text=True)
         try:
             mcp_where = adapter.register_mcp(workdir, url, claude)
         except RuntimeError as e:
@@ -1307,14 +1311,19 @@ def cmd_init(a):
     if dropped:
         steps.append(f"migrated: removed the reveille entry from {dropped}")
 
-    hook_rc = install.main()
-    if hook_rc != 0:
-        print("reveille init: the Stop hook did not install. The MCP registration "
-              "above stands -- this machine can reach the bus, but nothing will "
-              "keep a waiter armed, so wake it by draining inbox() per turn until "
-              "this is fixed.", file=sys.stderr)
+    # THE HOOK IS THE RUNTIME'S ANSWER. Claude installs a Stop hook and fails
+    # the install if it cannot; Codex returns the sentence that says a hook was
+    # OFFERED and not installed, because a non-managed Codex hook does nothing
+    # until a human trusts its hash and nothing on that runtime's reachability
+    # path is allowed to wait on a human.
+    try:
+        steps.append(f"hook: {adapter.install_hooks(workdir)}")
+    except AdapterError as e:
+        print(f"reveille init: {e}. The MCP registration above stands -- this "
+              f"machine can reach the bus, but the turn-end gate is not "
+              f"running, so drain inbox() per turn until this is fixed.",
+              file=sys.stderr)
         return 1
-    steps.append("hook: installed")
 
     # THE MINT IS THE LAST ACT WITH A REMOTE CONSEQUENCE (ruling #126, regressed
     # in 0.2.186, re-ruled 12271). It used to run ~50 lines earlier, before the
@@ -1373,13 +1382,19 @@ def cmd_init(a):
     ign, wrote = ignore_the_credential(workdir)
     if wrote:
         steps.append(f"ignored: {ign} -- the credential cannot be committed from here")
-    warn = warn_if_committable(workdir, pathlib.Path(workdir) / "CLAUDE.local.md")
-    if warn:
-        steps.append(warn)
-    lifted = lift_doctrine_from_claude_md(workdir)
-    if lifted:
-        steps.append(f"migrated: lifted the doctrine block out of {lifted} "
-                     f"(it belongs in CLAUDE.local.md, which is not tracked)")
+    # ONLY A PER-AGENT FILE CAN BE COMMITTED BY MISTAKE. Claude's block carries
+    # this agent's name, so a tracked copy is a small identity leak worth a
+    # sentence. Codex's file is SHARED BY DESIGN and carries no identity at
+    # all, so warning about committing it would be advice to hide the one file
+    # that is meant to be read by everyone.
+    if adapter.name == "claude":
+        warn = warn_if_committable(workdir, adapter.instruction_path(workdir))
+        if warn:
+            steps.append(warn)
+        lifted = lift_doctrine_from_claude_md(workdir)
+        if lifted:
+            steps.append(f"migrated: lifted the doctrine block out of {lifted} "
+                         f"(it belongs in CLAUDE.local.md, which is not tracked)")
     # THE DAEMON GOES ONLY WHEN THE SECRET IT READ AT SPAWN IS NOW DEAD --
     # that is what 12008 meant, and the predicate says it directly (ruling
     # 13094). An init that installed no NEW credential retires no daemon:
