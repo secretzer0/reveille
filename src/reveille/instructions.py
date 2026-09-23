@@ -4,12 +4,11 @@ import re
 from pathlib import Path
 
 from . import __version__
-from .adapters import AdapterError
 from .adapters.files import atomic_write
 
 DOCTRINE_BEGIN_PREFIX = "<!-- reveille:begin"
 DOCTRINE_END = "<!-- reveille:end -->"
-_MARKER_RE = re.compile(
+MARKER_RE = re.compile(
     r"<!-- reveille:begin(?:\s+v=(?P<v>\S+))?(?:\s+sha256=(?P<sha>[0-9a-f]+))?[^>]*-->")
 
 
@@ -23,10 +22,14 @@ def doctrine_begin(version, sha):
             f"`reveille init`; edit OUTSIDE these markers -->")
 
 
+def managed_block(body, version=__version__):
+    """Any runtime's managed section: begin marker, body, end marker. Pure."""
+    return f"{doctrine_begin(version, body_hash(body))}\n{body}{DOCTRINE_END}\n"
+
+
 def doctrine_block(name, agent_type, version=__version__):
     """The managed section, verbatim. Pure, so a gate can read it."""
-    body = doctrine_body(name, agent_type)
-    return f"{doctrine_begin(version, body_hash(body))}\n{body}{DOCTRINE_END}\n"
+    return managed_block(doctrine_body(name, agent_type), version)
 
 
 def doctrine_body(name, agent_type):
@@ -120,37 +123,32 @@ def doctrine_body(name, agent_type):
         )
 
 
-def sync_claude_md(workdir, name, agent_type, version=__version__):
-    """Write or refresh the managed doctrine block in CLAUDE.local.md.
+def sync_managed_block(path, body, version=__version__):
+    """Write or refresh THIS runtime's managed block in `path`.
 
     Returns (path, what) where what is 'created' | 'updated' | 'repaired' |
     'appended' | 'unchanged'.
 
-    CLAUDE.local.md, NOT CLAUDE.md (architect 12167). Claude Code loads both at
-    session start, but CLAUDE.md is the PROJECT's file -- tracked, shared, and
-    written by whoever owns the repo. This block is PER-AGENT: it carries the
-    agent's own name and role, so in a shared checkout two people's agents would
-    overwrite each other's block in a tracked file and commit the fight. The
-    .local.md variant is the documented per-developer, untracked home, which is
-    exactly what a per-agent block is.
-
     NEVER an overwrite of somebody's file: outside the markers, every byte the
-    directory already had survives, in place. Between them, this owns the text --
-    which is what makes a later boot able to correct a doctrine that has moved on
-    without asking a human to merge prose by hand.
+    file already had survives, in place. Between them, this owns the text --
+    which is what makes a later boot able to correct a doctrine that has moved
+    on without asking a human to merge prose by hand.
+
+    The file is not ours, so neither is its mode: an existing one keeps the
+    permissions it already had, and only a file this creates gets 0644.
     """
-    path = get_adapter("claude").instruction_path(pathlib.Path(workdir))
-    body = doctrine_body(name, agent_type)
-    block = doctrine_block(name, agent_type, version)
+    path = Path(path)
+    block = managed_block(body, version)
     if not path.exists():
-        path.write_text(block)
+        atomic_write(path, block, mode=0o644)
         return path, "created"
+    mode = path.stat().st_mode & 0o777
     text = path.read_text()
-    m = _MARKER_RE.search(text)
+    m = MARKER_RE.search(text)
     j = text.find(DOCTRINE_END)
     if m is None or j == -1 or j < m.start():
         sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
-        path.write_text(text + sep + block)
+        atomic_write(path, text + sep + block, mode=mode)
         return path, "appended"
     # WHERE THE BLOCK ENDS, MEASURED (architect nit on #123): the end marker plus
     # its newline IF there is one. Assuming the newline eats the first byte after
@@ -171,10 +169,9 @@ def sync_claude_md(workdir, name, agent_type, version=__version__):
     actual = body_hash(found_body)
     expected = body_hash(body)
     if actual != claimed:
-        path.write_text(text[:m.start()] + block + text[end:])
+        atomic_write(path, text[:m.start()] + block + text[end:], mode=mode)
         return path, "repaired"
     if actual == expected and (m.group("v") or "") == version:
         return path, "unchanged"
-    path.write_text(text[:m.start()] + block + text[end:])
+    atomic_write(path, text[:m.start()] + block + text[end:], mode=mode)
     return path, "updated"
-

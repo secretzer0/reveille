@@ -40,7 +40,8 @@ import types
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from reveille import cli, daemon, store  # noqa: E402
+from reveille import daemon, store  # noqa: E402
+from reveille import instructions
 
 
 def db():
@@ -233,7 +234,7 @@ def test_the_doctrine_line_reaches_the_boot_and_the_reference():
     """Gap 2 of 12441 as ruled in 12445: the line that would have saved 54k
     tokens, in both places a body learns from -- the managed CLAUDE.local.md
     block and usage()."""
-    for text in (cli.doctrine_body("x", ""), daemon.USAGE):
+    for text in (instructions.doctrine_body("x", ""), daemon.USAGE):
         flat = " ".join(text.split())    # the line wrap is not the doctrine
         assert "Idle is a valid life" in flat
         assert "not files, not logs, not git history" in flat, (
@@ -337,4 +338,4 @@ def test_one_sentence_three_sites_and_no_two_word_refusal_survives():
         return " ".join(t.split())          # line wrap is not the doctrine
     assert flat(store.REFUSAL_DOCTRINE) in flat(store.BAD_TOKEN)
     assert flat(store.REFUSAL_DOCTRINE) in flat(daemon.USAGE)
-    assert flat(store.REFUSAL_DOCTRINE) in flat(cli.doctrine_body("x", ""))
+    assert flat(store.REFUSAL_DOCTRINE) in flat(instructions.doctrine_body("x", ""))

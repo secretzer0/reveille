@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import importlib.util  # noqa: E402
 import pathlib  # noqa: E402
 
-from reveille import cli, daemon  # noqa: E402
+from reveille import daemon  # noqa: E402
+from reveille import instructions
 
 _spec = importlib.util.spec_from_file_location(
     "reveille_launch",
@@ -56,7 +57,7 @@ def test_the_frame_is_a_ring_not_a_close_and_says_the_body_still_holds_it():
 
 def test_the_doctrine_block_tells_the_agent_what_to_do_with_it():
     """A frame nobody was taught to read is a frame that changes nothing."""
-    block = cli.doctrine_block("someone", "", "0.0.0")
+    block = instructions.doctrine_block("someone", "", "0.0.0")
     assert "swap-pending" in block
     # distill() is THE verb for the note (decision c6c4bb45); memory_add(kind=
     # "state") is the raw form and stays named beside it, because it is the
@@ -72,7 +73,7 @@ def test_the_work_is_saved_before_the_note_is_written():
     body cannot reach is a description of something lost. Files do not travel,
     so the work has to be pushed somewhere the far side can fetch -- and the
     note has to carry the branch and sha, or say plainly where it is stranded."""
-    block = cli.doctrine_block("someone", "", "0.0.0")
+    block = instructions.doctrine_block("someone", "", "0.0.0")
     assert "wip/$REVEILLE_AGENT_ROLE/<utc-ts>" in block
     assert "NEVER onto main, NEVER a force-push" in block, (
         "this branch exists so the far side can fetch it, not overwrite anything")

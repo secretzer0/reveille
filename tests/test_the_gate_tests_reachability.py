@@ -374,10 +374,10 @@ def test_the_shipped_doctrine_does_not_teach_the_dead_arm_rule():
     doorbell made cold starts cheap to trigger, so this is the highest-leverage
     prose in the system. Asserted against the SHIPPED constants, not the repo's
     own markdown, because the constants are what `reveille init` writes."""
-    from reveille import cli, daemon
+    from reveille import daemon, instructions
     # doctrine_body IS what `reveille init` writes between the markers -- the
     # text a NEW body boots on. daemon.USAGE is what usage() serves. Both.
-    text = cli.doctrine_body("someagent", "devops") + daemon.USAGE
+    text = instructions.doctrine_body("someagent", "devops") + daemon.USAGE
 
     # THE INSTRUCTION FORM ONLY. A gate that greps the phrase itself also flags
     # the sentence RETRACTING it, which is how this gate first went red on its

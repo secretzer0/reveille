@@ -131,7 +131,7 @@ def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
     CLAUDE.md block agents paste, the send tool's own description, join()'s reply,
     and the starter CLAUDE.md `reveille init` seeds."""
     import inspect
-    from reveille import cli
+    from reveille import instructions
     head = daemon.USAGE.split("ENV (set by the launching pane", 1)[0]
     assert "BUS DOCTRINE" in head and "ULTRA-TERSE" in head, "the doctrine leads the standing usage"
     block = daemon.USAGE.split("CLAUDE.md block", 1)[1]
@@ -145,7 +145,7 @@ def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
     # body became separately hashable, and a gate reading source would have gone
     # green on the wrong function or red on a pure refactor. What an agent
     # actually reads is the block.
-    seeded = cli.doctrine_block("any-agent", "devops")
+    seeded = instructions.doctrine_block("any-agent", "devops")
     assert "BUS DOCTRINE" in seeded and "ULTRA-TERSE" in seeded, \
         "the seeded CLAUDE.local.md carries it"
 

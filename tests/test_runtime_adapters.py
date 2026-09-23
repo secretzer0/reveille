@@ -169,3 +169,54 @@ def test_cross_runtime_identity_conflict_precedes_registration(tmp_path, monkeyp
                      "--dir", str(tmp_path), "--no-prompt"]) == 1
     assert "bob" in capsys.readouterr().err
     assert not runtime_path(tmp_path).exists()
+
+
+def test_claude_instruction_block_is_unchanged_by_the_generic_synchroniser(tmp_path):
+    """The extraction may not move one byte of what `reveille init` writes."""
+    from reveille import instructions
+    adapter = get_adapter("claude")
+    path, what = adapter.sync_instructions(tmp_path, "example-agent", "devops")
+    assert (path, what) == (tmp_path / "CLAUDE.local.md", "created")
+    assert path.read_text() == instructions.doctrine_block("example-agent", "devops")
+    assert instructions.doctrine_body("example-agent", "devops") in path.read_text()
+    assert path.stat().st_mode & 0o777 == 0o644
+
+
+def test_a_runtime_without_instructions_writes_none(tmp_path):
+    """A runtime with no body of its own may never inherit another's (defect 7)."""
+    with pytest.raises(AdapterError, match="not implemented"):
+        get_adapter("codex").sync_instructions(tmp_path, "bob", "devops")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_managed_block_discipline_is_runtime_agnostic(tmp_path):
+    """Every runtime repairs a tampered block and keeps every byte outside it."""
+    from reveille.instructions import DOCTRINE_END, sync_managed_block
+    path = tmp_path / "AGENTS.md"
+    path.write_text("Project rules a human wrote.\n")
+    path.chmod(0o640)
+    _, what = sync_managed_block(path, "shared bus rules\n", "1.0")
+    assert what == "appended"
+    assert path.read_text().startswith("Project rules a human wrote.\n")
+    assert path.stat().st_mode & 0o777 == 0o640, "a file we did not create keeps its mode"
+    assert sync_managed_block(path, "shared bus rules\n", "1.0")[1] == "unchanged"
+    assert sync_managed_block(path, "shared bus rules\n", "1.1")[1] == "updated"
+    tampered = path.read_text().replace("shared bus rules", "somebody's edit")
+    path.write_text(tampered)
+    assert sync_managed_block(path, "shared bus rules\n", "1.1")[1] == "repaired"
+    text = path.read_text()
+    assert "somebody's edit" not in text
+    assert text.startswith("Project rules a human wrote.\n")
+    assert text.count(DOCTRINE_END) == 1
+
+
+def test_a_malformed_marker_never_eats_the_surrounding_prose(tmp_path):
+    """An end marker with no begin is somebody's text, not ours to rewrite."""
+    from reveille.instructions import DOCTRINE_END, sync_managed_block
+    path = tmp_path / "AGENTS.md"
+    path.write_text(f"before\n{DOCTRINE_END}\nafter\n")
+    _, what = sync_managed_block(path, "body\n", "1.0")
+    assert what == "appended"
+    text = path.read_text()
+    assert text.startswith(f"before\n{DOCTRINE_END}\nafter\n")
+    assert "body\n" in text

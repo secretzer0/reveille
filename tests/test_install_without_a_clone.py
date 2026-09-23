@@ -16,6 +16,8 @@ import threading
 import pytest
 
 from reveille import cli, daemon, install
+from reveille import instructions
+from reveille.adapters import get_adapter
 
 
 class Broker(http.server.BaseHTTPRequestHandler):
@@ -799,7 +801,7 @@ def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
     install never takes -- and with the password door closed that is the only
     way to install a native agent. red-shirt joined 0.2.170 with a bus
     connection, a Stop hook and no idea a broadcast does not wake anybody."""
-    path, what = cli.sync_claude_md(tmp_path, "reveille-devops", "devops")
+    path, what = get_adapter('claude').sync_instructions(tmp_path, "reveille-devops", "devops")
     text = path.read_text()
     assert path.name == "CLAUDE.local.md", "per-agent text never lands in a tracked file"
     assert what == "created"
@@ -808,30 +810,30 @@ def test_the_doctrine_block_is_managed_and_the_rest_is_the_agents(tmp_path):
     assert "does not wake anyone" in text, "the rule red-shirt did not have"
     assert "rings that thread's agent authors" in text, (
         "and the thread-wake amendment (12472/12532) reaches every boot")
-    assert cli.DOCTRINE_BEGIN_PREFIX in text and cli.DOCTRINE_END in text
+    assert instructions.DOCTRINE_BEGIN_PREFIX in text and instructions.DOCTRINE_END in text
     # Idempotent, and a later init corrects a stale block in place.
-    assert cli.sync_claude_md(tmp_path, "reveille-devops", "devops")[1] == "unchanged"
-    assert cli.sync_claude_md(tmp_path, "reveille-devops", "architect")[1] == "updated"
+    assert get_adapter('claude').sync_instructions(tmp_path, "reveille-devops", "devops")[1] == "unchanged"
+    assert get_adapter('claude').sync_instructions(tmp_path, "reveille-devops", "architect")[1] == "updated"
     assert "architect" in path.read_text()
     # A human's own file: the block is APPENDED once, and their words are kept
     # exactly, in place, forever after.
     mine = tmp_path / "own" / "CLAUDE.local.md"
     mine.parent.mkdir()
     mine.write_text("# my own instructions\nnever touch this line\n")
-    _, what = cli.sync_claude_md(mine.parent, "x", "devops")
+    _, what = get_adapter('claude').sync_instructions(mine.parent, "x", "devops")
     assert what == "appended"
     assert mine.read_text().startswith("# my own instructions\nnever touch this line\n")
-    assert cli.DOCTRINE_BEGIN_PREFIX in mine.read_text()
-    assert cli.sync_claude_md(mine.parent, "x", "devops")[1] == "unchanged"
-    assert cli.sync_claude_md(mine.parent, "x", "senior-dev")[1] == "updated"
+    assert instructions.DOCTRINE_BEGIN_PREFIX in mine.read_text()
+    assert get_adapter('claude').sync_instructions(mine.parent, "x", "devops")[1] == "unchanged"
+    assert get_adapter('claude').sync_instructions(mine.parent, "x", "senior-dev")[1] == "updated"
     assert "never touch this line" in mine.read_text(), "outside the markers is theirs"
     # NO NEWLINE AFTER THE END MARKER, which a hand edit can produce: the byte
     # right after it is the agent's and must survive an update (architect nit).
     hand = tmp_path / "hand"
     hand.mkdir()
     (hand / "CLAUDE.local.md").write_text(
-        cli.doctrine_block("x", "devops").rstrip("\n") + "TAIL-KEEP-ME\n")
-    _, what = cli.sync_claude_md(hand, "x", "architect")
+        instructions.doctrine_block("x", "devops").rstrip("\n") + "TAIL-KEEP-ME\n")
+    _, what = get_adapter('claude').sync_instructions(hand, "x", "architect")
     assert what == "updated"
     assert "TAIL-KEEP-ME" in (hand / "CLAUDE.local.md").read_text()
 
@@ -849,29 +851,29 @@ def test_the_marker_signs_the_block_so_a_hand_edit_cannot_survive(tmp_path):
     stale doctrine stays alive: a person tweaks one line, the version still
     reads current, and every later boot agrees with the edit instead of
     correcting it."""
-    path, _ = cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")
+    path, _ = get_adapter('claude').sync_instructions(tmp_path, "red-shirt-01", "devops")
     text = path.read_text()
     assert "sha256=" in text and "v=" in text
 
     # The claimed hash is the hash of what is actually between the markers.
     import re
     m = re.search(r"sha256=([0-9a-f]+)", text)
-    body = text.split("-->\n", 1)[1].split(cli.DOCTRINE_END, 1)[0]
-    assert m.group(1) == cli.body_hash(body)
+    body = text.split("-->\n", 1)[1].split(instructions.DOCTRINE_END, 1)[0]
+    assert m.group(1) == instructions.body_hash(body)
 
     # Case 3: edit INSIDE the markers. The version still says current.
     path.write_text(text.replace("## Bus", "## Bus (I edited this)"))
-    _, what = cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")
+    _, what = get_adapter('claude').sync_instructions(tmp_path, "red-shirt-01", "devops")
     assert what == "repaired", "an in-marker edit must be detected and replaced"
     assert "I edited this" not in path.read_text()
 
     # Case 1 again: now it is current and nothing happens.
-    assert cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")[1] == "unchanged"
+    assert get_adapter('claude').sync_instructions(tmp_path, "red-shirt-01", "devops")[1] == "unchanged"
 
     # Case 2: the doctrine moves on -- same body-hash claim, older version.
     stale = path.read_text().replace(f"v={cli.__version__}", "v=0.0.1")
     path.write_text(stale)
-    _, what = cli.sync_claude_md(tmp_path, "red-shirt-01", "devops")
+    _, what = get_adapter('claude').sync_instructions(tmp_path, "red-shirt-01", "devops")
     assert what == "updated"
     assert f"v={cli.__version__}" in path.read_text()
 
@@ -883,12 +885,12 @@ def test_a_block_an_earlier_init_left_in_claude_md_is_lifted_out(tmp_path):
     is more likely to read. Only text BETWEEN our markers is removed."""
     md = tmp_path / "CLAUDE.md"
     md.write_text("# the project's own words\n\n"
-                  + cli.doctrine_block("old-name", "devops")
+                  + instructions.doctrine_block("old-name", "devops")
                   + "\n## and more of theirs\n")
     lifted = cli.lift_doctrine_from_claude_md(tmp_path)
     assert lifted == md
     left = md.read_text()
-    assert cli.DOCTRINE_BEGIN_PREFIX not in left and cli.DOCTRINE_END not in left
+    assert instructions.DOCTRINE_BEGIN_PREFIX not in left and instructions.DOCTRINE_END not in left
     assert "the project's own words" in left and "more of theirs" in left
     # Idempotent, and a CLAUDE.md that never had one is not touched.
     assert cli.lift_doctrine_from_claude_md(tmp_path) is None
@@ -1063,7 +1065,7 @@ def test_the_boot_doctrine_teaches_the_living_ritual_not_a_retired_one(tmp_path)
     when one is needed. The correction reaching the LESSON but not this TEMPLATE
     is exactly how it survived 0.2.293: native-doorbell-test regenerated at
     0.2.294 and got a byte-identical body, sha256 unchanged."""
-    path, _ = cli.sync_claude_md(tmp_path, "dev-agent", "devops")
+    path, _ = get_adapter('claude').sync_instructions(tmp_path, "dev-agent", "devops")
     text = path.read_text()
     assert "--once" not in text, "the boot doctrine prescribes the retired arm"
     assert "arm rule is DEAD" in text, "the boot doctrine does not retire arming"

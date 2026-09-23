@@ -9,6 +9,8 @@ import json
 import os
 import tempfile
 
+from .. import __version__
+
 
 class AdapterError(RuntimeError):
     """A runtime cannot safely perform the requested operation."""
@@ -47,6 +49,28 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def instruction_path(self, project: Path) -> Path: ...
 
+    def instructions_body(self, name: str, agent_type: str) -> str:
+        """The managed text THIS runtime writes between its markers.
+
+        Shared bus rules are one body; where a runtime loads them, and what it
+        may claim about hooks, delivery or environment, is the runtime's own.
+        A runtime that has none yet says so rather than writing another's.
+        """
+        raise AdapterError(f"{self.name} managed instructions are not implemented yet")
+
+    def sync_instructions(self, project: Path, name: str, agent_type: str,
+                          version: str = __version__) -> tuple[Path, str]:
+        """Write or refresh the managed block in this runtime's instruction file.
+
+        The body is the runtime's; the marker discipline is shared, so every
+        runtime repairs a tampered block and preserves every byte outside it
+        the same way. Returns (path, 'created' | 'updated' | 'repaired' |
+        'appended' | 'unchanged').
+        """
+        from ..instructions import sync_managed_block
+        return sync_managed_block(self.instruction_path(Path(project)),
+                                  self.instructions_body(name, agent_type), version)
+
     @abstractmethod
     def register_mcp(self, project: Path, url: str, executable: str) -> str: ...
 
@@ -72,7 +96,21 @@ class ClaudeAdapter(RuntimeAdapter):
         return mcp_registered(project)
 
     def instruction_path(self, project):
+        """CLAUDE.local.md, NOT CLAUDE.md (architect 12167).
+
+        Claude Code loads both at session start, but CLAUDE.md is the PROJECT's
+        file -- tracked, shared, and written by whoever owns the repo. This
+        block is PER-AGENT: it carries the agent's own name and role, so in a
+        shared checkout two people's agents would overwrite each other's block
+        in a tracked file and commit the fight. The .local.md variant is the
+        documented per-developer, untracked home, which is exactly what a
+        per-agent block is.
+        """
         return Path(project) / "CLAUDE.local.md"
+
+    def instructions_body(self, name, agent_type):
+        from ..instructions import doctrine_body
+        return doctrine_body(name, agent_type)
 
     def register_mcp(self, project, url, executable):
         from reveille.cli import register_mcp_local

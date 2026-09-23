@@ -26,7 +26,6 @@ import argparse
 import contextlib
 import getpass
 import socket
-import hashlib
 import re
 import json
 import os
@@ -906,15 +905,7 @@ def ask_type(stdin=None):
 # how a stale doctrine stays alive -- a person tweaks one line, the version still
 # reads current, and every later boot agrees with the edit instead of correcting
 # it. Everything OUTSIDE the markers is still never touched.
-from .instructions import (  # Compatibility for existing callers.
-    DOCTRINE_BEGIN_PREFIX, DOCTRINE_END, _MARKER_RE,
-    body_hash, doctrine_begin, doctrine_block, doctrine_body,
-)
-
-
-def sync_claude_md(workdir, name, agent_type, version=__version__):
-    """Compatibility wrapper for Claude's managed local instructions."""
-    return get_adapter("claude").sync_instructions(workdir, name, agent_type, version)
+from .instructions import DOCTRINE_END, MARKER_RE  # noqa: E402 -- the note above.
 
 
 def lift_doctrine_from_claude_md(workdir):
@@ -931,7 +922,7 @@ def lift_doctrine_from_claude_md(workdir):
     if not path.exists():
         return None
     text = path.read_text()
-    m = _MARKER_RE.search(text)
+    m = MARKER_RE.search(text)
     j = text.find(DOCTRINE_END)
     if m is None or j == -1 or j < m.start():
         return None
@@ -976,6 +967,20 @@ def warn_if_committable(workdir, path):
 def cmd_init(a):
     workdir = pathlib.Path(a.dir or os.getcwd()).resolve()
     wizard = sys.stdin.isatty() and not a.no_prompt
+    # A NEW IDENTITY WITH NO ROOMS NAMED IS A THROWAWAY (DES-022 s4, ruled
+    # 12165). --create already says "yes, a new agent"; --rooms says which
+    # bus it is for, and defaulting it to every room the owner is in makes a
+    # typo reach everything. The wizard asks instead, so it is exempt.
+    #
+    # ARGUMENTS ARE ANSWERED BEFORE THE PROJECT IS READ. Runtime selection
+    # refuses too, and its sentence is about the DIRECTORY -- it tells a person
+    # nothing about the flag they got wrong. A check that reads only argv
+    # therefore runs above every step that reads the project, or the second
+    # defect in one command line hides the first.
+    if a.create and not a.rooms and not wizard:
+        print("reveille init --create: --rooms is required when creating a new "
+              "agent -- name the rooms it is for.", file=sys.stderr)
+        return 2
     try:
         runtime = getattr(a, "runtime", "auto")
         # The legacy executable override is itself an explicit runtime choice.
@@ -1124,14 +1129,6 @@ def cmd_init(a):
         if not url or not name:
             print("reveille init: needs REVEILLE_URL and an agent name "
                   "(REVEILLE_AGENT_ROLE or the second argument).", file=sys.stderr)
-            return 2
-        # A NEW IDENTITY WITH NO ROOMS NAMED IS A THROWAWAY (DES-022 s4, ruled
-        # 12165). --create already says "yes, a new agent"; --rooms says which
-        # bus it is for, and defaulting it to every room the owner is in makes a
-        # typo reach everything. The wizard asks instead, so it is exempt.
-        if a.create and not a.rooms and not wizard:
-            print("reveille init --create: --rooms is required when creating a new "
-                  "agent -- name the rooms it is for.", file=sys.stderr)
             return 2
         # A SESSION THIS RUN DID NOT CREATE OUTLIVES IT. --login's is the
         # installer's own and is closed after the mint; the machine's sign-in
@@ -1414,7 +1411,7 @@ def cmd_init(a):
     # ALWAYS, wizard or not (operator 11879 + red-shirt, 2026-08-18): the paste
     # path skips every prompt, and an agent with no CLAUDE.md has no boot ritual
     # -- it comes up connected and doctrine-less, which is what red-shirt did.
-    doc, what = sync_claude_md(workdir, name, agent_type)
+    doc, what = adapter.sync_instructions(workdir, name, agent_type)
     steps.append(f"doctrine: {doc} ({what}" +
                  (f"; role {agent_type}" if agent_type else "") +
                  ") -- the reveille block is managed, everything outside it is yours")
