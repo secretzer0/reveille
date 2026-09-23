@@ -161,10 +161,13 @@ when a different runtime is explicitly selected.
 
 1. Route waked's credential reads/writes, rotation, parked state and
    acknowledgement through the adapter. Today those still read Claude's paths.
-2. Live end-to-end Codex verification: an authenticated MCP tool call from a
-   Codex session, and an idle session woken by a real ring. The transport and
-   the session census are verified; `turn/start` delivering a ring into a live
-   session has NOT yet been observed end to end.
+2. An AUTHENTICATED MCP tool call from a Codex session is still unverified.
+   The WAKE is not: on 2026-09-23 a ring delivered through
+   `CodexAdapter.deliver` reached an idle TUI session, started a turn, and the
+   body answered `Could not process the ring: - inbox() / bus tools are
+   unavailable` -- correct, because that directory had no reveille MCP
+   registered. A ring becoming a turn is observed; a ring being ACTED on
+   needs a provisioned directory.
 3. Credential rotation on a live Codex session: Codex caches helper headers per
    connection and refreshes once on a 401/403 only if the helper's answer
    changed, so a rotation that the MCP layer never reports as a 401 may not
@@ -180,9 +183,9 @@ Claude's behavior stays covered while adding: two projects with different Codex
 identities; ambiguous selection; malformed credentials; idempotent
 configuration merges; an untrusted project installing nothing; a full Codex
 install with no `claude` binary present; an identity-free shared block; a
-missing app-server reported rather than pretended; and -- still outstanding --
-a real authenticated MCP call and an idle wake through the same app-server the
-terminal UI uses.
+missing app-server reported rather than pretended; and an idle wake through
+the same app-server the terminal UI uses, which is observed. Still
+outstanding: a real authenticated MCP call from inside a Codex session.
 
 Research sources: [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli),
 [instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md),
