@@ -486,6 +486,14 @@
   border-radius:4px;padding:0 .35em;letter-spacing:.08em}
  .head time{color:var(--faint);font-size:.74rem}
  .head .mid{color:var(--faint);font-size:.72rem;opacity:0;margin-left:auto}
+ /* A RECIPIENT IS NOT A MESSAGE ID. Each name in a group send also opens that
+    copy's thread, and it took `.mid` to get the click -- inheriting opacity:0,
+    which hid the one thing the row exists to say: WHO it went to. Invisible
+    until moused over, and only for a group send, so it read as a rendering
+    glitch rather than a shared class doing what it was told. The click now
+    follows whatever CARRIES a thread id; the name keeps the pointer and its
+    own colour. */
+ .head .toname[data-thread]{cursor:pointer}
  .row:hover .mid{opacity:1}
  .head .del{color:#e8555a;font-size:.78rem;opacity:0;cursor:pointer;padding:0 .2rem}
  .row:hover .del{opacity:1}
@@ -1933,7 +1941,7 @@ function render(m){
     ||{}).textContent||null)){
   const gr=$('inner').querySelector('.row[data-group="'+CSS.escape(m.send_group)+'"]');
   gr.querySelector('.grpto')?.insertAdjacentHTML('beforeend',
-   ', <span class="toname mid" data-thread="'+m.thread_id+'" style="color:'
+   ', <span class="toname" data-thread="'+m.thread_id+'" style="color:'
    +color(m.to)+'" title="thread of this copy">'+esc(m.to)+' (#'+m.id+')</span>');
   prevMsg=m;
   return frag;                        // registered, rendered as a chip
@@ -1964,7 +1972,7 @@ function render(m){
     +'<span class="arrow">&rarr;</span>'
     +(m.to==='*'?'<span class="all">ALL</span>'
       :(m.send_group
-        ?'<span class="grpto"><span class="toname mid" data-thread="'+m.thread_id
+        ?'<span class="grpto"><span class="toname" data-thread="'+m.thread_id
           +'" style="color:'+color(m.to)+'" title="thread of this copy">'
           +esc(m.to)+' (#'+m.id+')</span></span>'
         :'<span class="toname" style="color:'+color(m.to)+'">'+esc(m.to)+'</span>'))
@@ -1983,7 +1991,7 @@ function render(m){
  for(const el of row.querySelectorAll('.mdview[data-src]'))hydrateMd(el);
  row.style.display=matches(m)?'':'none';
  row.addEventListener('click',e=>{
-  if(e.target.closest('.mid'))return;        // thread drill-down keeps its own click
+  if(e.target.closest('[data-thread]'))return;  // thread drill-down keeps its own click
   // The click always ASKS first (ruling 11483): the broker says ready (durable
   // file -> play) or queues -- a terse stand-in heard earlier is not a file.
   // A message that HAS audio is a play point: the cursor moves there and the
@@ -3017,7 +3025,7 @@ $('inner').addEventListener('click',async e=>{
   }
   return;
  }
- const t=e.target.closest('.mid');
+ const t=e.target.closest('[data-thread]');
  if(t)runSearch({thread_id:t.dataset.thread});
 });
 $('toBtn').onclick=()=>$('toPanel').classList.toggle('on');
