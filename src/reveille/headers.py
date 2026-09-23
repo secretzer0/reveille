@@ -23,16 +23,19 @@ refusal it produces.
 """
 import json
 import pathlib
+import argparse
+import sys
+
+from reveille.adapters import AdapterError, find_project, select_adapter
 
 
-def gather(root="."):
+def gather(root=".", runtime="auto"):
     """The headers for the agent directory at root, or {} when it is not one."""
     try:
-        cfg = json.loads(
-            (pathlib.Path(root) / ".claude" / "settings.local.json").read_text())
-    except (OSError, ValueError):
+        adapter = select_adapter(root, runtime)
+        env = adapter.identity(pathlib.Path(root))
+    except (AdapterError, OSError, ValueError):
         return {}
-    env = cfg.get("env", {})
     token = env.get("REVEILLE_TOKEN", "")
     name = env.get("REVEILLE_AGENT_ROLE", "")
     if not (token and name):
@@ -40,8 +43,23 @@ def gather(root="."):
     return {"Authorization": f"Bearer {token}", "X-Agent": name}
 
 
-def main():
-    print(json.dumps(gather()))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Project-local Reveille MCP headers")
+    # NO PROJECT NAMED IS NOT NO PROJECT. The helper is handed a cwd and
+    # nothing else, and that cwd can be below the agent's root, so the default
+    # WALKS UP to the nearest agent directory. An explicit --project is taken
+    # exactly as given: naming one is a decision, not a hint.
+    parser.add_argument("--project", default=None)
+    parser.add_argument("--runtime", default="auto", choices=("auto", "claude", "codex"))
+    args = parser.parse_args(argv)
+    project = args.project if args.project is not None else find_project(".", args.runtime)
+    try:
+        adapter = select_adapter(project, args.runtime)
+    except AdapterError as e:
+        print(f"reveille-headers: {e}", file=sys.stderr)
+        print("{}")
+        return 0
+    print(json.dumps(gather(project, adapter.name)))
     return 0
 
 

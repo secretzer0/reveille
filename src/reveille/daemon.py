@@ -37,6 +37,7 @@ import gzip
 import html
 import ipaddress
 import io
+import zipfile
 import json
 import logging
 import math
@@ -401,6 +402,62 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.317",
+     "0.2.317 A SECOND RUNTIME, AND THREE SIGNALS THAT HAD DRIFTED (schema v48).\n"
+     "\n"
+     "CODEX IS A RUNTIME THIS BUS CAN REACH. RuntimeAdapter owns what a CLI\n"
+     "keeps where, how it publishes a live session, and how a ring becomes a\n"
+     "turn; the doorbell owns the routing and every refusal that is about the\n"
+     "bus. Measured against codex-cli 0.156.1 rather than read off a page: the\n"
+     "headers helper runs with the SESSION's cwd and no CODEX_HOME, so the\n"
+     "registration carries no path; a project's .codex layer is read only when\n"
+     "the project is trusted, so validate_install verifies trust and refuses by\n"
+     "name; thread/loaded/list plus thread/read give cwd, status and\n"
+     "canAcceptDirectInput, which are the same three facts a Claude descriptor\n"
+     "carries. A provisioned Codex body then read its room, replied on a\n"
+     "thread, and uploaded a file over an authenticated MCP.\n"
+     "\n"
+     "CODEX HAS NO PER-AGENT INSTRUCTION FILE -- one file per directory, and an\n"
+     "override REPLACES rather than adds -- so its managed block carries no\n"
+     "name, no role and no path, and the body reads its identity off the bus.\n"
+     "BUS_RULES is one constant; Claude's rendering is byte-identical.\n"
+     "\n"
+     "THREE SIGNALS SAID MORE THAN THEY KNEW, each because the architecture\n"
+     "moved underneath them:\n"
+     "  active     claimed 'a bus call landed' and read seen_ns, which the wake\n"
+     "             attach and the 5-minute HEARTBEAT also refresh. A heartbeat\n"
+     "             is not a bus message in either direction (operator), so it\n"
+     "             reads spoke_ns now -- written only where a real call lands.\n"
+     "  connected  asked whether a waked held a socket, which one host daemon\n"
+     "             makes true for EVERY identity it serves. It asks whether a\n"
+     "             session is there; -1 is never-said and falls back.\n"
+     "  inbound    was recorded nowhere: a ring lands on the agent's machine and\n"
+     "             the broker never saw it. waked reports it on the socket it\n"
+     "             already holds, and rung_ns means the write SUCCEEDED -- not\n"
+     "             that the body read it.\n"
+     "\n"
+     "AN IDENTITY IS DIALLED AT THE BUS ITS OWN CREDENTIAL NAMES. Host mode took\n"
+     "each token from its directory and then dialled every one of them at the\n"
+     "single --url it was started with -- invisible on a one-broker machine, and\n"
+     "wrong the moment one identity belongs elsewhere: measured, a host waked\n"
+     "held a local agent's spool lock and dialled it at the live broker with a\n"
+     "token that broker never minted. The host singleton moved with its root for\n"
+     "the same reason.\n"
+     "\n"
+     "THE CONVERSATION LEAVES AS A FILE. An admin exports what is ON SCREEN --\n"
+     "the client names its rows, because its filters run in the browser and a\n"
+     "second copy of that predicate would drift -- as a zip holding one\n"
+     "self-contained HTML page and its attachments. Every body is escaped and\n"
+     "nothing is fetched: it is opened from a mail client, where no origin\n"
+     "protects the reader.\n"
+     "\n"
+     "Schema 48: members.runtime, spoke_ns, rung_ns, sessions_n -- additive, and\n"
+     "'', 0 and -1 are right for every existing row, because inventing any of\n"
+     "them would be a confident claim about something never observed.\n"
+     "\n"
+     "AND A LOCAL BUS TO TRY IT ON: `make local-bus` builds a whole one from a\n"
+     "rebuildable dataset, under a private registry and spool, so a testbed and\n"
+     "a real fleet share a machine without either noticing."),
     ("0.2.316",
      "0.2.316 A CONFLICT VERDICT IS JUDGED ONCE (schema v47).\n\nEvery agent in a room folds over the same rows, so every agent's conflict pass\noffered the writer the SAME pairs. Measured 2026-09-21: roc-api-dev and\nshared-dev shared 95 of 95 candidate pairs; roc-api-dev's pass ran 03:16:02 to\n03:18:38, and roughly seventeen OverSiteAI bodies were each going to pay that\nagain for identical answers -- on the writer the voice path shares.\n\nconflict_verdicts holds every judgement keyed on the sorted pair of FULL uids\nand the JUDGE. A uid never changes -- an edit writes a new row with a new uid --\nso a verdict can never go stale on content. It CAN go stale on the judge: the\nkey fingerprints the frame and the model, so changing either misses and\nre-asks rather than answering a new question with an old verdict.\n\nEvery verdict is kept, not only CONFLICT: AGREE and UNRELATED are the ~94% that\nsave the work. An UNPARSED reply is never stored -- not evidence of anything,\nand caching it would make a missing answer permanent. Verdicts land one at a\ntime, so a pass the writer abandons half-way is resumed by the next fold, not\nrepeated. A cached CONFLICT still reaches the note; the log line now says\n`N judged, M from cache`.\n\nv46 -> v47 is additive: a new table, no row touched, no snapshot owed. The\nfirst OverSiteAI fold after this deploy pays for the room's pairs; every other\nbody in it should log `95 from cache`."),
     ("0.2.315",
@@ -3599,14 +3656,28 @@ def _human_live(agents):
 def _reachable(entry):
     """Is this member reachable in real time RIGHT NOW, in this room?
 
-    An agent is reachable when its wake waiter is attached; a HUMAN is reachable when a
-    browser tab holds this room's feed. Two transports, one meaning. This used to ask only
-    about the waiter, so a web user -- who never has one and never will -- was pinned to
-    "live, waiter down" forever: the UI asking a person whether they are running wake.py.
+    A HUMAN is reachable when a browser tab holds this room's feed. An AGENT is
+    reachable when a SESSION is there to ring -- which is not the same question
+    as whether a daemon holds a wake socket, and stopped being the same the day
+    one host waked began serving every identity on a machine. Measured
+    2026-09-23: native-doorbell-test, zero live sessions in its directory,
+    reported connected and painted green, because the host daemon was up.
+
+    So the count waked reports wins where it exists. -1 is NEVER SAID -- an old
+    daemon that cannot report yet -- and falls back to the socket, because a
+    body must not read as gone merely because its daemon is too old to speak.
+
+    REACHABLE IS NOT THE SAME AS PRESENT, and neither is the same as LEFT. A
+    member that is here but has no session keeps its row, keeps its name and is
+    still addressed the same way: mail queues and is read on the next turn. A
+    member that LEFT is not in presence at all.
     """
-    if _waiters.get(entry["token_id"]):
+    if (entry["room"], entry["name"]) in set(_feed.values()):
         return True
-    return (entry["room"], entry["name"]) in set(_feed.values())
+    said = entry.get("sessions", -1)
+    if said is not None and said >= 0:
+        return said > 0
+    return bool(_waiters.get(entry["token_id"]))
 
 
 @dataclass(frozen=True)
@@ -3887,6 +3958,20 @@ def _arriving(request) -> Principal:
         raise store.AuthError(UNBOUND_ACT)
     _poke_pending.pop(p.token_id, None)
     return p
+
+
+def _spoke(p):
+    """THE BODY CALLED THE BUS: a heartbeat AND the outbound direction.
+
+    A HEARTBEAT IS NOT A BUS MESSAGE IN EITHER DIRECTION (operator,
+    2026-09-23). The wake socket's attach and its `hb` are the daemon saying it
+    is alive; only a call from the agent itself is the body speaking. Both
+    refresh liveness, and exactly one of them is traffic -- so they get
+    different names here rather than a flag somebody forgets to pass.
+    """
+    _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+    with contextlib.suppress(store.BusError):
+        store.mark_spoke(_conn, speaker_key(p), list(p.rooms))
 
 
 def _seen(principal, name, rooms, token_id=None):
@@ -4508,7 +4593,7 @@ async def send(to: str, body: str, subject: str = "",
     # The other half of the handover grace (R2): the five fields have to reach
     # the room, not just the memory, or the peers watching a move learn nothing.
     p = _handing_over(ctx.request_context.request)
-    _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+    _spoke(p)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))
     res = store.send(_conn, speaker_key(p), to, body, subject=subject, reply_to=reply_to,
@@ -4557,7 +4642,7 @@ async def inbox(ctx: Context = None) -> dict:
     came from. Non-destructive: ack(message_ids) when processed."""
     p = _me(ctx.request_context.request)
     if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
-        _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+        _spoke(p)
     # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
     # this one call covers every room, so one ring was the right number. _acting
     # clears it for every OTHER act; this line covers the read-only callers that
@@ -4706,7 +4791,7 @@ async def history(keywords: str = "", since: str = "", until: str = "",
     graph()/thread() or an id to trace() to expand the reply DAG."""
     p = _me(ctx.request_context.request)
     if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
-        _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+        _spoke(p)
     msgs = store.search(
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
@@ -4854,10 +4939,12 @@ async def wake_ws(ws: WebSocket):
     # keeping the previous value would turn "it has not said" into a confident
     # claim about a version nobody observed.
     with contextlib.suppress(store.BusError):
-        store.set_toolchain(_conn, principal,
-                            list(rooms), ws.query_params.get("toolchain", ""))
-    log.info("%s wake connected (%s room(s), toolchain %r)", name, len(rooms),
-             ws.query_params.get("toolchain", ""))
+        store.set_attach_facts(_conn, principal, list(rooms),
+                               ws.query_params.get("toolchain", ""),
+                               ws.query_params.get("runtime", ""))
+    log.info("%s wake connected (%s room(s), toolchain %r, runtime %r)",
+             name, len(rooms), ws.query_params.get("toolchain", ""),
+             ws.query_params.get("runtime", ""))
     q: asyncio.Queue = asyncio.Queue()
     # DES-003 2.3: one wake attachment per agent -- a SECOND attachment
     # SUPERSEDES the first (supersede, not refuse: a daemon respawned after a
@@ -4935,6 +5022,23 @@ async def wake_ws(ws: WebSocket):
                 break
             if recv in done:  # client data = its heartbeat; keep the agent LIVE
                 _seen(principal, name, rooms, tok["id"])
+                # A HEARTBEAT IS NOT A BUS MESSAGE IN EITHER DIRECTION
+                # (operator, 2026-09-23). It says the socket is alive, which is
+                # what _seen records, and nothing about whether a body worked
+                # or was reached. A daemon may also REPORT what it observes on
+                # its own machine, which the broker cannot see: how many
+                # sessions stand in the agent's directory, and that a ring it
+                # was handed actually landed on one. Anything unrecognised
+                # stays a heartbeat, so an old daemon's "hb" and a new
+                # daemon's report both work against either broker.
+                with contextlib.suppress(Exception):
+                    said = json.loads(recv.result())
+                    if isinstance(said, dict):
+                        if isinstance(said.get("sessions"), int):
+                            store.set_sessions(_conn, principal, list(rooms),
+                                               said["sessions"])
+                        if said.get("rung"):
+                            store.mark_rung(_conn, principal, list(rooms))
                 continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
@@ -6141,6 +6245,187 @@ async def audio_http(request):
                     continue
                 await asyncio.sleep(0.05)
     return StreamingResponse(tail(), media_type="audio/webm", headers=headers)
+
+
+EXPORT_CSS = """
+ body{margin:0;background:#0e1116;color:#dce3ec;
+  font:15px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+ .wrap{max-width:52rem;margin:0 auto;padding:2rem 1.2rem 4rem}
+ h1{font-size:1.2rem;letter-spacing:.14em;color:#e2a63d;margin:0 0 .3rem}
+ .meta{color:#7b8797;font-size:.82rem;margin-bottom:2rem}
+ .meta b{color:#dce3ec;font-weight:600}
+ .day{color:#7b8797;font-size:.75rem;text-align:center;margin:2rem 0 1rem;
+  letter-spacing:.1em;border-top:1px solid #242c37;padding-top:.9rem}
+ .m{display:flex;gap:.8rem;margin:1.1rem 0}
+ .av{width:2.1rem;height:2.1rem;border-radius:.5rem;flex:none;display:flex;
+  align-items:center;justify-content:center;font-size:.72rem;font-weight:700}
+ .hd{display:flex;gap:.5rem;align-items:baseline;flex-wrap:wrap;
+  font-size:.86rem;margin-bottom:.15rem}
+ .who{font-weight:600}
+ .to{color:#dcb86a}.all{color:#e2a63d;font-weight:600}
+ time{color:#7b8797;font-size:.76rem}
+ .sub{font-weight:600;margin:.1rem 0 .15rem}
+ .body{white-space:pre-wrap;word-wrap:break-word;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86rem}
+ .atts{margin-top:.5rem;display:flex;flex-wrap:wrap;gap:.6rem}
+ .atts img{max-width:100%;border:1px solid #242c37;border-radius:6px;display:block}
+ .atts a{color:#dcb86a;font-size:.8rem}
+ .missing{color:#7b8797;font-size:.8rem;font-style:italic}
+"""
+
+
+def export_hue(name):
+    """THE UI's OWN HUE, ported exactly (`hue()` in the bus page).
+
+    An export that gave the same agent a different colour than the room does
+    is a second answer to "who is what colour" -- and the two get compared,
+    because a person reads the export beside the screen it came from. The
+    32-bit wrap is what JavaScript's >>>0 does, and is the whole reason this
+    is a port rather than any hash that fits.
+    """
+    h = 0
+    for ch in name or "":
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    return h % 360
+
+
+def export_initials(name):
+    """The UI's own rule: first letters of the parts, not the first two
+    characters -- every `local-*` agent reads `LO` under that."""
+    parts = [p for p in re.split(r"[-_.]", name or "") if p]
+    if not parts:
+        return "?"
+    second = parts[1][0] if len(parts) > 1 else (parts[0][1:2] or "")
+    return (parts[0][0] + second).upper()
+
+
+def export_html(msgs, meta, files=None):
+    """One self-contained HTML page for a set of messages. Pure, so it is gated.
+
+    EVERY BYTE IS ESCAPED AND NOTHING IS FETCHED. The bodies are other people's
+    text and the attachment names are other people's filenames, so this renders
+    them as TEXT -- an export opened from a mail client is exactly the place a
+    stored script would want to run, and there is no origin here to protect it.
+    No stylesheet, no font and no script is loaded from anywhere: the file is
+    readable on a machine with no network and no bus.
+    """
+    files = files or {}
+    out = ["<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
+           f"<title>{html.escape(meta.get('title') or 'Reveille conversation')}</title>",
+           f"<style>{EXPORT_CSS}</style></head><body><div class=\"wrap\">",
+           f"<h1>{html.escape(meta.get('title') or 'REVEILLE')}</h1>",
+           "<div class=\"meta\">"]
+    for line in meta.get("lines") or []:
+        out.append(f"<div>{line}</div>")
+    out.append("</div>")
+    day = None
+    for m in msgs:
+        when = datetime.fromtimestamp(m["ts_ns"] / 10**9)
+        if when.date() != day:
+            day = when.date()
+            out.append(f"<div class=\"day\">{when.strftime('%a %b %d %Y')}</div>")
+        who = html.escape(m.get("from") or "")
+        hue = export_hue(m.get("from"))
+        initials = html.escape(export_initials(m.get("from")))
+        to = m.get("to") or ""
+        target = ("<span class=\"all\">ALL</span>" if to == "*"
+                  else f"<span class=\"to\">{html.escape(to)}</span>")
+        out.append(
+            f"<div class=\"m\"><div class=\"av\" style=\"color:hsl({hue} 62% 64%);"
+            f"background:hsl({hue} 45% 26%)\">{initials}</div>"
+            f"<div><div class=\"hd\"><span class=\"who\" "
+            f"style=\"color:hsl({hue} 62% 64%)\">{who}</span>"
+            f"<span>&rarr;</span>{target}"
+            f"<time>{when.strftime('%I:%M %p')}</time></div>")
+        if m.get("subject"):
+            out.append(f"<div class=\"sub\">{html.escape(m['subject'])}</div>")
+        out.append(f"<div class=\"body\">{html.escape(m.get('body') or '')}</div>")
+        atts = m.get("attachments") or []
+        if atts:
+            out.append("<div class=\"atts\">")
+            for a in atts:
+                name = html.escape(a.get("name") or "attachment")
+                local = files.get(a.get("url") or "")
+                if not local:
+                    # SAID, NOT SWALLOWED: a reader must not think an export
+                    # that omitted a file is a conversation that had none.
+                    out.append(f"<div class=\"missing\">[attachment not included: "
+                               f"{name}]</div>")
+                elif local.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+                    out.append(f"<figure><img src=\"{html.escape(local)}\" alt=\"{name}\">"
+                               f"<figcaption class=\"missing\">{name}</figcaption></figure>")
+                else:
+                    out.append(f"<a href=\"{html.escape(local)}\">{name}</a>")
+            out.append("</div>")
+        out.append("</div></div>")
+    out.append("</div></body></html>")
+    return "\n".join(out)
+
+
+@_guard
+async def export_http(request):
+    """POST /export {ids, attachments, title} -> a zip of the conversation.
+
+    THE CLIENT SAYS WHICH MESSAGES. Its filters -- selected agents, FROM or TO,
+    the text box -- run in the browser, so the only way an export can match
+    WHAT IS ON SCREEN is for the screen to name its rows. Re-deriving them here
+    would be a second copy of a predicate that already exists, and the two
+    would drift. Every id is still checked against the caller's rooms, which is
+    what makes trusting the list safe.
+
+    ADMIN ONLY. Reading one room in a browser and walking out with its whole
+    history in a file are different acts, and only the second one is worth a
+    gate. Widening it is one condition, deliberately not taken here.
+    """
+    p = _principal(request)
+    if not p.is_admin:
+        return JSONResponse({"error": "export is an admin action"}, status_code=403)
+    try:
+        body = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        return JSONResponse({"error": "nothing to export"}, status_code=400)
+    try:
+        msgs = store.messages_by_ids(_conn, ids, p.rooms)
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "ids must be integers"}, status_code=400)
+    if not msgs:
+        return JSONResponse({"error": "none of those messages are in your rooms"},
+                            status_code=404)
+    want_files = bool(body.get("attachments"))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    title = str(body.get("title") or "Reveille conversation")[:200]
+    lines = [html.escape(str(x)[:300]) for x in (body.get("lines") or [])][:8]
+    lines.append(f"<b>{len(msgs)}</b> message(s) &middot; exported {html.escape(stamp)}")
+
+    buf = io.BytesIO()
+    included = {}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if want_files:
+            for m in msgs:
+                for a in m.get("attachments") or []:
+                    url = a.get("url") or ""
+                    stored = url.rsplit("/", 1)[-1]
+                    safe = _FNAME_RE.sub("_", stored)
+                    # THE SAME ROOM CHECK THE FILE ROUTE MAKES. An export may
+                    # not become the one door that hands out an attachment the
+                    # caller could not have fetched by its url.
+                    rid = store.file_room(_conn, safe)
+                    path = _files_dir / safe if _files_dir else None
+                    if rid is None or rid not in p.rooms or not path or not path.is_file():
+                        continue
+                    local = f"attachments/{safe}"
+                    if local not in included.values():
+                        zf.write(path, local)
+                    included[url] = local
+        zf.writestr("conversation.html",
+                    export_html(msgs, {"title": title, "lines": lines}, included))
+    name = f"reveille-{stamp}.zip"
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"content-disposition": f'attachment; filename="{name}"',
+                             "x-content-type-options": "nosniff"})
 
 
 @_guard
@@ -7931,6 +8216,7 @@ def build_app():
                   methods=["POST"]),
             Route("/messages", messages_http),
             Route("/search", search_http),
+            Route("/export", export_http, methods=["POST"]),
             Route("/presence", presence_http),
             Route("/agents-seen", agents_seen_http),
             Route("/send", send_http, methods=["POST"]),

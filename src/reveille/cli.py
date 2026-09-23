@@ -26,7 +26,6 @@ import argparse
 import contextlib
 import getpass
 import socket
-import hashlib
 import re
 import json
 import os
@@ -44,6 +43,8 @@ import webbrowser
 from reveille import __version__
 
 from . import install, spool
+from .adapters import (ADAPTERS, AdapterError, get_adapter, project_claims,
+                       save_runtime, saved_runtime, select_adapter)
 from .devicecode import cli_code
 
 
@@ -172,8 +173,8 @@ def drop_project_mcp_entry(workdir):
     return path
 
 
-def ignore_the_credential(workdir):
-    """Make sure <workdir>/.claude/settings.local.json cannot be committed.
+def ignore_the_credential(workdir, adapter):
+    """Make sure the credential THIS RUNTIME wrote cannot be committed.
 
     The credential is written INTO A GIT WORKING TREE, and whether it is ignored
     was, until now, a property of the person's own machine: on this laptop a
@@ -181,14 +182,19 @@ def ignore_the_credential(workdir):
     clone by anyone else leaves a live agent token untracked-but-not-ignored,
     one `git add -A` from a public repo.
 
-    The fix stays inside what we own: a .gitignore in the .claude directory THIS
+    The fix stays inside what we own: a .gitignore in the directory THIS
     INSTALLER CREATES. Not the repo's own .gitignore (a tracked file that is the
     project's, not ours) and NOT .git/info/exclude (the user's git config, and a
     tool that writes there to protect its own mess is fixing the wrong layer --
     operator, 2026-08-19). Self-contained: it ships beside the credential, so a
     clone that gets one gets the other.
+
+    WHICH DIRECTORY IS THE RUNTIME'S ANSWER. Hardcoding `.claude` here meant a
+    Codex install created an EMPTY .claude/ holding an ignore file for two
+    secrets that were never going to be written there, while the real ones sat
+    in .codex/ -- found by running the install rather than by reading it.
     """
-    d = pathlib.Path(workdir) / ".claude"
+    d = pathlib.Path(adapter.state_dir(workdir))
     d.mkdir(parents=True, exist_ok=True)
     path = d / ".gitignore"
     # BOTH SECRETS THIS DIRECTORY CAN HOLD, not just the one this function was
@@ -197,7 +203,7 @@ def ignore_the_credential(workdir):
     # only one of two secrets is a published-identity hole with a green install.
     # Appends WHICHEVER is missing -- the old single-name early return meant a
     # dir init had ever touched could never gain a line.
-    want = ["settings.local.json", ".reveille-parked"]
+    want = [adapter.credential_path(workdir).name, ".reveille-parked"]
     text = path.read_text() if path.exists() else ""
     have = text.split()
     missing = [w for w in want if w not in have]
@@ -250,20 +256,6 @@ def agent_of_directory(workdir):
                 .get("REVEILLE_AGENT_ROLE") or "")
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
         return ""
-
-
-def mcp_registered(workdir):
-    """Is the local-scope registration for this directory already in
-    ~/.claude.json? Read-only, shape-tolerant: the file is claude's, not ours,
-    and the only thing this answer guards is whether a boot with no claude
-    binary may DEGRADE instead of refusing -- so anything unreadable is False,
-    which fails toward the hard refusal."""
-    try:
-        cfg = json.loads((pathlib.Path.home() / ".claude.json").read_text())
-        proj = (cfg.get("projects") or {}).get(str(workdir)) or {}
-        return "reveille" in (proj.get("mcpServers") or {})
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-        return False
 
 
 def write_credential(url, name, token, workdir):
@@ -904,176 +896,7 @@ def ask_type(stdin=None):
 # how a stale doctrine stays alive -- a person tweaks one line, the version still
 # reads current, and every later boot agrees with the edit instead of correcting
 # it. Everything OUTSIDE the markers is still never touched.
-DOCTRINE_BEGIN_PREFIX = "<!-- reveille:begin"
-DOCTRINE_END = "<!-- reveille:end -->"
-_MARKER_RE = re.compile(
-    r"<!-- reveille:begin(?:\s+v=(?P<v>\S+))?(?:\s+sha256=(?P<sha>[0-9a-f]+))?[^>]*-->")
-
-
-def body_hash(body):
-    """sha256 of the block body, short. Pure, so a gate can recompute it."""
-    return hashlib.sha256(body.encode()).hexdigest()[:16]
-
-
-def doctrine_begin(version, sha):
-    return (f"{DOCTRINE_BEGIN_PREFIX} v={version} sha256={sha} -- managed by "
-            f"`reveille init`; edit OUTSIDE these markers -->")
-
-
-def doctrine_block(name, agent_type, version=__version__):
-    """The managed section, verbatim. Pure, so a gate can read it."""
-    body = doctrine_body(name, agent_type)
-    return f"{doctrine_begin(version, body_hash(body))}\n{body}{DOCTRINE_END}\n"
-
-
-def doctrine_body(name, agent_type):
-    """Everything BETWEEN the markers. Hashed, so it is its own identity."""
-    role = f"You are the fleet's **{agent_type}**.\n\n" if agent_type else ""
-    return (
-        f"# {name}\n\n"
-        f"{role}"
-        f"## Bus\n"
-        f"BUS DOCTRINE: write ULTRA-TERSE -- fragments, no articles or filler,\n"
-        f"ids/numbers/names exact, code and errors quoted verbatim. Write for AGENTS,\n"
-        f"never for the ear: humans hear the writer's persona expansion; the raw text\n"
-        f"stays the record.\n\n"
-        f"Identity and credential come from the environment, never hardcoded:\n"
-        f"$REVEILLE_AGENT_ROLE is your bus name, $REVEILLE_TOKEN your credential.\n"
-        f"Your token does NOT name a room -- the broker maps it to your rooms\n"
-        f"server-side.\n\n"
-        f"Startup: `join()`, then `rehydrate()` PAGE 1. Page 1 row 1 is\n"
-        f"your DIGEST -- the broker's own fold of everything you worked on and\n"
-        f"everything the hive learned since your last one -- and the rest of the\n"
-        f"hive stays behind `next` for reaching back. No digest yet? `digest()`\n"
-        f"STARTS one and answers at once; rehydrate() reads it when it lands. A NEW\n"
-        f"body calls `digest(mentor=\"$REVEILLE_MENTOR\")` first,\n"
-        f"inheriting one agent's skills rather than every agent's memory.\n\n"
-        f"DO NOT ARM A WATCHER. The arm rule is DEAD (operator, 2026-09-20).\n"
-        f"Do not run `wake-watch`, do not re-arm after a ring, do not arm at\n"
-        f"boot \"in case\". A ring is no longer only a file: waked writes it to\n"
-        f"your spool AND rings your CLI's own inbox socket, which starts a turn\n"
-        f"in a body sitting idle -- so rings reach you with nothing armed.\n"
-        f"THE STOP HOOK DECIDES, not standing doctrine. It lets you stop when\n"
-        f"the doorbell can reach you -- a waked holding your spool lock, and a\n"
-        f"live interactive session in your registered directory carrying the\n"
-        f"reveille MCP -- and when it cannot it BLOCKS and NAMES THE HALF that\n"
-        f"failed, with the command that prints the reason. Act on that sentence\n"
-        f"then, and only as it says. Fix reachability before arming anything.\n\n"
-        f"Per ring: `inbox()`, `ack()` everything, act only if owed, delete the\n"
-        f"spool file you handled -- the ring's `spool` key is its absolute path,\n"
-        f"so rm THAT, never a glob. `reveille ack <that path>` does the ack and\n"
-        f"the rm in one call and refuses to delete a ring whose ack did not land.\n"
-        f"An entry left behind is replayed, so drain what you read.\n"
-        f"THE SPOOL IS STILL THE MAILBOX; the doorbell is only the doorbell. It\n"
-        f"reaches a RUNNING session and nothing else, so waked files the ring\n"
-        f"FIRST and rings after: one that lands while no session is up waits in\n"
-        f"the spool and is read on your next turn, never lost.\n"
-        f"Nothing owed -> silence is a valid turn.\n\n"
-        f"On a `reason=\"swap-pending\"` ring: a new credential was minted for your\n"
-        f"identity and is waiting to arrive. You are STILL the live body -- nothing\n"
-        f"has been taken from you and nothing will be until it joins. Three acts, in\n"
-        f"THIS ORDER, and the order is the whole point: the far side FETCHES before\n"
-        f"it joins, and the moment it joins your credential is spent. So the note --\n"
-        f"the one thing only you can write -- goes SECOND, not last.\n"
-        f"1. COMMIT AND PUSH. Files do NOT travel -- only the identity does. Commit\n"
-        f"   everything uncommitted to `wip/$REVEILLE_AGENT_ROLE/<utc-ts>` and push\n"
-        f"   it. NEVER onto main, NEVER a force-push: this branch exists so the far\n"
-        f"   side can fetch it, not so it can overwrite anything.\n"
-        f"2. WRITE THE NOTE, IMMEDIATELY. Room is 8192 characters; aim for 2048.\n"
-        f"   Over the soft line the write STILL LANDS and the result carries a\n"
-        f"   condense nudge -- going over costs nothing but advice, so never let\n"
-        f"   fear of a refusal shorten the note in a window seconds wide.\n"
-        f"   `distill(task, branch_sha, next_step, open_threads, undone)` -- the\n"
-        f"   FIVE FIELDS as parameters: task, the wip BRANCH and SHA, next step, open\n"
-        f"   threads, what is undone. The raw form `memory_add(kind=\"state\", ...)`\n"
-        f"   still lands the same note and never gains a refusal. If you could NOT\n"
-        f"   push, say so exactly: \"unpushed at <host>:<path>\", so the new body\n"
-        f"   knows the work is stranded rather than assuming it came.\n"
-        f"3. VERIFY THE PUSH and post the five fields to the room. Verification is\n"
-        f"   last because it is the only step that can wait: if the swap lands\n"
-        f"   mid-note your credential keeps these two writes for five minutes and\n"
-        f"   NOTHING else -- so spend that grace on the note, never on a read.\n"
-        f"The new body FETCHES that branch before it does anything else. Then carry\n"
-        f"on: if the swap never arrives, nothing about your situation changed.\n\n"
-        f"On a `reason=\"recalled\"` or `reason=\"not-arrived\"` ring: the credential\n"
-        f"in THIS directory is a successor that has not landed. `join()` -- that call\n"
-        f"IS the arrival, it commits the swap, and until it happens the identity is\n"
-        f"still the other body and nothing else here will work.\n\n"
-        f"THE BODY IN WAITING (rulings 12445/12526): join() refused and no ring\n"
-        f"explains it -> read your own spool first (~/.reveille/spool; a ring's\n"
-        f"`reason` is the system speaking, but reason=idle-nudge says nothing),\n"
-        f"then act on the refusal: `reveille knock`, `reveille init`, or stay\n"
-        f"idle. Do NOT reconstruct your state from anything else -- not files,\n"
-        f"not logs, not git history. Idle is a valid life.\n\n"
-        f"WHO HEARS WHAT: a unicast (`to=\"<name>\"`) WAKES that agent. Your\n"
-        f"REPLY-broadcast on a thread rings that thread's agent authors -- unless\n"
-        f"they already read, and never past 40 agent messages in the ROOM with no\n"
-        f"human speaking in it (then nothing rings until a human does). Your PARENTLESS\n"
-        f"broadcast (`to=\"*\"`, no reply_to) does not wake anyone -- it is read\n"
-        f"on each recipient's next turn. A HUMAN's broadcast rings the room. So:\n"
-        f"needed now -> unicast the one who owes it. Broadcast only when a shared\n"
-        f"contract changed or you block several peers.\n\n"
-        f"Full reference: `usage()`.\n"
-        )
-
-
-def sync_claude_md(workdir, name, agent_type, version=__version__):
-    """Write or refresh the managed doctrine block in CLAUDE.local.md.
-
-    Returns (path, what) where what is 'created' | 'updated' | 'repaired' |
-    'appended' | 'unchanged'.
-
-    CLAUDE.local.md, NOT CLAUDE.md (architect 12167). Claude Code loads both at
-    session start, but CLAUDE.md is the PROJECT's file -- tracked, shared, and
-    written by whoever owns the repo. This block is PER-AGENT: it carries the
-    agent's own name and role, so in a shared checkout two people's agents would
-    overwrite each other's block in a tracked file and commit the fight. The
-    .local.md variant is the documented per-developer, untracked home, which is
-    exactly what a per-agent block is.
-
-    NEVER an overwrite of somebody's file: outside the markers, every byte the
-    directory already had survives, in place. Between them, this owns the text --
-    which is what makes a later boot able to correct a doctrine that has moved on
-    without asking a human to merge prose by hand.
-    """
-    path = pathlib.Path(workdir) / "CLAUDE.local.md"
-    body = doctrine_body(name, agent_type)
-    block = doctrine_block(name, agent_type, version)
-    if not path.exists():
-        path.write_text(block)
-        return path, "created"
-    text = path.read_text()
-    m = _MARKER_RE.search(text)
-    j = text.find(DOCTRINE_END)
-    if m is None or j == -1 or j < m.start():
-        sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
-        path.write_text(text + sep + block)
-        return path, "appended"
-    # WHERE THE BLOCK ENDS, MEASURED (architect nit on #123): the end marker plus
-    # its newline IF there is one. Assuming the newline eats the first byte after
-    # the marker in a hand-edited file -- and this whole design exists to promise
-    # that nothing outside the markers is ever touched.
-    end = j + len(DOCTRINE_END)
-    if text[end:end + 1] == "\n":
-        end += 1
-    found_body = text[m.end():j]
-    if found_body.startswith("\n"):
-        found_body = found_body[1:]
-
-    # THE THREE CASES (operator, 2026-08-19). The marker CLAIMS a hash; the bytes
-    # HAVE a hash; and there is the hash we would write. Comparing all three is
-    # what separates "doctrine moved on" from "someone edited inside the markers"
-    # -- and only the second one is silent under a version-only check.
-    claimed = (m.group("sha") or "")
-    actual = body_hash(found_body)
-    expected = body_hash(body)
-    if actual != claimed:
-        path.write_text(text[:m.start()] + block + text[end:])
-        return path, "repaired"
-    if actual == expected and (m.group("v") or "") == version:
-        return path, "unchanged"
-    path.write_text(text[:m.start()] + block + text[end:])
-    return path, "updated"
+from .instructions import DOCTRINE_END, MARKER_RE  # noqa: E402 -- the note above.
 
 
 def lift_doctrine_from_claude_md(workdir):
@@ -1090,7 +913,7 @@ def lift_doctrine_from_claude_md(workdir):
     if not path.exists():
         return None
     text = path.read_text()
-    m = _MARKER_RE.search(text)
+    m = MARKER_RE.search(text)
     j = text.find(DOCTRINE_END)
     if m is None or j == -1 or j < m.start():
         return None
@@ -1133,6 +956,62 @@ def warn_if_committable(workdir, path):
 
 
 def cmd_init(a):
+    workdir = pathlib.Path(a.dir or os.getcwd()).resolve()
+    wizard = sys.stdin.isatty() and not a.no_prompt
+    # A NEW IDENTITY WITH NO ROOMS NAMED IS A THROWAWAY (DES-022 s4, ruled
+    # 12165). --create already says "yes, a new agent"; --rooms says which
+    # bus it is for, and defaulting it to every room the owner is in makes a
+    # typo reach everything. The wizard asks instead, so it is exempt.
+    #
+    # ARGUMENTS ARE ANSWERED BEFORE THE PROJECT IS READ. Runtime selection
+    # refuses too, and its sentence is about the DIRECTORY -- it tells a person
+    # nothing about the flag they got wrong. A check that reads only argv
+    # therefore runs above every step that reads the project, or the second
+    # defect in one command line hides the first.
+    if a.create and not a.rooms and not wizard:
+        print("reveille init --create: --rooms is required when creating a new "
+              "agent -- name the rooms it is for.", file=sys.stderr)
+        return 2
+    try:
+        runtime = getattr(a, "runtime", "auto")
+        # The legacy executable override is itself an explicit runtime choice.
+        if a.claude:
+            if runtime not in ("auto", "claude"):
+                raise AdapterError("--claude conflicts with --runtime " + runtime)
+            runtime = "claude"
+        # Validate even when an explicit choice overrides the saved selection.
+        saved_runtime(workdir)
+        try:
+            adapter = select_adapter(workdir, runtime)
+        except AdapterError:
+            if runtime != "auto":
+                raise
+            existing = any(item.credential_path(workdir).exists() for item in ADAPTERS.values())
+            available = [name for name in ADAPTERS if shutil.which(name)] if not existing else []
+            if len(available) == 1:
+                adapter = get_adapter(available[0])
+            elif wizard:
+                adapter = get_adapter(ask("CLI runtime (claude/codex)"))
+            else:
+                raise AdapterError("choose --runtime claude or --runtime codex; "
+                                   "the project has no unambiguous runtime selection") from None
+        # TRUST IS GIVEN BEFORE THE PREFLIGHT ASKS FOR IT, never instead of it.
+        # Codex ignores a project's .codex layer until the directory is
+        # trusted, so a run that was told to grant it does so here and the
+        # preflight then verifies the result rather than assuming it worked.
+        if adapter.name == "codex" and (a.trust_project or wizard):
+            from .adapters.codex_config import trust, trusted
+            if not trusted(workdir) and (a.trust_project or
+                                         ask("Trust this directory in Codex? "
+                                             "It lets .codex config and hooks "
+                                             "run here (y/n)").strip().lower()
+                                         .startswith("y")):
+                print(f"runtime: Codex trust recorded in {trust(workdir)}")
+        adapter.validate_install(workdir)
+        claims = project_claims(workdir)
+    except AdapterError as e:
+        print(f"reveille init: REFUSING -- {e}. Nothing was installed.", file=sys.stderr)
+        return 1
     url = a.url or os.environ.get("REVEILLE_URL", "")
     name = a.name or os.environ.get("REVEILLE_AGENT_ROLE", "")
     agent_type = a.type or ""
@@ -1254,14 +1133,6 @@ def cmd_init(a):
             print("reveille init: needs REVEILLE_URL and an agent name "
                   "(REVEILLE_AGENT_ROLE or the second argument).", file=sys.stderr)
             return 2
-        # A NEW IDENTITY WITH NO ROOMS NAMED IS A THROWAWAY (DES-022 s4, ruled
-        # 12165). --create already says "yes, a new agent"; --rooms says which
-        # bus it is for, and defaulting it to every room the owner is in makes a
-        # typo reach everything. The wizard asks instead, so it is exempt.
-        if a.create and not a.rooms and not wizard:
-            print("reveille init --create: --rooms is required when creating a new "
-                  "agent -- name the rooms it is for.", file=sys.stderr)
-            return 2
         # A SESSION THIS RUN DID NOT CREATE OUTLIVES IT. --login's is the
         # installer's own and is closed after the mint; the machine's sign-in
         # is not, whether it was loaded here or by the wizard above.
@@ -1310,6 +1181,14 @@ def cmd_init(a):
               f"history.", file=sys.stderr)
         return 2
 
+    conflicting = {runtime: held for runtime, held in claims.items()
+                   if runtime != adapter.name and held != name}
+    if conflicting and not a.force:
+        print(f"reveille init: REFUSING -- project identities {conflicting} differ "
+              f"from {name!r}; choose another directory or explicitly use --force. "
+              "Nothing was installed.", file=sys.stderr)
+        return 1
+
     # RESOLVED ONCE, NEVER THE LITERAL (ruling 12401). The old fallback
     # `or "claude"` existed only to turn a missing binary into a
     # FileNotFoundError traceback -- at whichever of three call sites happened
@@ -1318,6 +1197,9 @@ def cmd_init(a):
     # self-update deleted the binary, and every docker start of that container
     # died on the traceback instead of a sentence.
     claude = shutil.which(a.claude) if a.claude else shutil.which("claude")
+    # WHOSE BINARY. `claude mcp add-json` writes Claude's registration, so its
+    # absence is Claude's problem: a Codex project has no use for it and must
+    # not be refused, degraded or explained in terms of a CLI it does not run.
     workdir = pathlib.Path(a.dir or os.getcwd()).resolve()
 
     # ONE DIRECTORY, ONE AGENT (measured 2026-08-19, and it cost an identity).
@@ -1375,8 +1257,8 @@ def cmd_init(a):
     # A first boot with nothing configured refuses hard, by name, before any
     # local step: there is nothing to degrade into.
     degraded = ""
-    if not claude:
-        if agent_of_directory(workdir) == name and mcp_registered(workdir):
+    if not claude and adapter.name == "claude":
+        if agent_of_directory(workdir) == name and adapter.mcp_registered(workdir, url):
             degraded = ("the claude binary was not found on PATH; this "
                         "directory's registration and credential already "
                         "stand, so the claude-dependent steps were skipped")
@@ -1413,18 +1295,19 @@ def cmd_init(a):
         # export or as nobody -- both wrong, and the second one silently. The
         # remove is idempotent and cheap; the local-scope add-json below is the
         # registration.
-        subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
-                       capture_output=True, text=True)
+        if adapter.name == "claude":
+            subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
+                           capture_output=True, text=True)
         try:
-            mcp_where = register_mcp_local(url, workdir, claude)
+            mcp_where = adapter.register_mcp(workdir, url, claude)
         except RuntimeError as e:
             print(f"reveille init: REFUSING at step 1 of 3 -- {e}\n"
                   f"Nothing else was installed: a Stop hook beside a directory "
                   f"whose MCP registration did not land looks configured and is "
                   f"not.", file=sys.stderr)
             return 1
-        steps.append(f"mcp: {mcp_where}; headersHelper reads the credential "
-                     f"from settings.local.json at connect time")
+        steps.append(f"mcp: {mcp_where}; the headers helper reads the credential "
+                     f"from {adapter.credential_path(workdir).name} at connect time")
     # NOTHING PER-AGENT STAYS IN THE TREE. An earlier init put the registration
     # in <dir>/.mcp.json; two registrations for one server is how a body ends up
     # authenticating twice by different rules, so the old one is lifted here
@@ -1433,14 +1316,19 @@ def cmd_init(a):
     if dropped:
         steps.append(f"migrated: removed the reveille entry from {dropped}")
 
-    hook_rc = install.main()
-    if hook_rc != 0:
-        print("reveille init: the Stop hook did not install. The MCP registration "
-              "above stands -- this machine can reach the bus, but nothing will "
-              "keep a waiter armed, so wake it by draining inbox() per turn until "
-              "this is fixed.", file=sys.stderr)
+    # THE HOOK IS THE RUNTIME'S ANSWER. Claude installs a Stop hook and fails
+    # the install if it cannot; Codex returns the sentence that says a hook was
+    # OFFERED and not installed, because a non-managed Codex hook does nothing
+    # until a human trusts its hash and nothing on that runtime's reachability
+    # path is allowed to wait on a human.
+    try:
+        steps.append(f"hook: {adapter.install_hooks(workdir)}")
+    except AdapterError as e:
+        print(f"reveille init: {e}. The MCP registration above stands -- this "
+              f"machine can reach the bus, but the turn-end gate is not "
+              f"running, so drain inbox() per turn until this is fixed.",
+              file=sys.stderr)
         return 1
-    steps.append("hook: installed")
 
     # THE MINT IS THE LAST ACT WITH A REMOTE CONSEQUENCE (ruling #126, regressed
     # in 0.2.186, re-ruled 12271). It used to run ~50 lines earlier, before the
@@ -1489,23 +1377,39 @@ def cmd_init(a):
         installed_new_credential = not minted_pending
 
     try:
-        path = write_credential(url, name, token, workdir)
+        path = adapter.write_credential(workdir, url, name, token)
     except RuntimeError as e:
         print(f"reveille init: REFUSING at the credential step -- {e}\n"
               f"The MCP registration and Stop hook above stand; re-run once the "
               f"file is fixed and init converges the rest.", file=sys.stderr)
         return 1
     steps.append(f"credential: {path} (0600) -- this directory IS the agent")
-    ign, wrote = ignore_the_credential(workdir)
+    # THE HELPER IS ASKED THE QUESTION THE CLI WILL ASK IT, here, where a wrong
+    # answer is still a sentence instead of an unexplained refusal at first use.
+    wrong = adapter.verify_headers(workdir, name)
+    if wrong:
+        print(f"reveille init: REFUSING at the last step -- {wrong}.\n"
+              f"The credential and the registration above stand; nothing else "
+              f"is needed once the right `reveille-headers` is what runs here.",
+              file=sys.stderr)
+        return 1
+    steps.append("headers: the registered command answers with this identity")
+    ign, wrote = ignore_the_credential(workdir, adapter)
     if wrote:
         steps.append(f"ignored: {ign} -- the credential cannot be committed from here")
-    warn = warn_if_committable(workdir, pathlib.Path(workdir) / "CLAUDE.local.md")
-    if warn:
-        steps.append(warn)
-    lifted = lift_doctrine_from_claude_md(workdir)
-    if lifted:
-        steps.append(f"migrated: lifted the doctrine block out of {lifted} "
-                     f"(it belongs in CLAUDE.local.md, which is not tracked)")
+    # ONLY A PER-AGENT FILE CAN BE COMMITTED BY MISTAKE. Claude's block carries
+    # this agent's name, so a tracked copy is a small identity leak worth a
+    # sentence. Codex's file is SHARED BY DESIGN and carries no identity at
+    # all, so warning about committing it would be advice to hide the one file
+    # that is meant to be read by everyone.
+    if adapter.name == "claude":
+        warn = warn_if_committable(workdir, adapter.instruction_path(workdir))
+        if warn:
+            steps.append(warn)
+        lifted = lift_doctrine_from_claude_md(workdir)
+        if lifted:
+            steps.append(f"migrated: lifted the doctrine block out of {lifted} "
+                         f"(it belongs in CLAUDE.local.md, which is not tracked)")
     # THE DAEMON GOES ONLY WHEN THE SECRET IT READ AT SPAWN IS NOW DEAD --
     # that is what 12008 meant, and the predicate says it directly (ruling
     # 13094). An init that installed no NEW credential retires no daemon:
@@ -1535,19 +1439,32 @@ def cmd_init(a):
     # ALWAYS, wizard or not (operator 11879 + red-shirt, 2026-08-18): the paste
     # path skips every prompt, and an agent with no CLAUDE.md has no boot ritual
     # -- it comes up connected and doctrine-less, which is what red-shirt did.
-    doc, what = sync_claude_md(workdir, name, agent_type)
+    doc, what = adapter.sync_instructions(workdir, name, agent_type)
     steps.append(f"doctrine: {doc} ({what}" +
                  (f"; role {agent_type}" if agent_type else "") +
                  ") -- the reveille block is managed, everything outside it is yours")
 
+    try:
+        selection = save_runtime(workdir, adapter.name)
+    except (AdapterError, OSError) as e:
+        print(f"reveille init: configuration installed but runtime selection could "
+              f"not be saved: {e}. Re-run init after fixing the file.", file=sys.stderr)
+        return 1
+    steps.append(f"runtime: {adapter.name} ({selection})")
+
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
-    print(f"start working:  cd {workdir} && claude")
-    print("  The credential lives in that directory's .claude/settings.local.json, "
-          "so any session started THERE carries this identity -- and a session "
-          "started elsewhere carries none: its Stop hook stays inert and nothing "
-          "wakes it. One directory, one agent; run init in another directory to "
-          "make another agent.")
+    # THE LAST LINE NAMES THE RUNTIME THE PERSON JUST INSTALLED. It told every
+    # Codex agent to run `claude` and to look for its credential in a file
+    # nothing there writes -- the install's own summary disagreeing with the
+    # install.
+    credential = adapter.credential_path(workdir)
+    print(f"start working:  cd {workdir} && {adapter.name}")
+    print(f"  The credential lives in that directory's "
+          f"{credential.relative_to(pathlib.Path(workdir))}, so any session "
+          f"started THERE carries this identity -- and a session started "
+          f"elsewhere carries none. One directory, one agent; run init in "
+          f"another directory to make another agent.")
     return 0
 
 
@@ -1915,6 +1832,15 @@ def main(argv=None):
                                  "started there carry the identity (default: the "
                                  "current directory)")
     i.add_argument("--claude", help="path to the claude binary")
+    i.add_argument("--runtime", choices=("auto", *ADAPTERS), default="auto",
+                   help="CLI adapter; auto uses saved selection, existing credentials, "
+                        "or the sole installed CLI. Ambiguity requires an explicit choice")
+    i.add_argument("--trust-project", action="store_true",
+                   help="Codex only: mark this directory trusted in Codex's own "
+                        "config, which is what lets Codex read its .codex layer "
+                        "at all. Trust also lets that directory run hooks, so it "
+                        "is the human's to give -- the wizard asks, this is the "
+                        "unattended yes, and Codex asks once itself on first run")
     i.add_argument("--login", action="store_true",
                    help="mint through the PASSWORD door, for a broker that still "
                         "has one open. Reads the password from $REVEILLE_PASSWORD "

@@ -19,7 +19,9 @@ from test_store import _mem_kw, fixture
 
 def test_a_fresh_database_has_the_table():
     c, *_ = fixture()
-    assert store._version(c) == store.SCHEMA_VERSION == 47
+    # GATE THE PROPERTY, NOT THE NUMBER. Pinning the literal made every LATER
+    # migration fail this file, which says nothing about conflict verdicts.
+    assert store._version(c) == store.SCHEMA_VERSION
     assert store._table_exists(c, "conflict_verdicts")
 
 
@@ -29,9 +31,9 @@ def test_a_v46_database_upgrades_in_place(tmp_path):
     store.migrate(c, db)
     c.execute("DROP TABLE conflict_verdicts")
     c.execute("PRAGMA user_version=46")
-    assert store.migrate(c, db) == 47
+    assert store.migrate(c, db) == store.SCHEMA_VERSION
     assert store._table_exists(c, "conflict_verdicts")
-    assert store.migrate(c, db) == 47                     # idempotent
+    assert store.migrate(c, db) == store.SCHEMA_VERSION   # idempotent
 
 
 def test_the_pair_is_the_key_in_either_order():

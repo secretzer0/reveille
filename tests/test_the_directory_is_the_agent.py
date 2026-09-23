@@ -17,6 +17,7 @@ import os
 import pytest
 
 from reveille import cli
+from reveille.adapters import get_adapter
 
 
 def test_a_fresh_directory_gets_the_env_block(tmp_path):
@@ -202,11 +203,11 @@ def test_the_credential_cannot_be_committed_from_its_own_directory(tmp_path):
     repo. The fix stays inside what we own: a .gitignore in the .claude
     directory this installer creates -- never the repo's own .gitignore, and
     never .git/info/exclude, which is the user's git config."""
-    path, wrote = cli.ignore_the_credential(tmp_path)
+    path, wrote = cli.ignore_the_credential(tmp_path, get_adapter("claude"))
     assert wrote and path == tmp_path / ".claude" / ".gitignore"
     assert "settings.local.json" in path.read_text()
     # Idempotent, and it never duplicates the line.
-    path2, wrote2 = cli.ignore_the_credential(tmp_path)
+    path2, wrote2 = cli.ignore_the_credential(tmp_path, get_adapter("claude"))
     assert wrote2 is False and path2.read_text().count("settings.local.json") == 1
 
 
@@ -214,7 +215,7 @@ def test_an_existing_claude_gitignore_is_appended_to_not_replaced(tmp_path):
     d = tmp_path / ".claude"
     d.mkdir()
     (d / ".gitignore").write_text("something-else\n")
-    path, wrote = cli.ignore_the_credential(tmp_path)
+    path, wrote = cli.ignore_the_credential(tmp_path, get_adapter("claude"))
     text = path.read_text()
     assert wrote and "something-else" in text and "settings.local.json" in text
     # BOTH secrets this directory can hold (architect blocking on #151): waked
@@ -231,12 +232,12 @@ def test_a_dir_init_already_touched_still_gains_the_parked_line(tmp_path):
     d = tmp_path / ".claude"
     d.mkdir()
     (d / ".gitignore").write_text("settings.local.json\n")   # an old init's file
-    path, wrote = cli.ignore_the_credential(tmp_path)
+    path, wrote = cli.ignore_the_credential(tmp_path, get_adapter("claude"))
     text = path.read_text()
     assert wrote and ".reveille-parked" in text.split()
     assert text.split().count("settings.local.json") == 1
     # And still idempotent once complete.
-    _, wrote2 = cli.ignore_the_credential(tmp_path)
+    _, wrote2 = cli.ignore_the_credential(tmp_path, get_adapter("claude"))
     assert wrote2 is False
 
 

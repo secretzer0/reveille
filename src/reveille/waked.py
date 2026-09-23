@@ -333,6 +333,12 @@ def _doorbell(agent, obj, path):
         workdir = spool.registered().get(agent, "")
         rung, why = doorbell.knock(agent, workdir, dict(obj, spool=path))
         if rung:
+            # THE INBOUND DIRECTION, AND ONLY THIS MACHINE SAW IT. The ring went
+            # from the bus INTO a session here; the broker handed it over and
+            # has no way to learn it landed. It means the write to the session
+            # succeeded -- not that the body read it, which is the body's to
+            # say by calling the bus.
+            report(rung=True)
             print(f"reveille-waked: doorbell rang {rung} session(s) for {agent}",
                   file=sys.stderr)
         elif why:
@@ -540,16 +546,51 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
         return
     while True:
         await asyncio.sleep(interval_s)
-        try:
-            live = {pid for pid, _s, _t in doorbell.inboxes_for(workdir)}
-        except OSError:
+        # THE CENSUS ASKS THE RUNTIME, not a directory of Claude descriptors:
+        # Codex publishes none, and answers the same question from its
+        # app-server. A directory whose runtime cannot be resolved is simply
+        # not censused -- it is not an agent directory yet.
+        adapter, _why = doorbell.adapter_for(workdir)
+        if adapter is None:
             continue
+        # WHAT THE RUNTIME NEEDS IN PLACE BEFORE A BODY STARTS. For Claude,
+        # nothing. For Codex, its app-server daemon: a session that starts
+        # without it never joins it, so the ordering is load-bearing and
+        # nothing else was starting it. Cheap when it is already up, rate
+        # limited when it is not, and NEVER stopped again -- the daemon is
+        # Codex's own and other sessions share it.
+        try:
+            said = adapter.ensure_reachable(workdir)
+        except Exception as e:                                   # noqa: BLE001
+            said = f"could not ensure reachability -- {type(e).__name__}: {e}"
+        if said and said != state.get("ensured"):
+            state["ensured"] = said
+            print(f"reveille-waked: {agent}: {said}", file=sys.stderr)
+        try:
+            found = {adapter.session_key(s): s for s in adapter.sessions(workdir)}
+        except Exception as e:                                   # noqa: BLE001
+            # A CENSUS THAT DIES STOPS BEING A CENSUS, SILENTLY. This reads
+            # another program's state -- a directory on one runtime, a daemon
+            # socket on the other -- so its failures are that program's, not
+            # this loop's, and any of them killing the task would end boot
+            # rings and reconciles for the life of the daemon with nothing
+            # said. Every tick is independent; a bad one is a log line.
+            print(f"reveille-waked: {agent}: census failed -- "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        live = set(found)
+        # WHAT THE BROKER CANNOT SEE. `connected` used to mean "a waked holds a
+        # wake socket", which one host daemon makes true for every identity it
+        # serves, body or no body. The count is the honest answer and this is
+        # the only place that knows it. Sent on CHANGE: a state, not a stream.
+        if live != state.get("sessions"):
+            report(sessions=len(live))
         first = "sessions" not in state
         arrived, departed = session_events(state.get("sessions", set()), live, first)
         state["sessions"] = live
         known = state.setdefault("known_sessions", {})
-        for pid in sorted(arrived):
-            sid = doorbell.session_id(pid)
+        for key in sorted(arrived):
+            sid = adapter.conversation_id(found[key])
             if not boot_due(sid, known):
                 # A RESUME IS NOT A BODY WITHOUT MEMORY. `claude --resume`
                 # starts a new pid carrying the SAME conversation, so its
@@ -557,15 +598,15 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
                 # ringing it to rehydrate spends a turn and the whole digest
                 # on memory it has (operator: no token spent on a poll with
                 # nothing to return).
-                print(f"reveille-waked: {agent}: session {pid} resumed "
+                print(f"reveille-waked: {agent}: session {key} resumed "
                       f"{sid[:8]} -- no boot ring", file=sys.stderr)
                 continue
-            print(f"reveille-waked: {agent}: session {pid} arrived -- ring boot",
+            print(f"reveille-waked: {agent}: session {key} arrived -- ring boot",
                   file=sys.stderr)
             write_ring(agent, boot_frame())
             state["last"] = time.time_ns()
             state["armed"] = True
-        remember_sessions(known, (doorbell.session_id(pid) for pid in live))
+        remember_sessions(known, (adapter.conversation_id(s) for s in found.values()))
         # THE LAST DEPARTURE STARTS A COOL-DOWN; IT DOES NOT FOLD. Any body
         # back inside it -- a resume, or a fresh session -- means the identity
         # is working again and its own next exit reconciles; nothing is lost,
@@ -620,11 +661,55 @@ async def _heartbeat(ws):
         await ws.send("hb")
 
 
+# WHAT ONLY THIS MACHINE CAN SEE, on its way to the broker. The broker cannot
+# look in an agent's directory: it cannot count the sessions standing there and
+# it never sees a doorbell ring, which happens entirely on this host. Both are
+# things presence is WRONG about without them -- a body with no session read as
+# connected because the daemon's socket was up, and an arriving ring was
+# invisible. A dict rather than a queue: these are STATES, so the newest value
+# of each is the only one worth sending, and a flush that misses a tick coalesces
+# instead of falling behind.
+REPORT_FLUSH_S = 2
+_report = {}
+
+
+def report(**facts):
+    """Queue what this daemon observed. Sync, so any caller can reach it."""
+    _report.update(facts)
+
+
+async def _reporter(ws):
+    """Flush observations onto the socket the daemon already holds.
+
+    NO NEW CONNECTION AND NO NEW ENDPOINT: the wake socket is open, is already
+    authenticated as this identity, and its client frames are read by a broker
+    that treats anything it cannot name as a heartbeat -- so a new daemon
+    reporting to an old broker is harmless, and an old daemon's `hb` still
+    means what it always did.
+    """
+    while True:
+        await asyncio.sleep(REPORT_FLUSH_S)
+        if not _report:
+            continue
+        facts = dict(_report)
+        _report.clear()
+        try:
+            await ws.send(json.dumps(facts))
+        except Exception:                                        # noqa: BLE001
+            # PUT THEM BACK. `sessions` is sent only when it CHANGES, so a
+            # dropped send would leave the broker on a stale count until the
+            # next change -- which for a body that just went quiet is never.
+            # Newer facts win: this fills gaps, it does not overwrite.
+            for key, value in facts.items():
+                _report.setdefault(key, value)
+
+
 async def _session(uri, agent, state):
     """One connection: spool every ring. Returns an exit code, or None to
     reconnect."""
     async with websockets.connect(uri) as ws:
         hb = asyncio.create_task(_heartbeat(ws))
+        rep = asyncio.create_task(_reporter(ws))
         try:
             async for frame in ws:
                 # THE BROKER SPOKE. Registration and refusal both arrive as
@@ -752,6 +837,7 @@ async def _session(uri, agent, state):
                 # hold the socket; a close leads to the reconnect loop.
         finally:
             hb.cancel()
+            rep.cancel()
     return None
 
 
@@ -833,6 +919,34 @@ async def _claim(url, secret):
         return "", type(e).__name__
 
 
+def _adapter_env(workdir):
+    """The credential env this directory holds, whichever runtime wrote it."""
+    from reveille.adapters import AdapterError, select_adapter
+    try:
+        return select_adapter(workdir or os.getcwd()).credential_env(
+            workdir or os.getcwd())
+    except (AdapterError, OSError, ValueError):
+        return {}
+
+
+def _adapter_state_dir(workdir):
+    """Where this directory's runtime keeps its per-agent files.
+
+    A directory that names no runtime yet still has to answer: a parked marker
+    is written by a daemon that may be the first thing to touch the directory,
+    and refusing to name a path there would lose the one secret the recall
+    claim is matched against. Claude's is the shape every existing body has,
+    so it is what an unclaimed directory gets.
+    """
+    from reveille.adapters import AdapterError, get_adapter, select_adapter
+    base = workdir or os.getcwd()
+    try:
+        adapter = select_adapter(base)
+    except (AdapterError, OSError, ValueError):
+        adapter = get_adapter("claude")
+    return str(adapter.state_dir(base))
+
+
 def read_env(agent, workdir=None):
     """The credential THIS DIRECTORY currently holds, or "".
 
@@ -840,16 +954,12 @@ def read_env(agent, workdir=None):
     daemon parked on a spent secret has no other way to learn that a live one
     arrived by a path it did not take.
     """
-    # READ, NOT IMPORTED. waked deliberately does not depend on the CLI at
-    # module scope -- a daemon that will not start is worse than one that cannot
-    # self-heal -- and this file is three lines of JSON, so borrowing a reader
-    # would trade that independence for nothing.
-    try:
-        with open(os.path.join(workdir or os.getcwd(), ".claude",
-                               "settings.local.json")) as f:
-            env = json.load(f).get("env") or {}
-    except (OSError, ValueError, AttributeError):
-        return ""
+    # THE FILE IS THE RUNTIME'S, SO THE RUNTIME NAMES IT. waked still does not
+    # depend on the CLI -- reveille.adapters touches no broker, no process and
+    # no credential at import -- but it stopped spelling `.claude` itself the
+    # moment a second runtime existed, because a daemon reading one CLI's path
+    # in another CLI's directory reads nothing and calls the identity absent.
+    env = _adapter_env(workdir)
     # ONE DIRECTORY, ONE AGENT: if this file now names somebody else, its
     # credential is not ours to adopt -- taking it would be the clobber bug
     # wearing a daemon's face.
@@ -872,11 +982,11 @@ def read_env(agent, workdir=None):
 # session -- the only call that may read it is the recall claim. It is a secret
 # already spent for every purpose except proving which machine this is, and it
 # is unlinked the moment any credential attaches.
-PARKED_NAME = os.path.join(".claude", ".reveille-parked")
+PARKED_BASENAME = ".reveille-parked"
 
 
 def parked_path(workdir=None):
-    return os.path.join(workdir or os.getcwd(), PARKED_NAME)
+    return os.path.join(_adapter_state_dir(workdir), PARKED_BASENAME)
 
 
 def _ignore_parked(claude_dir):
@@ -1284,7 +1394,7 @@ def _converge_inner(raw, state):
     os.execv(me, [me, *sys.argv[1:]])
 
 
-def wake_uri(url, sep, agent, token):
+def wake_uri(url, sep, agent, token, workdir=None):
     """The wake socket's address, built in ONE place.
 
     It was four hand-built copies of one f-string -- the reconnect loop's and
@@ -1297,7 +1407,15 @@ def wake_uri(url, sep, agent, token):
     out = f"{url}{sep}name={agent}"
     if token:
         out += f"&token={token}"
-    return out + f"&toolchain={urllib.parse.quote(__version__)}"
+    out += f"&toolchain={urllib.parse.quote(__version__)}"
+    # WHICH CLI THIS BODY IS. A fleet has flavours now, and which one a body
+    # runs decides what can reach it; the broker cannot see a directory, so the
+    # daemon that can says it here -- same seam, same attach-only rule.
+    runtime = ""
+    with contextlib.suppress(Exception):
+        from reveille.adapters import select_adapter
+        runtime = select_adapter(workdir).name if workdir else ""
+    return out + (f"&runtime={urllib.parse.quote(runtime)}" if runtime else "")
 
 
 async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
@@ -1310,9 +1428,9 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     sep = "&" if "?" in url else "?"
     token = os.environ.get("REVEILLE_TOKEN", "") if token is None else token
     if workdir:
-        _STATUS_BY_AGENT[agent] = os.path.join(workdir, ".claude",
+        _STATUS_BY_AGENT[agent] = os.path.join(_adapter_state_dir(workdir),
                                                ".reveille-repo-status")
-    uri = wake_uri(url, sep, agent, token)
+    uri = wake_uri(url, sep, agent, token, workdir)
     # Daemon start counts as activity AND arms one nudge: whatever the agent
     # parked before this daemon existed has never been asked about.
     state = {"last": time.time_ns(), "armed": True}
@@ -1423,7 +1541,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         parked_secret = spent
                         token = got
                         tried.add(token)
-                        uri = wake_uri(url, sep, agent, token)
+                        uri = wake_uri(url, sep, agent, token, workdir)
                         delay = 1
                         continue
                     print(f"reveille-waked: that credential never landed and the "
@@ -1437,7 +1555,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = wake_uri(url, sep, agent, token)
+                    uri = wake_uri(url, sep, agent, token, workdir)
                     delay = 1
                 elif code == PARKED:
                     # SUPERSEDED IS NOT DEAD (s14). The old shape exited here and
@@ -1454,7 +1572,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
                         return PARKED
                     token = got
                     tried.add(token)
-                    uri = wake_uri(url, sep, agent, token)
+                    uri = wake_uri(url, sep, agent, token, workdir)
                     delay = 1
                 else:
                     first_no_rooms = None
@@ -1547,7 +1665,18 @@ class _Stamped:
 # lock they always did and the loser exits 0; the Stop hook's liveness probe
 # ("does somebody hold MY spool lock") is true for either shape without
 # knowing which is running.
-HOST_LOCK = os.path.join(os.path.expanduser("~"), ".reveille", "host.lock")
+def host_lock_path():
+    """The host singleton, BESIDE THE SPOOL IT SERVES.
+
+    It was ~/.reveille/host.lock, fixed -- while everything else a host waked
+    touches already moves with REVEILLE_SPOOL and REVEILLE_AGENTS. So a second
+    host waked over a PRIVATE root (a local testbed beside a real fleet) was
+    refused by the singleton of a daemon it shares nothing else with: not its
+    registry, not its spools, not its bus. Derived from the spool root, this is
+    byte-identical for a default install and private for a private one.
+    """
+    return os.path.join(os.path.dirname(spool.base_dir().rstrip(os.sep)),
+                        "host.lock")
 HOST_RESCAN_S = 30      # opendir of one directory; SIGHUP makes it immediate
 # A RUN THAT ENDED ON A REFUSAL IS NOT RE-ATTACHED EVERY 30 SECONDS (ruled
 # 24332). Five of the eleven identities on the operator's workstation hold
@@ -1559,10 +1688,15 @@ HOST_RESCAN_S = 30      # opendir of one directory; SIGHUP makes it immediate
 REFUSAL_EXITS = (3, PARKED, NOT_ARRIVED, DEAD_CREDENTIAL)
 
 
-def host_lock(path=HOST_LOCK):
+def host_lock(path=None):
     """The host singleton. Returns the held fd, or None if another host waked
     already runs here -- in which case this process exits 0, exactly as a
-    second per-agent waked does."""
+    second per-agent waked does.
+
+    "Here" is the ROOT this daemon serves, not the machine: two hosts over two
+    private roots share nothing and must not contend.
+    """
+    path = path or host_lock_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = open(path, "w")
     try:
@@ -1579,10 +1713,10 @@ def credential_mtime(workdir):
     """When this identity's credential last changed, or 0. The whole parked
     rule rests on it: a refusal is only worth retrying once the thing that
     was refused is different."""
+    from reveille.adapters import AdapterError, select_adapter
     try:
-        return os.stat(os.path.join(workdir, ".claude",
-                                    "settings.local.json")).st_mtime_ns
-    except OSError:
+        return select_adapter(workdir).credential_mtime(workdir)
+    except (AdapterError, OSError, ValueError):
         return 0
 
 
@@ -1592,6 +1726,34 @@ def identity_token(workdir, agent):
     Returns "" when the directory holds no credential, or holds somebody
     else's: both are the stale case, and the caller says so out loud."""
     return read_env(agent, workdir)
+
+
+def identity_wake_url(workdir, fallback):
+    """The bus THIS identity's own credential names, or the host's as a fallback.
+
+    THE TOKEN CAME FROM THE DIRECTORY AND THE URL DID NOT, which is only
+    invisible while every identity on a machine belongs to the same broker.
+    Host mode read each agent's token from its own directory and then dialled
+    every one of them at the single --url it was started with, so an identity
+    provisioned against another bus -- a local test bus beside the live fleet,
+    the exact case the harness creates -- was dialled at the WRONG broker with
+    a token that broker never minted. It cannot succeed, and because the host
+    holds that identity's spool lock, a correct daemon cannot take it over.
+
+    THE DIRECTORY IS THE AGENT, so the directory names its bus too. A
+    credential that does not say keeps the host's url, which is every existing
+    body: same daemon, same behaviour, one more thing read from the one place
+    that knows it.
+    """
+    said = _adapter_env(workdir).get("REVEILLE_URL", "").strip()
+    if not said:
+        return fallback
+    parts = urllib.parse.urlsplit(said)
+    if not parts.netloc:
+        return fallback
+    if parts.scheme in ("ws", "wss"):
+        return said
+    return f"{'wss' if parts.scheme == 'https' else 'ws'}://{parts.netloc}/wake"
 
 
 def host_plan(entries, held):
@@ -1674,11 +1836,13 @@ async def _host_pass(url, opts, tasks, locks, noted, parked=None):
         lock.write(f"{os.getpid()}\n")
         lock.flush()
         locks[name] = lock
+        here = identity_wake_url(workdir, url)
         tasks[name] = asyncio.create_task(_run(
-            url, name, idle_nudge_s, no_rooms_window_s=no_rooms_window_s,
+            here, name, idle_nudge_s, no_rooms_window_s=no_rooms_window_s,
             read_env=read_env, wedge_n=wedge_n, mail_probe_s=mail_probe_s,
             token=identity_token(workdir, name), workdir=workdir))
-        print(f"reveille-waked: serving {name} from {workdir}", file=sys.stderr)
+        print(f"reveille-waked: serving {name} from {workdir}"
+              + (f" -> {here}" if here != url else ""), file=sys.stderr)
     return tasks
 
 

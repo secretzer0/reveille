@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scratch import child_report  # noqa: E402
 from reveille import __version__, store  # noqa: E402
+from _bus import daemon_cmd  # the tree's daemon, not PATH's
 
 
 def free_port():
@@ -298,7 +299,7 @@ def spawn_daemon():
     secrets = seed(db)
     env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port),
                REVEILLE_HOST="127.0.0.1")
-    proc = subprocess.Popen(["reveille-daemon"], env=env,
+    proc = subprocess.Popen(daemon_cmd(), env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return port, proc, secrets
 

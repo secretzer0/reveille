@@ -75,7 +75,28 @@ def agent_in(workdir):
         return ""
 
 
-def mcp_enabled(workdir, config=None):
+def _points_at(entry, expect_url):
+    """Does a registration entry name the broker we mean?
+
+    A REGISTRATION IS AN ADDRESS, NOT A FLAG. The name `reveille` being present
+    says a server was registered once; it does not say WHICH bus it reaches,
+    and the two have been different before -- the 2026-08-13 URL cutover left
+    running bodies registered against an address that no longer served them
+    (lesson url-cutover-strands-every-running-waked). So when the caller knows
+    which broker the credential names, the entry has to agree with it.
+
+    An entry that carries no url at all (a bare name in a project's enabled
+    list) cannot be checked, and an unanswerable question is not a failure:
+    it passes, exactly as it did before there was a url to compare.
+    """
+    if not expect_url:
+        return True
+    if not isinstance(entry, dict) or not entry.get("url"):
+        return True
+    return str(entry["url"]).rstrip("/") == expect_url.rstrip("/") + "/mcp"
+
+
+def mcp_enabled(workdir, config=None, expect_url=""):
     """Whether a CLI started in `workdir` can actually answer a ring.
 
     The line we send says inbox(), ack(). A session without the reveille MCP has
@@ -83,6 +104,10 @@ def mcp_enabled(workdir, config=None):
     follow -- worse than silence, because the body has no way to say why. Three
     places register it: the per-project block in ~/.claude.json, a checked-in
     .mcp.json, and a global server list.
+
+    `expect_url` is the broker the directory's own credential names, so a
+    registration pointing somewhere else reads as ABSENT rather than as
+    present-and-wrong.
     """
     work = os.path.abspath(workdir)
     try:
@@ -95,12 +120,14 @@ def mcp_enabled(workdir, config=None):
     proj = (conf.get("projects") or {}).get(work) or {}
     for names in (proj.get("mcpServers"), conf.get("mcpServers")):
         if isinstance(names, dict) and "reveille" in names:
-            return True
+            if _points_at(names["reveille"], expect_url):
+                return True
     if "reveille" in (proj.get("enabledMcpjsonServers") or []):
         return True
     try:
         with open(os.path.join(work, ".mcp.json")) as f:
-            if "reveille" in (json.load(f).get("mcpServers") or {}):
+            servers = json.load(f).get("mcpServers") or {}
+            if "reveille" in servers and _points_at(servers["reveille"], expect_url):
                 return True
     except (OSError, ValueError, AttributeError):
         pass
@@ -313,7 +340,22 @@ def ring_text(frame):
             f"only if owed, delete the spool file you handled.")
 
 
-def reachable(agent, base=None, config=None, agents_base=None):
+def adapter_for(workdir):
+    """The runtime that owns `workdir`, or (None, why) when none does.
+
+    A ring is routed by DIRECTORY, and a directory answers for itself: the
+    credential it holds names its runtime. Nothing here guesses from PATH or
+    falls back to Claude, because a fallback would ring the wrong CLI's socket
+    and call the silence a delivery.
+    """
+    from .adapters import AdapterError, select_adapter
+    try:
+        return select_adapter(workdir), ""
+    except AdapterError as e:
+        return None, str(e)
+
+
+def reachable(agent, agents_base=None):
     """Can a ring reach this body WITHOUT a watcher? (True, "") or (False, why).
 
     THE GATE SHOULD TEST REACHABILITY, NOT A PROCESS (0.2.292). The Stop hook
@@ -329,56 +371,61 @@ def reachable(agent, base=None, config=None, agents_base=None):
     ring (or a written ring never becomes a turn). The second half reuses the
     delivery checks exactly -- same claim, same MCP, same live interactive
     session -- so the gate cannot pass on a path the ring itself would refuse.
+
+    EVERY CHECK BELOW IS THE RUNTIME'S OWN ANSWER, asked through the adapter:
+    Claude reads its session descriptors, Codex asks its app-server which
+    threads are loaded, and neither of them is the doorbell's business.
     """
     if off():
         return False, "the doorbell is off (REVEILLE_DOORBELL=off)"
-    if not spool.holder_pid(agent, base):
+    if not spool.holder_pid(agent, None):
         return False, "no waked holds this identity's spool lock -- nothing is spooling rings"
     workdir = spool.registered(agents_base).get(agent, "")
     if not workdir:
         return False, f"no registered directory for {agent!r} -- `reveille init` writes it"
-    claimed = agent_in(workdir)
+    adapter, why = adapter_for(workdir)
+    if adapter is None:
+        return False, f"{workdir} is not an agent directory -- {why}"
+    claimed = adapter.claimed_agent(workdir)
     if claimed and claimed != agent:
         return False, f"{workdir} claims {claimed!r}, not {agent!r}"
-    if not mcp_enabled(workdir, config):
+    if not adapter.mcp_registered(workdir, adapter.identity(workdir).get("REVEILLE_URL", "")):
         return False, f"no reveille MCP in {workdir} -- a ring it could not answer"
-    if not inboxes_for(workdir, base=None):
+    if not adapter.sessions(workdir):
         return False, f"no live interactive session in {workdir} to ring"
     return True, ""
 
 
-def knock(agent, workdir, frame, base=None, config=None):
+def knock(agent, workdir, frame):
     """Ring every inbox in `agent`'s own directory. Returns (rung, reason).
 
     Four things are checked before a single byte is sent, and each refusal has
     its own words, because "nobody is home" and "that is not our house" are
     different facts and only some of them are defects:
       1. the directory must be the one the registry holds for THIS identity;
-      2. the directory must still CLAIM this identity (agent_in) -- a path can
-         outlive the agent that registered it and a ring is a delivery;
-      3. the session must be a live, interactive CLI (inboxes_for);
+      2. the directory must still CLAIM this identity -- a path can outlive the
+         agent that registered it and a ring is a delivery;
+      3. the session must be a live, interactive CLI;
       4. that directory must have the reveille MCP, or the body cannot act on
          the line we would send it.
+
+    THE FIRST TWO ARE THE BUS'S QUESTIONS AND THE LAST TWO ARE THE RUNTIME'S,
+    so the runtime answers them: this function owns the routing and the
+    refusals, the adapter owns the protocol. A runtime whose transport is not
+    built answers 0 with a reason, and the spool entry stands -- never a
+    pretended delivery.
     """
     if off():
         return 0, "doorbell is off (REVEILLE_DOORBELL=off)"
     if not workdir:
         return 0, "no registered directory for this identity"
-    claimed = agent_in(workdir)
+    adapter, why = adapter_for(workdir)
+    if adapter is None:
+        return 0, f"{workdir} is not an agent directory -- {why}"
+    claimed = adapter.claimed_agent(workdir)
     if claimed and agent and claimed != agent:
         return 0, (f"{workdir} now claims {claimed!r}, not {agent!r} -- not ringing "
                    f"another identity's session")
-    if not mcp_enabled(workdir, config):
+    if not adapter.mcp_registered(workdir, adapter.identity(workdir).get("REVEILLE_URL", "")):
         return 0, f"no reveille MCP in {workdir} -- a ring it could not answer"
-    found = inboxes_for(workdir, base)
-    if not found:
-        return 0, "no live session in that directory"
-    text = ring_text(frame)
-    rung, why = 0, []
-    for pid, sock_path, token in found:
-        err = ring_one(sock_path, token, text)
-        if err:
-            why.append(f"pid {pid}: {err}")
-        else:
-            rung += 1
-    return rung, "" if rung else "; ".join(why)
+    return adapter.deliver(workdir, agent, frame)

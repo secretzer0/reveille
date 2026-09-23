@@ -49,3 +49,6 @@ CLAUDE.local.md
 *.webm
 *.mp4
 !src/reveille/ui/bus/earcon.wav
+
+# the local test harness database -- rebuilt from scripts/local_bus.py
+.local/

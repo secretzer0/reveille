@@ -52,6 +52,12 @@ def _drive(monkeypatch, script, sids=None, grace=0):
                         lambda url, tok: (posts.append(tok), {"started": True})[1])
     monkeypatch.setattr(waked.doorbell, "inboxes_for",
                         lambda wd, base=None: [(p, "s", "t") for p in live["pids"]])
+    # The census asks the RUNTIME which sessions are live, so the fake directory
+    # is given one: Claude's adapter, whose answer is the patched descriptor
+    # read above. Codex answers the same question from its app-server.
+    from reveille.adapters import get_adapter
+    monkeypatch.setattr(waked.doorbell, "adapter_for",
+                        lambda wd: (get_adapter("claude"), ""))
     state = {"last": 0, "armed": False}
 
     async def run():

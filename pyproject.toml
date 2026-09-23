@@ -1,6 +1,6 @@
 [project]
 name = "reveille"
-version = "0.2.316"
+version = "0.2.317"
 description = "Filesystem-woken, SQLite-brokered message bus for coordinating Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -18,6 +18,16 @@ dependencies = [
     # rather than in the dev group because `uv sync --frozen --no-dev` is what
     # builds the server image, and a dev-group entry is invisible to it.
     "httpx>=0.28",
+    # CODEX'S CONFIG IS A FILE A HUMAN EDITS, so writing it back needs a parser
+    # that preserves comments and layout: tomllib reads TOML and cannot write
+    # it, and a dump from plain dicts would silently delete a team's own
+    # sandbox policy and notes the first time `reveille init` touched the file.
+    # Declared beside the runtime deps rather than as an extra ON PURPOSE: the
+    # same package ships the broker AND the installer, and an agent container
+    # that ran `reveille init --runtime codex` without it would fail at the one
+    # step it was run for. The cost is one pure-python module in the server
+    # image, which never imports it.
+    "tomlkit>=0.13,<1",
 ]
 
 [project.scripts]

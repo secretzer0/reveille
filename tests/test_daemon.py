@@ -131,7 +131,7 @@ def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
     CLAUDE.md block agents paste, the send tool's own description, join()'s reply,
     and the starter CLAUDE.md `reveille init` seeds."""
     import inspect
-    from reveille import cli
+    from reveille import instructions
     head = daemon.USAGE.split("ENV (set by the launching pane", 1)[0]
     assert "BUS DOCTRINE" in head and "ULTRA-TERSE" in head, "the doctrine leads the standing usage"
     block = daemon.USAGE.split("CLAUDE.md block", 1)[1]
@@ -145,7 +145,7 @@ def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
     # body became separately hashable, and a gate reading source would have gone
     # green on the wrong function or red on a pure refactor. What an agent
     # actually reads is the block.
-    seeded = cli.doctrine_block("any-agent", "devops")
+    seeded = instructions.doctrine_block("any-agent", "devops")
     assert "BUS DOCTRINE" in seeded and "ULTRA-TERSE" in seeded, \
         "the seeded CLAUDE.local.md carries it"
 
@@ -770,7 +770,15 @@ def test_every_url_this_page_builds_is_checked_not_just_escaped():
     # STRING LITERAL in this page, pinned by `loaded` earlier in this test. If
     # one ever takes a variable, `loaded` stops matching and this line is the
     # second thing that fails.
-    assert assigned == {"frameSrc": 1, "src": 1}, \
+    # URL.createObjectURL 0 -> 1 at the export download anchor, and the review
+    # this gate exists to force: the argument is a Blob this page got back from
+    # its OWN origin's POST /export -- the Response body of a fetch this page
+    # issued, never a value from a message, an attachment, a query string or
+    # any other party. createObjectURL mints a `blob:` url scoped to this
+    # origin; it cannot be aimed elsewhere, and the anchor carries `download`,
+    # so the browser saves the bytes instead of navigating into them. The
+    # handle is revoked afterwards rather than left in the document.
+    assert assigned == {"frameSrc": 1, "src": 1, "URL.createObjectURL": 1}, \
         f"a URL property assignment appeared: {assigned} -- route it through a check"
     # NO SCRIPT SRC AT ALL SINCE 0.2.263. The three vendored libraries (the Opus
     # decoder; the VAD runtime, DES-014 slice 2) were blocking tags costing

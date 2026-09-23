@@ -83,7 +83,7 @@ def seed(db, media=False, extra_agents=()):
             # seeded the column by hand could pass while set_toolchain was
             # broken. The second joined-less agents keep '' on purpose --
             # the rail must show nothing for a body that has not said.
-            store.set_toolchain(conn, store.agent_principal(t["agent_id"]),
+            store.set_attach_facts(conn, store.agent_principal(t["agent_id"]),
                                 [rid], "0.2.256")
     store.send(conn, agent, "*", "Deployed 0.2.130 to reveille.mythos.org: writer at "
                "192.168.85.101:18080, ear take cap 8 MiB / 60 s, GPU 0 at 11.26 of 12.29 GB, "
