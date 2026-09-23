@@ -844,7 +844,12 @@
  /* DES-018: the doors -- one anchor per configured provider, above the password form */
  #liDoors:empty,#liOr:empty{display:none}
  .door{display:block;text-align:center;border:1px solid var(--line);border-radius:8px;
-  padding:.55rem;margin:.45rem 0;color:var(--ink);text-decoration:none;font-size:.85rem;
+  /* --fg, NOT --ink: `--ink` is defined nowhere, so this declaration dropped
+     and the text merely inherited. It looked right on the login card by luck,
+     which is how an undefined variable survives -- the same way #taPanel lost
+     its whole background. */
+  padding:.55rem;margin:.45rem 0;color:var(--fg,#dce3ec);text-decoration:none;
+  font-size:.85rem;
   background:var(--rail)}
  .door:hover{border-color:var(--gold)}
  .door.last::after{content:" -- last used";color:var(--faint);font-size:.72rem}
@@ -852,7 +857,7 @@
   letter-spacing:.14em}
  .doorRow .door{display:inline-block;margin:.2rem .4rem .2rem 0;padding:.3rem .6rem}
  #liAsk input{width:100%;background:var(--rail);border:1px solid var(--line);
-  border-radius:8px;padding:.5rem;color:var(--ink);font:inherit;margin:.35rem 0}
+  border-radius:8px;padding:.5rem;color:var(--fg,#dce3ec);font:inherit;margin:.35rem 0}
  #liAsk .liHint{font-size:.72rem;margin:.1rem 0 .2rem}
  .pRow .ok{color:#6fcf7f}
  .pRow .warn{color:#e0a44c}
@@ -878,7 +883,14 @@
  /* Inline @/# type-ahead (ruling 14523): a small list above the composer.
     Selection binds; text never does. */
  #taPanel{display:none;position:absolute;bottom:calc(100% + .4rem);left:4rem;width:18rem;
-  max-height:14rem;overflow-y:auto;background:var(--panel);border:1px solid var(--line);
+  /* --card, NOT --panel: `--panel` was never defined anywhere, and a var()
+     with no definition and no fallback drops the whole declaration -- so this
+     panel had NO background at all and the feed read straight through the
+     names it was offering. Every other raised surface here is --card, which is
+     what this is. The fallback is spelled out as well, so a theme that loses
+     the variable degrades to a colour rather than to transparency. */
+  max-height:14rem;overflow-y:auto;background:var(--card,#151a21);
+  border:1px solid var(--line);
   border-radius:8px;padding:.25rem;z-index:30;box-shadow:0 6px 24px rgba(0,0,0,.4)}
  #taPanel.on{display:block}
  #taPanel .ti{display:flex;align-items:center;gap:.45rem;width:100%;text-align:left;
