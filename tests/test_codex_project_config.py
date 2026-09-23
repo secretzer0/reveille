@@ -1,6 +1,9 @@
 """Project configuration and secrets stay separate, including on repair."""
 import json
+import os
+import pathlib
 import shlex
+import sys
 import subprocess
 import tomllib
 
@@ -154,6 +157,15 @@ def test_a_codex_project_installs_every_local_artifact(tmp_path, monkeypatch, ca
         monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
         monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
         monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+        # THE REGISTERED COMMAND IS A NAME ON PATH, and init now verifies that
+        # what answers to it is the build that wrote the credential. So the
+        # build under test has to be what answers here, exactly as a real
+        # install requires -- including ahead of ensure_on_path(), which
+        # deliberately puts ~/.local/bin FIRST and would otherwise hand the
+        # question to whichever reveille was installed there last.
+        monkeypatch.setattr(cli, "ensure_on_path", lambda: None)
+        monkeypatch.setenv("PATH", f"{pathlib.Path(sys.executable).parent}:"
+                                   f"{os.environ.get('PATH', '')}")
         rc = cli.main(["init", url, "codex-agent", "-", "--runtime", "codex",
                        "--dir", str(work), "--trust-project", "--no-prompt"])
     finally:
@@ -191,3 +203,55 @@ def test_an_untrusted_codex_project_installs_nothing(tmp_path, monkeypatch, caps
                      "--runtime", "codex", "--dir", str(work), "--no-prompt"]) == 1
     assert "does not trust" in capsys.readouterr().err
     assert list(work.iterdir()) == []
+
+
+def test_a_codex_install_creates_no_claude_directory(tmp_path, monkeypatch, capsys):
+    """FOUND BY RUNNING THE INSTALL, not by reading it: the ignore writer and
+    the closing summary both spelled `.claude`, so a Codex project got an empty
+    .claude/ holding an ignore file for two secrets that live in .codex/ -- and
+    was then told to run `claude` and look for a credential no runtime there
+    writes."""
+    import http.server
+    import threading
+    from reveille import cli
+
+    class Broker(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"rooms": {}}')
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Broker)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home" / ".codex"))
+        monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
+        monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
+        monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+        # THE REGISTERED COMMAND IS A NAME ON PATH, and init now verifies that
+        # what answers to it is the build that wrote the credential. So the
+        # build under test has to be what answers here, exactly as a real
+        # install requires -- including ahead of ensure_on_path(), which
+        # deliberately puts ~/.local/bin FIRST and would otherwise hand the
+        # question to whichever reveille was installed there last.
+        monkeypatch.setattr(cli, "ensure_on_path", lambda: None)
+        monkeypatch.setenv("PATH", f"{pathlib.Path(sys.executable).parent}:"
+                                   f"{os.environ.get('PATH', '')}")
+        assert cli.main(["init", url, "codex-agent", "-", "--runtime", "codex",
+                         "--dir", str(work), "--trust-project", "--no-prompt"]) == 0
+    finally:
+        srv.shutdown()
+    assert not (work / ".claude").exists(), "a Codex install wrote Claude's directory"
+    ignored = (work / ".codex" / ".gitignore").read_text().split()
+    assert "reveille.json" in ignored and ".reveille-parked" in ignored
+    said = capsys.readouterr().out
+    assert "&& codex" in said and "&& claude" not in said
+    assert "settings.local.json" not in said
+    assert ".codex/reveille.json" in said

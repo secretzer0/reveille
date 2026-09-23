@@ -326,3 +326,40 @@ def test_codex_never_hides_an_existing_agents_file(tmp_path):
     assert path == tmp_path / "AGENTS.md" and what == "appended"
     assert path.read_text().startswith("Project rules a team wrote.\n")
     assert not (tmp_path / "AGENTS.override.md").exists()
+
+
+def test_the_installer_verifies_the_command_it_registered(tmp_path, monkeypatch):
+    """A DEPLOY MUST VERIFY THE PATH THE CONSUMER USES.
+
+    The registration names a console script by NAME, so what answers is
+    whatever PATH resolves -- not necessarily the build that wrote the
+    credential. Measured 2026-09-23: an older reveille on PATH answered `{}`
+    for a Codex project, the session connected ANONYMOUSLY, and the only
+    symptom was a refusal at the broker with nothing local saying why.
+    """
+    import subprocess
+    adapter = get_adapter("codex")
+    calls = []
+
+    def fake(command, **kwargs):
+        calls.append((command, kwargs.get("cwd")))
+        return subprocess.CompletedProcess(command, 0, stdout=fake.out, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake)
+
+    fake.out = '{"Authorization": "Bearer x", "X-Agent": "codex-agent"}'
+    assert adapter.verify_headers(tmp_path, "codex-agent") == ""
+    assert calls[0] == (["reveille-headers", "--runtime", "codex"], str(tmp_path))
+
+    # The old build's answer for a project it does not understand.
+    fake.out = "{}"
+    said = adapter.verify_headers(tmp_path, "codex-agent")
+    assert "no identity" in said and "connect as nobody" in said
+
+    # Another agent's identity is the same failure, said differently.
+    fake.out = '{"X-Agent": "somebody-else"}'
+    said = adapter.verify_headers(tmp_path, "codex-agent")
+    assert "somebody-else" in said and "codex-agent" in said
+
+    fake.out = "not json at all"
+    assert "did not print JSON" in adapter.verify_headers(tmp_path, "codex-agent")

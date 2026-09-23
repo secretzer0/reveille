@@ -43,12 +43,17 @@ def test_the_command_the_docs_prescribe_is_the_command_that_exists():
     assert "THE DIRECTORY IS THE AGENT" in DES008, (
         "DES-008 no longer names the per-directory mechanism this gate reads")
     assert "settings.local.json" in DES008
-    # the CLI's closing line is the one the operator actually reads at the end
-    # of a successful install: plain `claude`, no wrapper.
+    # The CLI's closing line is the one the operator actually reads at the end
+    # of a successful install: the CLI they just installed for, and no wrapper.
+    # It names the RUNTIME rather than the word `claude` since a second runtime
+    # exists -- a Codex agent told to run `claude` is an install disagreeing
+    # with itself -- and the rendered text for each is gated where it is
+    # produced (test_codex_project_config, test_install_without_a_clone).
     printed = re.search(r'print\(f"start working:  cd \{workdir\} && (\S+)"\)', CLI)
     assert printed, "reveille init no longer prints a start-working line in this form"
-    assert printed.group(1) == "claude", (
-        f"init prints {printed.group(1)!r}; the living mechanism is plain `claude`")
+    assert printed.group(1) == "{adapter.name}", (
+        f"init prints {printed.group(1)!r}; the living mechanism is the runtime "
+        f"the directory was initialised for")
     assert "reveille-agent" not in SCRIPTS, (
         "the retired wrapper is shipping again -- half a cutover")
 

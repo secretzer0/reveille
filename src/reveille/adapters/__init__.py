@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 import json
 import os
+import shutil
 import tempfile
 
 from .. import __version__
@@ -118,6 +119,51 @@ class RuntimeAdapter(ABC):
         from ..instructions import sync_managed_block
         return sync_managed_block(self.instruction_path(Path(project)),
                                   self.instructions_body(name, agent_type), version)
+
+    def headers_command(self, project: Path) -> list:
+        """The exact command this runtime's registration tells the CLI to run."""
+        return ["reveille-headers"]
+
+    def verify_headers(self, project: Path, name: str) -> str:
+        """Run the headers command AS REGISTERED. "" when it answers `name`.
+
+        A DEPLOY MUST VERIFY THE PATH THE CONSUMER USES. The registration names
+        a console script by NAME, so what answers is whatever is first on PATH
+        -- which is not necessarily the build that wrote the registration.
+        Measured 2026-09-23: an older reveille on PATH answered `{}` for a
+        Codex project, the session connected ANONYMOUSLY, and the only symptom
+        was a refusal at the broker with nothing local saying why.
+
+        `{}` is the correct answer for a directory that is not an agent, so the
+        helper cannot refuse on its own behalf. This asks the question only the
+        installer can: it just wrote this directory's credential, so the helper
+        must now name THIS agent, and anything else is a reachability failure
+        at install time rather than a mystery at first use.
+        """
+        import json as _json
+        import subprocess
+        command = self.headers_command(project)
+        try:
+            run = subprocess.run(command, cwd=str(project), capture_output=True,
+                                 text=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"`{' '.join(command)}` could not run in this directory: {e}"
+        if run.returncode != 0:
+            return (f"`{' '.join(command)}` exited {run.returncode}: "
+                    f"{(run.stderr or run.stdout).strip()[:200]}")
+        try:
+            said = _json.loads(run.stdout or "{}")
+        except ValueError:
+            return f"`{' '.join(command)}` did not print JSON: {run.stdout[:200]}"
+        got = said.get("X-Agent", "") if isinstance(said, dict) else ""
+        if got == name:
+            return ""
+        which = shutil.which(command[0]) or "not on PATH"
+        return (f"`{' '.join(command)}` answered {got or 'no identity'} in this "
+                f"directory, not {name!r}. The MCP registration names that "
+                f"command, so a session here would connect as nobody and the "
+                f"broker would refuse it. The one answering is {which} -- put "
+                f"the reveille that wrote this credential first on PATH")
 
     @abstractmethod
     def register_mcp(self, project: Path, url: str, executable: str) -> str: ...
@@ -276,6 +322,11 @@ class CodexAdapter(RuntimeAdapter):
         if override.exists() and override.read_text().strip():
             return override
         return project / "AGENTS.md"
+
+    def headers_command(self, project):
+        import shlex
+        from .codex_config import helper_command
+        return shlex.split(helper_command(project))
 
     def register_mcp(self, project, url, executable):
         from .codex_config import register

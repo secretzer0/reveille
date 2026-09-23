@@ -173,8 +173,8 @@ def drop_project_mcp_entry(workdir):
     return path
 
 
-def ignore_the_credential(workdir):
-    """Make sure <workdir>/.claude/settings.local.json cannot be committed.
+def ignore_the_credential(workdir, adapter):
+    """Make sure the credential THIS RUNTIME wrote cannot be committed.
 
     The credential is written INTO A GIT WORKING TREE, and whether it is ignored
     was, until now, a property of the person's own machine: on this laptop a
@@ -182,14 +182,19 @@ def ignore_the_credential(workdir):
     clone by anyone else leaves a live agent token untracked-but-not-ignored,
     one `git add -A` from a public repo.
 
-    The fix stays inside what we own: a .gitignore in the .claude directory THIS
+    The fix stays inside what we own: a .gitignore in the directory THIS
     INSTALLER CREATES. Not the repo's own .gitignore (a tracked file that is the
     project's, not ours) and NOT .git/info/exclude (the user's git config, and a
     tool that writes there to protect its own mess is fixing the wrong layer --
     operator, 2026-08-19). Self-contained: it ships beside the credential, so a
     clone that gets one gets the other.
+
+    WHICH DIRECTORY IS THE RUNTIME'S ANSWER. Hardcoding `.claude` here meant a
+    Codex install created an EMPTY .claude/ holding an ignore file for two
+    secrets that were never going to be written there, while the real ones sat
+    in .codex/ -- found by running the install rather than by reading it.
     """
-    d = pathlib.Path(workdir) / ".claude"
+    d = pathlib.Path(adapter.state_dir(workdir))
     d.mkdir(parents=True, exist_ok=True)
     path = d / ".gitignore"
     # BOTH SECRETS THIS DIRECTORY CAN HOLD, not just the one this function was
@@ -198,7 +203,7 @@ def ignore_the_credential(workdir):
     # only one of two secrets is a published-identity hole with a green install.
     # Appends WHICHEVER is missing -- the old single-name early return meant a
     # dir init had ever touched could never gain a line.
-    want = ["settings.local.json", ".reveille-parked"]
+    want = [adapter.credential_path(workdir).name, ".reveille-parked"]
     text = path.read_text() if path.exists() else ""
     have = text.split()
     missing = [w for w in want if w not in have]
@@ -1301,8 +1306,8 @@ def cmd_init(a):
                   f"whose MCP registration did not land looks configured and is "
                   f"not.", file=sys.stderr)
             return 1
-        steps.append(f"mcp: {mcp_where}; headersHelper reads the credential "
-                     f"from settings.local.json at connect time")
+        steps.append(f"mcp: {mcp_where}; the headers helper reads the credential "
+                     f"from {adapter.credential_path(workdir).name} at connect time")
     # NOTHING PER-AGENT STAYS IN THE TREE. An earlier init put the registration
     # in <dir>/.mcp.json; two registrations for one server is how a body ends up
     # authenticating twice by different rules, so the old one is lifted here
@@ -1379,7 +1384,17 @@ def cmd_init(a):
               f"file is fixed and init converges the rest.", file=sys.stderr)
         return 1
     steps.append(f"credential: {path} (0600) -- this directory IS the agent")
-    ign, wrote = ignore_the_credential(workdir)
+    # THE HELPER IS ASKED THE QUESTION THE CLI WILL ASK IT, here, where a wrong
+    # answer is still a sentence instead of an unexplained refusal at first use.
+    wrong = adapter.verify_headers(workdir, name)
+    if wrong:
+        print(f"reveille init: REFUSING at the last step -- {wrong}.\n"
+              f"The credential and the registration above stand; nothing else "
+              f"is needed once the right `reveille-headers` is what runs here.",
+              file=sys.stderr)
+        return 1
+    steps.append("headers: the registered command answers with this identity")
+    ign, wrote = ignore_the_credential(workdir, adapter)
     if wrote:
         steps.append(f"ignored: {ign} -- the credential cannot be committed from here")
     # ONLY A PER-AGENT FILE CAN BE COMMITTED BY MISTAKE. Claude's block carries
@@ -1439,12 +1454,17 @@ def cmd_init(a):
 
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
-    print(f"start working:  cd {workdir} && claude")
-    print("  The credential lives in that directory's .claude/settings.local.json, "
-          "so any session started THERE carries this identity -- and a session "
-          "started elsewhere carries none: its Stop hook stays inert and nothing "
-          "wakes it. One directory, one agent; run init in another directory to "
-          "make another agent.")
+    # THE LAST LINE NAMES THE RUNTIME THE PERSON JUST INSTALLED. It told every
+    # Codex agent to run `claude` and to look for its credential in a file
+    # nothing there writes -- the install's own summary disagreeing with the
+    # install.
+    credential = adapter.credential_path(workdir)
+    print(f"start working:  cd {workdir} && {adapter.name}")
+    print(f"  The credential lives in that directory's "
+          f"{credential.relative_to(pathlib.Path(workdir))}, so any session "
+          f"started THERE carries this identity -- and a session started "
+          f"elsewhere carries none. One directory, one agent; run init in "
+          f"another directory to make another agent.")
     return 0
 
 
