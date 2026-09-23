@@ -107,6 +107,8 @@ def test_init_registers_installs_and_verifies(tmp_path, broker, monkeypatch, cap
     monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
     assert cli.main(argv) == 0
     out = capsys.readouterr().out
+    assert json.loads((work / ".reveille" / "runtime.json").read_text()) == {
+        "version": 1, "runtime": "claude"}
 
     # 1. the MCP registration is LOCAL scope (architect 12167): the same
     # headersHelper registration, keyed to this project path in ~/.claude.json
@@ -395,7 +397,7 @@ def test_missing_configuration_names_what_is_missing(tmp_path, monkeypatch, caps
     # --no-prompt is the scripted path: a script would rather be told what is
     # missing than sit at a prompt nobody is watching. Without it, a terminal
     # gets the wizard, which is the point of the wizard.
-    assert cli.main(["init", "--no-prompt", "--dir", str(tmp_path)]) == 2
+    assert cli.main(["init", "--runtime", "claude", "--no-prompt", "--dir", str(tmp_path)]) == 2
     err = capsys.readouterr().err
     for var in ("REVEILLE_URL", "REVEILLE_AGENT_ROLE"):
         assert var in err
@@ -1244,7 +1246,7 @@ def test_a_missing_binary_refuses_by_name_before_any_local_step(tmp_path, broker
     monkeypatch.setenv("REVEILLE_TOKEN", "sekrit")
     monkeypatch.setenv("PATH", str(tmp_path / "emptybin"))  # no claude anywhere
     monkeypatch.setattr(cli.pathlib.Path, "home", staticmethod(lambda: home))
-    rc = cli.main(["init", broker, "dev-agent", "-", "--dir", str(work)])
+    rc = cli.main(["init", broker, "dev-agent", "-", "--runtime", "claude", "--dir", str(work)])
     err = capsys.readouterr().err
     assert rc == 1
     assert "claude" in err and "REFUSING" in err

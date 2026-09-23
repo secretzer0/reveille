@@ -44,7 +44,8 @@ import webbrowser
 from reveille import __version__
 
 from . import install, spool
-from .adapters import get_adapter
+from .adapters import (ADAPTERS, AdapterError, get_adapter, project_claims,
+                       save_runtime, saved_runtime, select_adapter)
 from .devicecode import cli_code
 
 
@@ -1134,6 +1135,36 @@ def warn_if_committable(workdir, path):
 
 
 def cmd_init(a):
+    workdir = pathlib.Path(a.dir or os.getcwd()).resolve()
+    wizard = sys.stdin.isatty() and not a.no_prompt
+    try:
+        runtime = getattr(a, "runtime", "auto")
+        # The legacy executable override is itself an explicit runtime choice.
+        if a.claude:
+            if runtime not in ("auto", "claude"):
+                raise AdapterError("--claude conflicts with --runtime " + runtime)
+            runtime = "claude"
+        # Validate even when an explicit choice overrides the saved selection.
+        saved_runtime(workdir)
+        try:
+            adapter = select_adapter(workdir, runtime)
+        except AdapterError:
+            if runtime != "auto":
+                raise
+            existing = any(item.credential_path(workdir).exists() for item in ADAPTERS.values())
+            available = [name for name in ADAPTERS if shutil.which(name)] if not existing else []
+            if len(available) == 1:
+                adapter = get_adapter(available[0])
+            elif wizard:
+                adapter = get_adapter(ask("CLI runtime (claude/codex)"))
+            else:
+                raise AdapterError("choose --runtime claude or --runtime codex; "
+                                   "the project has no unambiguous runtime selection") from None
+        adapter.validate_install(workdir)
+        claims = project_claims(workdir)
+    except AdapterError as e:
+        print(f"reveille init: REFUSING -- {e}. Nothing was installed.", file=sys.stderr)
+        return 1
     url = a.url or os.environ.get("REVEILLE_URL", "")
     name = a.name or os.environ.get("REVEILLE_AGENT_ROLE", "")
     agent_type = a.type or ""
@@ -1311,6 +1342,14 @@ def cmd_init(a):
               f"history.", file=sys.stderr)
         return 2
 
+    conflicting = {runtime: held for runtime, held in claims.items()
+                   if runtime != adapter.name and held != name}
+    if conflicting and not a.force:
+        print(f"reveille init: REFUSING -- project identities {conflicting} differ "
+              f"from {name!r}; choose another directory or explicitly use --force. "
+              "Nothing was installed.", file=sys.stderr)
+        return 1
+
     # RESOLVED ONCE, NEVER THE LITERAL (ruling 12401). The old fallback
     # `or "claude"` existed only to turn a missing binary into a
     # FileNotFoundError traceback -- at whichever of three call sites happened
@@ -1417,7 +1456,7 @@ def cmd_init(a):
         subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
                        capture_output=True, text=True)
         try:
-            mcp_where = get_adapter("claude").register_mcp(workdir, url, claude)
+            mcp_where = adapter.register_mcp(workdir, url, claude)
         except RuntimeError as e:
             print(f"reveille init: REFUSING at step 1 of 3 -- {e}\n"
                   f"Nothing else was installed: a Stop hook beside a directory "
@@ -1540,6 +1579,14 @@ def cmd_init(a):
     steps.append(f"doctrine: {doc} ({what}" +
                  (f"; role {agent_type}" if agent_type else "") +
                  ") -- the reveille block is managed, everything outside it is yours")
+
+    try:
+        selection = save_runtime(workdir, adapter.name)
+    except (AdapterError, OSError) as e:
+        print(f"reveille init: configuration installed but runtime selection could "
+              f"not be saved: {e}. Re-run init after fixing the file.", file=sys.stderr)
+        return 1
+    steps.append(f"runtime: {adapter.name} ({selection})")
 
     print("\n".join(steps))
     print(f"\nbus answered: {said}")
@@ -1916,6 +1963,9 @@ def main(argv=None):
                                  "started there carry the identity (default: the "
                                  "current directory)")
     i.add_argument("--claude", help="path to the claude binary")
+    i.add_argument("--runtime", choices=("auto", *ADAPTERS), default="auto",
+                   help="CLI adapter; auto uses saved selection, existing credentials, "
+                        "or the sole installed CLI. Ambiguity requires an explicit choice")
     i.add_argument("--login", action="store_true",
                    help="mint through the PASSWORD door, for a broker that still "
                         "has one open. Reads the password from $REVEILLE_PASSWORD "

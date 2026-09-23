@@ -22,14 +22,29 @@ not a model or a fleet role.
   `AGENTS.override.md`; otherwise it selects `AGENTS.md`. It never creates an
   override that hides project instructions.
 - Codex provisioning, trusted hook installation and socket delivery are NOT
-  implemented. They cannot report success. `reveille init` remains Claude-only.
+  implemented. They cannot report success. `reveille init --runtime codex`
+  refuses during local preflight before reading credentials or contacting the
+  broker.
+
+## Runtime selection
+
+`init --runtime auto|claude|codex` resolves the CLI before provisioning. Explicit
+selection wins; legacy `--claude PATH` explicitly selects Claude and conflicts
+with `--runtime codex`. Otherwise a saved `.reveille/runtime.json` wins, followed
+by existing runtime credentials. For a fresh project, the sole installed CLI
+can establish the default. Ambiguity requires a wizard choice or an explicit
+flag. Header lookup never uses installed executables to infer identity.
+
+Successful setup atomically saves versioned, secret-free runtime metadata,
+ignored via `.reveille/.gitignore`. Re-running with the same selection preserves
+the metadata file. Invalid metadata refuses instead of silently reverting to
+Claude. All runtime credential files participate in the identity-conflict check,
+even when a different runtime is explicitly selected.
 
 ## Remaining implementation sequence
 
-1. Add `init --runtime auto|claude|codex` and persist the explicit choice in
-   Reveille-owned project metadata. Resolve it before remote provisioning.
-   Preserve the existing one-directory/one-identity guard across both formats.
-   A fresh ambiguous project requires a wizard choice or explicit flag.
+1. Runtime selection and persistence are implemented. Extend their use to daemon
+   dispatch as each adapter operation becomes available.
 2. Add adapter-owned atomic credential writes and registration validation.
    Codex credentials must be 0600 and ignored; refuse already-tracked secrets.
    Merge TOML without discarding unrelated settings or comments. Register
