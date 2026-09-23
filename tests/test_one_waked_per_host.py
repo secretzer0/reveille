@@ -318,3 +318,44 @@ def test_a_stale_entry_is_said_once_and_again_when_it_changes(home, monkeypatch,
         f.close()
     for t in tasks.values():
         t.cancel()
+
+
+def test_each_identity_is_dialled_at_the_bus_its_own_credential_names(tmp_path,
+                                                                     monkeypatch):
+    """THE TOKEN CAME FROM THE DIRECTORY AND THE URL DID NOT.
+
+    Host mode read each agent's token from its own directory and then dialled
+    every one of them at the single --url it was started with. That is
+    invisible while a machine's identities all belong to one broker, and wrong
+    the moment one does not: measured 2026-09-23, a host waked on
+    wss://reveille.mythos.org claimed a locally-provisioned agent's spool lock
+    and dialled it there with a token that broker never minted -- so it could
+    never attach, and because the lock was held, no correct daemon could take
+    it over either.
+    """
+    monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
+    local = tmp_path / "local"
+    local.mkdir()
+    (local / ".claude").mkdir()
+    (local / ".claude" / "settings.local.json").write_text(json.dumps({"env": {
+        "REVEILLE_URL": "http://127.0.0.1:8799",
+        "REVEILLE_AGENT_ROLE": "loc", "REVEILLE_TOKEN": "t"}}))
+
+    host = "wss://bus.example/wake"
+    assert waked.identity_wake_url(local, host) == "ws://127.0.0.1:8799/wake"
+
+    # https becomes wss, and a credential that says nothing keeps the host's.
+    (local / ".claude" / "settings.local.json").write_text(json.dumps({"env": {
+        "REVEILLE_URL": "https://far.example", "REVEILLE_AGENT_ROLE": "loc",
+        "REVEILLE_TOKEN": "t"}}))
+    assert waked.identity_wake_url(local, host) == "wss://far.example/wake"
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert waked.identity_wake_url(bare, host) == host
+
+    # A credential that already names a wake socket is taken as written.
+    (local / ".claude" / "settings.local.json").write_text(json.dumps({"env": {
+        "REVEILLE_URL": "ws://127.0.0.1:1/wake", "REVEILLE_AGENT_ROLE": "loc",
+        "REVEILLE_TOKEN": "t"}}))
+    assert waked.identity_wake_url(local, host) == "ws://127.0.0.1:1/wake"

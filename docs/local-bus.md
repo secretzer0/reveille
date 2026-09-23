@@ -125,6 +125,34 @@ To set the environment by hand instead:
 REVEILLE_URL=http://127.0.0.1:8799 REVEILLE_AGENT_ROLE=local-architect REVEILLE_TOKEN=...
 ```
 
+## Co-existing with the real fleet
+
+A developer running this almost certainly has a REAL waked serving REAL agents
+on the same machine, and the two must not touch each other. Two things make
+that true, and the first one was learned the hard way:
+
+- **A private registry and spool.** `reveille init` records an agent's
+  directory in the machine-wide registry at `~/.reveille/agents`, and a host
+  waked enumerates exactly that -- so a test agent provisioned here was CLAIMED
+  by the daemon serving the real fleet, which then held its spool lock and
+  dialled it at the live broker with a token that broker never minted (measured
+  2026-09-23). `provision` now sets `REVEILLE_AGENTS` and `REVEILLE_SPOOL` to
+  `.local/reveille/*` and writes them into the agent's OWN credential, so the
+  session, its Stop hook, the waked that hook spawns and every ring stay under
+  this root. The real daemon never learns these identities exist.
+
+- **Each identity is dialled at its own bus.** Host mode took each agent's
+  token from its directory and then dialled every one of them at the single
+  `--url` it was started with. That is invisible while a machine's identities
+  all belong to one broker and wrong the moment one does not. It now reads
+  `REVEILLE_URL` from the same credential the token came from, and falls back
+  to the host's url when a credential does not say -- which is every existing
+  body, so nothing about a single-bus machine changes.
+
+To clean up afterwards: `rm -rf .local` takes the database, the private
+registry and the spool with it. The provisioned agent DIRECTORIES are yours to
+delete; nothing outside them was touched.
+
 ## What it deliberately does not run
 
 No voices, no ear, no writer. Each is off unless its URL is set, and the

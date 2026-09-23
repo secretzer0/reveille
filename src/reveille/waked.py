@@ -1712,6 +1712,34 @@ def identity_token(workdir, agent):
     return read_env(agent, workdir)
 
 
+def identity_wake_url(workdir, fallback):
+    """The bus THIS identity's own credential names, or the host's as a fallback.
+
+    THE TOKEN CAME FROM THE DIRECTORY AND THE URL DID NOT, which is only
+    invisible while every identity on a machine belongs to the same broker.
+    Host mode read each agent's token from its own directory and then dialled
+    every one of them at the single --url it was started with, so an identity
+    provisioned against another bus -- a local test bus beside the live fleet,
+    the exact case the harness creates -- was dialled at the WRONG broker with
+    a token that broker never minted. It cannot succeed, and because the host
+    holds that identity's spool lock, a correct daemon cannot take it over.
+
+    THE DIRECTORY IS THE AGENT, so the directory names its bus too. A
+    credential that does not say keeps the host's url, which is every existing
+    body: same daemon, same behaviour, one more thing read from the one place
+    that knows it.
+    """
+    said = _adapter_env(workdir).get("REVEILLE_URL", "").strip()
+    if not said:
+        return fallback
+    parts = urllib.parse.urlsplit(said)
+    if not parts.netloc:
+        return fallback
+    if parts.scheme in ("ws", "wss"):
+        return said
+    return f"{'wss' if parts.scheme == 'https' else 'ws'}://{parts.netloc}/wake"
+
+
 def host_plan(entries, held):
     """(attach, stale) for one enumeration. Pure, so the gate can drive it:
     `entries` is name -> directory from the registry, `held` the names this
@@ -1792,11 +1820,13 @@ async def _host_pass(url, opts, tasks, locks, noted, parked=None):
         lock.write(f"{os.getpid()}\n")
         lock.flush()
         locks[name] = lock
+        here = identity_wake_url(workdir, url)
         tasks[name] = asyncio.create_task(_run(
-            url, name, idle_nudge_s, no_rooms_window_s=no_rooms_window_s,
+            here, name, idle_nudge_s, no_rooms_window_s=no_rooms_window_s,
             read_env=read_env, wedge_n=wedge_n, mail_probe_s=mail_probe_s,
             token=identity_token(workdir, name), workdir=workdir))
-        print(f"reveille-waked: serving {name} from {workdir}", file=sys.stderr)
+        print(f"reveille-waked: serving {name} from {workdir}"
+              + (f" -> {here}" if here != url else ""), file=sys.stderr)
     return tasks
 
 

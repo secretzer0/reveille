@@ -32,6 +32,7 @@ rather than merely old.
     python scripts/local_bus.py --port 8799 --db /tmp/bus.db
 """
 import argparse
+import json
 import os
 import pathlib
 import subprocess
@@ -44,6 +45,24 @@ sys.path.insert(0, str(ROOT / "src"))
 from reveille import store                                      # noqa: E402
 
 SEC = 10 ** 9
+# A PRIVATE ROOT, SO THE LOCAL BUS NEVER TOUCHES THE LIVE FLEET. `reveille init`
+# records an agent's directory in the machine-wide registry, and a host waked
+# enumerates exactly that -- so a test agent provisioned here was CLAIMED by the
+# daemon serving somebody's real fleet, which then held its spool lock and
+# dialled it at the live broker with a token that broker never minted. Measured
+# 2026-09-23: pid 2541, `--url wss://reveille.mythos.org/wake --host`, holding
+# .reveille/spool/local-architect/.lock.
+#
+# REVEILLE_AGENTS and REVEILLE_SPOOL move both. Every provisioned directory
+# carries them in its own credential, so the session, its Stop hook and the
+# waked that hook spawns all use this root -- and the real daemon, reading
+# ~/.reveille/agents, never learns these identities exist.
+def harness_env(root):
+    root = pathlib.Path(root)
+    return {"REVEILLE_AGENTS": str(root / "agents"),
+            "REVEILLE_SPOOL": str(root / "spool")}
+
+
 # TWO PEOPLE, BECAUSE THE UI IS DIFFERENT FOR THEM. An owner sees the agent
 # management, the token doors and every room; a plain member sees what a
 # colleague sees. A harness with only an admin cannot show anyone the second
@@ -312,13 +331,17 @@ def provision(name, directory, runtime, port, db):
     cli = _tree_script("reveille")
     directory = pathlib.Path(directory).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True)
+    root = pathlib.Path(db).parent / "reveille"
+    private = harness_env(root)
+    for value in private.values():
+        pathlib.Path(value).mkdir(parents=True, exist_ok=True)
     cmd = [str(cli), "init", url, name, "-", "--runtime", runtime,
            "--dir", str(directory), "--no-prompt"]
     if runtime == "codex":
         # Codex reads a project's .codex layer only for a trusted project, so an
         # unprovisioned trust makes every other artifact unreachable.
         cmd.append("--trust-project")
-    env = dict(os.environ)
+    env = dict(os.environ, **private)
     for var in ("REVEILLE_TOKEN", "REVEILLE_AGENT_ROLE", "REVEILLE_URL"):
         env.pop(var, None)   # this directory's identity, never the caller's
     print(f"local-bus: provisioning {directory} as {name} ({runtime})")
@@ -326,7 +349,10 @@ def provision(name, directory, runtime, port, db):
     if out.returncode:
         raise SystemExit(f"local-bus: `reveille init` exited {out.returncode}")
     bindir = _tree_script("reveille").parent
+    _carry_private_root(directory, runtime, private)
     print(f"local-bus: now run   cd {directory} && {runtime}")
+    print(f"local-bus: this agent lives under {root} -- the real fleet's "
+          f"registry never sees it")
     # THE REGISTRATION NAMES A COMMAND ON PATH, and the TUI resolves it in the
     # shell YOU start it from -- not in this one. A machine with a released
     # reveille installed answers with that build, which for Codex does not know
@@ -356,6 +382,25 @@ def write_secrets(db, secrets):
     body = "".join(f"{name}={secret}\n" for name, secret in sorted(secrets.items()))
     path.write_text(body)
     path.chmod(0o600)
+    return path
+
+
+def _carry_private_root(directory, runtime, private):
+    """Write the private root into the directory's OWN credential.
+
+    The session reads this file and exports it, so the Stop hook, the waked it
+    spawns and every ring land under the harness root rather than in the one a
+    real fleet's daemon is watching. `reveille init` converges the REVEILLE_URL
+    /ROLE/TOKEN keys and preserves every other, so these survive a re-run.
+    """
+    from reveille.adapters import get_adapter
+    path = get_adapter(runtime).credential_path(pathlib.Path(directory))
+    data = json.loads(path.read_text())
+    data.setdefault("env", {}).update(private)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.chmod(path.stat().st_mode & 0o777)
+    tmp.replace(path)
     return path
 
 
