@@ -172,6 +172,33 @@ the credential and requires it to name THIS agent, refusing by name and saying
 which binary answered. It runs after `ensure_on_path()`, which deliberately
 puts `~/.local/bin` first, so it verifies the real resolution order.
 
+## The daemon is a precondition nothing currently satisfies
+
+MEASURED 2026-09-23, and this is the gap that matters most before anyone
+depends on Codex reachability:
+
+- A plain `codex` does NOT start the app-server daemon. Launched with the
+  daemon down, a TUI runs normally and no socket appears.
+- A session started while the daemon is down NEVER joins it. Starting the
+  daemon afterwards reports `thread/loaded/list: []` for a TUI that is plainly
+  running, and that session stays invisible for its whole life.
+- With the daemon up FIRST, the same launch appears immediately, and a ring
+  reaches it: observed as `reveille-waked: doorbell rang 1 session(s) for
+  codex-red-shirt`.
+
+So Codex reachability has an ordering precondition Claude does not:
+`codex app-server daemon start` must have run before the session. Nothing in
+reveille starts it -- deliberately, since a delivery path may not spawn a
+background service on somebody's machine -- and nothing in Codex starts it
+either. Until that is placed somewhere (host waked at startup, a required step
+in the install's output, or a refusal in `validate_install`), a Codex agent can
+be installed perfectly and still be unreachable, which is the exact failure
+class this document keeps naming. UNDECIDED, and it is a design question rather
+than a defect to patch quietly.
+
+`codex app-server daemon stop` also leaves its `pid-update-loop` supervisor
+running and reports `notRunning`, so a stop is not a reap.
+
 ## Still to do
 
 1. Route waked's credential reads/writes, rotation, parked state and
