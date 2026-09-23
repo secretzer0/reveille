@@ -79,11 +79,113 @@ ui-drive:
 # harness clears those upstreams rather than inheriting them.
 #   REVEILLE_LOCAL_PORT=9001 make local-bus
 LOCAL_PORT ?= 8799
-local-bus:
+LOCAL_DIR  := $(REPO)/.local
+LOCAL_BUS_PID   := $(LOCAL_DIR)/bus.pid
+LOCAL_BUS_LOG   := $(LOCAL_DIR)/bus.log
+LOCAL_WAKED_PID := $(LOCAL_DIR)/waked.pid
+LOCAL_WAKED_LOG := $(LOCAL_DIR)/waked.log
+
+# THE WHOLE LOCAL STACK, one command each way. `local-bus` brings up the bus
+# AND the watcher that gives a TUI its boot ring -- a bus without the watcher
+# looks broken in the one way that is hardest to diagnose: you start a body in
+# a provisioned directory and nothing happens, correctly, because nothing is
+# watching. `local-bus-wipe` rebuilds the dataset first. `local-stop` takes it
+# all down; NOT `stop`, which belongs to the real daemon on this machine and
+# must never be shadowed by a dev target.
+#
+# Both halves write a pid and a log under .local/ and are stopped BY PID --
+# never by pattern, which here would also match the daemon serving a real
+# fleet.
+local-bus: local-bus-start local-waked-start
+	@echo ""
+	@echo "  bus     http://127.0.0.1:$(LOCAL_PORT)/ui   (admin/adminadmin, user/useruser)"
+	@echo "  logs    $(LOCAL_DIR)"
+	@echo "  agent   $(UV) run python scripts/local_bus.py provision \\"
+	@echo "            --name <agent> --dir <directory> --runtime claude|codex"
+	@echo ""
+
+local-bus-wipe: local-stop
+	@echo "local: rebuilding the dataset (stop first, or the pid files go with it)"
+	$(UV) run python scripts/local_bus.py --wipe --seed-only
+	@$(MAKE) --no-print-directory local-bus
+
+local-stop: local-waked-stop local-bus-stop
+
+local-restart: local-stop local-bus
+
+# In the foreground, when you want to watch one of them directly.
+local-bus-fg:
 	$(UV) run python scripts/local_bus.py --port $(LOCAL_PORT)
 
-local-bus-wipe:
-	$(UV) run python scripts/local_bus.py --wipe --port $(LOCAL_PORT)
+local-waked-fg:
+	$(UV) run python scripts/local_bus.py waked --port $(LOCAL_PORT)
+
+local-bus-start:
+	@mkdir -p "$(LOCAL_DIR)"
+	@if [ -f "$(LOCAL_BUS_PID)" ] && kill -0 `cat "$(LOCAL_BUS_PID)"` 2>/dev/null; then \
+	  echo "local bus already running (pid `cat $(LOCAL_BUS_PID)`)"; \
+	else \
+	  setsid nohup $(UV) run python scripts/local_bus.py --port $(LOCAL_PORT) \
+	    >> "$(LOCAL_BUS_LOG)" 2>&1 & echo $$! > "$(LOCAL_BUS_PID)"; \
+	  sleep 2; \
+	  if kill -0 `cat "$(LOCAL_BUS_PID)"` 2>/dev/null; then \
+	    echo "local bus started (pid `cat $(LOCAL_BUS_PID)`) -> $(LOCAL_BUS_LOG)"; \
+	  else \
+	    echo "local bus FAILED to start -- last log lines:"; \
+	    tail -5 "$(LOCAL_BUS_LOG)"; rm -f "$(LOCAL_BUS_PID)"; exit 1; \
+	  fi; \
+	fi
+
+local-bus-stop:
+	@if [ -f "$(LOCAL_BUS_PID)" ] && kill -0 `cat "$(LOCAL_BUS_PID)"` 2>/dev/null; then \
+	  p=`cat "$(LOCAL_BUS_PID)"`; kill -- -$$p 2>/dev/null || kill $$p 2>/dev/null; \
+	  for i in 1 2 3 4 5 6; do kill -0 $$p 2>/dev/null || break; sleep 0.5; done; \
+	  kill -9 -- -$$p 2>/dev/null || kill -9 $$p 2>/dev/null || true; \
+	  echo "local bus stopped (pid $$p)"; \
+	else \
+	  echo "local bus: not running"; \
+	fi; \
+	rm -f "$(LOCAL_BUS_PID)"
+
+# NOTHING TO WATCH IS NOT A FAILURE. A fresh dataset has no provisioned
+# directories, so the watcher has no identity to serve -- it says so and the
+# stack still comes up; provision an agent and `make local-bus` again.
+local-waked-start:
+	@mkdir -p "$(LOCAL_DIR)"
+	@if [ -f "$(LOCAL_WAKED_PID)" ] && kill -0 `cat "$(LOCAL_WAKED_PID)"` 2>/dev/null; then \
+	  echo "local waked already running (pid `cat $(LOCAL_WAKED_PID)`)"; \
+	elif [ -z "`ls -A $(LOCAL_DIR)/reveille/agents 2>/dev/null`" ]; then \
+	  echo "local waked: no agents provisioned yet -- nothing to watch"; \
+	else \
+	  setsid nohup $(UV) run python scripts/local_bus.py waked --port $(LOCAL_PORT) \
+	    >> "$(LOCAL_WAKED_LOG)" 2>&1 & echo $$! > "$(LOCAL_WAKED_PID)"; \
+	  sleep 2; \
+	  if kill -0 `cat "$(LOCAL_WAKED_PID)"` 2>/dev/null; then \
+	    echo "local waked started (pid `cat $(LOCAL_WAKED_PID)`) -> $(LOCAL_WAKED_LOG)"; \
+	  else \
+	    echo "local waked did not stay up -- last log lines:"; \
+	    tail -5 "$(LOCAL_WAKED_LOG)"; rm -f "$(LOCAL_WAKED_PID)"; exit 1; \
+	  fi; \
+	fi
+
+local-waked-stop:
+	@if [ -f "$(LOCAL_WAKED_PID)" ] && kill -0 `cat "$(LOCAL_WAKED_PID)"` 2>/dev/null; then \
+	  p=`cat "$(LOCAL_WAKED_PID)"`; kill -- -$$p 2>/dev/null || kill $$p 2>/dev/null; \
+	  for i in 1 2 3 4 5 6; do kill -0 $$p 2>/dev/null || break; sleep 0.5; done; \
+	  kill -9 -- -$$p 2>/dev/null || kill -9 $$p 2>/dev/null || true; \
+	  echo "local waked stopped (pid $$p)"; \
+	else \
+	  echo "local waked: not running"; \
+	fi; \
+	rm -f "$(LOCAL_WAKED_PID)"
+
+local-status:
+	@for n in bus waked; do \
+	  f="$(LOCAL_DIR)/$$n.pid"; \
+	  if [ -f "$$f" ] && kill -0 `cat "$$f"` 2>/dev/null; then \
+	    echo "local $$n: running (pid `cat $$f`)"; \
+	  else echo "local $$n: down"; fi; \
+	done
 
 # The broker daemon. One process on an always-on host serves every agent (local at
 # 127.0.0.1, remote at the LAN name) over the same SQLite -> one bus. Set

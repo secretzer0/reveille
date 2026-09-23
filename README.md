@@ -287,10 +287,14 @@ broker. Six agents covering every presence state the rail draws differently,
 plus a room, mail and hive memories:
 
 ```bash
-make local-bus-wipe            # rebuild the dataset, serve on 127.0.0.1:8799
-make local-bus                 # serve what is already there
+make local-bus-wipe            # rebuild the dataset, bring the stack up
+make local-bus                 # bring it up on what is already there
+make local-stop                # take it down (NOT `make stop` -- the real daemon)
 LOCAL_PORT=9001 make local-bus
 ```
+
+That starts the broker AND a waked watching the agents provisioned against it,
+so a TUI started in one of their directories gets its boot ring.
 
 Open <http://127.0.0.1:8799/ui> and sign in as `admin`/`adminadmin` (owner) or
 `user`/`useruser` (a colleague's view), or use a real OIDC provider with

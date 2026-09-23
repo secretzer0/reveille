@@ -7,10 +7,24 @@ looked at in the real UI, and thrown away, instead of being tried against a
 fleet's live broker.
 
 ```bash
-uv sync                  # once
-make local-bus-wipe      # rebuild the dataset, then serve on 127.0.0.1:8799
-make local-bus           # serve what is already there
+uv sync                # once
+make local-bus-wipe    # rebuild the dataset, bring the stack up
+make local-bus         # bring it up on what is already there
+make local-stop        # take it down        (NOT `make stop` -- that is the real daemon)
+make local-restart
+make local-status
 ```
+
+`local-bus` starts TWO things: the broker, and a waked watching every agent
+provisioned against it. Both matter -- a bus without the watcher looks broken
+in the hardest way to diagnose, because you start a body in a provisioned
+directory and nothing happens, correctly, since nothing is there to see it
+arrive. Each half is its own process group with a pid and a log under
+`.local/`, and is stopped by pid, never by pattern -- a pattern here would also
+match the daemon serving your real fleet.
+
+`local-bus-fg` and `local-waked-fg` run either half in the foreground when you
+want to watch it directly.
 
 Then open <http://127.0.0.1:8799/ui> and sign in:
 

@@ -385,6 +385,46 @@ def write_secrets(db, secrets):
     return path
 
 
+def waked(port, db):
+    """One waked for every agent provisioned against this bus.
+
+    THE BOOT RING COMES FROM A CENSUS, and a census only runs inside a waked
+    serving that identity: it sees a session appear in the agent's directory
+    and rings reason=boot, which is what starts the turn a fresh body takes by
+    itself. Without this, a provisioned directory sits there and nothing
+    happens when you start a TUI in it -- correctly, since nothing is watching.
+
+    HOST MODE OVER THE PRIVATE REGISTRY, so one process serves every local
+    agent and the real fleet's daemon is untouched: different registry,
+    different spools, different singleton, different bus. Each identity is
+    dialled at the url its own credential names.
+    """
+    root = pathlib.Path(db).parent / "reveille"
+    private = harness_env(root)
+    for value in private.values():
+        pathlib.Path(value).mkdir(parents=True, exist_ok=True)
+    registry = pathlib.Path(private["REVEILLE_AGENTS"])
+    known = sorted(p.name for p in registry.iterdir()) if registry.exists() else []
+    if not known:
+        raise SystemExit(
+            "local-bus: no agents provisioned against this bus yet -- nothing "
+            "to watch. Run:\n  python scripts/local_bus.py provision --name "
+            "<agent> --dir <directory> --runtime claude")
+    env = dict(os.environ, **private)
+    for var in ("REVEILLE_TOKEN", "REVEILLE_AGENT_ROLE", "REVEILLE_URL"):
+        env.pop(var, None)
+    exe = _tree_script("reveille-waked")
+    print(f"local-bus: watching {', '.join(known)} under {root}")
+    print("local-bus: a TUI started in one of those directories gets a boot "
+          "ring; ctrl-c to stop")
+    try:
+        subprocess.run([str(exe), "--url", f"ws://127.0.0.1:{port}/wake",
+                        "--host"], env=env, check=False)
+    except KeyboardInterrupt:
+        print("\nlocal-bus: watcher stopped")
+    return 0
+
+
 def _carry_private_root(directory, runtime, private):
     """Write the private root into the directory's OWN credential.
 
@@ -434,6 +474,8 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "provision":
         return _provision_main(argv[1:])
+    if argv and argv[0] == "waked":
+        return _waked_main(argv[1:])
     ap = argparse.ArgumentParser(
         description=(__doc__ or "").splitlines()[0],
         epilog="provision a directory as an agent for a native TUI:\n"
@@ -464,6 +506,17 @@ def main(argv=None):
         return 0
     serve(db, a.port, secrets, oidc=a.oidc)
     return 0
+
+
+def _waked_main(argv):
+    ap = argparse.ArgumentParser(
+        prog="local_bus.py waked",
+        description="Watch every agent provisioned against the local bus, so a "
+                    "TUI started in one of their directories gets its boot ring.")
+    ap.add_argument("--port", type=int, default=8799)
+    ap.add_argument("--db", default=str(ROOT / ".local" / "bus.db"))
+    a = ap.parse_args(argv)
+    return waked(a.port, pathlib.Path(a.db))
 
 
 def _provision_main(argv):

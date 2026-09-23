@@ -33,7 +33,8 @@ def home(tmp_path, monkeypatch):
     """A machine: its own registry, its own spools, nothing shared."""
     monkeypatch.setenv("REVEILLE_AGENTS", str(tmp_path / "agents"))
     monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
-    monkeypatch.setattr(waked, "HOST_LOCK", str(tmp_path / "host.lock"))
+    monkeypatch.setattr(waked, "host_lock_path",
+                        lambda: str(tmp_path / "host.lock"))
     return tmp_path
 
 

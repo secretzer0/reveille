@@ -1665,7 +1665,18 @@ class _Stamped:
 # lock they always did and the loser exits 0; the Stop hook's liveness probe
 # ("does somebody hold MY spool lock") is true for either shape without
 # knowing which is running.
-HOST_LOCK = os.path.join(os.path.expanduser("~"), ".reveille", "host.lock")
+def host_lock_path():
+    """The host singleton, BESIDE THE SPOOL IT SERVES.
+
+    It was ~/.reveille/host.lock, fixed -- while everything else a host waked
+    touches already moves with REVEILLE_SPOOL and REVEILLE_AGENTS. So a second
+    host waked over a PRIVATE root (a local testbed beside a real fleet) was
+    refused by the singleton of a daemon it shares nothing else with: not its
+    registry, not its spools, not its bus. Derived from the spool root, this is
+    byte-identical for a default install and private for a private one.
+    """
+    return os.path.join(os.path.dirname(spool.base_dir().rstrip(os.sep)),
+                        "host.lock")
 HOST_RESCAN_S = 30      # opendir of one directory; SIGHUP makes it immediate
 # A RUN THAT ENDED ON A REFUSAL IS NOT RE-ATTACHED EVERY 30 SECONDS (ruled
 # 24332). Five of the eleven identities on the operator's workstation hold
@@ -1677,10 +1688,15 @@ HOST_RESCAN_S = 30      # opendir of one directory; SIGHUP makes it immediate
 REFUSAL_EXITS = (3, PARKED, NOT_ARRIVED, DEAD_CREDENTIAL)
 
 
-def host_lock(path=HOST_LOCK):
+def host_lock(path=None):
     """The host singleton. Returns the held fd, or None if another host waked
     already runs here -- in which case this process exits 0, exactly as a
-    second per-agent waked does."""
+    second per-agent waked does.
+
+    "Here" is the ROOT this daemon serves, not the machine: two hosts over two
+    private roots share nothing and must not contend.
+    """
+    path = path or host_lock_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd = open(path, "w")
     try:
