@@ -34,6 +34,9 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
+import time
 
 from . import AdapterError
 
@@ -59,6 +62,56 @@ RINGABLE = ("idle",)
 def control_socket():
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     return home / "app-server-control" / "app-server-control.sock"
+
+
+# How often a start may be ATTEMPTED. The healthy path is a stat() and costs
+# nothing, so the census can ask every tick; a failing one must not spawn a
+# subprocess every five seconds for the life of the daemon.
+START_RETRY_S = 60
+_last_start = [0.0]
+
+
+def ensure_daemon():
+    """Make sure Codex's app-server daemon is up. Returns a line to log, or "".
+
+    THE ORDERING IS LOAD-BEARING, WHICH IS WHY THIS EXISTS (measured
+    2026-09-23): a plain `codex` does NOT start this daemon, and a session that
+    starts while it is down NEVER joins it -- the daemon started afterwards
+    lists no threads for a TUI that is plainly running, and that session is
+    invisible for its whole life. So it must be up BEFORE a body starts, which
+    means something has to start it, and nothing did.
+
+    STARTED, NEVER STOPPED (operator, 2026-09-23). The daemon is Codex's, not
+    ours: other TUIs, and people, use the same one. Stopping it because no
+    reveille agent needs it right now would reach into somebody else's session.
+
+    POINTLESS WITHOUT CODEX, so it checks: no `codex` on PATH means there is
+    nothing to start and nothing to say twice -- the answer names it once and
+    the caller logs it. `codex app-server daemon start` is idempotent on its
+    own side too, but this asks the cheap question first because the answer is
+    a stat() and the ask is a subprocess.
+    """
+    if control_socket().exists():
+        return ""
+    if not shutil.which("codex"):
+        return ("codex is not installed, so its app-server daemon cannot be "
+                "started -- a Codex body here could not be rung")
+    now = time.monotonic()
+    if now - _last_start[0] < START_RETRY_S:
+        return ""
+    _last_start[0] = now
+    try:
+        run = subprocess.run(["codex", "app-server", "daemon", "start"],
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"`codex app-server daemon start` could not run: {e}"
+    if run.returncode != 0:
+        return (f"`codex app-server daemon start` exited {run.returncode}: "
+                f"{(run.stderr or run.stdout).strip()[:200]}")
+    if not control_socket().exists():
+        return (f"`codex app-server daemon start` reported success and "
+                f"{control_socket()} is still absent")
+    return f"started Codex's app-server daemon -- {control_socket()}"
 
 
 async def _exchange(calls, collect_ids):

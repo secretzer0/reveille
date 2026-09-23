@@ -171,6 +171,16 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def install_hooks(self, project: Path) -> str: ...
 
+    def ensure_reachable(self, project: Path) -> str:
+        """Make anything this runtime needs BEFORE a body starts. A log line, or "".
+
+        Claude needs nothing: a session publishes its own inbox as it starts.
+        Codex needs its app-server daemon already running, because a session
+        that starts without it never joins it. Called on the census path, so an
+        implementation must be cheap when everything is already fine.
+        """
+        return ""
+
     @abstractmethod
     def sessions(self, project: Path) -> list:
         """Every LIVE session in `project` a ring could start a turn in.
@@ -369,6 +379,10 @@ class CodexAdapter(RuntimeAdapter):
         """
         from ..instructions import shared_body
         return shared_body()
+
+    def ensure_reachable(self, project):
+        from .codex_app_server import ensure_daemon
+        return ensure_daemon()
 
     def sessions(self, project):
         from .codex_app_server import sessions

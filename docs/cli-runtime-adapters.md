@@ -187,14 +187,26 @@ depends on Codex reachability:
   codex-red-shirt`.
 
 So Codex reachability has an ordering precondition Claude does not:
-`codex app-server daemon start` must have run before the session. Nothing in
-reveille starts it -- deliberately, since a delivery path may not spawn a
-background service on somebody's machine -- and nothing in Codex starts it
-either. Until that is placed somewhere (host waked at startup, a required step
-in the install's output, or a refusal in `validate_install`), a Codex agent can
-be installed perfectly and still be unreachable, which is the exact failure
-class this document keeps naming. UNDECIDED, and it is a design question rather
-than a defect to patch quietly.
+`codex app-server daemon start` must have run before the session.
+
+RULED (operator, 2026-09-23): WAKED STARTS IT, CHECKS FIRST, AND NEVER STOPS
+IT. `RuntimeAdapter.ensure_reachable(project)` is what the census asks every
+tick -- nothing for Claude, whose sessions publish their own inboxes as they
+start; for Codex, the daemon.
+
+- CHECKS FIRST: the healthy answer is a `stat()` of the socket, which is what
+  makes it cheap enough to sit on the census path.
+- POINTLESS WITHOUT CODEX: no `codex` on PATH means nothing is spawned and the
+  answer says so, once.
+- NEVER STOPPED: the daemon is Codex's own and other sessions -- other people
+  -- share it. Stopping it because no reveille agent needs it right now would
+  reach into somebody else's work. Nothing in this package stops it, and a gate
+  asserts that.
+- RATE LIMITED: a failing start may be attempted once a minute, not once every
+  five seconds for the life of the daemon.
+
+The delivery path still never starts it: a ring may not spawn a background
+service. Ensuring is the census's job, which runs before a body is there.
 
 `codex app-server daemon stop` also leaves its `pid-update-loop` supervisor
 running and reports `notRunning`, so a stop is not a reap.

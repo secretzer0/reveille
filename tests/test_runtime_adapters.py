@@ -430,3 +430,53 @@ def test_a_busy_session_is_present_but_not_rung(tmp_path, monkeypatch):
     threads.clear()
     rung, why = cx.ring(tmp_path, "ring")
     assert rung == 0 and "no live Codex session" in why
+
+
+def test_the_daemon_is_started_when_absent_and_never_stopped(tmp_path, monkeypatch):
+    """Operator ruling 2026-09-23: check first, start if absent, never stop --
+    the daemon is Codex's own and other sessions share it. Pointless without
+    Codex installed, so that is answered before anything is spawned."""
+    import subprocess
+    from reveille.adapters import codex_app_server as cx
+
+    home = tmp_path / "codex-home"
+    sock = home / "app-server-control" / "app-server-control.sock"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(cx, "_last_start", [0.0])
+    runs = []
+
+    def fake_run(command, **kwargs):
+        runs.append(command)
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        sock.write_text("")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    # No codex on PATH: nothing is spawned, and the answer says why.
+    monkeypatch.setattr(cx.shutil, "which", lambda name: None)
+    said = cx.ensure_daemon()
+    assert "codex is not installed" in said and runs == []
+
+    monkeypatch.setattr(cx.shutil, "which", lambda name: "/bin/codex")
+    said = cx.ensure_daemon()
+    assert "started Codex's app-server daemon" in said
+    assert runs == [["codex", "app-server", "daemon", "start"]]
+
+    # Already up: a stat(), no subprocess -- this runs on the census path.
+    assert cx.ensure_daemon() == ""
+    assert len(runs) == 1
+
+    # Gone again, but inside the retry window: no second spawn.
+    sock.unlink()
+    assert cx.ensure_daemon() == ""
+    assert len(runs) == 1
+
+    # Nothing anywhere stops it.
+    source = pathlib.Path(cx.__file__).read_text()
+    assert "daemon\", \"stop" not in source and "daemon stop" not in source
+
+
+def test_claude_needs_nothing_ensured(tmp_path):
+    """A Claude session publishes its own inbox as it starts."""
+    assert get_adapter("claude").ensure_reachable(tmp_path) == ""

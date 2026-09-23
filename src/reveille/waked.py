@@ -547,6 +547,19 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
         adapter, _why = doorbell.adapter_for(workdir)
         if adapter is None:
             continue
+        # WHAT THE RUNTIME NEEDS IN PLACE BEFORE A BODY STARTS. For Claude,
+        # nothing. For Codex, its app-server daemon: a session that starts
+        # without it never joins it, so the ordering is load-bearing and
+        # nothing else was starting it. Cheap when it is already up, rate
+        # limited when it is not, and NEVER stopped again -- the daemon is
+        # Codex's own and other sessions share it.
+        try:
+            said = adapter.ensure_reachable(workdir)
+        except Exception as e:                                   # noqa: BLE001
+            said = f"could not ensure reachability -- {type(e).__name__}: {e}"
+        if said and said != state.get("ensured"):
+            state["ensured"] = said
+            print(f"reveille-waked: {agent}: {said}", file=sys.stderr)
         try:
             found = {adapter.session_key(s): s for s in adapter.sessions(workdir)}
         except Exception as e:                                   # noqa: BLE001
