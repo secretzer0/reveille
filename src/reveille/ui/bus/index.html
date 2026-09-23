@@ -219,8 +219,14 @@
  .agent .eq b::after{content:'';position:absolute;top:0;bottom:0;width:6px;
   border-radius:1px;background:var(--grn,#5cd6a0);left:-6px;opacity:0}
  .agent .eq b.go{opacity:1}
- .agent .eq b.in.go::after{animation:flowin .7s ease-out 1}
- .agent .eq b.out.go::after{animation:flowout .7s ease-out 1}
+ /* THREE PASSES, NOT ONE. A single sweep is over before the eye finds it --
+    the lane reads as having flickered rather than as having moved, and the
+    direction, which is the whole point of two lanes, is what gets lost. Three
+    at .55s is ~1.6s of unmistakable travel and still well inside the gap
+    between messages. It remains ONE SHOT per event: the lane goes still
+    afterwards, because the bus saw an event and not a condition. */
+ .agent .eq b.in.go::after{animation:flowin .55s ease-out 3}
+ .agent .eq b.out.go::after{animation:flowout .55s ease-out 3}
  @keyframes flowin{0%{left:-6px;opacity:.25}50%{opacity:1}100%{left:14px;opacity:0}}
  @keyframes flowout{0%{left:14px;opacity:.25}50%{opacity:1}100%{left:-6px;opacity:0}}
  /* THE FLAVOUR THIS BODY RUNS, IN THE SWATCH'S OWN SLOT. Carried, never
