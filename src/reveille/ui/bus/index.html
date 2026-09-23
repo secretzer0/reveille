@@ -223,10 +223,19 @@
  .agent .eq b.out.go::after{animation:flowout .7s ease-out 1}
  @keyframes flowin{0%{left:-6px;opacity:.25}50%{opacity:1}100%{left:14px;opacity:0}}
  @keyframes flowout{0%{left:14px;opacity:.25}50%{opacity:1}100%{left:-6px;opacity:0}}
- /* THE FLAVOUR THIS BODY RUNS. Carried, never computed -- the body said it at its
-    last attach, and a body that has not said gets no mark rather than a guess. */
- .agent .rt{font-size:9px;line-height:1;opacity:.7;flex:none;letter-spacing:.02em}
- /* Rung and unanswered: PRESENT and still. Motion here would be the inference we
+ /* THE FLAVOUR THIS BODY RUNS, IN THE SWATCH'S OWN SLOT. Carried, never
+    computed -- the body said it at its last attach. A body that has NOT said
+    keeps the colour swatch, and so does every person: no mark is the honest
+    rendering of "it did not say", and a default would be a claim about a body
+    that never spoke. Each vendor's own mark, inlined from source above. */
+ /* NO PLATE BEHIND EITHER MARK. The vendor asset for one of them is an APP
+    ICON -- a coloured rounded square with the glyph knocked out of it -- and
+    beside a bare glyph the box won the row while the shape it was carrying
+    lost. Both are bare now, each in its own brand colour, at a size where the
+    shape survives: the mark says WHICH runtime, and the dot on the right still
+    says how it is doing. */
+ .agent .mark{width:13px;height:13px;flex:none;display:block}
+  /* Rung and unanswered: PRESENT and still. Motion here would be the inference we
     refuse to make. Faded once "no answer yet" stops being an honest description. */
  .agent.act-waiting .nm{color:var(--gold)}
  .agent.act-unsure .nm{color:var(--gold);opacity:.6}
@@ -1008,6 +1017,24 @@
   .crow{flex-wrap:wrap}
  }
 </style></head><body>
+<!-- EACH VENDOR'S OWN MARK, fetched from source and inlined ONCE.
+     claude: https://claude.ai/favicon.svg -- Anthropic's burst, #D97757.
+     codex:  ChatGPT's knot, Wikimedia Commons ChatGPT_logo.svg.
+     BARE GLYPHS, NO PLATE. Both ship as app icons -- a coloured tile with
+     the shape knocked out of it -- and at 13px in a dark rail the tile won
+     the row while the shape it carried lost. The mark says WHICH runtime;
+     the colour that matters in this rail is the status dot on the right.
+     The knot is drawn to sit knocked out of its plate, so on near-black it
+     takes a lifted tint of the same brand green -- the ordinary dark-mode
+     treatment of a brand colour, not a different mark.
+     Defined as <symbol> and referenced per row: the knot is one petal plus
+     five rotations of it, so inlining the markup per row would repeat its id
+     and every row after the first would point at the first row's copy. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="rt-claude" viewBox="0 0 248 248"><path d="M52.4285 162.873L98.7844 136.879L99.5485 134.602L98.7844 133.334H96.4921L88.7237 132.862L62.2346 132.153L39.3113 131.207L17.0249 130.026L11.4214 128.844L6.2 121.873L6.7094 118.447L11.4214 115.257L18.171 115.847L33.0711 116.911L55.485 118.447L71.6586 119.392L95.728 121.873H99.5485L100.058 120.337L98.7844 119.392L97.7656 118.447L74.5877 102.732L49.4995 86.1905L36.3823 76.62L29.3779 71.7757L25.8121 67.2858L24.2839 57.3608L30.6515 50.2716L39.3113 50.8623L41.4763 51.4531L50.2636 58.1879L68.9842 72.7209L93.4357 90.6804L97.0015 93.6343L98.4374 92.6652L98.6571 91.9801L97.0015 89.2625L83.757 65.2772L69.621 40.8192L63.2534 30.6579L61.5978 24.632C60.9565 22.1032 60.579 20.0111 60.579 17.4246L67.8381 7.49965L71.9133 6.19995L81.7193 7.49965L85.7946 11.0443L91.9074 24.9865L101.714 46.8451L116.996 76.62L121.453 85.4816L123.873 93.6343L124.764 96.1155H126.292V94.6976L127.566 77.9197L129.858 57.3608L132.15 30.8942L132.915 23.4505L136.608 14.4708L143.994 9.62643L149.725 12.344L154.437 19.0788L153.8 23.4505L150.998 41.6463L145.522 70.1215L141.957 89.2625H143.994L146.414 86.7813L156.093 74.0206L172.266 53.698L179.398 45.6635L187.803 36.802L193.152 32.5484H203.34L210.726 43.6549L207.415 55.1159L196.972 68.3492L188.312 79.5739L175.896 96.2095L168.191 109.585L168.882 110.689L170.738 110.53L198.755 104.504L213.91 101.787L231.994 98.7149L240.144 102.496L241.036 106.395L237.852 114.311L218.495 119.037L195.826 123.645L162.07 131.592L161.696 131.893L162.137 132.547L177.36 133.925L183.855 134.279H199.774L229.447 136.524L237.215 141.605L241.8 147.867L241.036 152.711L229.065 158.737L213.019 154.956L175.45 145.977L162.587 142.787H160.805V143.85L171.502 154.366L191.242 172.089L215.82 195.011L217.094 200.682L213.91 205.172L210.599 204.699L188.949 188.394L180.544 181.069L161.696 165.118H160.422V166.772L164.752 173.152L187.803 207.771L188.949 218.405L187.294 221.832L181.308 223.959L174.813 222.777L161.187 203.754L147.305 182.486L136.098 163.345L134.745 164.2L128.075 235.42L125.019 239.082L117.887 241.8L111.902 237.31L108.718 229.984L111.902 215.452L115.722 196.547L118.779 181.541L121.58 162.873L123.291 156.636L123.14 156.219L121.773 156.449L107.699 175.752L86.304 204.699L69.3663 222.777L65.291 224.431L58.2867 220.768L58.9235 214.27L62.8713 208.48L86.304 178.705L100.44 160.155L109.551 149.507L109.462 147.967L108.959 147.924L46.6977 188.512L35.6182 189.93L30.7788 185.44L31.4156 178.115L33.7079 175.752L52.4285 162.873Z" fill="#D97757"/></symbol>
+  <symbol id="rt-codex" viewBox="0 0 2406 2406"><path id="cx-a" d="M1107.3 299.1c-197.999 0-373.9 127.3-435.2 315.3L650 743.5v427.9c0 21.4 11 40.4 29.4 51.4l344.5 198.515V833.3h.1v-27.9L1372.7 604c33.715-19.52 70.44-32.857 108.47-39.828L1447.6 450.3C1361 353.5 1237.1 298.5 1107.3 299.1zm0 117.5-.6.6c79.699 0 156.3 27.5 217.6 78.4-2.5 1.2-7.4 4.3-11 6.1L952.8 709.3c-18.4 10.4-29.4 30-29.4 51.4V1248l-155.1-89.4V755.8c-.1-187.099 151.601-338.9 339-339.2z" fill="#8ed4bf"/> <use xlink:href="#cx-a" transform="rotate(60 1203 1203)"/> <use xlink:href="#cx-a" transform="rotate(120 1203 1203)"/> <use xlink:href="#cx-a" transform="rotate(180 1203 1203)"/> <use xlink:href="#cx-a" transform="rotate(240 1203 1203)"/> <use xlink:href="#cx-a" transform="rotate(300 1203 1203)"/></symbol>
+</svg>
+
 <nav id="rail">
  <div id="brand"><h1>REVEILLE</h1>
   <small><span id="status"></span><span id="ver">bus</span></small></div>
@@ -2690,10 +2717,10 @@ async function loadPresence(){
 // The room pushes presence the moment it CHANGES (0.2.38); the poll above is the
 // fallback that repairs a stream which missed one. Both land here, so there is one
 // renderer and no chance of the two paths drifting into different rails.
-// One short mark per flavour. A name this does not know renders its first two
-// letters rather than nothing: a new runtime must be VISIBLE before anyone gets
-// around to choosing its glyph.
-const RUNTIME_MARK={claude:'\u25c6',codex:'\u25b3'};
+// Which flavours this UI has a mark for. The <symbol>s live at the top of the
+// body, one definition each; a runtime that is not here keeps the swatch rather
+// than getting somebody else's logo or an invented one.
+const RUNTIME_MARK=new Set(['claude','codex']);
 
 // The last timestamps each row was rendered with. A CHANGE is the event; the
 // first sight of a row is not one, or every reload would light the whole rail.
@@ -2764,12 +2791,15 @@ function renderPresence(agents){
   const eq=!web ? '<span class="eq" aria-hidden="true" title="top: the bus '
    +'reached this body -- bottom: this body called the bus">'
    +'<b class="in"></b><b class="out"></b></span>' : '';
-  // WHICH CLI THIS BODY IS, as it said at its last attach. No mark at all when
-  // it has not said: an empty space is the honest rendering of "unknown", and
-  // a default would be a claim about a body that never spoke.
-  const rt=(!web&&a.runtime)
-   ? '<span class="rt" title="this body runs '+esc(a.runtime)+'">'
-     +esc(RUNTIME_MARK[a.runtime]||a.runtime.slice(0,2))+'</span>' : '';
+  // WHICH CLI THIS BODY IS, IN THE SLOT THE COLOUR SWATCH HAD: the flavour is
+  // the first thing worth knowing about a body, and a second glyph beside the
+  // name only crowded it. A row whose runtime this UI has no mark for -- and
+  // every person, who has no runtime -- keeps the swatch, because the absence
+  // of a mark is what "it has not said" honestly looks like.
+  const badge=(!web&&RUNTIME_MARK.has(a.runtime))
+   ? '<svg class="mark" aria-hidden="true"><title>this body runs '
+     +esc(a.runtime)+'</title><use href="#rt-'+esc(a.runtime)+'"></use></svg>'
+   : '<span class="swatch" style="background:'+color(a.name)+'"></span>';
   // F8.4: what this body's LOCAL TOOLCHAIN is running, as it said at its last
   // attach. NO COLOUR RULE and nothing computed: whether it is behind the
   // broker is the reader's comparison, not a state this row asserts (14469 --
@@ -2781,8 +2811,8 @@ function renderPresence(agents){
   const tc=(!web&&a.toolchain)
    ? '<span class="cnt" title="toolchain this body reported at its last wake attach">'
      +esc(a.toolchain)+'</span>' : '';
-  el.innerHTML='<span class="swatch" style="background:'+color(a.name)+'"></span>'
-    +'<span class="nm">'+esc(a.name)+'</span>'+rt+eq+tc+'<span class="st"></span>';
+  el.innerHTML=badge+'<span class="nm">'+esc(a.name)+'</span>'
+    +eq+tc+'<span class="st"></span>';
   flow(el,a);
   // Same three states, said in the vocabulary of what the row actually is: a person has
   // a tab where an agent has a waiter, and telling a human their "waiter is down" is noise
