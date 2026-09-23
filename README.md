@@ -281,6 +281,29 @@ make lint
 make waiter-smoke / grant-smoke / launch-smoke / joinhere-smoke
 ```
 
+A whole bus on your own machine, from a sample dataset you can rebuild at any
+time -- the way to try a change end to end without touching anyone's live
+broker. Six agents covering every presence state the rail draws differently,
+plus a room, mail and hive memories:
+
+```bash
+make local-bus-wipe            # rebuild the dataset, serve on 127.0.0.1:8799
+make local-bus                 # serve what is already there
+LOCAL_PORT=9001 make local-bus
+```
+
+Open <http://127.0.0.1:8799/ui> and sign in as `admin`/`adminadmin` (owner) or
+`user`/`useruser` (a colleague's view), or use a real OIDC provider with
+`--oidc`. To run your own claude or codex TUI against it as a real agent:
+
+```bash
+uv run python scripts/local_bus.py provision \
+    --name local-architect --dir ~/agents/arch --runtime claude
+cd ~/agents/arch && claude
+```
+
+See [docs/local-bus.md](docs/local-bus.md) for the dataset and the sign-in rules.
+
 ```
 src/reveille/store.py       broker core: DAG messages, presence, auth, hive memory
 src/reveille/daemon.py      HTTP-MCP + WS wake + web UI + usage() doctrine
@@ -288,6 +311,7 @@ src/reveille/waked.py       the parked socket holder
 src/reveille/watch.py       wake-watch: exit-to-notify watcher
 scripts/reveille_launch.py  container launcher + join-here (owns docker)
 scripts/voice-bank.py       carry a voice bank between installs
+scripts/local_bus.py        a whole bus locally, from a rebuildable dataset
 docker/Caddyfile            the one front door: / bus, /agents, /attach/*
 ```
 
