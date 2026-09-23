@@ -23,6 +23,12 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def credential_path(self, project: Path) -> Path: ...
 
+    @abstractmethod
+    def write_credential(self, project: Path, url: str, name: str, token: str) -> Path: ...
+
+    @abstractmethod
+    def mcp_registered(self, project: Path, url: str) -> bool: ...
+
     def identity(self, project: Path) -> dict[str, str]:
         """Read only a complete project identity; never borrow another session's env."""
         try:
@@ -57,6 +63,14 @@ class ClaudeAdapter(RuntimeAdapter):
     def credential_path(self, project):
         return Path(project) / ".claude" / "settings.local.json"
 
+    def write_credential(self, project, url, name, token):
+        from reveille.cli import write_credential
+        return write_credential(url, name, token, project)
+
+    def mcp_registered(self, project, url):
+        from reveille.cli import mcp_registered
+        return mcp_registered(project)
+
     def instruction_path(self, project):
         return Path(project) / "CLAUDE.local.md"
 
@@ -83,6 +97,14 @@ class CodexAdapter(RuntimeAdapter):
     def credential_path(self, project):
         return Path(project) / ".codex" / "reveille.json"
 
+    def write_credential(self, project, url, name, token):
+        from .codex_config import write_credential
+        return write_credential(project, url, name, token)
+
+    def mcp_registered(self, project, url):
+        from .codex_config import registered
+        return registered(project, url)
+
     def instruction_path(self, project):
         project = Path(project)
         override = project / "AGENTS.override.md"
@@ -93,7 +115,8 @@ class CodexAdapter(RuntimeAdapter):
         return project / "AGENTS.md"
 
     def register_mcp(self, project, url, executable):
-        raise AdapterError("Codex project provisioning is not implemented yet")
+        from .codex_config import register
+        return register(project, url)
 
     def install_hooks(self, project):
         raise AdapterError("Codex trusted lifecycle hooks are not implemented yet")

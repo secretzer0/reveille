@@ -21,10 +21,30 @@ not a model or a fleet role.
 - Codex instruction discovery respects an existing nonempty
   `AGENTS.override.md`; otherwise it selects `AGENTS.md`. It never creates an
   override that hides project instructions.
-- Codex provisioning, trusted hook installation and socket delivery are NOT
-  implemented. They cannot report success. `reveille init --runtime codex`
+- Codex project MCP registration and private credential writes are implemented
+  as adapter operations. Full provisioning, trusted hook installation and
+  socket delivery are NOT implemented. `reveille init --runtime codex`
   refuses during local preflight before reading credentials or contacting the
   broker.
+
+## Codex configuration operations
+
+The adapter merges `.codex/config.toml` using `tomlkit`, preserving unrelated
+settings, comments, other servers and Reveille tool policies. It owns the
+Reveille URL and header helper and removes old stdio/authentication fields that
+would conflict with them. The helper gets an explicit, shell-quoted project path.
+Registration validation here checks the local configuration, not a live MCP
+connection or effective inherited user configuration.
+
+Credential writes preserve unrelated JSON fields, use atomic 0600 replacement,
+and install ignore rules before writing secrets. Tracked credential paths,
+symlinked configuration paths and malformed files refuse without overwriting
+them. Repeated identical writes do not rewrite the file. Credentials never go
+into the TOML or helper command. These low-level Codex operations do not yet
+register an agent with host waked; that awaits full lifecycle support.
+
+Claude's existing credential writer and registration check now also dispatch
+through the common adapter contract, preserving their existing behavior.
 
 ## Runtime selection
 
@@ -45,11 +65,9 @@ even when a different runtime is explicitly selected.
 
 1. Runtime selection and persistence are implemented. Extend their use to daemon
    dispatch as each adapter operation becomes available.
-2. Add adapter-owned atomic credential writes and registration validation.
-   Codex credentials must be 0600 and ignored; refuse already-tracked secrets.
-   Merge TOML without discarding unrelated settings or comments. Register
-   direct HTTP with `http_headers_helper`, including an explicit project path.
-   Preserve the existing rule that local validation precedes credential minting.
+2. Adapter-owned credential writes and local registration validation are
+   implemented. Wire Codex into full provisioning when lifecycle support lands;
+   preserve local validation before credential minting.
 3. Extract doctrine synchronization from Claude's path. Keep shared bus rules
    and runtime-specific lifecycle instructions separate; retain version/hash
    markers and preserve text outside them. Codex's shared AGENTS.md block must

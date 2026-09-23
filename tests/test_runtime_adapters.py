@@ -80,7 +80,7 @@ def test_codex_instructions_preserve_discovery_semantics(tmp_path):
 def test_unimplemented_codex_cannot_claim_install_or_delivery(tmp_path):
     adapter = get_adapter("codex")
     with pytest.raises(AdapterError, match="not implemented"):
-        adapter.register_mcp(tmp_path, "https://example.test", "codex")
+        adapter.validate_install(tmp_path)
     with pytest.raises(AdapterError, match="not implemented"):
         adapter.install_hooks(tmp_path)
     count, reason = adapter.deliver(tmp_path, "bob", {})

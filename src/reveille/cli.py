@@ -1416,7 +1416,7 @@ def cmd_init(a):
     # local step: there is nothing to degrade into.
     degraded = ""
     if not claude:
-        if agent_of_directory(workdir) == name and mcp_registered(workdir):
+        if agent_of_directory(workdir) == name and adapter.mcp_registered(workdir, url):
             degraded = ("the claude binary was not found on PATH; this "
                         "directory's registration and credential already "
                         "stand, so the claude-dependent steps were skipped")
@@ -1529,7 +1529,7 @@ def cmd_init(a):
         installed_new_credential = not minted_pending
 
     try:
-        path = write_credential(url, name, token, workdir)
+        path = adapter.write_credential(workdir, url, name, token)
     except RuntimeError as e:
         print(f"reveille init: REFUSING at the credential step -- {e}\n"
               f"The MCP registration and Stop hook above stand; re-run once the "
