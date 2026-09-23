@@ -35,6 +35,7 @@ import urllib.request
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 from reveille import store  # noqa: E402
+from _bus import daemon_cmd  # noqa: E402 -- after the sys.path setup above, like its neighbours
 
 ROLE = "reaped-dev"
 
@@ -96,7 +97,7 @@ def main():
     env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port),
                REVEILLE_HOST="127.0.0.1")
     env["PATH"] = str(REPO / ".venv" / "bin") + os.pathsep + env["PATH"]
-    proc = subprocess.Popen(["reveille-daemon"], env=env,
+    proc = subprocess.Popen(daemon_cmd(), env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         assert wait_health(port)

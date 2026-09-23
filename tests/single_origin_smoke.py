@@ -37,6 +37,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from scratch import child_report  # noqa: E402
 import ui_copy  # noqa: E402  -- the served copy every gate asserts, in ONE place
 from reveille import store  # noqa: E402
+from _bus import daemon_cmd  # noqa: E402 -- after the sys.path setup above, like its neighbours
 
 USER, PASS = "ana", "hunter2hunter2"
 AGENTS_PATH = "/agents"
@@ -76,7 +77,7 @@ def main():
     procs, cname = [], f"revgate-proxy-{pport}"
     try:
         procs.append(subprocess.Popen(
-            ["reveille-daemon"],
+            daemon_cmd(),
             env=dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(bport),
                      REVEILLE_HOST="127.0.0.1",
                      REVEILLE_AGENTS_PATH=AGENTS_PATH,

@@ -39,6 +39,7 @@ sys.path.insert(0, str(REPO / "src"))
 HOOK = REPO / "src" / "reveille" / "agent-stop-hook"
 ROLE = "offline-gate"
 from reveille import store  # noqa: E402
+from _bus import daemon_cmd  # noqa: E402 -- after the sys.path setup above, like its neighbours
 
 
 def free_port():
@@ -123,7 +124,7 @@ def main():
 
         # -- 3. the broker comes back at the same address ---------------------
         broker = subprocess.Popen(
-            ["reveille-daemon"],
+            daemon_cmd(),
             env=dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port),
                      REVEILLE_HOST="127.0.0.1",
                      PATH=str(REPO / ".venv" / "bin") + os.pathsep + os.environ["PATH"]),

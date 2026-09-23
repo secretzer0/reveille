@@ -72,6 +72,19 @@ shots:
 ui-drive:
 	scripts/ui-drive $(OUT)
 
+# A WHOLE BUS ON THIS MACHINE, from a sample dataset, so a change can be driven
+# end to end before it goes anywhere near the fleet's own broker. `local-bus`
+# serves what is there; `local-bus-wipe` rebuilds the dataset from scratch
+# first, which is the way back to a known state. No voice, ear or writer: the
+# harness clears those upstreams rather than inheriting them.
+#   REVEILLE_LOCAL_PORT=9001 make local-bus
+LOCAL_PORT ?= 8799
+local-bus:
+	$(UV) run python scripts/local_bus.py --port $(LOCAL_PORT)
+
+local-bus-wipe:
+	$(UV) run python scripts/local_bus.py --wipe --port $(LOCAL_PORT)
+
 # The broker daemon. One process on an always-on host serves every agent (local at
 # 127.0.0.1, remote at the LAN name) over the same SQLite -> one bus. Set
 # REVEILLE_PORT to change the port (default 8765); REVEILLE_DB to move the database.

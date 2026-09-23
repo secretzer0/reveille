@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from _bus import daemon_cmd  # the tree's daemon, not PATH's
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -108,7 +109,7 @@ def scratch_broker(env_extra=None, timeout=None):
     # merely slow -- after the loop had spun the full deadline against a dead pid.
     log = tmp / "daemon.log"
     with open(log, "wb") as fh:
-        proc = subprocess.Popen(["reveille-daemon"], env=env,
+        proc = subprocess.Popen(daemon_cmd(), env=env,
                                 stdout=fh, stderr=subprocess.STDOUT)
     try:
         started, deadline, last = time.time(), time.time() + timeout, None

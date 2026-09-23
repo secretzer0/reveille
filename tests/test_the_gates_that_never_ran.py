@@ -31,7 +31,7 @@ gate and ten for a hung runner, so this fits with room.
 
 WHAT THEY REACH FOR, because "they need nothing a runner lacks" was written
 here first and was FALSE. Thirteen of the fourteen need only a free port:
-scratch.py is `subprocess.Popen(["reveille-daemon"])`, no docker, no chromium,
+scratch.py is `subprocess.Popen(daemon_cmd())`, no docker, no chromium,
 no network -- which is why they did not have to wait for the ui-drive CI work.
 single_origin_smoke.py is the exception and needs a DOCKER SOCKET: it
 `docker run`s a caddy in front of a scratch broker to prove one origin serves

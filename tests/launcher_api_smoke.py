@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_copy  # noqa: E402  -- the served copy every gate asserts, in ONE place
 from reveille import store  # noqa: E402
+from _bus import daemon_cmd  # the tree's daemon, not PATH's
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 LAUNCH = [sys.executable, str(REPO / "scripts" / "reveille_launch.py")]
@@ -114,7 +115,7 @@ def main():
                 REVEILLE_HOST="127.0.0.1")
     benv["PATH"] = str(REPO / ".venv" / "bin") + os.pathsep + benv["PATH"]
     broker = subprocess.Popen(
-        ["reveille-daemon"], env=benv,
+        daemon_cmd(), env=benv,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     lenv = dict(os.environ,
                 REVEILLE_LAUNCH_DB=os.path.join(tmp, "launcher.db"),

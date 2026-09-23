@@ -48,6 +48,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import store  # noqa: E402
+from _bus import daemon_cmd  # the tree's daemon, not PATH's
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 ROLE = "smoke-join"
@@ -104,7 +105,7 @@ def main():
     conn.close()
     env = dict(os.environ, REVEILLE_DB=db, REVEILLE_PORT=str(port),
                REVEILLE_HOST="127.0.0.1")
-    broker = subprocess.Popen(["reveille-daemon"], env=env,
+    broker = subprocess.Popen(daemon_cmd(), env=env,
                               stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL)
     home = tempfile.mkdtemp()   # the clean user
