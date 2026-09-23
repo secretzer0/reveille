@@ -157,11 +157,31 @@ explicit flag, and installing a CLI never establishes intent by itself.
 Every runtime's credential participates in the identity-conflict check, even
 when a different runtime is explicitly selected.
 
+## The helper is verified at install time
+
+The registration names a console script by NAME, so what answers is whatever
+PATH resolves -- and that is not necessarily the build that wrote the
+credential. Measured: this machine's released `reveille-headers` answered `{}`
+for a Codex project, the session connected ANONYMOUSLY (three captured POSTs
+with no Authorization and no X-Agent), and the only symptom would have been a
+refusal at the broker with nothing local saying why. `{}` is the correct answer
+for a directory that is not an agent, so the helper cannot refuse for itself.
+
+So `init` runs the registered command from the project directory after writing
+the credential and requires it to name THIS agent, refusing by name and saying
+which binary answered. It runs after `ensure_on_path()`, which deliberately
+puts `~/.local/bin` first, so it verifies the real resolution order.
+
 ## Still to do
 
 1. Route waked's credential reads/writes, rotation, parked state and
    acknowledgement through the adapter. Today those still read Claude's paths.
-2. An AUTHENTICATED MCP tool call from a Codex session is still unverified.
+2. The AUTHENTICATED CONNECTION is verified; the TOOL CALL is not. Against a
+   capturing endpoint, a Codex session in a provisioned directory sent
+   `X-Agent: codex-red-shirt` and `Authorization: Bearer ...` to `/mcp`, with
+   the identity resolved from cwd alone -- no path in the config, no
+   environment. What is still unobserved is the broker accepting that
+   connection and a tool returning a result, which needs a model turn.
    The WAKE is not: on 2026-09-23 a ring delivered through
    `CodexAdapter.deliver` reached an idle TUI session, started a turn, and the
    body answered `Could not process the ring: - inbox() / bus tools are
