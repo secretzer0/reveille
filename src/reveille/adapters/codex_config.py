@@ -124,10 +124,25 @@ def register(project, url):
 
 
 def registered(project, url):
+    """Is this project registered against THIS broker, with headers of ours?
+
+    GATE THE PROPERTY, NOT THE SPELLING. This used to demand a byte-identical
+    `http_headers_helper`, so pinning the helper to an absolute path -- a
+    venv install, a container layout -- read as NO REVEILLE MCP AT ALL, and
+    the doorbell then refused to ring with a reason that named the wrong
+    problem. What actually has to hold is that the server points at the broker
+    the credential names, that it gets its headers from a helper rather than
+    from a competing credential, and that it is enabled.
+
+    `register()` still WRITES the canonical command: the transport and its
+    authentication are the installer's to own, and a pin survives until the
+    next init says otherwise.
+    """
     try:
         _, doc = load_config(project)
         server = doc.get("mcp_servers", {}).get("reveille", {})
-        return (all(server.get(k) == v for k, v in mcp_spec(project, url).items())
+        return (server.get("url") == mcp_spec(project, url)["url"]
+                and bool(server.get("http_headers_helper"))
                 and server.get("enabled", True) is True
                 and not any(k in server for k in ("command", "bearer_token_env_var",
                                                    "http_headers", "env_http_headers", "oauth")))

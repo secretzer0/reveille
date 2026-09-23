@@ -307,7 +307,18 @@ class CodexAdapter(RuntimeAdapter):
         return Path(project) / ".codex" / "reveille.json"
 
     def write_credential(self, project, url, name, token):
+        """Write it, and RECORD WHERE IT WROTE (ruling 24286).
+
+        A host-wide waked enumerates identities from ~/.reveille/agents, and a
+        credential writer is the only act that knows an identity's directory.
+        Claude's writer has always done this; Codex's did not, so a Codex agent
+        was invisible to waked -- no census, no boot ring, no delivery, with
+        every local artifact present and correct. The entry is a path, never a
+        secret, and last init wins.
+        """
+        from reveille import spool
         from .codex_config import write_credential
+        spool.register(name, str(Path(project)))
         return write_credential(project, url, name, token)
 
     def mcp_registered(self, project, url):

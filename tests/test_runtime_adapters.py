@@ -363,3 +363,70 @@ def test_the_installer_verifies_the_command_it_registered(tmp_path, monkeypatch)
 
     fake.out = "not json at all"
     assert "did not print JSON" in adapter.verify_headers(tmp_path, "codex-agent")
+
+
+def test_every_credential_writer_records_where_it_wrote(tmp_path, monkeypatch):
+    """Ruling 24286: a host-wide waked enumerates identities from the registry,
+    and the credential writer is the only act that knows an identity's
+    directory. Codex's writer did not record it, so a Codex agent was invisible
+    to waked -- no census, no boot ring, no delivery -- with every local
+    artifact present and correct."""
+    from reveille import spool
+    monkeypatch.setenv("REVEILLE_SPOOL", str(tmp_path / "spool"))
+    for runtime in ("claude", "codex"):
+        project = tmp_path / runtime
+        project.mkdir()
+        get_adapter(runtime).write_credential(project, "https://broker.test",
+                                              f"{runtime}-agent", "tok")
+        assert spool.registered().get(f"{runtime}-agent") == str(project), runtime
+
+
+def test_a_busy_session_is_present_but_not_rung(tmp_path, monkeypatch):
+    """TWO QUESTIONS, NOT ONE. Measured 2026-09-23: a ring left two live Codex
+    TUIs at {"type": "active", "activeFlags": ["waitingOnApproval"]} and a
+    third at {"type": "systemError"}. Counting only "idle" made the census see
+    an EMPTY directory -- no boot ring for a body plainly there -- and every
+    later ring refused with "no live session", naming the wrong problem."""
+    from reveille.adapters import codex_app_server as cx
+
+    threads = {
+        "t-idle": {"cwd": str(tmp_path), "canAcceptDirectInput": True,
+                   "status": {"type": "idle"}},
+        "t-busy": {"cwd": str(tmp_path), "canAcceptDirectInput": True,
+                   "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}},
+        "t-dead": {"cwd": str(tmp_path), "canAcceptDirectInput": True,
+                   "status": {"type": "systemError"}},
+    }
+    started = []
+
+    def fake_run(coro):
+        coro.close()
+        call = fake_run.next
+        if call == "loaded":
+            return {1: {"data": list(threads)}}
+        if call == "read":
+            return {10 + i: {"thread": dict(t, id=k)}
+                    for i, (k, t) in enumerate(threads.items())}
+        started.append(call)
+        return {}
+
+    def run(coro):
+        # thread/loaded/list is one call, thread/read the next, turn/start last.
+        fake_run.next = ("loaded" if not hasattr(run, "seen") else
+                         ("read" if run.seen % 2 else "loaded"))
+        run.seen = getattr(run, "seen", 0) + 1
+        return fake_run(coro)
+
+    monkeypatch.setattr(cx, "control_socket", lambda: tmp_path)
+    monkeypatch.setattr(cx, "_run", run)
+    assert sorted(cx.sessions(tmp_path)) == ["t-busy", "t-idle"], "systemError is not a session"
+    assert cx.sessions(tmp_path, cx.RINGABLE) == ["t-idle"]
+
+    # With nothing idle, the reason says BUSY -- the body is there.
+    threads.pop("t-idle")
+    rung, why = cx.ring(tmp_path, "ring")
+    assert rung == 0 and "mid-turn" in why
+
+    threads.clear()
+    rung, why = cx.ring(tmp_path, "ring")
+    assert rung == 0 and "no live Codex session" in why

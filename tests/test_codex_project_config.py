@@ -255,3 +255,28 @@ def test_a_codex_install_creates_no_claude_directory(tmp_path, monkeypatch, caps
     assert "&& codex" in said and "&& claude" not in said
     assert "settings.local.json" not in said
     assert ".codex/reveille.json" in said
+
+
+def test_a_pinned_helper_is_still_our_registration(tmp_path, adapter):
+    """GATE THE PROPERTY, NOT THE SPELLING. A helper pinned to an absolute path
+    -- a venv install, a container layout -- used to read as NO REVEILLE MCP,
+    and the doorbell then refused to ring naming the wrong problem."""
+    adapter.register_mcp(tmp_path, "https://broker.test", "codex")
+    config = tmp_path / ".codex" / "config.toml"
+    config.write_text(config.read_text().replace(
+        'http_headers_helper = "reveille-headers --runtime codex"',
+        'http_headers_helper = "/opt/venv/bin/reveille-headers --runtime codex"'))
+    assert adapter.mcp_registered(tmp_path, "https://broker.test")
+    # The things that DO make it not ours, each on its own.
+    for line, why in (('url = "https://elsewhere.test/mcp"', "another broker"),
+                      ('http_headers_helper = ""', "no helper"),
+                      ('enabled = false', "disabled")):
+        text = config.read_text()
+        key = line.split(" =")[0]
+        broken = "\n".join(line if row.startswith(key) else row
+                           for row in text.splitlines())
+        config.write_text(broken)
+        assert not adapter.mcp_registered(tmp_path, "https://broker.test"), why
+        config.write_text(text)
+    config.write_text(config.read_text() + '\nbearer_token_env_var = "OTHER"\n')
+    assert not adapter.mcp_registered(tmp_path, "https://broker.test"), "competing credential"

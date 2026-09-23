@@ -549,7 +549,15 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
             continue
         try:
             found = {adapter.session_key(s): s for s in adapter.sessions(workdir)}
-        except OSError:
+        except Exception as e:                                   # noqa: BLE001
+            # A CENSUS THAT DIES STOPS BEING A CENSUS, SILENTLY. This reads
+            # another program's state -- a directory on one runtime, a daemon
+            # socket on the other -- so its failures are that program's, not
+            # this loop's, and any of them killing the task would end boot
+            # rings and reconciles for the life of the daemon with nothing
+            # said. Every tick is independent; a bad one is a log line.
+            print(f"reveille-waked: {agent}: census failed -- "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
             continue
         live = set(found)
         first = "sessions" not in state

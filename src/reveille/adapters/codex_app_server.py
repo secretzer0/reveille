@@ -41,9 +41,18 @@ CONNECT_TIMEOUT_S = 5
 CALL_TIMEOUT_S = 10
 CLIENT = {"name": "reveille", "title": "Reveille", "version": "1"}
 
-# A session that is mid-turn already has the floor; `turn/start` would queue
-# behind it and `turn/steer` would shove a ring into somebody's reasoning. Both
-# are worse than waiting, because the spool entry is not lost either way.
+# TWO QUESTIONS, NOT ONE -- and conflating them cost the census its eyes.
+# PRESENT is "is a body here": what the session census and the reachability
+# gate ask, and the answer stays yes while a turn runs. RINGABLE is "can it
+# take a turn right now", which only an idle thread can.
+#
+# Measured 2026-09-23, with two live TUIs in one directory: a ring left them at
+# {"type": "active", "activeFlags": ["waitingOnApproval"]} -- a turn blocked on
+# a human -- and a third read {"type": "systemError"}. With only "idle"
+# counting, the census saw an EMPTY directory and rang no boot for a body that
+# was plainly there, and every later ring refused with "no live session" while
+# naming the wrong problem.
+PRESENT = ("idle", "active")
 RINGABLE = ("idle",)
 
 
@@ -98,8 +107,13 @@ def _loaded_threads():
     return list((result.get(1) or {}).get("data") or [])
 
 
-def sessions(project):
-    """Every LIVE session whose cwd is `project`, as a list of thread ids.
+def sessions(project, states=PRESENT):
+    """Every live session whose cwd is `project`, as a list of thread ids.
+
+    `states` is which runtime statuses count. The default is PRESENCE, because
+    that is what the census and the reachability gate mean by a session; the
+    delivery path asks for RINGABLE. A `systemError` thread is neither: it is a
+    session that has stopped being one.
 
     All of them, not the newest -- the same reasoning as Claude's: a duplicate
     ring costs one turn and a skipped one costs every ring.
@@ -127,7 +141,7 @@ def sessions(project):
             continue
         if not thread.get("canAcceptDirectInput"):
             continue
-        if (thread.get("status") or {}).get("type") not in RINGABLE:
+        if (thread.get("status") or {}).get("type") not in states:
             continue
         out.append(tid)
     return out
@@ -140,11 +154,17 @@ def ring(project, text):
         return 0, (f"no Codex app-server socket at {sock} -- "
                    f"`codex app-server daemon start` runs the daemon")
     try:
-        found = sessions(project)
+        found = sessions(project, RINGABLE)
+        present = found or sessions(project)
     except (AdapterError, OSError, ValueError, concurrent.futures.TimeoutError) as e:
         return 0, str(e)
     if not found:
-        return 0, "no live Codex session in that directory"
+        # BUSY IS NOT ABSENT. The body is there and mid-turn -- `turn/start`
+        # would queue behind it and `turn/steer` would shove a ring into
+        # somebody's reasoning -- so the ring waits in the spool, which is
+        # where it already is, and the reason says which of the two it was.
+        return 0, ("the Codex session in that directory is mid-turn"
+                   if present else "no live Codex session in that directory")
     calls = [{"method": "turn/start", "id": i,
               "params": {"threadId": tid, "input": [{"type": "text", "text": text}]}}
              for i, tid in enumerate(found, start=20)]
