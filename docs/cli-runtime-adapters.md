@@ -215,12 +215,17 @@ running and reports `notRunning`, so a stop is not a reap.
 
 1. Route waked's credential reads/writes, rotation, parked state and
    acknowledgement through the adapter. Today those still read Claude's paths.
-2. The AUTHENTICATED CONNECTION is verified; the TOOL CALL is not. Against a
-   capturing endpoint, a Codex session in a provisioned directory sent
-   `X-Agent: codex-red-shirt` and `Authorization: Bearer ...` to `/mcp`, with
-   the identity resolved from cwd alone -- no path in the config, no
-   environment. What is still unobserved is the broker accepting that
-   connection and a tool returning a result, which needs a model turn.
+2. VERIFIED END TO END, 2026-09-23, on a local bus. A provisioned Codex
+   directory ran `codex`, and that body read its room, replied on a thread,
+   sent unicasts to a Claude agent, and UPLOADED a file -- which is a write
+   through the MCP, authenticated by the headers helper, with the identity
+   resolved from cwd alone. Presence read `runtime=codex, sessions=2,
+   connected=true`. The two runtimes then coordinated on a task across the
+   bus and each reviewed the other's work.
+
+   Earlier, and still the narrower proof: against a capturing endpoint, a
+   Codex session sent `X-Agent` and `Authorization` to `/mcp` with no path in
+   the config and nothing in the environment.
    The WAKE is not: on 2026-09-23 a ring delivered through
    `CodexAdapter.deliver` reached an idle TUI session, started a turn, and the
    body answered `Could not process the ring: - inbox() / bus tools are
@@ -242,9 +247,9 @@ Claude's behavior stays covered while adding: two projects with different Codex
 identities; ambiguous selection; malformed credentials; idempotent
 configuration merges; an untrusted project installing nothing; a full Codex
 install with no `claude` binary present; an identity-free shared block; a
-missing app-server reported rather than pretended; and an idle wake through
-the same app-server the terminal UI uses, which is observed. Still
-outstanding: a real authenticated MCP call from inside a Codex session.
+missing app-server reported rather than pretended; an idle wake through the
+same app-server the terminal UI uses; and a Codex body reading, replying and
+uploading over an authenticated MCP -- all observed.
 
 Research sources: [Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli),
 [instruction discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md),
