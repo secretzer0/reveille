@@ -540,16 +540,24 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
         return
     while True:
         await asyncio.sleep(interval_s)
+        # THE CENSUS ASKS THE RUNTIME, not a directory of Claude descriptors:
+        # Codex publishes none, and answers the same question from its
+        # app-server. A directory whose runtime cannot be resolved is simply
+        # not censused -- it is not an agent directory yet.
+        adapter, _why = doorbell.adapter_for(workdir)
+        if adapter is None:
+            continue
         try:
-            live = {pid for pid, _s, _t in doorbell.inboxes_for(workdir)}
+            found = {adapter.session_key(s): s for s in adapter.sessions(workdir)}
         except OSError:
             continue
+        live = set(found)
         first = "sessions" not in state
         arrived, departed = session_events(state.get("sessions", set()), live, first)
         state["sessions"] = live
         known = state.setdefault("known_sessions", {})
-        for pid in sorted(arrived):
-            sid = doorbell.session_id(pid)
+        for key in sorted(arrived):
+            sid = adapter.conversation_id(found[key])
             if not boot_due(sid, known):
                 # A RESUME IS NOT A BODY WITHOUT MEMORY. `claude --resume`
                 # starts a new pid carrying the SAME conversation, so its
@@ -557,15 +565,15 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
                 # ringing it to rehydrate spends a turn and the whole digest
                 # on memory it has (operator: no token spent on a poll with
                 # nothing to return).
-                print(f"reveille-waked: {agent}: session {pid} resumed "
+                print(f"reveille-waked: {agent}: session {key} resumed "
                       f"{sid[:8]} -- no boot ring", file=sys.stderr)
                 continue
-            print(f"reveille-waked: {agent}: session {pid} arrived -- ring boot",
+            print(f"reveille-waked: {agent}: session {key} arrived -- ring boot",
                   file=sys.stderr)
             write_ring(agent, boot_frame())
             state["last"] = time.time_ns()
             state["armed"] = True
-        remember_sessions(known, (doorbell.session_id(pid) for pid in live))
+        remember_sessions(known, (adapter.conversation_id(s) for s in found.values()))
         # THE LAST DEPARTURE STARTS A COOL-DOWN; IT DOES NOT FOLD. Any body
         # back inside it -- a resume, or a fresh session -- means the identity
         # is working again and its own next exit reconciles; nothing is lost,

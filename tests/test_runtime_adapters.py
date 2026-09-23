@@ -1,5 +1,6 @@
 """Runtime selection must not leak one project's identity into another CLI."""
 import json
+import pathlib
 from pathlib import Path
 import sys
 
@@ -170,10 +171,49 @@ def test_fresh_unattended_init_requires_runtime(tmp_path, monkeypatch, capsys):
 
 
 def test_sole_installed_runtime_reaches_adapter_preflight(tmp_path, monkeypatch, capsys):
+    """An untrusted project is a config Codex will not read -- installed and
+    unreachable -- so the preflight refuses and names every way to fix it."""
     from reveille import cli
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/codex" if name == "codex" else None)
     assert cli.main(["init", "--dir", str(tmp_path), "--no-prompt"]) == 1
-    assert "Codex project provisioning" in capsys.readouterr().err
+    said = capsys.readouterr().err
+    assert "does not trust" in said and "--trust-project" in said
+    assert "config.toml" in said
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_trust_is_granted_only_when_asked_for_and_then_verified(tmp_path, monkeypatch, capsys):
+    """Trust lets a directory run hooks, so it is the human's to give: the flag
+    is the unattended yes, and nothing else writes it."""
+    import tomllib
+    from reveille import cli
+    from reveille.adapters.codex_config import trust, trusted
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    project = tmp_path / "project"
+    project.mkdir()
+    assert not trusted(project)
+    path = pathlib.Path(trust(project))
+    assert path == home / "config.toml"
+    assert tomllib.loads(path.read_text())["projects"][str(project)]["trust_level"] == "trusted"
+    assert trusted(project)
+    # Idempotent, and it never touches anything else in that file.
+    path.write_text("model = \"example\"\n" + path.read_text())
+    trust(project)
+    assert tomllib.loads(path.read_text())["model"] == "example"
+    assert trusted(project)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(cli, "read_token", lambda *args: "")
+    monkeypatch.delenv("REVEILLE_URL", raising=False)
+    monkeypatch.delenv("REVEILLE_AGENT_ROLE", raising=False)
+    # Trusted now, so the preflight passes: what stops the run is the missing
+    # url and name, which is a sentence about THIS command line and not about
+    # the directory.
+    assert cli.main(["init", "--dir", str(project), "--no-prompt"]) == 2
+    said = capsys.readouterr().err
+    assert "does not trust" not in said
+    assert "REVEILLE_URL" in said
 
 
 def test_cross_runtime_identity_conflict_precedes_registration(tmp_path, monkeypatch, capsys):
@@ -200,9 +240,29 @@ def test_claude_instruction_block_is_unchanged_by_the_generic_synchroniser(tmp_p
 
 
 def test_a_runtime_without_instructions_writes_none(tmp_path):
-    """A runtime with no body of its own may never inherit another's (defect 7)."""
+    """A NEW runtime may never inherit another's text by default.
+
+    The base class has no body, so a third CLI added tomorrow refuses until
+    somebody decides what its file should say and where it lives -- rather
+    than quietly writing Claude's per-agent block into a shared file or
+    Codex's identity-free one into a private one."""
+    from reveille.adapters import RuntimeAdapter
+
+    class Newcomer(RuntimeAdapter):
+        name = "newcomer"
+        def credential_path(self, project): return Path(project) / ".new" / "cred.json"
+        def write_credential(self, project, url, name, token): ...
+        def mcp_registered(self, project, url): return False
+        def instruction_path(self, project): return Path(project) / "NEW.md"
+        def register_mcp(self, project, url, executable): return ""
+        def install_hooks(self, project): return ""
+        def sessions(self, project): return []
+        def session_key(self, session): return ""
+        def conversation_id(self, session): return ""
+        def deliver(self, project, agent, frame): return 0, ""
+
     with pytest.raises(AdapterError, match="not implemented"):
-        get_adapter("codex").sync_instructions(tmp_path, "bob", "devops")
+        Newcomer().sync_instructions(tmp_path, "bob", "devops")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -237,3 +297,32 @@ def test_a_malformed_marker_never_eats_the_surrounding_prose(tmp_path):
     text = path.read_text()
     assert text.startswith(f"before\n{DOCTRINE_END}\nafter\n")
     assert "body\n" in text
+
+
+def test_codex_instructions_carry_no_identity(tmp_path):
+    """Codex's file is the project's own AGENTS.md -- tracked, shared, and read
+    by every agent that opens the directory. A name or a role in it leaks one
+    agent's identity into a repo and makes two agents fight over one block."""
+    from reveille import instructions
+    adapter = get_adapter("codex")
+    path, what = adapter.sync_instructions(tmp_path, "secret-agent-name", "devops")
+    assert (path, what) == (tmp_path / "AGENTS.md", "created")
+    text = path.read_text()
+    assert "secret-agent-name" not in text
+    assert "devops" not in text
+    assert "You are the fleet's" not in text
+    assert str(tmp_path) not in text
+    # The RULES are the same rules: one doctrine, two places to put it.
+    assert instructions.BUS_RULES in text
+    assert instructions.BUS_RULES in instructions.doctrine_body("someone", "devops")
+    assert "join()" in text and "whoami()" in text
+
+
+def test_codex_never_hides_an_existing_agents_file(tmp_path):
+    """AGENTS.override.md REPLACES AGENTS.md in the same directory, so writing
+    one would hide the project's own instructions."""
+    (tmp_path / "AGENTS.md").write_text("Project rules a team wrote.\n")
+    path, what = get_adapter("codex").sync_instructions(tmp_path, "agent", "devops")
+    assert path == tmp_path / "AGENTS.md" and what == "appended"
+    assert path.read_text().startswith("Project rules a team wrote.\n")
+    assert not (tmp_path / "AGENTS.override.md").exists()

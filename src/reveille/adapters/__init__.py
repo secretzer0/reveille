@@ -109,6 +109,23 @@ class RuntimeAdapter(ABC):
         """
 
     @abstractmethod
+    def session_key(self, session) -> str:
+        """What makes this session ONE session, for a census of arrivals."""
+
+    @abstractmethod
+    def conversation_id(self, session) -> str:
+        """What makes this session the same CONVERSATION across a restart.
+
+        A RESUME IS NOT A BODY WITHOUT MEMORY. The census rings `boot` when a
+        session arrives so a new body goes and gets its digest; a resumed one
+        already holds what it read at its real boot, so ringing it spends a
+        turn and the whole digest on memory it has. The two runtimes keep that
+        identity in different places -- Claude in the conversation behind a new
+        pid, Codex in the thread id a session resumes -- and this is the one
+        place that difference lives.
+        """
+
+    @abstractmethod
     def deliver(self, project: Path, agent: str, frame: dict) -> tuple[int, str]: ...
 
 
@@ -157,6 +174,13 @@ class ClaudeAdapter(RuntimeAdapter):
         from reveille import doorbell
         return doorbell.inboxes_for(str(project))
 
+    def session_key(self, session):
+        return str(session[0])
+
+    def conversation_id(self, session):
+        from reveille import doorbell
+        return doorbell.session_id(session[0])
+
     def deliver(self, project, agent, frame):
         """Write the ring on every live session's own inbox socket.
 
@@ -182,7 +206,28 @@ class CodexAdapter(RuntimeAdapter):
     name = "codex"
 
     def validate_install(self, project):
-        raise AdapterError("Codex project provisioning is not implemented yet")
+        """The one Codex precondition an installer cannot supply for itself.
+
+        Codex reads a project's `.codex/` layer ONLY for a project marked
+        trusted in Codex's own home config -- config reference,
+        `projects.<path>.trust_level`: "Untrusted projects skip project-scoped
+        `.codex/` layers, including project-local config, hooks, and rules."
+        Writing a registration into an untrusted project produces a file
+        nothing reads: installed, and unreachable.
+
+        Trust is also what lets that directory run HOOKS, so it is never taken
+        as a side effect of installing. This refuses and names all three ways
+        to give it.
+        """
+        from .codex_config import codex_home, trusted
+        if trusted(project):
+            return
+        raise AdapterError(
+            f"Codex does not trust {Path(project).resolve()}, so it would ignore "
+            f"the .codex configuration this writes. Give trust in any one of "
+            f"three ways: re-run with --trust-project, answer the wizard, or "
+            f"open `codex` in that directory once and say yes -- it records the "
+            f"same entry in {codex_home() / 'config.toml'}")
 
     def credential_path(self, project):
         return Path(project) / ".codex" / "reveille.json"
@@ -223,9 +268,29 @@ class CodexAdapter(RuntimeAdapter):
                 "the app-server. A Stop-hook gate is available but must be "
                 "trusted by a human under `/hooks` before it runs")
 
+    def instructions_body(self, name, agent_type):
+        """The SHARED rules, with no identity in them.
+
+        `name` and `agent_type` are accepted and deliberately NOT written:
+        Codex's instruction file is the project's own AGENTS.md, which is
+        tracked and shared, and a per-agent name in it is both a leak and a
+        fight two agents in one checkout would commit. The identity is read
+        off the bus instead -- see instructions.shared_body().
+        """
+        from ..instructions import shared_body
+        return shared_body()
+
     def sessions(self, project):
         from .codex_app_server import sessions
         return sessions(project)
+
+    def session_key(self, session):
+        return str(session)
+
+    def conversation_id(self, session):
+        # A Codex thread id IS the conversation: resuming one keeps the id, so
+        # the census recognises a returning body without asking anything else.
+        return str(session)
 
     def deliver(self, project, agent, frame):
         from reveille import doorbell

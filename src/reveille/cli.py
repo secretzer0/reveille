@@ -990,6 +990,18 @@ def cmd_init(a):
             else:
                 raise AdapterError("choose --runtime claude or --runtime codex; "
                                    "the project has no unambiguous runtime selection") from None
+        # TRUST IS GIVEN BEFORE THE PREFLIGHT ASKS FOR IT, never instead of it.
+        # Codex ignores a project's .codex layer until the directory is
+        # trusted, so a run that was told to grant it does so here and the
+        # preflight then verifies the result rather than assuming it worked.
+        if adapter.name == "codex" and (a.trust_project or wizard):
+            from .adapters.codex_config import trust, trusted
+            if not trusted(workdir) and (a.trust_project or
+                                         ask("Trust this directory in Codex? "
+                                             "It lets .codex config and hooks "
+                                             "run here (y/n)").strip().lower()
+                                         .startswith("y")):
+                print(f"runtime: Codex trust recorded in {trust(workdir)}")
         adapter.validate_install(workdir)
         claims = project_claims(workdir)
     except AdapterError as e:
@@ -1788,6 +1800,12 @@ def main(argv=None):
     i.add_argument("--runtime", choices=("auto", *ADAPTERS), default="auto",
                    help="CLI adapter; auto uses saved selection, existing credentials, "
                         "or the sole installed CLI. Ambiguity requires an explicit choice")
+    i.add_argument("--trust-project", action="store_true",
+                   help="Codex only: mark this directory trusted in Codex's own "
+                        "config, which is what lets Codex read its .codex layer "
+                        "at all. Trust also lets that directory run hooks, so it "
+                        "is the human's to give -- the wizard asks, this is the "
+                        "unattended yes, and Codex asks once itself on first run")
     i.add_argument("--login", action="store_true",
                    help="mint through the PASSWORD door, for a broker that still "
                         "has one open. Reads the password from $REVEILLE_PASSWORD "
