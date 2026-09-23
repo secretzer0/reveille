@@ -325,7 +325,16 @@ def provision(name, directory, runtime, port, db):
     out = subprocess.run(cmd, input=secret + "\n", text=True, env=env)
     if out.returncode:
         raise SystemExit(f"local-bus: `reveille init` exited {out.returncode}")
+    bindir = _tree_script("reveille").parent
     print(f"local-bus: now run   cd {directory} && {runtime}")
+    # THE REGISTRATION NAMES A COMMAND ON PATH, and the TUI resolves it in the
+    # shell YOU start it from -- not in this one. A machine with a released
+    # reveille installed answers with that build, which for Codex does not know
+    # `--runtime codex` and hands back no identity at all; `init` refuses when
+    # that is already true here, and this is the line that makes the session
+    # agree with the bus it was provisioned against.
+    print(f'local-bus: in that shell, put this checkout first on PATH ->\n'
+          f'  export PATH="{bindir}:$PATH"')
     return 0
 
 

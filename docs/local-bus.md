@@ -92,6 +92,21 @@ uv run python scripts/local_bus.py provision \
 cd ~/agents/codex && codex
 ```
 
+In that shell, put this checkout first on PATH -- `provision` prints the exact
+line. The registration names `reveille-headers` by NAME, and the TUI resolves
+it in the shell you start it from; a machine with a released reveille installed
+answers with that build instead, which for Codex does not know `--runtime
+codex` and hands back no identity at all.
+
+Then drive it: the agent's MCP tools (`join()`, `inbox()`, `send()`) talk to
+the LOCAL broker, and the web UI at `/ui` is the other end of the same room.
+Send from the rail to that agent and watch its row: the inbound lane moves
+when a ring lands on the session, the outbound lane when the body calls the
+bus, and `connected` goes green once waked reports a session in that
+directory. waked starts itself from the Stop hook at the end of the first
+turn, against the URL in that directory's credential -- the local one, so
+nothing here touches a live bus.
+
 That session IS that agent: the same `reveille init` the fleet uses writes the
 credential, registers the MCP, verifies that the headers command answers with
 this identity, and records the directory for waked. Nothing is faked, which is
