@@ -23,16 +23,19 @@ refusal it produces.
 """
 import json
 import pathlib
+import argparse
+import sys
+
+from reveille.adapters import AdapterError, select_adapter
 
 
-def gather(root="."):
+def gather(root=".", runtime="auto"):
     """The headers for the agent directory at root, or {} when it is not one."""
     try:
-        cfg = json.loads(
-            (pathlib.Path(root) / ".claude" / "settings.local.json").read_text())
-    except (OSError, ValueError):
+        adapter = select_adapter(root, runtime)
+        env = adapter.identity(pathlib.Path(root))
+    except (AdapterError, OSError, ValueError):
         return {}
-    env = cfg.get("env", {})
     token = env.get("REVEILLE_TOKEN", "")
     name = env.get("REVEILLE_AGENT_ROLE", "")
     if not (token and name):
@@ -40,8 +43,18 @@ def gather(root="."):
     return {"Authorization": f"Bearer {token}", "X-Agent": name}
 
 
-def main():
-    print(json.dumps(gather()))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Project-local Reveille MCP headers")
+    parser.add_argument("--project", default=".")
+    parser.add_argument("--runtime", default="auto", choices=("auto", "claude", "codex"))
+    args = parser.parse_args(argv)
+    try:
+        adapter = select_adapter(args.project, args.runtime)
+    except AdapterError as e:
+        print(f"reveille-headers: {e}", file=sys.stderr)
+        print("{}")
+        return 0
+    print(json.dumps(gather(args.project, adapter.name)))
     return 0
 
 

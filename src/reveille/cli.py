@@ -44,6 +44,7 @@ import webbrowser
 from reveille import __version__
 
 from . import install, spool
+from .adapters import get_adapter
 from .devicecode import cli_code
 
 
@@ -1036,7 +1037,7 @@ def sync_claude_md(workdir, name, agent_type, version=__version__):
     which is what makes a later boot able to correct a doctrine that has moved on
     without asking a human to merge prose by hand.
     """
-    path = pathlib.Path(workdir) / "CLAUDE.local.md"
+    path = get_adapter("claude").instruction_path(pathlib.Path(workdir))
     body = doctrine_body(name, agent_type)
     block = doctrine_block(name, agent_type, version)
     if not path.exists():
@@ -1416,7 +1417,7 @@ def cmd_init(a):
         subprocess.run([claude, "mcp", "remove", "--scope", "user", "reveille"],
                        capture_output=True, text=True)
         try:
-            mcp_where = register_mcp_local(url, workdir, claude)
+            mcp_where = get_adapter("claude").register_mcp(workdir, url, claude)
         except RuntimeError as e:
             print(f"reveille init: REFUSING at step 1 of 3 -- {e}\n"
                   f"Nothing else was installed: a Stop hook beside a directory "
