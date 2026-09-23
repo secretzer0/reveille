@@ -83,7 +83,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 48
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -378,6 +378,27 @@ CREATE TABLE IF NOT EXISTS members (
     -- old daemon, and it must read as UNKNOWN rather than as the last value
     -- anyone saw.
     toolchain TEXT NOT NULL DEFAULT '',
+    -- WHICH CLI THIS BODY IS. Same rule as toolchain: written at ATTACH and
+    -- only there, '' means the body did not say. A fleet has flavours now, and
+    -- which one a body runs decides what can reach it.
+    runtime   TEXT NOT NULL DEFAULT '',
+    -- THE TWO DIRECTIONS OF BUS TRAFFIC, kept apart from seen_ns on purpose.
+    -- seen_ns is LIVENESS and a daemon heartbeat refreshes it; a heartbeat is
+    -- not a bus message in either direction, and animating it says the body
+    -- worked when only its daemon breathed.
+    --   spoke_ns  the BODY called the bus          (out: body -> bus)
+    --   rung_ns   a ring reached one of its sessions (in: bus -> body)
+    -- Timestamps, not events: a reader derives an event from a CHANGE, so a
+    -- client that missed an update still catches up and none of this needs a
+    -- server-side window to decide when motion stops.
+    spoke_ns  INTEGER NOT NULL DEFAULT 0,
+    rung_ns   INTEGER NOT NULL DEFAULT 0,
+    -- HOW MANY SESSIONS waked LAST SAW in this body's own directory. -1 means
+    -- it has never said, which is an old daemon, and must fall back to the
+    -- socket rule rather than read as "no body": a wake socket used to BE the
+    -- body, and since one host daemon holds a socket for every identity it is
+    -- only evidence that the DAEMON is up. 0 is a body that is gone.
+    sessions_n INTEGER NOT NULL DEFAULT -1,
     -- Set when the agent LEFT deliberately (DIRECTIVE:LEAVE). The row stays so
     -- that a departure is distinguishable from a reap: the reaper DELETES, and
     -- readmit() only fills a gap where no row exists. Without this column the
@@ -2423,6 +2444,29 @@ def _upgrade_v45(conn, db_path):
         conn.execute("PRAGMA user_version=46")
 
 
+def _upgrade_v47(conn, db_path):
+    """v47 -> v48: members.runtime, members.spoke_ns, members.rung_ns.
+
+    Additive, and '' / 0 are the correct values for every existing row: a body
+    that has not re-attached has not said which CLI it is, and a body whose
+    traffic nobody recorded has no traffic to report. Inventing either would be
+    a confident claim about something never observed.
+    """
+    with tx(conn):
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(members)")}
+        if "runtime" not in have:
+            conn.execute("ALTER TABLE members ADD COLUMN runtime TEXT NOT NULL "
+                         "DEFAULT ''")
+        for column in ("spoke_ns", "rung_ns"):
+            if column not in have:
+                conn.execute(f"ALTER TABLE members ADD COLUMN {column} INTEGER "
+                             f"NOT NULL DEFAULT 0")
+        if "sessions_n" not in have:
+            conn.execute("ALTER TABLE members ADD COLUMN sessions_n INTEGER "
+                         "NOT NULL DEFAULT -1")
+        conn.execute("PRAGMA user_version=48")
+
+
 def _upgrade_v46(conn, db_path):
     """v46 -> v47: conflict_verdicts -- a pair judged once is not judged again
     by the next agent in the room. Additive and idempotent: a new table, no
@@ -2435,7 +2479,7 @@ def _upgrade_v46(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43, 44, 45, 46)}
+              37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -5247,14 +5291,18 @@ def join(conn, name, tag, room_id, token_id=None, fresh=False, url=None,
         rname = cur["name"]
     else:
         rname = _room_name_for(conn, room_id, principal, name, now)
+    # ARRIVING IS TAKING A TURN (the same reading _arriving() gives it), so a
+    # join is the BODY speaking and stamps spoke_ns as well as seen_ns. The two
+    # are separate everywhere else precisely because a daemon's heartbeat
+    # refreshes one and not the other -- a join is not that.
     conn.execute(
         "INSERT INTO members(room_id, principal, name, tag, url, token_id, "
-        "joined_ns, seen_ns) VALUES(?,?,?,?,?,?,?,?) "
+        "joined_ns, seen_ns, spoke_ns) VALUES(?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(room_id, principal) DO UPDATE SET name=excluded.name, "
         "tag=excluded.tag, url=excluded.url, token_id=excluded.token_id, "
-        "seen_ns=excluded.seen_ns" +
+        "seen_ns=excluded.seen_ns, spoke_ns=excluded.spoke_ns" +
         (", left_ns=NULL" if clear_leave else ""),
-        (room_id, principal, rname, tag, url, token_id, now, now))
+        (room_id, principal, rname, tag, url, token_id, now, now, now))
     # Mark everything outside the catch-up window already-read: default joiners see
     # only recent traffic; fresh joiners start clean. history(since=...) recalls more.
     # EXCEPT THIS IDENTITY'S OWN MAIL (ruling 14046): a catch-up window may drop
@@ -5411,8 +5459,17 @@ def activity(conn, rooms, now=None):
     landed, and that mail is unread -- and each label here says only which of
     those is true:
 
-      active   a bus call from this agent landed within ACTIVE_GRACE. OBSERVED.
+      active   a bus call from THIS BODY landed within ACTIVE_GRACE. OBSERVED.
                This is the only one anything may animate.
+
+               IT READS spoke_ns, NOT seen_ns, and the difference is the whole
+               honesty of the label. seen_ns is LIVENESS: the wake attach
+               refreshes it and so does the daemon's heartbeat, and A HEARTBEAT
+               IS NOT A BUS MESSAGE IN EITHER DIRECTION (operator,
+               2026-09-23). Keyed on seen_ns this said `active` for every body
+               whose daemon merely breathed -- an equalizer bouncing for an
+               agent that had done nothing, which is the inference ruling 8676
+               exists to forbid.
       waiting  rung, direct mail unread, no call since. "Told, no answer yet."
       unsure   the same, past WAITING_CEILING. The honest label stops being
                "no answer yet" and becomes "no idea" long before the 900s deaf
@@ -5449,10 +5506,13 @@ def activity(conn, rooms, now=None):
 
     out = {}
     for m in conn.execute(
-            f"SELECT room_id, name, seen_ns FROM members "
+            f"SELECT room_id, name, spoke_ns FROM members "
             f"WHERE room_id IN ({_ph(rooms)}) AND left_ns IS NULL", rooms):
         key = (m["room_id"], m["name"])
-        if now - m["seen_ns"] <= ACTIVE_GRACE_NS:
+        # 0 is NEVER SPOKE, which no grace can make recent: a row that predates
+        # this column reads calm until its body's next call, which is the
+        # honest answer for traffic nobody recorded.
+        if m["spoke_ns"] and now - m["spoke_ns"] <= ACTIVE_GRACE_NS:
             out[key] = "active"                 # a call landed: the one we saw
         elif key in stuck:
             out[key] = ("waiting"
@@ -5732,8 +5792,8 @@ def agent_owner_moniker(conn, agent_id):
     return (r["name"], moniker_of(r)) if r else None
 
 
-def set_toolchain(conn, principal, rooms, toolchain):
-    """Record what this body is running, in every room it is attached to.
+def set_attach_facts(conn, principal, rooms, toolchain, runtime=""):
+    """Record what this body IS, in every room it is attached to.
 
     WRITTEN AT ATTACH AND ONLY THERE (F8.4). A body that converges execv's and
     re-attaches, so the row heals itself -- no sweep and no TTL, and nothing
@@ -5748,10 +5808,80 @@ def set_toolchain(conn, principal, rooms, toolchain):
         return 0
     rooms = list(rooms)
     cur = conn.execute(
-        f"UPDATE members SET toolchain=? WHERE principal=? AND "
+        f"UPDATE members SET toolchain=?, runtime=? WHERE principal=? AND "
         f"room_id IN ({_ph(rooms)}) AND left_ns IS NULL",
-        [(toolchain or "").strip()[:64], principal] + rooms)
+        [(toolchain or "").strip()[:64], (runtime or "").strip()[:32],
+         principal] + rooms)
     return cur.rowcount
+
+
+def set_sessions(conn, principal, rooms, count):
+    """How many sessions waked last saw in this body's own directory.
+
+    THE SOCKET STOPPED BEING THE BODY. `connected` asked whether a waked held a
+    wake socket for this identity, which was the same question while each body
+    ran its own daemon. One host daemon now holds a socket for every registered
+    identity, so that answer became "the host daemon is up" -- true for every
+    agent forever, including one whose directory has had no session for hours.
+    Measured 2026-09-23: native-doorbell-test, zero live sessions, reported
+    connected and painted green.
+
+    waked is the only thing that can see the difference, because the sessions
+    are on its machine. -1 is NEVER SAID and falls back to the old rule; a body
+    on an old daemon must not read as gone merely because it cannot speak yet.
+    """
+    if not rooms:
+        return 0
+    rooms = list(rooms)
+    try:
+        count = max(-1, int(count))
+    except (TypeError, ValueError):
+        return 0
+    return conn.execute(
+        f"UPDATE members SET sessions_n=? WHERE principal=? AND "
+        f"room_id IN ({_ph(rooms)}) AND left_ns IS NULL",
+        [count, principal] + rooms).rowcount
+
+
+def mark_spoke(conn, principal, rooms, now=None):
+    """THE BODY CALLED THE BUS. Out: body -> bus.
+
+    Written ONLY where a real call from the agent lands -- never at attach and
+    never on a heartbeat. A HEARTBEAT IS NOT A BUS MESSAGE IN EITHER DIRECTION
+    (operator, 2026-09-23): it is a daemon saying its socket is alive, and
+    `seen_ns` is where that belongs. Recording it here would make a body look
+    like it worked every time its daemon breathed, which is the inference
+    ruling 8676 forbids anything from animating.
+    """
+    if not rooms:
+        return 0
+    rooms = list(rooms)
+    return conn.execute(
+        f"UPDATE members SET spoke_ns=? WHERE principal=? AND "
+        f"room_id IN ({_ph(rooms)}) AND left_ns IS NULL",
+        [now or time.time_ns(), principal] + rooms).rowcount
+
+
+def mark_rung(conn, principal, rooms, now=None):
+    """A RING REACHED ONE OF THIS BODY'S SESSIONS. In: bus -> body.
+
+    THE OBSERVER IS waked, NOT THE BROKER, which is the whole reason this
+    exists as a separate write: the doorbell runs on the agent's own machine
+    and the broker never sees it. waked reports a delivery on the wake socket
+    it already holds.
+
+    WHAT IT MEANS, EXACTLY: waked wrote the ring onto a live session's socket
+    and that write succeeded. NOT that the body read it, and not that it acted
+    -- those are the body's to say by calling the bus, which is the other
+    direction.
+    """
+    if not rooms:
+        return 0
+    rooms = list(rooms)
+    return conn.execute(
+        f"UPDATE members SET rung_ns=? WHERE principal=? AND "
+        f"room_id IN ({_ph(rooms)}) AND left_ns IS NULL",
+        [now or time.time_ns(), principal] + rooms).rowcount
 
 
 def presence(conn, rooms):
@@ -5775,6 +5905,17 @@ def presence(conn, rooms):
          # it is behind the broker is the reader's comparison to make, not a
          # state this row asserts (14469). '' means the body has not said.
          "toolchain": (r["toolchain"] if "toolchain" in r.keys() else "") or "",
+         # WHICH CLI THIS BODY IS, said at the same attach and under the same
+         # rule: carried, never computed, and '' means it has not said.
+         "runtime": (r["runtime"] if "runtime" in r.keys() else "") or "",
+         # THE TWO DIRECTIONS, AS TIMESTAMPS. A reader derives an EVENT from a
+         # change, so a client that missed an update still catches up, and
+         # nothing here needs a window to decide when motion stops. 0 is "never
+         # observed", which is not the same as "a long time ago".
+         "spoke_ns": (r["spoke_ns"] if "spoke_ns" in r.keys() else 0) or 0,
+         "rung_ns": (r["rung_ns"] if "rung_ns" in r.keys() else 0) or 0,
+         # -1 is NEVER SAID (an old daemon), 0 is a body that is gone.
+         "sessions": (r["sessions_n"] if "sessions_n" in r.keys() else -1),
          # 14048: the resolved address rides presence, walked once broker-side.
          # A human row carries their own; an agent row carries its OWNER's --
          # either way it answers "what do I call the person here".

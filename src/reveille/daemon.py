@@ -3599,14 +3599,28 @@ def _human_live(agents):
 def _reachable(entry):
     """Is this member reachable in real time RIGHT NOW, in this room?
 
-    An agent is reachable when its wake waiter is attached; a HUMAN is reachable when a
-    browser tab holds this room's feed. Two transports, one meaning. This used to ask only
-    about the waiter, so a web user -- who never has one and never will -- was pinned to
-    "live, waiter down" forever: the UI asking a person whether they are running wake.py.
+    A HUMAN is reachable when a browser tab holds this room's feed. An AGENT is
+    reachable when a SESSION is there to ring -- which is not the same question
+    as whether a daemon holds a wake socket, and stopped being the same the day
+    one host waked began serving every identity on a machine. Measured
+    2026-09-23: native-doorbell-test, zero live sessions in its directory,
+    reported connected and painted green, because the host daemon was up.
+
+    So the count waked reports wins where it exists. -1 is NEVER SAID -- an old
+    daemon that cannot report yet -- and falls back to the socket, because a
+    body must not read as gone merely because its daemon is too old to speak.
+
+    REACHABLE IS NOT THE SAME AS PRESENT, and neither is the same as LEFT. A
+    member that is here but has no session keeps its row, keeps its name and is
+    still addressed the same way: mail queues and is read on the next turn. A
+    member that LEFT is not in presence at all.
     """
-    if _waiters.get(entry["token_id"]):
+    if (entry["room"], entry["name"]) in set(_feed.values()):
         return True
-    return (entry["room"], entry["name"]) in set(_feed.values())
+    said = entry.get("sessions", -1)
+    if said is not None and said >= 0:
+        return said > 0
+    return bool(_waiters.get(entry["token_id"]))
 
 
 @dataclass(frozen=True)
@@ -3887,6 +3901,20 @@ def _arriving(request) -> Principal:
         raise store.AuthError(UNBOUND_ACT)
     _poke_pending.pop(p.token_id, None)
     return p
+
+
+def _spoke(p):
+    """THE BODY CALLED THE BUS: a heartbeat AND the outbound direction.
+
+    A HEARTBEAT IS NOT A BUS MESSAGE IN EITHER DIRECTION (operator,
+    2026-09-23). The wake socket's attach and its `hb` are the daemon saying it
+    is alive; only a call from the agent itself is the body speaking. Both
+    refresh liveness, and exactly one of them is traffic -- so they get
+    different names here rather than a flag somebody forgets to pass.
+    """
+    _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+    with contextlib.suppress(store.BusError):
+        store.mark_spoke(_conn, speaker_key(p), list(p.rooms))
 
 
 def _seen(principal, name, rooms, token_id=None):
@@ -4508,7 +4536,7 @@ async def send(to: str, body: str, subject: str = "",
     # The other half of the handover grace (R2): the five fields have to reach
     # the room, not just the memory, or the peers watching a move learn nothing.
     p = _handing_over(ctx.request_context.request)
-    _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+    _spoke(p)
     rid = store.resolve_send_room(p.rooms, room=room or None,
                                   parent_room=_parent_room(reply_to))
     res = store.send(_conn, speaker_key(p), to, body, subject=subject, reply_to=reply_to,
@@ -4557,7 +4585,7 @@ async def inbox(ctx: Context = None) -> dict:
     came from. Non-destructive: ack(message_ids) when processed."""
     p = _me(ctx.request_context.request)
     if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
-        _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+        _spoke(p)
     # The wake poll: acks the poke and re-arms the gate. Keyed per agent, not per room --
     # this one call covers every room, so one ring was the right number. _acting
     # clears it for every OTHER act; this line covers the read-only callers that
@@ -4706,7 +4734,7 @@ async def history(keywords: str = "", since: str = "", until: str = "",
     graph()/thread() or an id to trace() to expand the reply DAG."""
     p = _me(ctx.request_context.request)
     if p.agent_id:                # being PRESENT is an act (11252): unbound reads only
-        _seen(speaker_key(p), p.name, p.rooms, p.token_id)
+        _spoke(p)
     msgs = store.search(
         _conn, keywords=keywords.split() or None,
         since_ns=_when_ns(since), until_ns=_when_ns(until),
@@ -4854,10 +4882,12 @@ async def wake_ws(ws: WebSocket):
     # keeping the previous value would turn "it has not said" into a confident
     # claim about a version nobody observed.
     with contextlib.suppress(store.BusError):
-        store.set_toolchain(_conn, principal,
-                            list(rooms), ws.query_params.get("toolchain", ""))
-    log.info("%s wake connected (%s room(s), toolchain %r)", name, len(rooms),
-             ws.query_params.get("toolchain", ""))
+        store.set_attach_facts(_conn, principal, list(rooms),
+                               ws.query_params.get("toolchain", ""),
+                               ws.query_params.get("runtime", ""))
+    log.info("%s wake connected (%s room(s), toolchain %r, runtime %r)",
+             name, len(rooms), ws.query_params.get("toolchain", ""),
+             ws.query_params.get("runtime", ""))
     q: asyncio.Queue = asyncio.Queue()
     # DES-003 2.3: one wake attachment per agent -- a SECOND attachment
     # SUPERSEDES the first (supersede, not refuse: a daemon respawned after a
@@ -4935,6 +4965,23 @@ async def wake_ws(ws: WebSocket):
                 break
             if recv in done:  # client data = its heartbeat; keep the agent LIVE
                 _seen(principal, name, rooms, tok["id"])
+                # A HEARTBEAT IS NOT A BUS MESSAGE IN EITHER DIRECTION
+                # (operator, 2026-09-23). It says the socket is alive, which is
+                # what _seen records, and nothing about whether a body worked
+                # or was reached. A daemon may also REPORT what it observes on
+                # its own machine, which the broker cannot see: how many
+                # sessions stand in the agent's directory, and that a ring it
+                # was handed actually landed on one. Anything unrecognised
+                # stays a heartbeat, so an old daemon's "hb" and a new
+                # daemon's report both work against either broker.
+                with contextlib.suppress(Exception):
+                    said = json.loads(recv.result())
+                    if isinstance(said, dict):
+                        if isinstance(said.get("sessions"), int):
+                            store.set_sessions(_conn, principal, list(rooms),
+                                               said["sessions"])
+                        if said.get("rung"):
+                            store.mark_rung(_conn, principal, list(rooms))
                 continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
