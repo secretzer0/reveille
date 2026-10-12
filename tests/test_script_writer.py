@@ -118,7 +118,7 @@ def world(tmp_path, monkeypatch):
     while not daemon._tts_q.empty():
         daemon._tts_q.get_nowait()
     v = store.voice_get(c, "quark")
-    item = (m["id"], room["id"], "quark", "s. terse body", daemon.clip_name(v), v, "s", "terse body")
+    item = (m["id"], room["id"], "quark", "s. terse body", daemon.clip_name(v), v, "s", "terse body", "")
     yield dict(c=c, mid=m["id"], room=room["id"], item=item, pushed=pushed, voice=v,
                quark=quark)
     # A rest still finishing on a helper thread must not outlive the world it
@@ -173,7 +173,7 @@ def test_a_slow_first_sentence_or_a_dead_writer_speaks_the_terse_text_now(llama,
     assert ok is False and daemon._tts_q.get_nowait()[3] == "s. terse body"
     # The SAME slow writer makes it when the body is long: 700 chars buy ~1 s.
     _Llama.tokens, _Llama.pace = ["Slow ", "start ", "here. ", "Done."], 0.6
-    long_item = world["item"][:7] + ("y" * 700,)
+    long_item = world["item"][:7] + ("y" * 700, "")
     ok = daemon._script_one(long_item, llama, "qwen", "", first_timeout=1.0, wait=True)
     assert ok is True and world["pushed"][0]["event"] == "script"
 
@@ -385,7 +385,7 @@ def test_two_scripts_finishing_on_two_threads_both_leave_rows(llama, world):
     connection lost every row written from the second thread, quietly."""
     c, v = world["c"], world["voice"]
     m2 = store.send(c, world["quark"], "*", "second body", room=world["room"])
-    item2 = (m2["id"], world["room"], "quark", "s. second body", daemon.clip_name(v), v, "s", "second body")
+    item2 = (m2["id"], world["room"], "quark", "s. second body", daemon.clip_name(v), v, "s", "second body", "")
     _Llama.tokens = ["First one. ", "Second one."]
     _Llama.pace = 0.05
     assert daemon._script_one(world["item"], llama, "qwen", "", first_timeout=1.5) is True

@@ -46,6 +46,7 @@ import sqlite3
 import time
 import uuid
 
+from reveille import lex as lexmod
 from reveille import timings
 
 # LIVE = heartbeat within this window. Exceeds the standup silence window (30m
@@ -83,7 +84,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 48
+SCHEMA_VERSION = 49
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -480,7 +481,11 @@ CREATE TABLE IF NOT EXISTS messages (
     -- backfilled (a group inferred after the fact asserts a set that may
     -- never have existed).
     send_group TEXT,
-    ts_ns     INTEGER NOT NULL
+    ts_ns     INTEGER NOT NULL,
+    -- The room's LEX version AT SEND (v49). A message decodes against the table
+    -- that was live when it was written, never the current one. NULL = the room
+    -- had no LEX then.
+    lex_ver   INTEGER
 );
 -- Receipts key on the IDENTITY (DES-011 s6.1(b); DES-007 4.3 said why a name
 -- cannot: a resurrected identity under a reused name would inherit the previous
@@ -779,6 +784,33 @@ CREATE TABLE IF NOT EXISTS conflict_verdicts (
 );
 """
 _SCHEMA += _CONFLICT_VERDICTS_SCHEMA
+# LEX (v49): a room's codebook for agent-to-agent messages, one FULL table per
+# version, append-only. A whole snapshot rather than an entry ledger: a table is
+# a few dozen rows, so the version a message was written under is one row read,
+# and a diff is computed when someone asks for one. A room with no row has no
+# LEX and is not enforced; adopting a first version is what opts it in.
+_LEX_SCHEMA = """
+CREATE TABLE IF NOT EXISTS lex_versions (
+    room        TEXT NOT NULL REFERENCES rooms(id),
+    ver         INTEGER NOT NULL,
+    entries     TEXT NOT NULL,         -- JSON [{"code", "means"}]
+    adopted_by  TEXT NOT NULL,
+    source_msg  INTEGER,
+    adopted_ns  INTEGER NOT NULL,
+    PRIMARY KEY (room, ver)
+);
+-- A VOTE IS A ROW, NEVER A MESSAGE: a `+` on the bus is delivered to every
+-- reader, rings the thread and is voiced -- noise paid by everyone for one bit.
+-- One row per (proposal, voter); a re-vote replaces it.
+CREATE TABLE IF NOT EXISTS lex_votes (
+    proposal_id INTEGER NOT NULL REFERENCES messages(id),
+    voter       TEXT NOT NULL,         -- agent id
+    yes         INTEGER NOT NULL,
+    voted_ns    INTEGER NOT NULL,
+    PRIMARY KEY (proposal_id, voter)
+);
+"""
+_SCHEMA += _LEX_SCHEMA
 _SCHEMA += _VOICES_SCHEMA
 # messages_fts (DES-001 S1; tokenizer measured on the live corpus, bus msg 8366):
 # unicode61 with tokenchars '-_' keeps fleet vocabulary (ADR-061, wake-127, run_id) as
@@ -2467,6 +2499,17 @@ def _upgrade_v47(conn, db_path):
         conn.execute("PRAGMA user_version=48")
 
 
+def _upgrade_v48(conn, db_path):
+    """v48 -> v49: lex_versions + messages.lex_ver. Additive: no room has a LEX
+    until one is adopted, and NULL is the true stamp for every existing message."""
+    with tx(conn):
+        _exec_script(conn, _LEX_SCHEMA)
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+        if "lex_ver" not in have:
+            conn.execute("ALTER TABLE messages ADD COLUMN lex_ver INTEGER")
+        conn.execute("PRAGMA user_version=49")
+
+
 def _upgrade_v46(conn, db_path):
     """v46 -> v47: conflict_verdicts -- a pair judged once is not judged again
     by the next agent in the room. Additive and idempotent: a new table, no
@@ -2479,7 +2522,7 @@ def _upgrade_v46(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47)}
+              37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -6119,6 +6162,165 @@ def resolve_send_room(rooms, room=None, parent_room=None):
     raise AmbiguousRoom([{"id": r, "name": n} for r, n in rooms.items()])
 
 
+def lex_table(conn, room, ver=None):
+    """The room's LEX at `ver` (default: current) as {room, ver, table,
+    adopted_by, source_msg, adopted_ns}, or None when the room has none."""
+    q = "SELECT * FROM lex_versions WHERE room=?"
+    args = [room]
+    if ver is not None:
+        q += " AND ver=?"
+        args.append(ver)
+    r = conn.execute(q + " ORDER BY ver DESC LIMIT 1", args).fetchone()
+    if r is None:
+        return None
+    return {"room": r["room"], "ver": r["ver"], "table": json.loads(r["entries"]),
+            "adopted_by": r["adopted_by"], "source_msg": r["source_msg"],
+            "adopted_ns": r["adopted_ns"]}
+
+
+def lex_vers(conn, rooms):
+    """{room: current LEX version} for the rooms that have one."""
+    rooms = list(rooms)
+    if not rooms:
+        return {}
+    return {r[0]: r[1] for r in conn.execute(
+        f"SELECT room, MAX(ver) FROM lex_versions WHERE room IN ({_ph(rooms)}) "
+        f"GROUP BY room", rooms)}
+
+
+def lex_adopt(conn, room, proposal, *, adopted_by, ver=None, source_msg=None):
+    """Adopt the next LEX version for `room`: the current table (the reveille
+    seed, for a room's first -- which opts the room in) with `proposal` applied.
+    `proposal` is the same L?... text an agent sends on the bus; empty adopts
+    the table unchanged (an opt-in on the bare seed). Linted whole: a table
+    that decodes two ways is refused. `ver` carries a room's existing
+    numbering and must exceed the current one. Authority is the caller's."""
+    cur = lex_table(conn, room)
+    try:
+        change = lexmod.proposals(proposal) or {}
+        table = lexmod.apply(cur["table"] if cur else lexmod.seed(), change)
+    except lexmod.LexError as e:
+        raise BusError(str(e)) from None
+    nxt = (cur["ver"] + 1) if cur else 1
+    if ver is not None:
+        if ver < nxt:
+            raise BusError(f"LEX v{ver} refused: room is at v{nxt - 1}; the next is v{nxt} or above")
+        nxt = ver
+    if source_msg is not None and not conn.execute(
+            "SELECT 1 FROM messages WHERE id=? AND room=?", (source_msg, room)).fetchone():
+        raise BusError(f"source {source_msg}: no such message in this room")
+    with tx(conn):
+        conn.execute("INSERT INTO lex_versions(room, ver, entries, adopted_by, source_msg, "
+                     "adopted_ns) VALUES(?,?,?,?,?,?)",
+                     (room, nxt, json.dumps(table, separators=(",", ":")), adopted_by,
+                      source_msg, time.time_ns()))
+    return lex_table(conn, room, nxt)
+
+
+LEX_VOTE_NS = 24 * 3600 * 10**9   # a proposal is open this long, and the room's
+                                  # electorate is the agents who spoke in it this long
+
+
+def lex_vote(conn, principal, proposal_id, yes, rooms):
+    """An agent's vote on a proposal: a row, not a message (see lex_votes).
+    Returns lex_tally's verdict, so the vote that carries it says so."""
+    aid = agent_of(principal)
+    if not aid:
+        raise AccessError("lex_vote is for agents; a human replies `+` on the bus")
+    p = conn.execute("SELECT room, body, ts_ns FROM messages WHERE id=?",
+                     (proposal_id,)).fetchone()
+    try:
+        ok = p is not None and lexmod.proposals(p["body"])
+    except lexmod.LexError:
+        ok = False
+    if p is not None and p["room"] not in rooms:
+        raise AccessError(f"m{proposal_id}: no access to its room")
+    if not ok:
+        raise BusError(f"m{proposal_id}: not a LEX proposal")
+    if time.time_ns() - p["ts_ns"] > LEX_VOTE_NS:
+        raise BusError(f"m{proposal_id}: voting closed (24h); propose it again")
+    with tx(conn):
+        conn.execute("INSERT OR REPLACE INTO lex_votes(proposal_id, voter, yes, voted_ns) "
+                     "VALUES(?,?,?,?)", (proposal_id, aid, 1 if yes else 0, time.time_ns()))
+    return {"room": p["room"], "verdict": lex_tally(conn, p["room"], proposal_id)}
+
+
+def lex_tally(conn, room, proposal_id):
+    """THE ROOM GROWS ITS OWN LEX. Count the votes on a proposal -- agents' rows
+    in lex_votes, the proposer counted yes -- and adopt when a HUMAN replies `+`
+    (override) or a strict majority of the room's electorate (agents that spoke
+    in it within 24h) votes yes, with at least two yes. A room with no LEX yet
+    opts in only by a human `+`.
+    Returns {"adopted": ver} | {"refused": why} | None (still open)."""
+    p = conn.execute("SELECT id, body, ts_ns, sender_agent_id FROM messages "
+                     "WHERE id=? AND room=?", (proposal_id, room)).fetchone()
+    now = time.time_ns()
+    if p is None or now - p["ts_ns"] > LEX_VOTE_NS:
+        return None
+    try:
+        if not lexmod.proposals(p["body"]):
+            return None
+    except lexmod.LexError:
+        return None
+    if conn.execute("SELECT 1 FROM lex_versions WHERE room=? AND source_msg=?",
+                    (room, proposal_id)).fetchone():
+        return None                                   # already adopted
+    votes = {r[0]: r[1] for r in conn.execute(
+        "SELECT voter, yes FROM lex_votes WHERE proposal_id=?", (proposal_id,))}
+    if p["sender_agent_id"]:
+        votes.setdefault(p["sender_agent_id"], 1)
+    human_yes = next((r["sender"] for r in conn.execute(
+        "SELECT m.sender, m.body FROM links l JOIN messages m ON m.id=l.child_id "
+        "WHERE l.parent_id=? AND m.sender_agent_id IS NULL AND m.ts_ns<=?",
+        (proposal_id, p["ts_ns"] + LEX_VOTE_NS))
+        if (r["body"] or "").split(None, 1)[:1] == ["+"]), None)
+    has_lex = lex_table(conn, room) is not None
+    yes = sum(votes.values())
+    electorate = conn.execute(
+        "SELECT COUNT(DISTINCT sender_agent_id) FROM messages WHERE room=? AND "
+        "sender_agent_id IS NOT NULL AND ts_ns>?", (room, now - LEX_VOTE_NS)).fetchone()[0]
+    quorum = has_lex and yes >= 2 and yes * 2 > electorate
+    if not (human_yes or quorum):
+        return None
+    try:
+        t = lex_adopt(conn, room, p["body"], source_msg=proposal_id,
+                      adopted_by=human_yes or f"quorum {yes}/{electorate}")
+    except BusError as e:
+        return {"refused": str(e)}
+    return {"adopted": t["ver"]}
+
+
+LEX_HINT_WINDOW = 2000   # recent room messages a phrase is counted across
+
+
+def _prose_seen(conn, room, phrases):
+    """[(phrase, times)] -- how often each "..." phrase was already quoted in
+    the room's recent LEX messages, plus this one. The pushback that grows the
+    LEX: what the room keeps spelling out is what it should have a code for."""
+    out = []
+    floor = conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages WHERE room=?",
+                         (room,)).fetchone()[0] - LEX_HINT_WINDOW
+    for p in dict.fromkeys(phrases):
+        if not p:
+            continue
+        pat = '%"' + re.sub(r"([%_\\])", r"\\\1", p) + '"%'
+        n = conn.execute("SELECT count(*) FROM messages WHERE room=? AND id>? AND "
+                         "lex_ver IS NOT NULL AND body LIKE ? ESCAPE '\\'",
+                         (room, floor, pat)).fetchone()[0]
+        out.append((p, n + 1))
+    return out
+
+
+def lex_of_message(conn, mid):
+    """(body, table, ver) for a message written under a LEX, else None."""
+    r = conn.execute("SELECT room, body, lex_ver FROM messages WHERE id=?",
+                     (mid,)).fetchone()
+    if r is None or r["lex_ver"] is None:
+        return None
+    t = lex_table(conn, r["room"], r["lex_ver"])
+    return None if t is None else (r["body"], t["table"], t["ver"])
+
+
 def send(conn, principal, recipient, body, subject="", reply_to=None, attachments=None,
          room=None, send_group=None):
     """Insert a message from `principal` (agent:<id> | user:<id>, DES-011
@@ -6165,12 +6367,25 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
                 raise BusError(f"reply_to {p}: no such message in this room")
         parent_id = parents[0]                      # primary parent
         thread_id = found[parents[0]]["thread_id"]  # joins the primary parent's thread
+    # LEX IS ENFORCED, NOT ADVISED: in a room that has adopted one, an AGENT's
+    # message must decode -- codes, refs, quoted free text. A person is never
+    # held to it; their words are the record. The stamp is what lets a reader
+    # (and the script writer) decode against the table live at send.
+    table = lex_table(conn, room)
+    if table is not None and agent_of(principal):
+        why = lexmod.refusal(f"{subject} {body}" if subject else body,
+                             table["table"], table["ver"])
+        if why:
+            raise BusError(why)
+        lex_hints = lexmod.hints(_prose_seen(conn, room, lexmod.prose(body)), table["table"])
+    else:
+        lex_hints = []
     now = time.time_ns()
     with tx(conn):
         cur = conn.execute(
             "INSERT INTO messages(thread_id, parent_id, sender, recipient, subject, "
-            "body, room, send_group, sender_agent_id, recipient_agent_id, ts_ns) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "body, room, send_group, sender_agent_id, recipient_agent_id, ts_ns, lex_ver) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (thread_id, parent_id, sender, recipient, subject, body, room, send_group,
              # BOTH IDENTITIES FROM THE STORE'S OWN KEYS: the sender's from the
              # principal the caller proved (the credential -- never agent_id_for
@@ -6178,7 +6393,8 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
              # is that a column the writer skips is a backfill that rots), the
              # recipient's from the members row the room-name resolves to
              # (DES-011 s3). A person on either side is NULL.
-             agent_of(principal), recipient_agent_id(conn, room, recipient), now))
+             agent_of(principal), recipient_agent_id(conn, room, recipient), now,
+             table["ver"] if table else None))
         mid = cur.lastrowid
         # Manual FTS sync (DES-001 S1): external-content tables index nothing on their
         # own; every insert here must be mirrored or the message is unsearchable.
@@ -6197,9 +6413,14 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
                          "VALUES(?,?,?,?,?,?)",
                          (mid, a["url"], a.get("name"), a.get("bytes"),
                           1 if a.get("clip") else 0, a.get("duration_s")))
+    # A HUMAN's `+` reply may be the override that adopts the proposal it
+    # answers. Agents vote with lex_vote(), never with a message.
+    lex_vote = (lex_tally(conn, room, parent_id)
+                if parent_id is not None and not agent_of(principal) else None)
     targets = _wake_targets(conn, principal, recipient, room)
     uid = user_of(principal)
     return {"id": mid, "thread_id": thread_id, "parents": parents, "sender": sender,
+            "lex_hints": lex_hints, "lex_vote": lex_vote,
             "owner": _owner_name(conn, principal),
             # 14056: A MESSAGE CARRIES ITS SENDER'S RESOLVED MONIKER AT
             # DELIVERY -- walked here, once, for the rings this send fires.
@@ -6214,6 +6435,10 @@ def _msg(r):
          "body": r["body"], "room": r["room"], "ts_ns": r["ts_ns"]}
     with contextlib.suppress(IndexError, KeyError):
         m["room_name"] = r["room_name"]
+    # The LEX version to decode this body against; absent = written under none.
+    with contextlib.suppress(IndexError, KeyError):
+        if r["lex_ver"] is not None:
+            m["lex"] = r["lex_ver"]
     # ADVISORY render data (14434): the composer-minted submit id, so any
     # client MAY collapse one submit's copies into one row; none must. NULL
     # rides as absent-or-None, and nothing downstream may invent one.
