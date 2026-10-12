@@ -600,6 +600,7 @@ def test_nothing_is_made_that_nobody_would_hear(monkeypatch):
     _feed, dropped with it."""
     monkeypatch.setattr(daemon, "_tts_on", True)
     monkeypatch.setattr(store, "voice_for", lambda *a: None)
+    monkeypatch.setattr(store, "lex_of_message", lambda *a: None)
     q1, q2 = asyncio.Queue(), asyncio.Queue()
     monkeypatch.setattr(daemon, "_feed", {q1: ("r1", "travis"), q2: ("r2", "vyzon")})
     monkeypatch.setattr(daemon, "_feed_voice", {q1: False, q2: True})

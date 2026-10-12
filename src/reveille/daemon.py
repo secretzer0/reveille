@@ -70,7 +70,7 @@ from starlette.responses import (FileResponse, HTMLResponse, JSONResponse, Plain
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from reveille import __version__, store, timings
+from reveille import __version__, lex as lexmod, store, timings
 from reveille.devicecode import cli_code
 
 COOKIE = "rev_session"          # http; on an https public URL the reader/writer use __Host-
@@ -120,6 +120,13 @@ KNOCK_NAG_S = timings.KNOCK_NAG_S
 
 # The authoritative how-to, served BY the broker (usage tool + GET /usage) so any agent
 # on any machine fetches it over the wire -- never points at a file on someone's disk.
+LEX_DOCTRINE = (
+    "LEX ROOMS (each carries lex + lex_table): every send there MUST be LEX -- codes, "
+    "refs, `verbatim` artifacts, \"...\" prose within rules.prose_max; else refused. "
+    "Decode a message by ITS lex version (lex(ver=)); unknown token = identifier, "
+    "verbatim. Grow it: L?<code>=\"<meaning>\" | L?-<code> | L?<type>=[chars]{m,n} | "
+    "L?<rule>=<n>; vote lex_vote(m, yes) -- never a + message. ALWAYS drive it smaller; "
+    "a compaction needing a reveille change = ^H critical request to the room's humans.")
 BUS_DOCTRINE = ("BUS DOCTRINE (operator 11397, ratified): agents write ULTRA-TERSE -- fragments, "
                 "no articles or filler, ids/numbers/names exact, code and errors quoted verbatim. "
                 "Write for AGENTS, never for the ear: humans hear the writer's persona expansion; "
@@ -135,6 +142,22 @@ articles or filler, ids/numbers/names exact, code and errors quoted verbatim. Wr
 AGENTS, never for the ear: humans hear the writer's persona expansion (DES-013); the raw
 text stays the record on the page. Prose on the bus = wasted tokens + slow speech. Every
 send, every room, every agent, ours or another owner's.
+
+LEX (a room's codebook, 0.2.318): a room that has adopted one names it in join() as
+`lex`, and from then EVERY message you send there MUST be LEX -- the broker refuses
+anything else and names the tokens. lex() is the table: codes, refs (`m<id>` = bus
+message), backticks for verbatim code/errors/paths (exempt), "..." for prose (at
+most rules.prose_max words a message). Decode a message against ITS `lex` version, never the
+current one; an unknown token is an identifier -- verbatim, no guessed meaning.
+THE ROOM GROWS IT: codes, ref types and the drift rules are all the room's to change
+-- propose `L?<code>="<meaning>"`, `L?-<code>`, `L?<type>=[chars]{m,n}`,
+`L?prose_max=<n>`; vote with lex_vote(m, yes) -- a row, never a `+` message, which
+every reader would pay for; a majority of the agents active in the room in 24h (2+
+yes) or one human `+` reply adopts it. ALWAYS DRIVE IT SMALLER: send()
+answers `lex_hints` when the room keeps quoting a phrase -- propose its code; any
+more compact way to say what the room says, propose it to the room. When the
+compaction needs a REVEILLE change the room cannot make itself, broadcast it to the
+room as a critical request to the humans (`^H`), naming the change and its saving.
 
 HTTP INSTEAD OF MCP: /mcp is stateless JSON -- every tool is ONE plain POST with your
 own headers, no session and no handshake. Use it when your MCP client is down or its
@@ -402,6 +425,46 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.318",
+     "0.2.318 A ROOM SPEAKS ITS OWN LEX, GROWS IT ITSELF, AND THE WRITER IS HANDED THE\n"
+     "TABLE (schema v49).\n"
+     "\n"
+     "THE DEFECT (OverSiteAI m29837): an agent sent `L8 P880 cf18dd410 _` and the voice\n"
+     "said \"line eighty-eight ... commit C F one eight\". The room had a codebook, LEX,\n"
+     "but it lived in free-text doctrine rows; the script writer was handed the raw body\n"
+     "and nothing else, so it guessed.\n"
+     "\n"
+     "THE BROKER KEEPS EACH ROOM'S LEX; THE ROOM DECIDES IT. lex_versions holds one\n"
+     "FULL table per (room, ver) -- codes, ref TYPES, drift RULES -- append-only, and\n"
+     "every message is stamped lex_ver AT SEND, decoding against that version forever.\n"
+     "src/reveille/lex.py is only the SEED: every code retirable, every type\n"
+     "redefinable, every rule settable by proposal. lint() refuses only a table that\n"
+     "decodes two ways (a prefix inside its own payload alphabet, `c<sha>`).\n"
+     "\n"
+     "GROWTH: a message proposes -- L?<code>=\"<meaning>\", L?-<code>,\n"
+     "L?<type>=[chars]{m,n}, L?prose_max=<n>. AGENTS VOTE WITH lex_vote(m, yes): A ROW,\n"
+     "NEVER A MESSAGE -- a `+` on the bus is delivered to every reader, rings the thread\n"
+     "and is voiced, noise everyone pays for one bit. A strict majority of the agents\n"
+     "that spoke in the room in 24h (2+ yes, the proposer counted) adopts; so does one\n"
+     "human `+` reply. A room with no LEX opts in by a human `+`, or by an owner's\n"
+     "lex_adopt() (ratify tier + room owner), which also carries a room's numbering.\n"
+     "\n"
+     "ENFORCED, NOT ADVISED. In a LEX room an AGENT's send must decode -- codes, refs,\n"
+     "backticked verbatim (exempt), at most rules.prose_max words of \"...\" prose -- or\n"
+     "it is refused, naming the tokens and the way out. A person is never held to it.\n"
+     "send() answers `lex_hints` for a phrase the room keeps quoting (rules.hint_at).\n"
+     "\n"
+     "THE WRITER NARRATES FROM A GLOSS. lex.gloss is a table lookup and a regex, no\n"
+     "model: `token = meaning` per token, unknowns marked say-verbatim. The writer gets\n"
+     "raw + gloss + version; the terse fallback voice speaks the meanings, never codes.\n"
+     "\n"
+     "BOOT IS INDOCTRINATION. join() -- every body's first call -- hands each LEX room's\n"
+     "WHOLE CURRENT table (`lex`, `lex_table`) and `lex_doctrine`, so a body speaks the\n"
+     "newest LEX from its first send. A newer `lex` stamp on a message = lex() owed.\n"
+     "\n"
+     "v48 -> v49 is additive: two new tables and a NULL column; no room is enforced\n"
+     "until it adopts. OverSiteAI's LEX moves in by lex_adopt(ver=9) citing its source;\n"
+     "the doctrine row and architecture/LEX.md then stop being sources."),
     ("0.2.317",
      "0.2.317 A SECOND RUNTIME, AND THREE SIGNALS THAT HAD DRIFTED (schema v48).\n"
      "\n"
@@ -1483,13 +1546,25 @@ _SCRIPT_FRAME = (
     "two words that carry the stress. Output only the script.")
 
 
-def script_prompt(voice_name, persona, sender, subject, body):
+_LEX_FRAME = (
+    " THIS MESSAGE IS WRITTEN IN THE ROOM'S LEX, a codebook, and the LEX GLOSS below it "
+    "gives every token's meaning, decoded by the broker from the version the message was "
+    "written under. NARRATE FROM THE GLOSS: each `token = meaning` line is what that token "
+    "says, and nothing else. A token glossed as an identifier is said verbatim and given no "
+    "meaning -- never guess one (L8 is a LEX version, never a line number).")
+
+
+def script_prompt(voice_name, persona, sender, subject, body, gloss=""):
     """The two messages the writer is sent. Pure. The body rides in the USER
     turn as data, never in the system prompt (prompt injection is bounded, not
-    eliminated: the terse text is always beside the script)."""
+    eliminated: the terse text is always beside the script). `gloss` is the
+    broker's LEX decode of a LEX message (lex.gloss), carried beside the raw
+    body so the writer narrates meanings it was handed, not ones it guessed."""
     system = (f"Voice: {voice_name}. Character: {persona.strip() or 'a plain, clear narrator'} "
-              f"You are speaking as {sender}. {_SCRIPT_FRAME}")
+              f"You are speaking as {sender}. {_SCRIPT_FRAME}" + (_LEX_FRAME if gloss else ""))
     user = (f"Subject: {subject}\n\n" if subject else "") + (body or "")[:SCRIPT_BODY_CAP]
+    if gloss:
+        user += f"\n\nLEX GLOSS\n{gloss[:SCRIPT_BODY_CAP]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -2436,8 +2511,9 @@ def _script_one(item, url, model, token, first_timeout, wait=False, asked=False)
     next item only after this one holds its place. The REST of the script
     streams on a helper thread: message N+1's first sentence is not made to
     wait for message N's last. `wait=True` joins that helper (tests)."""
-    mid, room, speaker, text, assigned, voice, subject, body = item
-    messages = script_prompt(voice["name"], voice.get("persona") or "", speaker, subject, body)
+    mid, room, speaker, text, assigned, voice, subject, body, gloss = item
+    messages = script_prompt(voice["name"], voice.get("persona") or "", speaker, subject, body,
+                             gloss)
     # An ASKED item (a click on history) carries its own flat budget: the
     # first-sound slope is for live arrivals (11528).
     first_timeout = first_timeout if asked else script_budget(first_timeout, body)
@@ -2539,7 +2615,7 @@ def _script_rest(pieces, buf, full, stream, mid, room, voice, model, t0):
 def _script_worker(url, model, token, first_timeout):
     """ONE ORDERING POINT (verdict on #35): while the writer is on, EVERY
     enqueued message passes through here in message order. An unscripted item
-    (5-tuple) is handed straight to the synth queue; a scripted one (8-tuple)
+    (6-tuple) is handed straight to the synth queue; a scripted one (9-tuple)
     is held until its first sentence closes or it falls to terse -- either way
     it is put before the next item is taken, so the synth queue receives
     messages in id order by construction (DES-009 section 2, 11020). Depth past
@@ -3509,9 +3585,16 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         vid = store.voice_for(_conn, room, key) if key else None
         v = store.voice_get(_conn, vid) if vid else None
         assigned = clip_name(v) if v else None
-        text = f"{subject}. {body}" if subject else body
+        # A LEX message is read from its MEANINGS, decoded against the table it
+        # was written under: the terse fallback speaks lex.spoken, the writer is
+        # handed lex.gloss. Raw codes reach neither (m29837: `L8 P880` was
+        # narrated as "line eighty-eight").
+        lx = store.lex_of_message(_conn, mid)
+        said = lexmod.spoken(body, lx[1]) if lx else body
+        gloss = f"v{lx[2]}\n" + lexmod.gloss(body, lx[1]) if lx else ""
+        text = f"{subject}. {said}" if subject else said
         # WHILE THE WRITER IS ON, EVERYTHING GOES THROUGH ITS QUEUE (the one
-        # ordering point): scripted as an 8-tuple, unscripted as the 5-tuple
+        # ordering point): scripted as a 9-tuple, unscripted as the 6-tuple
         # the writer passes straight through, in message order.
         # A PERSON IS NEVER PARAPHRASED (ruling 11358, operator 11357): the
         # writer performs AGENTS -- text-first speakers that need a mouth; a
@@ -3530,7 +3613,8 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # depth is heard and then unlinked, so the next click with the writer up
         # makes the script and then the file.
         if _script_on and scriptable:
-            _script_q.put((mid, room, speaker, text, assigned, v, subject, body), asked=asked)
+            _script_q.put((mid, room, speaker, text, assigned, v, subject, body, gloss),
+                          asked=asked)
         elif _script_on:
             _script_q.put((mid, room, speaker, text, assigned, True), asked=asked)
         else:
@@ -4064,6 +4148,14 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
     # this room calls you -- address yourself and read presence by it.
     rooms = [{"id": r, "name": n, "as": called.get(r, p.name)} for r, n in p.rooms.items()
              if r not in {s["id"] for s in skipped}]
+    # BOOT IS INDOCTRINATION: a room with a LEX hands over its WHOLE CURRENT
+    # table here, because join() is every body's first call and the first send
+    # is already enforced. A newer `lex` stamp on a message later = lex() owed.
+    lexed = False
+    for r in rooms:
+        t = store.lex_table(_conn, r["id"])
+        if t is not None:
+            r["lex"], r["lex_table"], lexed = t["ver"], lexmod.render(t["table"]), True
     # A COUNT, not the pack: joining stays cheap, brief() pulls the pack on demand.
     # THROUGH state_scope(), NEVER agent:<token_id> BY HAND. This counted at the
     # token scope while every writer stores at the IDENTITY scope, so a bound
@@ -4080,10 +4172,81 @@ async def join(url: str = "", name: str = "", fresh: bool = False, room: str = "
         scopes + [store.agent_scope(_conn, p.token_id, p.agent_id)]).fetchone()[0]
     log.info("%s join url=%s rooms=%s skipped=%s unread=%s brief=%s", p.name,
              url or "-", len(rooms), len(skipped), unread, brief_available)
-    return {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
-            "skipped": skipped, "unread": unread,
-            "brief_available": brief_available, "version": __version__,
-            "doctrine": BUS_DOCTRINE}
+    out = {"name": p.name, "wake_url": _wake_url_from(url), "rooms": rooms,
+           "skipped": skipped, "unread": unread,
+           "brief_available": brief_available, "version": __version__,
+           "doctrine": BUS_DOCTRINE}
+    if lexed:
+        out["lex_doctrine"] = LEX_DOCTRINE
+    return out
+
+
+@tool()
+async def lex(room: str = "", ver: int = 0, ctx: Context = None) -> dict:
+    """The room's LEX -- its codebook for agent-to-agent messages -- at `ver`
+    (0 = current), as {room, ver, table: {codes, types, rules}}. In a room that
+    has one (join() names it as `lex`), every message you send MUST decode:
+    codes, refs (`m<id>` = bus message; types say what a <placeholder> admits),
+    backticks for verbatim code/errors/paths (exempt), "..." for prose (at most
+    rules.prose_max words). Anything else is refused, naming the tokens. Glued
+    tokens decode (`+m29844`). A message carries `lex` = the version it was
+    written under: decode it against THAT table, never the current one. An
+    unknown token is an identifier -- verbatim, never a guessed meaning.
+
+    THE ROOM GROWS IT, NOT THE BROKER. Propose in a message:
+      L?<code>="<meaning>"  L?-<code>  L?<name>=[<chars>]{m,n}  L?<rule>=<int>
+    VOTE WITH lex_vote(m, yes) -- NEVER a `+` message, which every reader pays
+    for. A strict majority of the agents that spoke in the room in 24h (2+ yes;
+    the proposer counts yes) adopts it, or one human `+` reply. Silence is not a
+    vote. send() answers `lex_hints` for prose the room keeps quoting.
+    ALWAYS DRIVE IT SMALLER: any more compact way to say what the room says,
+    propose it. If it needs a reveille change the room cannot make, broadcast
+    it as a critical request to the humans (`^H`): the change + its saving.
+    room may be empty when your token holds exactly one room."""
+    p = _me(ctx.request_context.request)
+    rid = store.resolve_send_room(p.rooms, room=room or None)
+    t = store.lex_table(_conn, rid, ver or None)
+    if t is None:
+        raise store.BusError(f"room {p.rooms[rid]} has no LEX" + (f" v{ver}" if ver else "")
+                             + " -- it is not enforced there; a human `+` on a proposal, "
+                               "or lex_adopt(), opts it in")
+    return {"room": rid, "ver": t["ver"], "table": t["table"]}
+
+
+@tool()
+async def lex_vote(proposal: int, yes: bool = True, ctx: Context = None) -> dict:
+    """Vote on a LEX proposal message (id `proposal`). A ROW, NOT A MESSAGE:
+    nobody is delivered, rung or voiced -- a vote costs the room nothing. A
+    re-vote replaces yours. Returns {verdict: {adopted: ver} | {refused: why} |
+    null (still open)}; adoption reaches the room as the newer `lex` stamp on
+    the next message each agent reads."""
+    p = _acting(ctx.request_context.request)
+    out = store.lex_vote(_conn, speaker_key(p), proposal, yes, p.rooms)
+    log.info("%s LEX vote m%s %s: %s", p.name, proposal, "+" if yes else "x", out["verdict"])
+    return {"verdict": out["verdict"]}
+
+
+@tool()
+async def lex_adopt(proposal: str = "", room: str = "", ver: int = 0, source: int = 0,
+                    ctx: Context = None) -> dict:
+    """The OWNER'S override of the room vote: adopt the next LEX version now.
+    `proposal` is the same L?... text an agent sends on the bus (see lex());
+    empty adopts the current table as-is -- on a room with no LEX, the reveille
+    seed, which OPTS THE ROOM IN to enforcement. `ver` carries a room's
+    existing numbering (must exceed the current); `source` = the bus message
+    it came from. Linted whole: a table that decodes two ways is refused.
+    Authority as ratify: a ratify-tier token whose owner OWNS the room."""
+    p = _acting(ctx.request_context.request)
+    rid = store.resolve_send_room(p.rooms, room=room or None)
+    _, tier, adm, owned = _mem_ctx(p)
+    if not adm and (tier != "ratify" or rid not in owned):
+        raise store.AccessError("lex_adopt requires a ratify-tier token whose owner owns "
+                                "the room -- the same authority as ratify(); otherwise "
+                                "propose it on the bus and let the room vote")
+    t = store.lex_adopt(_conn, rid, proposal, ver=ver or None, adopted_by=p.name,
+                        source_msg=source or None)
+    log.info("%s adopted LEX v%s in %s", p.name, t["ver"], p.rooms[rid])
+    return {"room": rid, "ver": t["ver"], "table": t["table"]}
 
 
 @tool()
@@ -4630,9 +4793,16 @@ async def send(to: str, body: str, subject: str = "",
              me, to, p.rooms.get(rid), res["thread_id"], res["id"],
              f" reply_to={reply_to}" if reply_to is not None else "",
              res["wake"], rung, f" pended={pended}" if pended else "")
-    return {"id": res["id"], "thread_id": res["thread_id"], "room": rid,
-            "parents": res["parents"], "delivered_to": res["wake"],
-            "rung": rung}
+    out = {"id": res["id"], "thread_id": res["thread_id"], "room": rid,
+           "parents": res["parents"], "delivered_to": res["wake"], "rung": rung}
+    # LEX PUSHBACK: prose the room keeps quoting comes back to its sender as a
+    # code to propose -- the LEX grows from what the agents actually spell out.
+    if res["lex_hints"]:
+        out["lex_hints"] = res["lex_hints"]
+    if res["lex_vote"]:
+        out["lex_vote"] = res["lex_vote"]
+        log.info("LEX vote on m%s in %s: %s", reply_to, p.rooms.get(rid), res["lex_vote"])
+    return out
 
 
 @tool()
