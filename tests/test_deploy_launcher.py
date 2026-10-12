@@ -70,10 +70,18 @@ def test_a_launcher_that_does_not_answer_is_left_alone(tmp_path):
     # Same rule the pin check already follows: a host that never ran a launcher
     # is deploying a broker, and refusing there turns a working deploy into a
     # failed one. It must not pin, restart, or fail.
+    #
+    # THE UNIT NAME IS PINNED BY THE FIXTURE, not left to whatever this machine
+    # happens to have installed: the branch under test asks systemctl whether
+    # this host serves a launcher, so a developer box that happens to carry the
+    # real unit would run the OTHER branch and the gate would measure nothing
+    # (fixture-resemblance-is-two-sided).
     r = run({"LAUNCHER_HEALTH": "http://127.0.0.1:9/health",
-             "REVEILLE_LAUNCH_REPO": str(tmp_path)})
+             "REVEILLE_LAUNCH_REPO": str(tmp_path),
+             "LAUNCHER_UNIT": "reveille-launcher-no-such-unit.service"})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "not answering" in r.stdout
+    assert "launcher untouched" in r.stdout
     assert "pinning" not in r.stdout
 
 
@@ -138,6 +146,136 @@ def test_a_health_reply_with_no_commit_field_stops_nothing(tmp_path):
     assert "cannot read a commit" in r.stdout
     assert "pinning" not in r.stdout, "it must refuse BEFORE touching the pinned tree"
     assert "stopping" not in r.stdout
+
+
+def gated_health(tmp_path, commit):
+    """A health endpoint that is SILENT until something starts the launcher.
+
+    503 until the marker exists, then the pinned commit -- which is what a
+    stopped unit and a started one actually look like from this script's side.
+    The marker is what the stubbed `systemctl restart` writes, so the assertion
+    "it came back" is measured through the same curl the script uses rather
+    than by reading the stub's recording.
+    """
+    marker = tmp_path / "STARTED"
+
+    class Gated(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if not marker.exists():
+                self.send_response(503)
+                self.end_headers()
+                return
+            body = f'{{"ok":true,"commit":"{commit}"}}'.encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Gated)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_port}/health", marker
+
+
+def systemctl_stub(tmp_path, marker, knows_unit=True):
+    """A PATH whose systemctl is a recording, and whose sudo always refuses.
+
+    sudo refuses so the gate proves the UNPRIVILEGED call is the one that ran;
+    a host that needs sudo is the deploy box, and that path is the operator's
+    first deploy to measure (same rule this file already states for the restart
+    that needs a real serve process).
+    """
+    import os
+    binv = tmp_path / "bin"
+    binv.mkdir(exist_ok=True)
+    (binv / "systemctl").write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$1\" in\n"
+        f"  cat)     exit {0 if knows_unit else 1} ;;\n"
+        f"  restart) touch '{marker}'; echo restart >> '{tmp_path}/SYSTEMCTL'; exit 0 ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n")
+    (binv / "sudo").write_text('#!/usr/bin/env bash\nexit 1\n')
+    for f in binv.iterdir():
+        f.chmod(0o755)
+    # The stub directory FIRST, and the rest of the real PATH after it: curl,
+    # git and uv must be the real ones or this gate measures its own fixture.
+    return {"PATH": f"{binv}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+
+
+def test_a_silent_launcher_on_a_host_with_the_unit_is_started(tmp_path):
+    """THE OUTAGE THIS COMMAND EXISTS TO END, measured 2026-09-23.
+
+    The unit was stopped at 14:35:56 (SIGTERM, Result=success -- a stop is not a
+    restart trigger, so Restart=always never fired). `make up` then deployed
+    0.2.317, this script printed `launcher: not answering ... launcher
+    untouched`, exited 0, and /agents/agents served 502 until a human noticed
+    and asked. Every check in the deploy was green through the whole outage.
+
+    A host that carries the unit SERVES a launcher, so a silent 8766 there is an
+    outage, not an absence -- and this command pins, starts it, and verifies the
+    commit it came back on.
+    """
+    pin, sha = pinned_tree(tmp_path)
+    srv, url, marker = gated_health(tmp_path, sha)
+    try:
+        r = run({**systemctl_stub(tmp_path, marker),
+                 "LAUNCHER_HEALTH": url,
+                 "REVEILLE_LAUNCH_REPO": str(pin),
+                 "LAUNCHER_UNIT": "reveille-launcher.service"})
+    finally:
+        srv.shutdown()
+    assert "outage, not an absence" in r.stdout, r.stdout + r.stderr
+    assert "pinning" in r.stdout, "a launcher started on the old tree is half a deploy"
+    assert (tmp_path / "SYSTEMCTL").exists(), "nothing ever asked systemd to start it"
+    assert f"back on {sha}" in r.stdout, r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "stopping" not in r.stdout, "there was no process to stop"
+
+
+def test_a_silent_launcher_on_a_host_without_the_unit_is_never_started(tmp_path):
+    """The original rule, kept whole: a box that never ran a launcher is
+    deploying a broker. The discriminator is the unit -- not a flag someone has
+    to remember, and not the health check, which reads the same either way."""
+    pin, sha = pinned_tree(tmp_path)
+    srv, url, marker = gated_health(tmp_path, sha)
+    try:
+        r = run({**systemctl_stub(tmp_path, marker, knows_unit=False),
+                 "LAUNCHER_HEALTH": url,
+                 "REVEILLE_LAUNCH_REPO": str(pin),
+                 "LAUNCHER_UNIT": "reveille-launcher.service"})
+    finally:
+        srv.shutdown()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "launcher untouched" in r.stdout
+    assert not (tmp_path / "SYSTEMCTL").exists(), "it started a launcher this host does not run"
+    assert "pinning" not in r.stdout
+
+
+def test_the_unit_that_supervises_the_launcher_is_a_file_in_the_repo():
+    """What gains privilege on the deploy host is reviewable in the diff that
+    adds it -- the rule the auto-deploy units already follow. Before this file
+    existed the unit lived ONLY on reveille-server and in a prose copy in
+    INSTALL-broker.md, so nothing in the repo could say what supervises the
+    launcher, and the only supervisor named anywhere was the agent Stop hook --
+    which runs at the end of an agent's TURN, on a box that runs no agents.
+    """
+    unit = (pathlib.Path(__file__).resolve().parent.parent
+            / "systemd" / "reveille-launcher.service").read_text()
+    assert "Restart=always" in unit, "the whole point: a killed launcher comes back"
+    assert "RestartSec=" in unit
+    assert "WantedBy=multi-user.target" in unit, "or it does not come back after a reboot"
+    assert "EnvironmentFile=" in unit and "launcher.env" in unit
+    # From the PINNED tree, never a developer's checkout (msg 8568).
+    assert "launcher-src/.venv/bin/python" in unit
+    assert "scripts/reveille_launch.py serve" in unit
+
+    doc = (pathlib.Path(__file__).resolve().parent.parent
+           / "docs" / "INSTALL-broker.md").read_text()
+    assert "systemd/reveille-launcher.service" in doc, \
+        "the doc must install the repo's file, not a copy of it that drifts"
 
 
 def test_make_up_runs_the_fix_before_the_check():

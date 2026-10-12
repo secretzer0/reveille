@@ -30,15 +30,42 @@ WAIT="${LAUNCHER_WAIT:-20}"
 PORT="$(printf '%s' "$HEALTH" | sed -n 's|.*://[^:/]*:\([0-9]\{1,\}\).*|\1|p')"
 PORT="${PORT:-8766}"
 
+UNIT="${LAUNCHER_UNIT:-reveille-launcher.service}"
+
 commit_of() { curl -fsS --max-time 3 "$HEALTH" 2>/dev/null \
   | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'; }
 
-# NOT RUNNING IS NOT THIS COMMAND'S BUSINESS, same rule the pin check already
-# follows: a host that never ran a launcher is deploying a broker, and refusing
-# there would turn a working deploy into a failed one.
+# THE UNIT IS THE EVIDENCE that this host serves a launcher, which is why the
+# branch below can tell an absence from an outage without being told.
+have_unit() { command -v systemctl >/dev/null 2>&1 \
+  && systemctl cat "$UNIT" >/dev/null 2>&1; }
+
+# The unit is a SYSTEM unit, so starting it is root's to do; the deploy user has
+# NOPASSWD sudo on the box that serves the bus and needs privilege for nothing
+# else here. Unprivileged first, so a host that does grant it never calls sudo.
+sysd() { systemctl "$@" >/dev/null 2>&1 || sudo -n systemctl "$@" >/dev/null 2>&1; }
+
+# NOT RUNNING IS NOT THIS COMMAND'S BUSINESS -- UNLESS THIS HOST SERVES A
+# LAUNCHER. The original rule is still right for the case it was written for: a
+# host that never ran a launcher is deploying a broker, and refusing there would
+# turn a working deploy into a failed one. But it was also the ONLY branch for a
+# host whose launcher is simply DOWN, and it left that host down while reporting
+# success -- measured 2026-09-23: the unit was stopped at 14:35:56 (SIGTERM,
+# Result=success, and a stop is not a restart trigger, so Restart=always never
+# fired), `make up` deployed 0.2.317 at 14:37, this command printed "launcher
+# untouched" at 14:38:22, and /agents/agents served 502 until a human noticed.
+# The comment that justified it -- "the Stop hook respawns it at the end of an
+# agent's turn" -- assumes a body, and this box runs the bus, not agents.
+DOWN=0
 if [ -z "$(curl -fsS --max-time 3 "$HEALTH" 2>/dev/null)" ]; then
-  echo "launcher: not answering at $HEALTH -- broker deploy stands, launcher untouched"
-  exit 0
+  if ! have_unit; then
+    echo "launcher: not answering at $HEALTH and no $UNIT on this host --"
+    echo "broker deploy stands, launcher untouched"
+    exit 0
+  fi
+  echo "launcher: not answering at $HEALTH, but $UNIT IS installed here --"
+  echo "a silent launcher on this host is an outage, not an absence"
+  DOWN=1
 fi
 
 # AN UNREADABLE VERSION IS NOT A STALE ONE (architect, BLOCKING 2 of msg 8929).
@@ -48,7 +75,7 @@ fi
 # with the launcher being behind, and this command's next move is to KILL it.
 # An unknown reading must never be treated as a negative one, and the recoverable
 # side of a control that stops a service is always: change nothing, say why.
-if [ -z "$(commit_of)" ]; then
+if [ "$DOWN" = 0 ] && [ -z "$(commit_of)" ]; then
   echo "REFUSED: the launcher at $HEALTH answered, but I cannot read a commit"
   echo "  out of its reply. It may be perfectly current -- I cannot tell, and I"
   echo "  will not stop a service on a reading I could not take. Nothing was"
@@ -89,38 +116,52 @@ if [ "$want" = "unknown" ] || [ -z "$want" ]; then
   echo "  from, so an unreadable one is a reason to stop, not to proceed."
   exit 1
 fi
-if [ "$(commit_of)" = "$want" ]; then
-  echo "launcher: already serving $want -- nothing to restart"
-  exit 0
-fi
+if [ "$DOWN" = 0 ]; then
+  if [ "$(commit_of)" = "$want" ]; then
+    echo "launcher: already serving $want -- nothing to restart"
+    exit 0
+  fi
 
-# The EXACT pid, matched on the script path rather than on the word "serve": a
-# blind pkill on this box would reach any python process whose cmdline happens
-# to contain it.
-pids="$(pgrep -f "reveille_launch\.py serve" || true)"
-if [ -z "$pids" ]; then
-  echo "launcher: answering but no serve process found -- something else is on"
-  echo "$HEALTH. Refusing to guess; nothing restarted."
-  exit 1
-fi
-echo "launcher: stopping $(echo "$pids" | tr '\n' ' ')(was $(commit_of), want $want)"
-# shellcheck disable=SC2086
-kill $pids
+  # The EXACT pid, matched on the script path rather than on the word "serve": a
+  # blind pkill on this box would reach any python process whose cmdline happens
+  # to contain it.
+  pids="$(pgrep -f "reveille_launch\.py serve" || true)"
+  if [ -z "$pids" ]; then
+    echo "launcher: answering but no serve process found -- something else is on"
+    echo "$HEALTH. Refusing to guess; nothing restarted."
+    exit 1
+  fi
+  echo "launcher: stopping $(echo "$pids" | tr '\n' ' ')(was $(commit_of), want $want)"
+  # shellcheck disable=SC2086
+  kill $pids
 
-# The Stop hook respawns it at the end of an agent turn. Wait for that; if no
-# agent is running there is nothing to wait for, so start it ourselves from the
-# PINNED tree -- never from this checkout, which is what made `git checkout` a
-# deployment once already (msg 8568).
-#
-# THE RACE, named so the next reader does not have to work it out: if the hook
-# respawns at the same second this loop gives up, two launchers start and the
-# loser fails to take the flock and dies. Benign, because whichever survives is
-# on `want` either way -- both were started from the pinned tree. Not worth a
-# lock of our own; worth a sentence.
-for _ in $(seq 1 "$WAIT"); do
-  [ "$(commit_of)" = "$want" ] && { echo "launcher: back on $want"; exit 0; }
-  sleep 1
-done
+  # systemd brings it back in RestartSec on a host with the unit; the Stop hook
+  # does it at the end of an agent turn on a host without one. Wait for either;
+  # if neither exists there is nothing to wait for, so start it ourselves from
+  # the PINNED tree -- never from this checkout, which is what made
+  # `git checkout` a deployment once already (msg 8568).
+  #
+  # THE RACE, named so the next reader does not have to work it out: if the hook
+  # respawns at the same second this loop gives up, two launchers start and the
+  # loser fails to take the flock and dies. Benign, because whichever survives is
+  # on `want` either way -- both were started from the pinned tree. Not worth a
+  # lock of our own; worth a sentence.
+  for _ in $(seq 1 "$WAIT"); do
+    [ "$(commit_of)" = "$want" ] && { echo "launcher: back on $want"; exit 0; }
+    sleep 1
+  done
+else
+  # Nothing is running, so there is no pid to stop and no respawn to wait for.
+  # A STOPPED unit is the case Restart=always cannot cover, and it is the one
+  # that happened: start it, rather than describing it.
+  echo "launcher: starting $UNIT (want $want)"
+  sysd restart "$UNIT" \
+    || echo "launcher: systemctl could not restart $UNIT, with or without sudo"
+  for _ in $(seq 1 "$WAIT"); do
+    [ "$(commit_of)" = "$want" ] && { echo "launcher: back on $want ($UNIT)"; exit 0; }
+    sleep 1
+  done
+fi
 
 echo "launcher: nothing respawned it in ${WAIT}s -- starting it from $PIN"
 py="$PIN/.venv/bin/python"; [ -x "$py" ] || py=python3
