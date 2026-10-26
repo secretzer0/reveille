@@ -6405,6 +6405,40 @@ def _prose_seen(conn, room, phrases):
     return out
 
 
+def _one_owner(conn, room, principal):
+    """Is every identity in `room` -- agents by their owner, people as
+    themselves, the room's owner too -- the same owner as `principal`'s?"""
+    aid = agent_of(principal)
+    me = conn.execute("SELECT owner_id FROM agents WHERE id=?", (aid,)).fetchone() if aid else None
+    if me is None:
+        return False
+    owners = {r[0] for r in conn.execute(
+        "SELECT a.owner_id FROM members m JOIN agents a ON m.principal = 'agent:' || a.id "
+        "WHERE m.room_id=?", (room,))}
+    owners |= {r[0][len("user:"):] for r in conn.execute(
+        "SELECT principal FROM members WHERE room_id=? AND principal LIKE 'user:%'", (room,))}
+    owners |= {r[0] for r in conn.execute("SELECT user_id FROM room_members WHERE room_id=?",
+                                          (room,))}
+    owners |= {r[0] for r in conn.execute("SELECT owner_id FROM rooms WHERE id=?", (room,))}
+    return owners <= {me["owner_id"]}
+
+
+LEX_RESOLVED_CHARS = 80   # what a resolver may say a ref is: a title, not a page
+
+
+def lex_define(conn, room, refs, *, source, msg_id=None):
+    """Write explanations into the room's ref ledger -- {ref: meaning}, each
+    capped -- and return what landed. The caller decides who may explain."""
+    now = time.time_ns()
+    rows = [(room, r, " ".join(str(m).split())[:LEX_RESOLVED_CHARS], source, msg_id, now)
+            for r, m in refs.items() if str(m).strip()]
+    with tx(conn):
+        conn.executemany(
+            "INSERT OR REPLACE INTO lex_refs(room, ref, meaning, source, msg_id, ts_ns) "
+            "VALUES(?,?,?,?,?,?)", rows)
+    return {r[1]: r[2] for r in rows}
+
+
 def lex_known(conn, room):
     """The room's ref ledger, {ref: meaning} -- the bridge every gloss reads."""
     return {r["ref"]: r["meaning"] for r in conn.execute(
@@ -6546,7 +6580,7 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
     # held to it; their words are the record. The stamp is what lets a reader
     # (and the script writer) decode against the table live at send.
     table = lex_table(conn, room)
-    said = {}
+    said, resolve = {}, []
     if table is not None and agent_of(principal):
         why = lexmod.refusal(f"{subject} {body}" if subject else body,
                              table["table"], table["ver"])
@@ -6558,9 +6592,16 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
             raise BusError(why)
         known = lex_known(conn, room)
         said = lexmod.definitions(f"{subject} {body}" if subject else body, table["table"])
-        dark = sorted({tok for tok, _code in lexmod.refs_used(
+        unexplained = [(tok, code) for tok, code in lexmod.refs_used(
             f"{subject} {body}" if subject else body, table["table"])
-            if tok not in known and tok not in said})
+            if tok not in known and tok not in said]
+        # The sender's own waked explains what it can (main.62) -- only in a
+        # room ONE owner holds: a private repo's PR title is the owner's to
+        # show, and in a shared room it would reach another owner's people.
+        if unexplained and _one_owner(conn, room, principal):
+            resolve = lexmod.resolvable(unexplained, table["table"])
+        held = {r["ref"] for r in resolve}
+        dark = sorted({tok for tok, _code in unexplained if tok not in held})
         if dark:
             LEX_REFUSALS.update((room, f"undefined {t}") for t in dark)
             raise BusError(
@@ -6619,7 +6660,7 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
     targets = _wake_targets(conn, principal, recipient, room)
     uid = user_of(principal)
     return {"id": mid, "thread_id": thread_id, "parents": parents, "sender": sender,
-            "lex_hints": lex_hints, "lex_vote": lex_vote,
+            "lex_hints": lex_hints, "lex_vote": lex_vote, "resolve": resolve,
             "owner": _owner_name(conn, principal),
             # 14056: A MESSAGE CARRIES ITS SENDER'S RESOLVED MONIKER AT
             # DELIVERY -- walked here, once, for the rings this send fires.

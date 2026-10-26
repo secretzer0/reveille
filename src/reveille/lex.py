@@ -63,7 +63,7 @@ SEED = {
 RULES = frozenset(SEED["rules"])
 
 _PH = re.compile(r"<([a-z][a-z0-9_]*)>")
-_PROPOSAL = r'L\?-?[^\s;="`]+(?:=(?:"[^"]*"|[^\s;]+))?'
+_PROPOSAL = r'L\?-?[^\s;="`]+(?:=(?:"[^"]*"(?:@[a-z_]+)?|[^\s;]+))?'
 _DEFINE = r'[^\s;="`]+="[^"]*"'
 _TOKEN = re.compile(rf"(?P<p>{_PROPOSAL})|(?P<d>{_DEFINE})|```[\s\S]*?```|`[^`]*`|\"[^\"]*\"|[^\s;\"`]+|[\"`]")
 # A path on the SENDER'S OWN HOST: no other reader can open it, so it is not
@@ -74,6 +74,12 @@ _LOCAL_PATH = re.compile(r"^(?:/tmp/|/var/tmp/|/home/|/root/|~/)")
 # words, `P39="layer-norm fix"`) and the room's ledger carries it after.
 # ponytail: a fixed set; a room-settable flag when a room needs its own.
 BARE = frozenset({"m<id>", "L<n>", "a<n>"})
+# WHO CAN EXPLAIN A REF NOBODY DEFINED: the sender's own waked, which sits beside
+# the agent's repo and its gh login (main.62). A code names one of these
+# (`L?P<n>="pull request {}"@gh_pr`); the broker hands waked the resolver NAME
+# and an argument checked here -- never a command, never free text. waked owns
+# the commands (waked.RESOLVE_CMDS).
+RESOLVERS = {"gh_pr": re.compile(r"[0-9]{1,9}")}
 _TYPESPEC = re.compile(r"\[(.+)\](?:\{(\d+),(\d+)\})?")
 
 
@@ -139,6 +145,9 @@ def lint(table):
             bad.append(f"{code!r}: no whitespace, ';', '=', quotes, backticks, or leading 'L?'")
             continue
         phs = list(_PH.finditer(code))
+        if e.get("resolve") is not None and (e["resolve"] not in RESOLVERS or len(phs) != 1):
+            bad.append(f"{code!r}: resolver {e['resolve']!r} -- one of {sorted(RESOLVERS)}, "
+                       f"on a ref with exactly one placeholder")
         for m in phs:
             name = m.group(1)
             if name not in types:
@@ -190,6 +199,9 @@ def _parse_proposal(tok):
     code, eq, val = body.partition("=")
     if not eq:
         raise LexError(f"{tok}: needs =<value>")
+    resolve = None
+    if val[:1] == '"' and '"@' in val:
+        val, _at, resolve = val.rpartition("@")
     val = val[1:-1] if val[:1] == '"' else val
     ph = re.fullmatch(r"<([a-z][a-z0-9_]*)>", code)
     if ph:
@@ -202,7 +214,7 @@ def _parse_proposal(tok):
         if not val.isdigit():
             raise LexError(f"{tok}: a rule is an int")
         return ("rule", code, int(val))
-    return ("code", code, val)
+    return ("code", code, val, resolve)
 
 
 def _proposal_gloss(tok):
@@ -264,6 +276,23 @@ def definitions(body, table):
     return out
 
 
+def resolvable(refs, table):
+    """[{ref, resolver, arg}] for the refs in `refs` (from refs_used) whose code
+    names a resolver and whose argument that resolver accepts."""
+    by_code = {e["code"]: e for e in table["codes"]}
+    out = []
+    for tok, code in refs:
+        e = by_code.get(code) or {}
+        name = e.get("resolve")
+        if not name:
+            continue
+        m = _ref_regex(code, table["types"]).fullmatch(tok)
+        arg = m.group(1) if m and m.groups() else ""
+        if RESOLVERS[name].fullmatch(arg):
+            out.append({"ref": tok, "resolver": name, "arg": arg})
+    return out
+
+
 def refs_used(body, table):
     """[(token, code)] for every ref in a body that does NOT say what it is by
     itself (BARE) -- the ones a reader needs explained -- defined here or not."""
@@ -292,7 +321,7 @@ def proposals(body):
         elif p[0] == "rule":
             ch["rules"][p[1]] = p[2]
         else:
-            ch["add"].append({"code": p[1], "means": p[2]})
+            ch["add"].append({"code": p[1], "means": p[2], **({"resolve": p[3]} if p[3] else {})})
     return ch if any(ch.values()) else None
 
 
@@ -306,7 +335,9 @@ def apply(table, change):
     add = list(change.get("add", ()))
     new = {e["code"] for e in add}
     codes = [e for e in table["codes"] if e["code"] not in retire and e["code"] not in new]
-    out = {"codes": codes + [{"code": e["code"], "means": e["means"]} for e in add],
+    out = {"codes": codes + [{"code": e["code"], "means": e["means"],
+                              **({"resolve": e["resolve"]} if e.get("resolve") else {})}
+                             for e in add],
            "types": {**table["types"], **change.get("types", {})},
            "rules": {**table["rules"], **change.get("rules", {})}}
     lint(out)

@@ -162,7 +162,10 @@ reason. DEFINE ONCE, CITE FOREVER: the first mention of a ref explains it in a f
 words -- `P39="layer-norm fix"` (rules.define_max) -- and the room's ledger carries
 it, so every later bare `P39` reaches the page and the writer as "pull request 39
 (layer-norm fix)". A ref nobody in the room has explained is refused, naming the
-way out; m<id>, L<n> and a<n> explain themselves. Cite `m<id>` instead of restating;
+way out -- unless its code names a resolver (`L?P<n>="pull request {}"@gh_pr`) and
+one owner holds the room: then the broker asks YOUR OWN waked, which runs `gh` in
+your repo and explains it for the page and the writer. m<id>, L<n> and a<n>
+explain themselves. Cite `m<id>` instead of restating;
 the writer reads the cited message, and the newest earlier message that mentioned
 each ref, for the human. `?L` (cannot decode) is UNICAST to that message's sender --
 a broadcast `?L` is refused -- and is never voiced. Decode a message against ITS `lex` version, never the
@@ -1103,6 +1106,42 @@ _conn = None  # one connection, used only from the event-loop thread (async tool
 # one socket = one prompt, however many rooms it holds and whatever each room calls it
 # -- an agent aliased `bob-architect` in one room is rung there like anywhere else.
 _waiters: dict[str, set] = {}  # token_id -> wake queues
+# THE BRIDGE'S ASK (main.62): refs a sender's own waked was asked to explain,
+# token_id -> {(room, mid): {ref: resolver}}. An answer is taken ONLY for a ref
+# this broker asked about, from the token it asked -- waked can explain, never
+# write the ledger at will. ponytail: in memory; a deploy drops open asks and
+# the next mention asks again.
+_resolve_asks: dict[str, dict] = {}
+
+
+def _resolve_ask(token_id, room, mid, refs):
+    """Ask the sender's waked to explain `refs` ([{ref, resolver, arg}]) over
+    the wake socket it already holds. No waker attached = nobody to ask."""
+    qs = _waiters.get(token_id)
+    if not refs or not qs:
+        return False
+    _resolve_asks.setdefault(token_id, {})[(room, mid)] = {r["ref"]: r["resolver"] for r in refs}
+    for q in list(qs):
+        q.put_nowait({"resolve": {"room": room, "mid": mid, "refs": refs}})
+    return True
+
+
+def _resolved(token_id, rooms, said, source):
+    """Take waked's answer: only refs asked for, in a room this token holds.
+    Returns what landed in the ledger."""
+    if not isinstance(said, dict):
+        return {}
+    key = (said.get("room"), said.get("mid"))
+    asked = _resolve_asks.get(token_id, {}).pop(key, None)
+    if not asked or key[0] not in rooms or not isinstance(said.get("refs"), dict):
+        return {}
+    landed = store.lex_define(_conn, key[0], {r: m for r, m in said["refs"].items()
+                                              if r in asked and isinstance(m, str)},
+                              source=source, msg_id=key[1])
+    if landed:
+        _feed_push(key[0], {"event": "gloss", "id": key[1],
+                            **store.lex_glosses(_conn, [key[1]]).get(key[1], {})})
+    return landed
 
 # Poke gate: one outstanding wake per AGENT (not per agent-room). A pushed frame sets
 # token_id -> ts here; no further frames are pushed until the agent polls inbox()
@@ -4864,6 +4903,8 @@ async def send(to: str, body: str, subject: str = "",
                 "attachments": attachments or [], "ts_ns": time.time_ns(),
                 **store.lex_glosses(_conn, [res["id"]]).get(res["id"], {})})
     _voice_of_send(res["id"], rid, me, subject, body, speaker_key(p), attachments)
+    if res.get("resolve"):
+        _resolve_ask(p.token_id, rid, res["id"], res["resolve"])
     # DELIVERED IS NOT RUNG, by name (lesson log-label-says-woke-means-
     # delivered): delivered= is who can read this on their next turn; rung= is
     # who a wake frame was actually pushed toward, right now.
@@ -5287,6 +5328,9 @@ async def wake_ws(ws: WebSocket):
                                                said["sessions"])
                         if said.get("rung"):
                             store.mark_rung(_conn, principal, list(rooms))
+                        if said.get("resolved"):
+                            got = _resolved(key, rooms, said["resolved"], f"waked:{name}")
+                            log.info("%s waked explained %s", name, sorted(got))
                 continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
@@ -5294,6 +5338,14 @@ async def wake_ws(ws: WebSocket):
             vals = [woke.result()] if woke in done and not woke.cancelled() else []
             while not q.empty():
                 vals.append(q.get_nowait())
+            # AN ASK IS NOT A RING: waked explains refs for the writer and the
+            # page; the CLI is never woken for it, and the poke gate is not spent.
+            for v in vals:
+                if isinstance(v, dict) and "resolve" in v:
+                    await ws.send_json({"wake": False, "reason": "resolve", **v["resolve"]})
+            vals = [v for v in vals if not (isinstance(v, dict) and "resolve" in v)]
+            if not vals:
+                continue
             # The CREDENTIAL is gone, not just this attachment: a body swap
             # committed elsewhere. Distinct frame from the attachment supersede
             # above -- that one says "another daemon holds your slot", this one
