@@ -187,9 +187,14 @@ def test_the_page_paints_icons_from_the_flags_and_the_frames():
     # The script view replaces the body in place and a second click restores the
     # escaped body -- since 14835 it comes back through colorMentions (escape
     # FIRST, then wrap known @names), so the pin moved with the ruled text.
+    # Since 98868dc2 the restore is paintBody: the escaped VIEW of the body --
+    # the gloss for an agent's LEX, the words as written for anyone else.
     tog = UI[UI.index("async function toggleScript(row,m){"):]
     tog = tog[:tog.index("\n}\n")]
-    assert "body.innerHTML=colorMentions(esc(m.body))" in tog and "mdToHtml(m.script)" in tog
+    paint = UI[UI.index("function paintBody(row,m){"):]
+    paint = paint[:paint.index("\n}\n")]
+    assert "paintBody(row,m)" in tog and "mdToHtml(m.script)" in tog
+    assert "body.innerHTML=colorMentions(esc(v.text))" in paint
     assert "'/script/'+encodeURIComponent(m.id)" in tog
     assert "generated, in character" in tog
     # Row click ignores the icons (they own their click), like .mid does. THE

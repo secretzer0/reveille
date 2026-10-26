@@ -4848,7 +4848,8 @@ async def send(to: str, body: str, subject: str = "",
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": me, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
-                "attachments": attachments or [], "ts_ns": time.time_ns()})
+                "attachments": attachments or [], "ts_ns": time.time_ns(),
+                **store.lex_glosses(_conn, [res["id"]]).get(res["id"], {})})
     _voice_of_send(res["id"], rid, me, subject, body, speaker_key(p), attachments)
     # DELIVERED IS NOT RUNG, by name (lesson log-label-says-woke-means-
     # delivered): delivered= is who can read this on their next turn; rung= is
@@ -5489,6 +5490,10 @@ async def messages_http(request):
     if p.kind == "user" and msgs and len(rooms) == 1:
         store.mark_room_seen(_conn, store.user_principal(p.user_id), next(iter(rooms)),
                              max(m["id"] for m in msgs))
+    if p.kind == "user":            # a person reads the decode, never the codes
+        g = store.lex_glosses(_conn, [m["id"] for m in msgs])
+        for m in msgs:
+            m.update(g.get(m["id"], {}))
     return JSONResponse({"messages": msgs})
 
 

@@ -6357,6 +6357,33 @@ def _prose_seen(conn, room, phrases):
     return out
 
 
+def lex_glosses(conn, ids):
+    """{id: {gloss, gloss_subject?}} for the AGENT-sent LEX messages among
+    `ids`: the exact decode (lex.spoken, a table lookup, no model) a HUMAN
+    surface shows in place of the codes (98868dc2: a human never sees LEX).
+    A person's own words are never decoded -- `x` in their sentence is not
+    "no, rejected". Human surfaces only: an agent reading this would pay for
+    a second copy of every message."""
+    ids = list(ids)
+    if not ids:
+        return {}
+    out, tables = {}, {}
+    for r in conn.execute(
+            f"SELECT id, room, subject, body, lex_ver FROM messages WHERE id IN ({_ph(ids)}) "
+            "AND sender_agent_id IS NOT NULL AND lex_ver IS NOT NULL", ids):
+        key = (r["room"], r["lex_ver"])
+        if key not in tables:
+            tables[key] = lex_table(conn, r["room"], r["lex_ver"])
+        if tables[key] is None:
+            continue
+        t = tables[key]["table"]
+        g = {"gloss": lexmod.spoken(r["body"], t)}
+        if r["subject"]:
+            g["gloss_subject"] = lexmod.spoken(r["subject"], t)
+        out[r["id"]] = g
+    return out
+
+
 def lex_of_message(conn, mid):
     """(body, table, ver) for a message written under a LEX, else None."""
     r = conn.execute("SELECT room, body, lex_ver FROM messages WHERE id=?",
