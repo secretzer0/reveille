@@ -6321,6 +6321,37 @@ def lex_of_message(conn, mid):
     return None if t is None else (r["body"], t["table"], t["ver"])
 
 
+LEX_CITED_MAX = 3       # cited messages the writer is shown per message
+LEX_CITED_CHARS = 300   # of each: what it was about, not the whole of it
+
+
+def lex_cited(conn, mid, body, table):
+    """What a LEX message answers, for the script writer: its parent and every
+    message it cites as m<id>, SAME ROOM ONLY, one line each -- who said it and
+    what, decoded against the version IT was written under. Without this the
+    writer said "message 31562 is confirmed" and nobody listening knew what."""
+    r = conn.execute("SELECT room, parent_id FROM messages WHERE id=?", (mid,)).fetchone()
+    if r is None:
+        return []
+    ids = [r["parent_id"]] if r["parent_id"] else []
+    # ponytail: matches the seed's m<id> spelling; a room that renames it loses citations, not parents
+    ids += [int(t[1:]) for t, _m, k in lexmod.decode(body, table)
+            if k == "code" and re.fullmatch(r"m\d+", t)]
+    out = []
+    for i in dict.fromkeys(ids):
+        c = conn.execute("SELECT sender, subject, body, lex_ver FROM messages "
+                         "WHERE id=? AND room=?", (i, r["room"])).fetchone()
+        if c is None:
+            continue
+        text = f"{c['subject']} {c['body']}" if c["subject"] else c["body"]
+        t = lex_table(conn, r["room"], c["lex_ver"]) if c["lex_ver"] is not None else None
+        said = lexmod.spoken(text, t["table"]) if t else text
+        out.append(f"m{i} from {c['sender']}: {said[:LEX_CITED_CHARS]}")
+        if len(out) == LEX_CITED_MAX:
+            break
+    return out
+
+
 def send(conn, principal, recipient, body, subject="", reply_to=None, attachments=None,
          room=None, send_group=None):
     """Insert a message from `principal` (agent:<id> | user:<id>, DES-011

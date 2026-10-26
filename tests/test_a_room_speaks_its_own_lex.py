@@ -156,3 +156,80 @@ def test_boot_hands_every_body_the_current_lex(tmp_path, monkeypatch):
     r = out["rooms"][0]
     assert r["lex"] == 10 and "qf queued field" in r["lex_table"]
     assert "P<n> pull request {}" in r["lex_table"] and "lex_vote" in out["lex_doctrine"]
+
+
+# The writer narrated m31563 -- `+ m31562 `F38-6` "skip ok if 0010 rewrites old
+# rows'" ...` -- as "Message thirty-one five six two is confirmed. F38-6, skip ok
+# if 0010 rewrites old rows": every code decoded, nothing a listener could follow.
+# It never saw what m31562 said, and the gloss told it to read prose as written.
+
+def _enqueue(room, monkeypatch, mid, subject, body):
+    v = {"id": "quark", "name": "Quark", "persona": "A Ferengi bartender.", "updated_ns": 0}
+    monkeypatch.setattr(daemon, "_tts_on", True)
+    monkeypatch.setattr(daemon, "_script_on", True)
+    monkeypatch.setattr(daemon, "_room_listening", lambda _r: True)
+    monkeypatch.setattr(store, "voice_for", lambda *_a: "quark")
+    monkeypatch.setattr(store, "voice_get", lambda *_a: v)
+    while not daemon._script_q.empty():
+        daemon._script_q.get_nowait()
+    daemon._tts_enqueue(mid, room["room"], "quark", subject, body, key="agent:x")
+    return daemon._script_q.get_nowait()
+
+
+def test_the_subject_is_decoded_like_the_body_it_was_checked_with(room, monkeypatch):
+    c, rid = room["c"], room["room"]
+    store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
+    m = store.send(c, room["quark"], "*", "+ _", subject="L8 P880", room=rid)
+    item = _enqueue(room, monkeypatch, m["id"], "L8 P880", "+ _")
+    assert item[3] == "LEX version 8 adopted; pull request 880. ok, done, yes; no reply wanted"
+    assert "P880 = pull request 880" in item[8]
+
+
+def test_prose_is_glossed_as_a_fragment_to_restore_not_to_read_as_written(room):
+    from reveille import lex
+    g = lex.gloss('+ "skip ok if 0010 rewrites old rows"', lex.seed())
+    assert "say it as written" not in g
+    assert "restore" in g
+
+
+def test_the_writer_is_handed_what_the_message_answers(room, monkeypatch):
+    c, rid = room["c"], room["room"]
+    store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
+    asked = store.send(c, room["odo"], "*", '? P880 "migration 0010 rewrites old rows"',
+                       subject='"skip F38-6"', room=rid)
+    m = store.send(c, room["quark"], "*", f'+ m{asked["id"]} "skip ok" _', room=rid,
+                   reply_to=asked["id"])
+    item = _enqueue(room, monkeypatch, m["id"], "", f'+ m{asked["id"]} "skip ok" _')
+    gloss = item[8]
+    assert f"m{asked['id']} from odo: skip F38-6; question; pull request 880; " \
+           "migration 0010 rewrites old rows" in gloss
+    assert gloss.count(f"m{asked['id']} from") == 1          # parent AND cited: once
+    msgs = daemon.script_prompt("Quark", "p", "quark", "", item[7], gloss)
+    assert "CONTEXT" in msgs[0]["content"]
+
+
+def test_a_cited_message_from_another_room_never_reaches_the_writer(room, monkeypatch):
+    c, rid = room["c"], room["room"]
+    other = store.create_room(c, room["human"].split(":", 1)[1], "wardroom")["id"]
+    secret = store.send(c, room["human"], "*", "the vault code is 4471", room=other)
+    store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
+    m = store.send(c, room["quark"], "*", f'+ m{secret["id"]}', room=rid)
+    item = _enqueue(room, monkeypatch, m["id"], "", f'+ m{secret["id"]}')
+    assert "4471" not in item[8]
+
+
+def test_the_first_sentence_budget_is_sized_on_what_the_writer_reads(room, monkeypatch):
+    c, rid = room["c"], room["room"]
+    store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
+    m = store.send(c, room["quark"], "*", "L8 P880 @f18dd410 _", room=rid)
+    item = _enqueue(room, monkeypatch, m["id"], "", "L8 P880 @f18dd410 _")
+    sized = []
+    monkeypatch.setattr(daemon, "script_budget", lambda f, text: sized.append(text) or f)
+
+    def down(*_a, **_k):
+        raise ConnectionError("writer down")
+    monkeypatch.setattr(daemon, "_llm_stream", down)
+    daemon._script_one(item, "http://x", "m", "", 1.0)
+    while not daemon._tts_q.empty():
+        daemon._tts_q.get_nowait()
+    assert "LEX GLOSS" in sized[0] and "P880 = pull request 880" in sized[0]

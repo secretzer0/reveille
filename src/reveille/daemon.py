@@ -1551,7 +1551,9 @@ _LEX_FRAME = (
     "gives every token's meaning, decoded by the broker from the version the message was "
     "written under. NARRATE FROM THE GLOSS: each `token = meaning` line is what that token "
     "says, and nothing else. A token glossed as an identifier is said verbatim and given no "
-    "meaning -- never guess one (L8 is a LEX version, never a line number).")
+    "meaning -- never guess one (L8 is a LEX version, never a line number). Lines under "
+    "CONTEXT are the messages this one answers or cites: use them to say in a few words "
+    "WHAT is being confirmed, answered or asked -- never read them out.")
 
 
 def script_prompt(voice_name, persona, sender, subject, body, gloss=""):
@@ -2516,7 +2518,11 @@ def _script_one(item, url, model, token, first_timeout, wait=False, asked=False)
                              gloss)
     # An ASKED item (a click on history) carries its own flat budget: the
     # first-sound slope is for live arrivals (11528).
-    first_timeout = first_timeout if asked else script_budget(first_timeout, body)
+    # Budgeted on what the writer READS -- body, gloss and context -- not the
+    # body alone: a LEX prompt runs ~4x its body, and a budget sized on the
+    # body sent it to terse before its first sentence could close.
+    first_timeout = first_timeout if asked else script_budget(first_timeout,
+                                                              messages[1]["content"])
     t0 = time.monotonic()
     stream = _SentenceStream()
     buf, in_think = "", False
@@ -3589,10 +3595,20 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # was written under: the terse fallback speaks lex.spoken, the writer is
         # handed lex.gloss. Raw codes reach neither (m29837: `L8 P880` was
         # narrated as "line eighty-eight").
+        # The SUBJECT is decoded too: send() checked subject and body together,
+        # so a subject is LEX as much as the body is. The writer is also handed
+        # what the message answers (store.lex_cited): "message 31562 is
+        # confirmed" told a listener nothing.
         lx = store.lex_of_message(_conn, mid)
         said = lexmod.spoken(body, lx[1]) if lx else body
-        gloss = f"v{lx[2]}\n" + lexmod.gloss(body, lx[1]) if lx else ""
-        text = f"{subject}. {said}" if subject else said
+        subj = lexmod.spoken(subject, lx[1]) if lx and subject else subject
+        gloss = ""
+        if lx:
+            gloss = f"v{lx[2]}\n" + lexmod.gloss(f"{subject} {body}" if subject else body, lx[1])
+            cited = store.lex_cited(_conn, mid, body, lx[1])
+            if cited:
+                gloss += "\n\nCONTEXT\n" + "\n".join(cited)
+        text = f"{subj}. {said}" if subj else said
         # WHILE THE WRITER IS ON, EVERYTHING GOES THROUGH ITS QUEUE (the one
         # ordering point): scripted as a 9-tuple, unscripted as the 6-tuple
         # the writer passes straight through, in message order.

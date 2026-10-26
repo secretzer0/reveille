@@ -297,11 +297,15 @@ def hints(phrases_seen, table):
 
 def gloss(body, table):
     """One line per token, `token = meaning`, for the script writer. An unknown
-    token says so -- the writer reads it out verbatim and invents nothing."""
+    token says so -- the writer reads it out verbatim and invents nothing.
+    "..." prose is a FRAGMENT to restore into a spoken sentence: told "say it
+    as written", the writer read `skip ok if 0010 rewrites old rows` raw."""
     lines = []
     for t, means, kind in decode(body, table):
-        if kind in ("quote", "prose"):
-            lines.append(f"{t} = free text, say it as written")
+        if kind == "prose":
+            lines.append(f"{t} = fragment, restore it to a full spoken sentence, meaning intact")
+        elif kind == "quote":
+            lines.append(f"{t} = verbatim artifact, speak it by the mouth rules, give it no meaning")
         elif means is None:
             lines.append(f"{t} = identifier, say it verbatim, give it no meaning")
         else:
