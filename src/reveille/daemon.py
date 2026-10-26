@@ -2512,6 +2512,27 @@ class _SentenceStream:
             yield s
 
 
+# ponytail: writer outcomes per room, in memory since the last deploy (the log
+# carries the history); persist when lex_stats must trend across deploys.
+_voice_outcomes = {}
+
+
+def _voice_outcome(room, how):
+    o = _voice_outcomes.setdefault(room, {"scripted": 0, "terse": 0})
+    o[how] += 1
+
+
+def _lex_stats(conn, room):
+    """store.lex_stats plus the writer's fallback rate: a message the writer
+    misses reaches the human as the terse decode, not a script."""
+    out = store.lex_stats(conn, room)
+    o = dict(_voice_outcomes.get(room) or {"scripted": 0, "terse": 0})
+    n = o["scripted"] + o["terse"]
+    o["fallback_rate"] = round(o["terse"] / n, 3) if n else 0.0
+    out["writer"] = o
+    return out
+
+
 def _script_one(item, url, model, token, first_timeout, wait=False, asked=False):
     """Write one message's script, streaming sentences into the synth queue.
     Returns True if the message went scripted, False if it went terse.
@@ -2556,12 +2577,14 @@ def _script_one(item, url, model, token, first_timeout, wait=False, asked=False)
             raise ValueError("the writer closed no sentence")
     except Exception as e:
         log.info("script: %s falls to terse: %s", mid, e)
+        _voice_outcome(room, "terse")
         stream.q.put(None)
         _tts_q.put((mid, room, speaker, text, assigned, False))   # heard, not kept (11476)
         return False
     # THE FIRST SENTENCE CLOSED INSIDE THE BUDGET: this message holds its place
     # in the synth queue NOW, and the feed learns a script exists.
     _tts_q.put((mid, room, speaker, stream, assigned, True))
+    _voice_outcome(room, "scripted")
     _feed_push(room, {"event": "script", "id": mid, "text": sentences[0], "voice_id": voice["id"]})
     full = ""
     for x in sentences:
@@ -4251,6 +4274,20 @@ async def lex_vote(proposal: int, yes: bool = True, ctx: Context = None) -> dict
     out = store.lex_vote(_conn, speaker_key(p), proposal, yes, p.rooms)
     log.info("%s LEX vote m%s %s: %s", p.name, proposal, "+" if yes else "x", out["verdict"])
     return {"verdict": out["verdict"]}
+
+
+@tool()
+async def lex_stats(room: str = "", ctx: Context = None) -> dict:
+    """What this room's LEX talk COSTS, so the room keeps only what moves the
+    numbers: read_tokens (tokens x readers: a broadcast is paid by every other
+    member), tokens_per_message, identifiers it keeps putting in backticks (each
+    one is a ref type to propose: L?F<n>-<n>="finding {} item {}"), top "..."
+    prose (a code to propose), ?L challenges, refusals since the last deploy,
+    unused_codes (retire them: L?-<code>), table_tokens (what join() costs every
+    body), and the writer's fallback_rate (how often a human got the bare
+    decode instead of a script). Over the last 2000 agent messages."""
+    p = _me(ctx.request_context.request)
+    return _lex_stats(_conn, store.resolve_send_room(p.rooms, room=room or None))
 
 
 @tool()

@@ -6291,6 +6291,52 @@ def lex_tally(conn, room, proposal_id):
 
 
 LEX_HINT_WINDOW = 2000   # recent room messages a phrase is counted across
+# ponytail: refusals are counted in memory and reset on a deploy; persist them
+# when a trend across deploys is the question.
+LEX_REFUSALS = collections.Counter()   # (room, refused token or rule) -> n
+LEX_STATS_TOP = 10
+
+
+def lex_stats(conn, room, window=LEX_HINT_WINDOW):
+    """What a LEX room PAYS for its talk, over its last `window` agent messages
+    (98868dc2): tokens as READ -- a broadcast costs every other member, a
+    unicast one reader; ~4 chars a token, the broker has no tokenizer. Plus
+    the identifiers it keeps putting in backticks (each a ref type it lacks:
+    unknown identifiers are where translation fails), ?L challenges, refusals
+    since the last deploy, codes nobody speaks, and what the table itself costs
+    every body at join()."""
+    cur = lex_table(conn, room)
+    if cur is None:
+        raise BusError("this room has no LEX")
+    members = conn.execute("SELECT COUNT(*) FROM members WHERE room_id=?", (room,)).fetchone()[0]
+    rows = conn.execute(
+        "SELECT subject, body, recipient, lex_ver FROM messages WHERE room=? AND "
+        "sender_agent_id IS NOT NULL ORDER BY id DESC LIMIT ?", (room, window)).fetchall()
+    tables, read, msgs, chal = {}, 0, 0, 0
+    idents, prose, used = collections.Counter(), collections.Counter(), set()
+    for r in rows:
+        text = f"{r['subject']} {r['body']}" if r["subject"] else (r["body"] or "")
+        msgs += 1
+        read += (len(text) + 3) // 4 * (1 if r["recipient"] != "*" else max(members - 1, 1))
+        if r["lex_ver"] is None:
+            continue
+        if r["lex_ver"] not in tables:
+            tables[r["lex_ver"]] = (lex_table(conn, room, r["lex_ver"]) or cur)["table"]
+        t = tables[r["lex_ver"]]
+        toks = lexmod.decode(text, t)
+        idents.update(m for _t, m, k in toks if k == "quote" and m and len(m.split()) == 1)
+        prose.update(lexmod.prose(text))
+        chal += lexmod.challenges(text, t)
+        if r["lex_ver"] == cur["ver"]:
+            used |= lexmod.codes_used(text, t)
+    top = lambda c: [[k, n] for k, n in c.most_common(LEX_STATS_TOP)]  # noqa: E731
+    return {"room": room, "ver": cur["ver"], "window": window, "agent_messages": msgs,
+            "read_tokens": read, "tokens_per_message": round(read / msgs, 1) if msgs else 0,
+            "identifiers": top(idents), "prose": top(prose), "challenges": chal,
+            "refusals": top(collections.Counter({k: n for (rm, k), n in LEX_REFUSALS.items()
+                                                 if rm == room})),
+            "unused_codes": [e["code"] for e in cur["table"]["codes"] if e["code"] not in used],
+            "table_tokens": (len(lexmod.render(cur["table"])) + 3) // 4}
 
 
 def _prose_seen(conn, room, phrases):
@@ -6407,8 +6453,13 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
         why = lexmod.refusal(f"{subject} {body}" if subject else body,
                              table["table"], table["ver"])
         if why:
+            bad = [t for t, _m, k in lexmod.decode(f"{subject} {body}" if subject else body,
+                                                    table["table"]) if k == "unknown"]
+            LEX_REFUSALS.update((room, b) for b in bad or
+                                ["verbatim_max" if "verbatim_max" in why else "prose_max"])
             raise BusError(why)
         if recipient == "*" and lexmod.challenges(body, table["table"]):
+            LEX_REFUSALS[(room, "?L broadcast")] += 1
             raise BusError("?L is unicast: send it to the sender of what you could not "
                            "decode (to=<sender>), never to the room -- every reader pays "
                            "for a broadcast challenge")

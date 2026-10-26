@@ -273,6 +273,23 @@ def rules(table):
     return {**SEED["rules"], **table["rules"]}
 
 
+def codes_used(body, table):
+    """The table entries a body used -- `m<id>` for m29844 -- so a room can
+    see which of its codes nobody speaks."""
+    codes, _refs = compile_table(table)
+    refs = [(_ref_regex(e["code"], table["types"]), e["code"])
+            for e in table["codes"] if _PH.search(e["code"])]
+    used = set()
+    for t, _m, k in decode(body, table):
+        if k != "code":
+            continue
+        if t in codes:
+            used.add(t)
+        else:
+            used.update(code for rx, code in refs if rx.fullmatch(t))
+    return used
+
+
 def challenges(body, table):
     """Does this message challenge with `?L`? A challenge is the sender's
     business alone: it goes unicast and is never voiced (98868dc2)."""
