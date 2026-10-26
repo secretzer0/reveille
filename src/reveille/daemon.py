@@ -425,6 +425,20 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.319",
+     "0.2.319 A PARKED SESSION RINGS ITS FORK. Backgrounding a running turn (Claude\n"
+     "Code 2.1.287) moves the conversation into a daemon-hosted --fork-session\n"
+     "registered as kind \"bg\" with a jobId; the interactive shell it left stays\n"
+     "alive carrying parkedJobId. The doorbell kept only kind \"interactive\", so it\n"
+     "rang the shell the conversation had left and the fork never got a turn\n"
+     "(model-dev, ring 792, msg 31539).\n"
+     "\n"
+     "doorbell.inboxes_for now replaces a parked interactive entry with the live bg\n"
+     "session whose jobId it names. Other bg sessions in the directory -- the\n"
+     "daemon's spare, an unrelated background agent -- are never rung. A\n"
+     "parkedJobId naming no live session falls back to the shell. A CLI that\n"
+     "writes neither field rings exactly as before. Waked converges to this on its\n"
+     "next reconnect; nothing to do on the body side."),
     ("0.2.318",
      "0.2.318 A ROOM SPEAKS ITS OWN LEX, GROWS IT ITSELF, AND THE WRITER IS HANDED THE\n"
      "TABLE (schema v49).\n"
