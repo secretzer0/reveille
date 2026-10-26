@@ -108,7 +108,7 @@ async def run(port, secrets):
             assert hello["unread"] == 0 and not hello["wake"], \
                 f"nothing has been sent yet, so the greeting must not ring: {hello}"
 
-            sent = data(await bob.call_tool("send", {"to": "alice", "body": "yo", "subject": "hi"}))
+            sent = data(await bob.call_tool("send", {"to": "alice", "body": '"yo"', "subject": '"hi"'}))
             assert sent["delivered_to"] == ["alice"], sent
             frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert frame["wake"] and frame["unread"] == 1, frame
@@ -126,7 +126,7 @@ async def run(port, secrets):
             "--token", secrets["alice"], "--once",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         await asyncio.sleep(0.5)
-        await bob.call_tool("send", {"to": "alice", "body": "ping"})
+        await bob.call_tool("send", {"to": "alice", "body": '"ping"'})
         out, werr = await asyncio.wait_for(w.communicate(), timeout=8)
         # NAME THE CAUSE, NOT THE CODE. This read `(w.returncode, out)` and
         # threw stderr away, so a CI red said `AssertionError: (2, b'')` and
@@ -157,8 +157,8 @@ async def run(port, secrets):
         bw = f"{j['wake_url']}?name=bob&token={secrets['bob']}"
         async with websockets.connect(aw) as wsa, websockets.connect(bw) as wsb:
             await asyncio.sleep(0.3)
-            await alice.call_tool("send", {"to": "*", "body": "agent broadcast",
-                                           "subject": "fyi"})
+            await alice.call_tool("send", {"to": "*", "body": '"agent broadcast"',
+                                           "subject": '"fyi"'})
             # A FRAME IS NOT A RING. Since 0.2.253 every attach is answered with
             # an unconditional greeting (`reason: hello`, `wake: false`), so
             # "the socket said anything at all" stopped meaning "the socket was
@@ -176,7 +176,7 @@ async def run(port, secrets):
                             f"agent broadcast RANG {who} -- that is the N^2 storm "
                             f"this rule exists to prevent: {frame}")
             got = data(await bob.call_tool("inbox", {}))["messages"]
-            assert any(m["body"] == "agent broadcast" for m in got), got
+            assert any(m["body"] == '"agent broadcast"' for m in got), got
             print("agent broadcast: delivered to inbox, rang nobody")
 
             # Same shape, human plane: the web composer's broadcast.

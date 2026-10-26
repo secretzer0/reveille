@@ -40,7 +40,7 @@ def world():
     store.join(c, "scout", "agent", room["id"], token_id=tok["id"])
     # agents_seen lists what the HIVE remembers, so the name has to have said
     # something for the roster to know it at all.
-    store.send(c, store.agent_principal(tok["agent_id"]), "*", "hello",
+    store.send(c, store.agent_principal(tok["agent_id"]), "*", '"hello"',
                room=room["id"])
     return c, u, room, tok
 

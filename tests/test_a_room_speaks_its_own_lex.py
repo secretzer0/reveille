@@ -31,11 +31,6 @@ def room(tmp_path, monkeypatch):
                 human=store.user_principal(admin["id"]), rooms={r["id"]: "bridge"})
 
 
-def test_a_room_without_a_lex_is_not_enforced_and_stamps_nothing(room):
-    m = store.send(room["c"], room["quark"], "*", "plain english here", room=room["room"])
-    assert store.lex_of_message(room["c"], m["id"]) is None
-
-
 def test_adopting_opts_the_room_in_and_an_agent_must_speak_it(room):
     c, rid = room["c"], room["room"]
     t = store.lex_adopt(c, rid, V9, ver=9, adopted_by="architect")
@@ -62,7 +57,7 @@ def test_a_message_decodes_against_the_version_it_was_written_under(room):
 def test_a_table_that_reads_two_ways_is_refused_whole(room):
     with pytest.raises(store.BusError, match="own alphabet"):
         store.lex_adopt(room["c"], room["room"], 'L?c<sha>="commit {}"', adopted_by="a")
-    assert store.lex_table(room["c"], room["room"]) is None
+    assert store.lex_table(room["c"], room["room"])["ver"] == 1      # the seed, untouched
     store.lex_adopt(room["c"], room["room"], V9, ver=9, adopted_by="a")
     with pytest.raises(store.BusError, match="the next is v10"):
         store.lex_adopt(room["c"], room["room"], "", ver=9, adopted_by="a")
@@ -149,7 +144,7 @@ def test_boot_hands_every_body_the_current_lex(tmp_path, monkeypatch):
             request = None
 
     out = asyncio.run(daemon.join(ctx=Ctx))
-    assert "lex" not in out["rooms"][0] and "lex_doctrine" not in out
+    assert out["rooms"][0]["lex"] == 1 and "lex_vote" in out["lex_doctrine"]   # born with the seed
     store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
     store.lex_adopt(c, rid, 'L?qf="queued field"', adopted_by="a")
     out = asyncio.run(daemon.join(ctx=Ctx))

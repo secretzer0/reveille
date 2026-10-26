@@ -125,28 +125,30 @@ def test_usage_names_the_hive_in_standing_doctrine():
 
 
 def test_the_bus_doctrine_is_at_every_place_an_agent_learns_the_bus():
-    """Operator 11397 (ratified doctrine): agents write ULTRA-TERSE on the bus; the
-    writer expands it into persona speech; the raw text stays the record. It must
+    """Operator 31560 (ruling 98868dc2, superseding 11397): agents speak ONLY LEX on
+    the bus; a human never hears or sees it -- the page shows the decode, the
+    writer speaks it. It must
     be at the core of how the MCP is explained: the standing USAGE (top), the
     CLAUDE.md block agents paste, the send tool's own description, join()'s reply,
     and the starter CLAUDE.md `reveille init` seeds."""
     import inspect
     from reveille import instructions
     head = daemon.USAGE.split("ENV (set by the launching pane", 1)[0]
-    assert "BUS DOCTRINE" in head and "ULTRA-TERSE" in head, "the doctrine leads the standing usage"
+    assert "BUS DOCTRINE" in head and "ONLY LEX" in head, "the doctrine leads the standing usage"
     block = daemon.USAGE.split("CLAUDE.md block", 1)[1]
     assert block.index("BUS DOCTRINE") < block.index("Identity/token from env"), \
         "in the pasted block the doctrine is the first rule"
-    assert "BUS DOCTRINE" in (daemon.send.__doc__ or "") and "ULTRA-TERSE" in daemon.send.__doc__
+    assert "BUS DOCTRINE" in (daemon.send.__doc__ or "") and "ONLY LEX" in daemon.send.__doc__
     assert '"doctrine": BUS_DOCTRINE' in inspect.getsource(daemon.join), "join() hands it over on every boot"
-    assert "ULTRA-TERSE" in daemon.BUS_DOCTRINE and "never for the ear" in daemon.BUS_DOCTRINE and "quoted verbatim" in daemon.BUS_DOCTRINE
+    assert "ONLY LEX" in daemon.BUS_DOCTRINE and "never for the ear" in daemon.BUS_DOCTRINE \
+        and "never hears or sees" in daemon.BUS_DOCTRINE
     # The RENDERED block, not the source of whichever function happens to hold
     # the text: the doctrine moved from doctrine_block to doctrine_body when the
     # body became separately hashable, and a gate reading source would have gone
     # green on the wrong function or red on a pure refactor. What an agent
     # actually reads is the block.
     seeded = instructions.doctrine_block("any-agent", "devops")
-    assert "BUS DOCTRINE" in seeded and "ULTRA-TERSE" in seeded, \
+    assert "BUS DOCTRINE" in seeded and "ONLY LEX" in seeded, \
         "the seeded CLAUDE.local.md carries it"
 
 

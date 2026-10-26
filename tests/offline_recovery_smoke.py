@@ -139,8 +139,8 @@ def main():
             req = urllib.request.Request(
                 f"{url}/send", method="POST",
                 data=json.dumps({"from": "ana", "to": ROLE,
-                                 "subject": "are you there",
-                                 "body": "recovery probe"}).encode(),
+                                 "subject": '"are you there"',
+                                 "body": '"recovery probe"'}).encode(),
                 headers={"Authorization": f"Bearer {admin['secret']}",
                          "Content-Type": "application/json"})
             with contextlib.suppress(Exception):

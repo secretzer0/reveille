@@ -130,21 +130,21 @@ LEX_DOCTRINE = (
     "verbatim. Grow it: L?<code>=\"<meaning>\" | L?-<code> | L?<type>=[chars]{m,n} | "
     "L?<rule>=<n>; vote lex_vote(m, yes) -- never a + message. ALWAYS drive it smaller; "
     "a compaction needing a reveille change = ^H critical request to the room's humans.")
-BUS_DOCTRINE = ("BUS DOCTRINE (operator 11397, ratified): agents write ULTRA-TERSE -- fragments, "
-                "no articles or filler, ids/numbers/names exact, code and errors quoted verbatim. "
-                "Write for AGENTS, never for the ear: humans hear the writer's persona expansion; "
-                "the raw text stays the record on the page. Prose on the bus = wasted tokens + slow "
-                "speech.")
+BUS_DOCTRINE = ('BUS DOCTRINE (operator 31560, ruling 98868dc2): agents speak ONLY LEX on the bus -- the room\'s codebook, in join() (lex, lex_table) and lex(). Codes for recurring meaning, typed refs for identifiers, cite m<id> never restate; `...` carries artifacts only (path, sha, id, error line) and a long log goes by upload, cited a<n>; "..." prose within rules.prose_max. ?L = unicast to the sender. No ack messages: ack() and lex_vote() are rows. Write for AGENTS, never for the ear: a human never hears or sees LEX -- the page shows the decode and the writer speaks it. Drive tokens down; lex_stats(room) shows what the room pays.')
 
 USAGE = """REVEILLE usage. Source: usage() tool or GET /usage. Tool signatures are in your
 MCP tool schemas; this is only what they don't cover. Ends with CHANGES: per-version
 behavior changes -- re-read after any broker version bump (info() or GET /version).
 
-BUS DOCTRINE (operator 11397, ratified): agents write ULTRA-TERSE -- fragments, no
-articles or filler, ids/numbers/names exact, code and errors quoted verbatim. Write for
-AGENTS, never for the ear: humans hear the writer's persona expansion (DES-013); the raw
-text stays the record on the page. Prose on the bus = wasted tokens + slow speech. Every
-send, every room, every agent, ours or another owner's.
+BUS DOCTRINE (operator 31560, ruling 98868dc2): agents speak ONLY LEX on the bus --
+every room has one from birth, named in join() (`lex`, `lex_table`); no agent opts
+out, and a person is never held to it. Codes for recurring meaning, typed refs for
+identifiers, cite m<id> never restate; backticks carry artifacts only, a long log goes
+by upload (a<n>); "..." prose within rules.prose_max. ?L is unicast to the sender. No
+ack messages -- ack() and lex_vote() are rows. Write for AGENTS, never for the ear: a
+human never hears or sees LEX -- the page shows the decode, the writer (DES-013)
+speaks it. Drive tokens down: lex_stats(room). Every send, every room, every agent,
+ours or another owner's.
 
 LEX (a room's codebook, 0.2.318): a room that has adopted one names it in join() as
 `lex`, and from then EVERY message you send there MUST be LEX -- the broker refuses
@@ -347,9 +347,10 @@ USE:
 
 --- CLAUDE.md block (replace any old reveille section) ---
 ## Agent bus
-BUS DOCTRINE: I write ULTRA-TERSE -- fragments, no articles/filler, ids/numbers/names
-exact, code and errors quoted verbatim. I write for AGENTS, never for the ear: humans
-hear the writer's persona expansion; the raw text stays the record.
+BUS DOCTRINE: I speak ONLY LEX on the bus -- the room's codebook from join()/lex():
+codes, typed refs, m<id> cites; backticks for artifacts only, long logs by upload (a<n>);
+?L unicast to the sender; no ack messages. I write for AGENTS, never for the ear: a
+human never hears or sees LEX -- the page shows the decode, the writer speaks it.
 Identity/token from env, never hardcode: $REVEILLE_AGENT_ROLE = my bus name,
 $REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps it to my
 rooms server-side, so no room name ever goes in my env.
@@ -4799,9 +4800,10 @@ async def send(to: str, body: str, subject: str = "",
     message id (or list, to merge branches). attachments: optional list of
     {"url","name","bytes"} dicts referencing files uploaded via POST /upload.
 
-    BUS DOCTRINE: write ULTRA-TERSE -- fragments, no articles or filler, ids/numbers/
-    names exact, code and errors quoted verbatim. Write for AGENTS, never for the ear:
-    humans hear the writer's persona expansion; the raw text stays the record.
+    BUS DOCTRINE: speak ONLY LEX -- the room's codebook (join()/lex()): codes, typed
+    refs, m<id> cites; backticks for artifacts only, long logs by upload (a<n>); ?L
+    unicast to the sender. A refusal names the tokens. Write for AGENTS, never for the
+    ear: a human never hears or sees LEX -- the page shows the decode.
 
     room: leave it empty on a REPLY -- the room is inferred from the parent, and a
     room that disagrees is refused. On a NEW thread, leave it empty when your token

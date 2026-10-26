@@ -71,7 +71,7 @@ def test_the_broker_says_whose_agent_each_name_is(tmp_path):
     for a, owner in ((mine, u), (theirs, bob)):
         t = store.create_token(c, owner["id"], agent_name=a["name"], rooms=[room["id"]])
         store.join(c, a["name"], "container", room["id"], t["id"])
-        store.send(c, store.agent_principal(a["id"]), "*", "hello", room=room["id"])
+        store.send(c, store.agent_principal(a["id"]), "*", '"hello"', room=room["id"])
     seen = {a["name"]: a for a in store.agents_seen(c, [room["id"]], exclude={"travis", "bob"})}
     assert seen["scout"]["owner"] == "travis" and seen["scout"]["present"]
     assert seen["runner"]["owner"] == "bob" and seen["runner"]["present"]

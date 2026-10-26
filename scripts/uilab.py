@@ -85,24 +85,28 @@ def seed(db, media=False, extra_agents=()):
             # the rail must show nothing for a body that has not said.
             store.set_attach_facts(conn, store.agent_principal(t["agent_id"]),
                                 [rid], "0.2.256")
-    store.send(conn, agent, "*", "Deployed 0.2.130 to reveille.mythos.org: writer at "
-               "192.168.85.101:18080, ear take cap 8 MiB / 60 s, GPU 0 at 11.26 of 12.29 GB, "
-               "PR #65 merged.", subject="smoke 0.2.130", room=rid)
+    # LEX FROM BIRTH (98868dc2): every room speaks LEX, so an AGENT's subject and
+    # body must decode or send() refuses them. The corpus keeps its layout cases
+    # in LEX shape -- the 200-char unbroken token, the long subject, the fence.
+    store.send(conn, agent, "*", '+ "deployed" `0.2.130` `reveille.mythos.org` "writer at" '
+               '`192.168.85.101:18080` "ear take cap" `8MiB/60s` "GPU 0 at" `11.26/12.29GB` '
+               '`PR#65` +', subject='"smoke" `0.2.130`', room=rid)
     store.send(conn, human, "*", "slice four: this was sent by the spoken word", room=rid)
-    store.send(conn, agent, "*", "NEED: your GO on #78 -- drawer, wrap, 16 px; "
-               "measured <= 393. Reply GO or what is wrong.", subject="#78 review", room=rid)
+    store.send(conn, agent, "*", '! ^H > `#78` "drawer, wrap, 16 px; measured <= 393"',
+               subject='? `#78` "review"', room=rid)
     store.send(conn, human, "*", "pause to send test", room=rid)
     store.send(conn, human, "*", "sentence one sentence two", room=rid)
-    store.send(conn, agent, "*", "an unbroken token: " + "x" * 200 + " and `audio_make_http` "
-               "answers ready whenever tts-<mid>.webm exists -- /home/vyzon/reveille/files/tts-11476.webm.part",
+    store.send(conn, agent, "*", '"an unbroken token:" `' + "x" * 200 + '` `audio_make_http` '
+               '"answers ready whenever" `tts-<mid>.webm` "exists" '
+               '`/home/vyzon/reveille/files/tts-11476.webm.part`',
                room=rid)
-    store.send(conn, agent, "*", "Where the defect lives, from the code as merged: on-demand "
-               "(`POST /audio/<mid>`, 0.2.117) already goes through the writer's queue -- BUT "
-               "`audio_make_http` answers \"ready\" whenever tts-<mid>.webm exists.",
-               subject="RULING (operator 11475, DES-013 s5/s7 amended): A TERSE RENDITION OF A "
-               "SCRIPTABLE MESSAGE IS NEVER DURABLE. Invariant: tts-<mid>.webm/.m4a is kept only if "
-               "(a) the message is not scriptable or (b) it was made from a script.", room=rid)
-    store.send(conn, agent, "*", "code block:\n```\nREVEILLE_TTS_URL=http://192.168.90.136:18004 "
+    store.send(conn, agent, "*", '! `POST /audio/<mid>` `0.2.117` '
+               '`audio_make_http answers "ready" whenever tts-<mid>.webm exists.`',
+               subject='^H `operator-11475` `DES-013` `s5/s7` "RULING, AMENDED: A TERSE '
+               'RENDITION OF A SCRIPTABLE MESSAGE IS NEVER DURABLE" `Invariant: '
+               'tts-<mid>.webm/.m4a is kept only if (a) the message is not scriptable or '
+               '(b) it was made from a script.`', room=rid)
+    store.send(conn, agent, "*", '"code block:"\n```\nREVEILLE_TTS_URL=http://192.168.90.136:18004 '
                "REVEILLE_LAN_PLAINTEXT=1 REVEILLE_SCRIPT_URL=http://192.168.85.101:18080 make "
                "SERVER_DATA=/home/vyzon/reveille PROXY_SITE=reveille.mythos.org up\n```", room=rid)
     if media:
@@ -121,8 +125,8 @@ def seed(db, media=False, extra_agents=()):
             (files / stored).write_bytes(data)
             store.record_file(conn, stored, rid, human)
             atts.append({"url": f"/files/{stored}", "name": name, "bytes": len(data)})
-        store.send(conn, agent, "*", "three shots from the deploy -- the amber one is the "
-                   "before, the other two are after the fix.", subject="deploy shots",
+        store.send(conn, agent, "*", '"three shots from the deploy: amber before, other two after"',
+                   subject='"deploy shots"',
                    attachments=atts, room=rid)
     conn.close()
 

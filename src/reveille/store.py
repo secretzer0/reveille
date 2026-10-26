@@ -84,7 +84,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -2510,6 +2510,25 @@ def _upgrade_v48(conn, db_path):
         conn.execute("PRAGMA user_version=49")
 
 
+LEX_SEEDED_BY = "reveille seed (98868dc2)"
+
+
+def _upgrade_v49(conn, db_path):
+    """v49 -> v50: EVERY ROOM SPEAKS LEX (ruling 98868dc2: default-ON, no agent
+    opt-out). A room with no LEX adopts the seed as its v1. Insert-only -- no
+    existing row is touched and a room that already has a LEX keeps it -- so no
+    snapshot is owed. Messages already sent keep lex_ver NULL: they were
+    written under none, and that stays their truth."""
+    seed = json.dumps(lexmod.seed(), separators=(",", ":"))
+    now = time.time_ns()
+    with tx(conn):
+        conn.execute(
+            "INSERT INTO lex_versions(room, ver, entries, adopted_by, source_msg, adopted_ns) "
+            "SELECT r.id, 1, ?, ?, NULL, ? FROM rooms r WHERE NOT EXISTS "
+            "(SELECT 1 FROM lex_versions l WHERE l.room=r.id)", (seed, LEX_SEEDED_BY, now))
+        conn.execute("PRAGMA user_version=50")
+
+
 def _upgrade_v46(conn, db_path):
     """v46 -> v47: conflict_verdicts -- a pair judged once is not judged again
     by the next agent in the room. Additive and idempotent: a new table, no
@@ -2522,7 +2541,7 @@ def _upgrade_v46(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48)}
+              37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -4158,6 +4177,9 @@ def create_room(conn, owner_id, name, public=False):
             (rid, name, owner_id, 1 if public else 0, now))
     except sqlite3.IntegrityError:
         raise BusError(f"you already own a room named {name!r}")
+    # EVERY ROOM SPEAKS LEX FROM BIRTH (98868dc2): the seed is its v1, and the
+    # room grows it from there. No agent opts out; a person is never held to it.
+    lex_adopt(conn, rid, "", adopted_by=LEX_SEEDED_BY)
     return {"id": rid, "name": name, "owner_id": owner_id, "public": bool(public),
             "retention_ns": None, "wake_k": None, "created_ns": now}
 
@@ -4727,6 +4749,7 @@ def _delete_messages(conn, ids):
     conn.execute(f"DELETE FROM attachments WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM scripts WHERE message_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM reads WHERE message_id IN ({ph})", ids)
+    conn.execute(f"DELETE FROM lex_votes WHERE proposal_id IN ({ph})", ids)
     conn.execute(f"DELETE FROM links WHERE parent_id IN ({ph}) OR child_id IN ({ph})", ids + ids)
     conn.execute(f"DELETE FROM messages WHERE id IN ({ph})", ids)
     if AUDIO_DIR:
@@ -4763,6 +4786,7 @@ def purge_room(conn, room_id, owner_id):
         conn.execute("DELETE FROM members WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM room_members WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM token_rooms WHERE room_id=?", (room_id,))
+        conn.execute("DELETE FROM lex_versions WHERE room=?", (room_id,))
         conn.execute("DELETE FROM rooms WHERE id=?", (room_id,))
     return len(ids)
 
