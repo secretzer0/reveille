@@ -205,6 +205,31 @@ def test_only_a_live_interactive_cli_is_rung(tmp_path):
     assert len(doorbell.inboxes_for(work, base=sess)) == 1
 
 
+def test_a_parked_session_rings_its_fork_and_never_the_spare(tmp_path):
+    """Backgrounding a turn forks the conversation into a kind "bg" session;
+    the interactive shell left behind names it by parkedJobId. The fork is
+    rung, the shell is not, and the daemon's spare in the same directory is
+    never rung. A parkedJobId naming no live session falls back to the shell."""
+    sess, work, _ = _world(tmp_path)
+    shell = _descriptor(sess, work, "/s/shell.sock", pid=os.getppid())
+    fork = _descriptor(sess, work, "/s/fork.sock", kind="bg", pid=os.getpid())
+
+    def tag(pid, **kw):
+        p = os.path.join(sess, f"{pid}.json")
+        with open(p) as f:
+            d = json.load(f)
+        d.update(kw)
+        with open(p, "w") as f:
+            json.dump(d, f)
+
+    tag(fork, jobId="1a3fa8bb")
+    tag(shell, parkedJobId="1a3fa8bb")
+    assert [s for _, s, _ in doorbell.inboxes_for(work, base=sess)] == ["/s/fork.sock"]
+
+    tag(fork, jobId="b03704f3", spare=True)               # only a spare: shell keeps it
+    assert [s for _, s, _ in doorbell.inboxes_for(work, base=sess)] == ["/s/shell.sock"]
+
+
 def test_a_session_in_another_directory_is_not_ours(tmp_path):
     """The registry maps an identity to ONE directory; a CLI running elsewhere
     belongs to somebody else and must never be rung by our ring."""
