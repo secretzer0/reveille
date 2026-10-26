@@ -287,6 +287,8 @@ def seed(db):
         tok = store.create_token(conn, owner["id"], name, agent_name=name, create=True)
         store.assign_room(conn, tok["id"], room["id"], owner["id"])
         secrets[name] = tok["secret"]
+    # A ref type the sender's own waked can explain (main.62).
+    store.lex_adopt(conn, room["id"], 'L?P<n>="pull request {}"@gh_pr', adopted_by="smoke")
     conn.close()
     return secrets
 
@@ -301,15 +303,46 @@ def spawn_daemon():
                REVEILLE_HOST="127.0.0.1")
     proc = subprocess.Popen(daemon_cmd(), env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return port, proc, secrets
+    return port, proc, secrets, db
+
+
+async def resolve_leg(port, secrets, db):
+    """THE BRIDGE OVER THE WIRE (main.62): an agent cites a ref nobody in the
+    room has explained; the broker does not refuse it -- it asks the SENDER'S
+    own waked over the wake socket, as a frame that is NOT a ring, and takes
+    back only what it asked about."""
+    async with session(port, "bob", secrets["bob"]) as (rb, wb), ClientSession(rb, wb) as bob:
+        await bob.initialize()
+        await bob.call_tool("join", {"name": "bob", "url": f"http://127.0.0.1:{port}"})
+        async with websockets.connect(f"ws://127.0.0.1:{port}/wake?name=bob&token={secrets['bob']}") as ws:
+            json.loads(await asyncio.wait_for(ws.recv(), timeout=5))          # hello
+            sent = data(await bob.call_tool("send", {"to": "*", "body": "~ P41 _"}))
+            ask = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            assert ask["wake"] is False and ask["reason"] == "resolve", ask
+            assert ask["refs"] == [{"ref": "P41", "resolver": "gh_pr", "arg": "41"}], ask
+            assert ask["mid"] == sent["id"], (ask, sent)
+            await ws.send(json.dumps({"resolved": {"room": ask["room"], "mid": ask["mid"],
+                                                   "refs": {"P41": "layer-norm fix, open",
+                                                            "P99": "never asked"}}}))
+            deadline = time.time() + 5
+            known = {}
+            while time.time() < deadline and "P41" not in known:
+                await asyncio.sleep(0.1)
+                conn = store.connect(db)
+                known = store.lex_known(conn, ask["room"])
+                conn.close()
+            assert known == {"P41": "layer-norm fix, open"}, known
+    print("resolve: unexplained ref -> non-ringing ask to the sender's waked -> "
+          "only the asked ref lands in the ledger")
 
 
 def main():
     # One daemon serves both halves: there is no open mode to spawn separately any more.
-    port, proc, secrets = spawn_daemon()
+    port, proc, secrets, db = spawn_daemon()
     try:
         wait_health(port)
         asyncio.run(run(port, secrets))
+        asyncio.run(resolve_leg(port, secrets, db))
         asyncio.run(check_auth(port, secrets["alice"]))
     finally:
         proc.terminate()
