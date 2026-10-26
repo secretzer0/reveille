@@ -2999,6 +2999,13 @@ function connect(){
   case 'audio':{const mm=msgs.get(m.id);if(mm){if(!m.terse)mm.has_audio=true;mm.gen_pending=false;paintIcons(mm);if(vAsked.delete(m.id))playOne(m.id);else vPush(mm);}return;}
   case 'script':{const mm=msgs.get(m.id);if(mm){mm.has_script=true;mm.script=m.text||mm.script;
     mm.script_voice=m.voice_id||mm.script_voice;paintIcons(mm);}return;}
+  // THE BRIDGE LANDED (main.62): the sender's waked explained a ref after the
+  // row was painted -- repaint its decode in place, unless the reader is
+  // looking at the codes or the script.
+  case 'gloss':{const mm=msgs.get(m.id);if(mm&&m.gloss!=null){mm.gloss=m.gloss;
+    if(m.gloss_subject!=null)mm.gloss_subject=m.gloss_subject;
+    const row=document.querySelector('.row[data-id="'+m.id+'"]');
+    if(row&&!row.classList.contains('scripted'))paintBody(row,mm);}return;}
   case 'message':return add(m);
   // A standing knock is an owner decision the system is blocked on (12602/
   // 12607): the frame is a POKE carrying a count -- the page fetches the SET
