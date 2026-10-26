@@ -46,6 +46,7 @@ SEED = {
         {"code": "^H", "means": "needs a human"},
         {"code": "m<id>", "means": "bus message {}"},
         {"code": "L<n>", "means": "LEX version {} adopted"},
+        {"code": "a<n>", "means": "attachment {} of this message"},
     ],
     "types": {
         "id": {"chars": "0123456789", "min": 1, "max": 20},
@@ -53,8 +54,10 @@ SEED = {
         "sha": {"chars": "0123456789abcdef", "min": 7, "max": 40},
     },
     # prose_max: "..." words one message may carry. hint_at: times a phrase must
-    # already appear in the room before a send is told to code it.
-    "rules": {"prose_max": 12, "hint_at": 3},
+    # already appear in the room before a send is told to code it. verbatim_max:
+    # words one message may carry inside backtick spans that contain whitespace
+    # -- an error line fits, a paragraph of English does not (98868dc2).
+    "rules": {"prose_max": 12, "hint_at": 3, "verbatim_max": 40},
 }
 RULES = frozenset(SEED["rules"])
 
@@ -264,20 +267,46 @@ def apply(table, change):
     return out
 
 
+def rules(table):
+    """The rules a table is held to: the seed's value for every rule it never
+    set. A room that adopted before a rule existed is held to the seed's."""
+    return {**SEED["rules"], **table["rules"]}
+
+
+def challenges(body, table):
+    """Does this message challenge with `?L`? A challenge is the sender's
+    business alone: it goes unicast and is never voiced (98868dc2)."""
+    return any(t == "?L" and k == "code" for t, _m, k in decode(body, table))
+
+
 def refusal(body, table, ver):
-    """None if `body` is valid LEX, else the refusal text naming the way out."""
+    """None if `body` is valid LEX, else the refusal text naming the way out.
+
+    BACKTICKS ARE FOR ARTIFACTS, NOT ENGLISH (98868dc2): 7/7 fleet reviews
+    found 86-97% of agent tokens in backtick prose. A span with no whitespace
+    (path, sha, id, flag) is free; every word of a span WITH whitespace, inline
+    or fenced, counts toward rules.verbatim_max. Past it the artifact goes by
+    upload -- referenced, never truncated, paid only by whoever fetches it."""
     toks = decode(body, table)
     unknown = [t for t, _m, k in toks if k == "unknown"]
     if unknown:
         return (f"not LEX v{ver}: {' '.join(unknown)}. Use a code from lex(), put "
                 f"code/errors/paths in `...`, prose in \"...\", or propose a code: "
                 f"L?<code>=\"<meaning>\"")
-    cap = table["rules"]["prose_max"]
+    rule = rules(table)
+    cap = rule["prose_max"]
     words = sum(len(m.split()) for _t, m, k in toks if k == "prose")
     if words > cap:
         return (f"LEX v{ver} drift: {words} words of \"...\" prose, max {cap}. "
                 f"Say it in codes and refs; propose a code for what has none: "
                 f"L?<code>=\"<meaning>\"")
+    cap = rule["verbatim_max"]
+    words = sum(len(m.split()) for _t, m, k in toks if k == "quote" and len(m.split()) > 1)
+    if words > cap:
+        return (f"LEX v{ver} drift: {words} words inside backticks, verbatim_max {cap}. "
+                f"Backticks carry artifacts, not English: put a path, sha or id in `...`, "
+                f"say the rest in codes, and send a long log or traceback by upload "
+                f"and cite it as a<n>")
     return None
 
 
@@ -292,7 +321,7 @@ def hints(phrases_seen, table):
     """Pushback for a sender: [(phrase, times)] already counted in the room ->
     one line per phrase at or past rules.hint_at, naming the proposal to send."""
     return [f'"{p}" x{n} in room: propose L?<code>="{p}"'
-            for p, n in phrases_seen if n >= table["rules"]["hint_at"]]
+            for p, n in phrases_seen if n >= rules(table)["hint_at"]]
 
 
 def gloss(body, table):
@@ -319,8 +348,8 @@ def render(table):
     codes = " | ".join(f"{e['code']} {e['means']}" for e in table["codes"])
     types = " ".join(f"<{k}>=[{t['chars']}]{{{t['min']},{t['max']}}}"
                      for k, t in table["types"].items())
-    rules = " ".join(f"{k}={v}" for k, v in table["rules"].items())
-    return f"codes: {codes}\ntypes: {types}\nrules: {rules}"
+    held = " ".join(f"{k}={v}" for k, v in rules(table).items())
+    return f"codes: {codes}\ntypes: {types}\nrules: {held}"
 
 
 def spoken(body, table):

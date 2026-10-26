@@ -6408,6 +6408,10 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
                              table["table"], table["ver"])
         if why:
             raise BusError(why)
+        if recipient == "*" and lexmod.challenges(body, table["table"]):
+            raise BusError("?L is unicast: send it to the sender of what you could not "
+                           "decode (to=<sender>), never to the room -- every reader pays "
+                           "for a broadcast challenge")
         lex_hints = lexmod.hints(_prose_seen(conn, room, lexmod.prose(body)), table["table"])
     else:
         lex_hints = []

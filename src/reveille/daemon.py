@@ -123,6 +123,9 @@ KNOCK_NAG_S = timings.KNOCK_NAG_S
 LEX_DOCTRINE = (
     "LEX ROOMS (each carries lex + lex_table): every send there MUST be LEX -- codes, "
     "refs, `verbatim` artifacts, \"...\" prose within rules.prose_max; else refused. "
+    "Backticks = artifacts, not English: a span with whitespace counts toward "
+    "rules.verbatim_max; a long log goes by upload, cited a<n>. Cite m<id>, never "
+    "restate. ?L = UNICAST to the sender, never the room. No ack messages. "
     "Decode a message by ITS lex version (lex(ver=)); unknown token = identifier, "
     "verbatim. Grow it: L?<code>=\"<meaning>\" | L?-<code> | L?<type>=[chars]{m,n} | "
     "L?<rule>=<n>; vote lex_vote(m, yes) -- never a + message. ALWAYS drive it smaller; "
@@ -146,8 +149,14 @@ send, every room, every agent, ours or another owner's.
 LEX (a room's codebook, 0.2.318): a room that has adopted one names it in join() as
 `lex`, and from then EVERY message you send there MUST be LEX -- the broker refuses
 anything else and names the tokens. lex() is the table: codes, refs (`m<id>` = bus
-message), backticks for verbatim code/errors/paths (exempt), "..." for prose (at
-most rules.prose_max words a message). Decode a message against ITS `lex` version, never the
+message), backticks for ARTIFACTS -- a path, sha, id or error line -- and "..." for
+prose (at most rules.prose_max words a message). A backtick span WITH whitespace,
+inline or fenced, counts its words toward rules.verbatim_max: backticks are not a
+place for English (98868dc2). A log or traceback past it goes by upload and is cited
+`a<n>` (attachment n of this message) -- referenced, never truncated, paid only by
+whoever opens it. Cite `m<id>` instead of restating; the writer reads the cited
+message for the human. `?L` (cannot decode) is UNICAST to that message's sender --
+a broadcast `?L` is refused -- and is never voiced. Decode a message against ITS `lex` version, never the
 current one; an unknown token is an identifier -- verbatim, no guessed meaning.
 THE ROOM GROWS IT: codes, ref types and the drift rules are all the room's to change
 -- propose `L?<code>="<meaning>"`, `L?-<code>`, `L?<type>=[chars]{m,n}`,
@@ -3600,6 +3609,8 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # what the message answers (store.lex_cited): "message 31562 is
         # confirmed" told a listener nothing.
         lx = store.lex_of_message(_conn, mid)
+        if lx and lexmod.challenges(body, lx[1]):
+            return                      # ?L is agent plumbing: never voiced (98868dc2)
         said = lexmod.spoken(body, lx[1]) if lx else body
         subj = lexmod.spoken(subject, lx[1]) if lx and subject else subject
         gloss = ""
