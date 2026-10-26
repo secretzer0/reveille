@@ -98,7 +98,7 @@ def seed(db, media=False, extra_agents=()):
     store.send(conn, human, "*", "sentence one sentence two", room=rid)
     store.send(conn, agent, "*", '"an unbroken token:" `' + "x" * 200 + '` `audio_make_http` '
                '"answers ready whenever" `tts-<mid>.webm` "exists" '
-               '`/home/vyzon/reveille/files/tts-11476.webm.part`',
+               '`tts-11476.webm.part`',
                room=rid)
     store.send(conn, agent, "*", '! `POST /audio/<mid>` `0.2.117` '
                '`audio_make_http answers "ready" whenever tts-<mid>.webm exists.`',

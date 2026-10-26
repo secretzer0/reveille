@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from reveille import daemon, store  # noqa: E402
 
 V9 = 'L?P<n>="pull request {}" L?@<sha>="commit {}" L?!!="stop fleet"'
+DEFINE = 'P880="writer fix" @f18dd410="writer fix commit"'   # each ref explained once (98868dc2 bridge)
 
 
 @pytest.fixture
@@ -39,6 +40,9 @@ def test_adopting_opts_the_room_in_and_an_agent_must_speak_it(room):
         store.send(c, room["quark"], "*", "L8 P880 cf18dd410 _", room=rid)
     with pytest.raises(store.BusError, match="drift"):
         store.send(c, room["quark"], "*", '+ "' + "word " * 13 + '"', room=rid)
+    with pytest.raises(store.BusError, match="define P880 once"):
+        store.send(c, room["quark"], "*", "L8 P880 @f18dd410 _", room=rid)
+    store.send(c, room["quark"], "*", DEFINE, room=rid)
     m = store.send(c, room["quark"], "*", "L8 P880 @f18dd410 _", room=rid)
     assert store.lex_of_message(c, m["id"])[2] == 9
     store.send(c, room["human"], "*", "plain english from a human", room=rid)   # never held
@@ -48,10 +52,10 @@ def test_a_message_decodes_against_the_version_it_was_written_under(room):
     from reveille import lex
     c, rid = room["c"], room["room"]
     store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
-    old = store.send(c, room["quark"], "*", "P880", room=rid)["id"]
+    old = store.send(c, room["quark"], "*", 'P880="writer fix"', room=rid)["id"]
     store.lex_adopt(c, rid, 'L?P<n>="merge request {}"', adopted_by="a")
     body, table, ver = store.lex_of_message(c, old)
-    assert ver == 9 and lex.spoken(body, table) == "pull request 880"
+    assert ver == 9 and lex.spoken(body, table) == "pull request 880 (writer fix)"
 
 
 def test_a_table_that_reads_two_ways_is_refused_whole(room):
@@ -75,7 +79,7 @@ def test_the_room_grows_its_own_lex_by_votes_that_are_never_messages(room):
     assert store.lex_vote(c, room["odo"], prop, True, room["rooms"])["verdict"] == {"adopted": 10}
     assert c.execute("SELECT count(*) FROM messages").fetchone()[0] == before, \
         "a vote is a row, not a message"
-    assert store.send(c, room["odo"], "*", "V3.3.17", room=rid)["id"]
+    assert store.send(c, room["odo"], "*", 'V3.3.17="current release"', room=rid)["id"]
     with pytest.raises(store.BusError, match="max 4"):
         store.send(c, room["odo"], "*", '+ "one two three four five"', room=rid)
     with pytest.raises(store.BusError, match="not a LEX proposal"):
@@ -103,6 +107,7 @@ def test_prose_the_room_keeps_quoting_comes_back_as_a_code_to_propose(room):
 def test_the_writer_is_handed_the_gloss_and_the_voice_the_meanings(room, monkeypatch):
     c, rid = room["c"], room["room"]
     store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
+    store.send(c, room["quark"], "*", DEFINE, room=rid)
     m = store.send(c, room["quark"], "*", "L8 P880 @f18dd410 _", room=rid)
     v = {"id": "quark", "name": "Quark", "persona": "A Ferengi bartender.", "updated_ns": 0}
     monkeypatch.setattr(daemon, "_tts_on", True)
@@ -114,7 +119,8 @@ def test_the_writer_is_handed_the_gloss_and_the_voice_the_meanings(room, monkeyp
         daemon._script_q.get_nowait()
     daemon._tts_enqueue(m["id"], rid, "quark", "", "L8 P880 @f18dd410 _", key="agent:x")
     item = daemon._script_q.get_nowait()
-    assert item[3] == "LEX version 8 adopted; pull request 880; commit f18dd410; no reply wanted"
+    assert item[3] == ("LEX version 8 adopted; pull request 880 (writer fix); "
+                       "commit f18dd410 (writer fix commit); no reply wanted")
     msgs = daemon.script_prompt("Quark", v["persona"], "quark", "", item[7], item[8])
     assert "NARRATE FROM THE GLOSS" in msgs[0]["content"]
     assert "L8 = LEX version 8 adopted" in msgs[1]["content"]
@@ -174,9 +180,11 @@ def _enqueue(room, monkeypatch, mid, subject, body):
 def test_the_subject_is_decoded_like_the_body_it_was_checked_with(room, monkeypatch):
     c, rid = room["c"], room["room"]
     store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
+    store.send(c, room["quark"], "*", DEFINE, room=rid)
     m = store.send(c, room["quark"], "*", "+ _", subject="L8 P880", room=rid)
     item = _enqueue(room, monkeypatch, m["id"], "L8 P880", "+ _")
-    assert item[3] == "LEX version 8 adopted; pull request 880. ok, done, yes; no reply wanted"
+    assert item[3] == ("LEX version 8 adopted; pull request 880 (writer fix). "
+                       "ok, done, yes; no reply wanted")
     assert "P880 = pull request 880" in item[8]
 
 
@@ -190,13 +198,13 @@ def test_prose_is_glossed_as_a_fragment_to_restore_not_to_read_as_written(room):
 def test_the_writer_is_handed_what_the_message_answers(room, monkeypatch):
     c, rid = room["c"], room["room"]
     store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
-    asked = store.send(c, room["odo"], "*", '? P880 "migration 0010 rewrites old rows"',
+    asked = store.send(c, room["odo"], "*", '? P880="writer fix" "migration 0010 rewrites old rows"',
                        subject='"skip F38-6"', room=rid)
     m = store.send(c, room["quark"], "*", f'+ m{asked["id"]} "skip ok" _', room=rid,
                    reply_to=asked["id"])
     item = _enqueue(room, monkeypatch, m["id"], "", f'+ m{asked["id"]} "skip ok" _')
     gloss = item[8]
-    assert f"m{asked['id']} from odo: skip F38-6; question; pull request 880; " \
+    assert f"m{asked['id']} from odo: skip F38-6; question; pull request 880 (writer fix); " \
            "migration 0010 rewrites old rows" in gloss
     assert gloss.count(f"m{asked['id']} from") == 1          # parent AND cited: once
     msgs = daemon.script_prompt("Quark", "p", "quark", "", item[7], gloss)
@@ -216,6 +224,7 @@ def test_a_cited_message_from_another_room_never_reaches_the_writer(room, monkey
 def test_the_first_sentence_budget_is_sized_on_what_the_writer_reads(room, monkeypatch):
     c, rid = room["c"], room["room"]
     store.lex_adopt(c, rid, V9, ver=9, adopted_by="a")
+    store.send(c, room["quark"], "*", DEFINE, room=rid)
     m = store.send(c, room["quark"], "*", "L8 P880 @f18dd410 _", room=rid)
     item = _enqueue(room, monkeypatch, m["id"], "", "L8 P880 @f18dd410 _")
     sized = []

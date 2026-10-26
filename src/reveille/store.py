@@ -84,7 +84,7 @@ def valid_file_url(url):
             f"attachment url must be a broker file path (/files/<stored>), got {url!r}. "
             f"Upload the bytes first -- the url it returns is the only one that serves.")
 BROADCAST = "*"
-SCHEMA_VERSION = 50
+SCHEMA_VERSION = 51
 
 # Entity extraction (DES-001 S2): deterministic, no LLM, the whole list in one place.
 # These are the identifier classes the fleet actually cites -- and the recovery path
@@ -810,7 +810,23 @@ CREATE TABLE IF NOT EXISTS lex_votes (
     PRIMARY KEY (proposal_id, voter)
 );
 """
+# THE BRIDGE (98868dc2): what each ref MEANS in a room, said once. `P39=
+# "layer-norm fix"` on first mention lands here; every later bare P39 reads
+# "pull request 39 (layer-norm fix)" to the page and the writer at no agent
+# cost. A later definition replaces it. source = who explained it.
+_LEX_REFS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS lex_refs (
+    room     TEXT NOT NULL REFERENCES rooms(id),
+    ref      TEXT NOT NULL,
+    meaning  TEXT NOT NULL,
+    source   TEXT NOT NULL,
+    msg_id   INTEGER,
+    ts_ns    INTEGER NOT NULL,
+    PRIMARY KEY (room, ref)
+);
+"""
 _SCHEMA += _LEX_SCHEMA
+_SCHEMA += _LEX_REFS_SCHEMA
 _SCHEMA += _VOICES_SCHEMA
 # messages_fts (DES-001 S1; tokenizer measured on the live corpus, bus msg 8366):
 # unicode61 with tokenchars '-_' keeps fleet vocabulary (ADR-061, wake-127, run_id) as
@@ -2529,6 +2545,13 @@ def _upgrade_v49(conn, db_path):
         conn.execute("PRAGMA user_version=50")
 
 
+def _upgrade_v50(conn, db_path):
+    """v50 -> v51: lex_refs, the room's ref ledger. Additive: a new table."""
+    with tx(conn):
+        _exec_script(conn, _LEX_REFS_SCHEMA)
+        conn.execute("PRAGMA user_version=51")
+
+
 def _upgrade_v46(conn, db_path):
     """v46 -> v47: conflict_verdicts -- a pair judged once is not judged again
     by the next agent in the room. Additive and idempotent: a new table, no
@@ -2541,7 +2564,7 @@ def _upgrade_v46(conn, db_path):
 _UPGRADES = {v: f"_upgrade_v{v}" for v in
              (0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
               21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
-              37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49)}
+              37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50)}
 
 # The versions with NO step, named rather than implied. The loop steps over a
 # missing entry by stamping forward one, which is correct for a version that
@@ -4787,6 +4810,7 @@ def purge_room(conn, room_id, owner_id):
         conn.execute("DELETE FROM room_members WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM token_rooms WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM lex_versions WHERE room=?", (room_id,))
+        conn.execute("DELETE FROM lex_refs WHERE room=?", (room_id,))
         conn.execute("DELETE FROM rooms WHERE id=?", (room_id,))
     return len(ids)
 
@@ -6381,6 +6405,12 @@ def _prose_seen(conn, room, phrases):
     return out
 
 
+def lex_known(conn, room):
+    """The room's ref ledger, {ref: meaning} -- the bridge every gloss reads."""
+    return {r["ref"]: r["meaning"] for r in conn.execute(
+        "SELECT ref, meaning FROM lex_refs WHERE room=?", (room,))}
+
+
 def lex_glosses(conn, ids):
     """{id: {gloss, gloss_subject?}} for the AGENT-sent LEX messages among
     `ids`: the exact decode (lex.spoken, a table lookup, no model) a HUMAN
@@ -6391,7 +6421,7 @@ def lex_glosses(conn, ids):
     ids = list(ids)
     if not ids:
         return {}
-    out, tables = {}, {}
+    out, tables, known = {}, {}, {}
     for r in conn.execute(
             f"SELECT id, room, subject, body, lex_ver FROM messages WHERE id IN ({_ph(ids)}) "
             "AND sender_agent_id IS NOT NULL AND lex_ver IS NOT NULL", ids):
@@ -6401,9 +6431,12 @@ def lex_glosses(conn, ids):
         if tables[key] is None:
             continue
         t = tables[key]["table"]
-        g = {"gloss": lexmod.spoken(r["body"], t)}
+        if r["room"] not in known:
+            known[r["room"]] = lex_known(conn, r["room"])
+        k = known[r["room"]]
+        g = {"gloss": lexmod.spoken(r["body"], t, k)}
         if r["subject"]:
-            g["gloss_subject"] = lexmod.spoken(r["subject"], t)
+            g["gloss_subject"] = lexmod.spoken(r["subject"], t, k)
         out[r["id"]] = g
     return out
 
@@ -6434,6 +6467,19 @@ def lex_cited(conn, mid, body, table):
     # ponytail: matches the seed's m<id> spelling; a room that renames it loses citations, not parents
     ids += [int(t[1:]) for t, _m, k in lexmod.decode(body, table)
             if k == "code" and re.fullmatch(r"m\d+", t)]
+    # CONTEXT BY REF, not only by m<id>: for each ref a reader needs explained
+    # (P39), the newest EARLIER message in this room that mentioned it -- most
+    # often the ship message that introduced it. Explicit cites go first.
+    for tok in dict.fromkeys(t for t, _c in lexmod.refs_used(body, table)):
+        edge = re.compile(rf"(?<![\w-]){re.escape(tok)}(?![\w-])")
+        hit = next((x["id"] for x in conn.execute(
+            "SELECT id, subject, body FROM messages WHERE room=? AND id<? AND "
+            "(body LIKE ? OR subject LIKE ?) ORDER BY id DESC LIMIT 20",
+            (r["room"], mid, f"%{tok}%", f"%{tok}%"))
+            if edge.search(f"{x['subject']} {x['body']}")), None)
+        if hit:
+            ids.append(hit)
+    known = lex_known(conn, r["room"])
     out = []
     for i in dict.fromkeys(ids):
         c = conn.execute("SELECT sender, subject, body, lex_ver FROM messages "
@@ -6442,7 +6488,7 @@ def lex_cited(conn, mid, body, table):
             continue
         text = f"{c['subject']} {c['body']}" if c["subject"] else c["body"]
         t = lex_table(conn, r["room"], c["lex_ver"]) if c["lex_ver"] is not None else None
-        said = lexmod.spoken(text, t["table"]) if t else text
+        said = lexmod.spoken(text, t["table"], known) if t else text
         out.append(f"m{i} from {c['sender']}: {said[:LEX_CITED_CHARS]}")
         if len(out) == LEX_CITED_MAX:
             break
@@ -6500,6 +6546,7 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
     # held to it; their words are the record. The stamp is what lets a reader
     # (and the script writer) decode against the table live at send.
     table = lex_table(conn, room)
+    said = {}
     if table is not None and agent_of(principal):
         why = lexmod.refusal(f"{subject} {body}" if subject else body,
                              table["table"], table["ver"])
@@ -6509,6 +6556,18 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
             LEX_REFUSALS.update((room, b) for b in bad or
                                 ["verbatim_max" if "verbatim_max" in why else "prose_max"])
             raise BusError(why)
+        known = lex_known(conn, room)
+        said = lexmod.definitions(f"{subject} {body}" if subject else body, table["table"])
+        dark = sorted({tok for tok, _code in lexmod.refs_used(
+            f"{subject} {body}" if subject else body, table["table"])
+            if tok not in known and tok not in said})
+        if dark:
+            LEX_REFUSALS.update((room, f"undefined {t}") for t in dark)
+            raise BusError(
+                f"LEX v{table['ver']}: {' '.join(dark)} -- nobody in this room has said "
+                f"what {'it is' if len(dark) == 1 else 'they are'}. "
+                + " ".join(f'define {t} once: {t}="<what it is>"' for t in dark)
+                + " -- in a few words, and every later bare mention carries it")
         if recipient == "*" and lexmod.challenges(body, table["table"]):
             LEX_REFUSALS[(room, "?L broadcast")] += 1
             raise BusError("?L is unicast: send it to the sender of what you could not "
@@ -6533,6 +6592,9 @@ def send(conn, principal, recipient, body, subject="", reply_to=None, attachment
              agent_of(principal), recipient_agent_id(conn, room, recipient), now,
              table["ver"] if table else None))
         mid = cur.lastrowid
+        conn.executemany(
+            "INSERT OR REPLACE INTO lex_refs(room, ref, meaning, source, msg_id, ts_ns) "
+            "VALUES(?,?,?,?,?,?)", [(room, r, m, sender, mid, now) for r, m in said.items()])
         # Manual FTS sync (DES-001 S1): external-content tables index nothing on their
         # own; every insert here must be mirrored or the message is unsearchable.
         conn.execute("INSERT INTO messages_fts(rowid, subject, body) VALUES(?,?,?)",

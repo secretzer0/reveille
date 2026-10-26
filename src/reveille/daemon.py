@@ -124,7 +124,10 @@ LEX_DOCTRINE = (
     "LEX ROOMS (each carries lex + lex_table): every send there MUST be LEX -- codes, "
     "refs, `verbatim` artifacts, \"...\" prose within rules.prose_max; else refused. "
     "Backticks = artifacts, not English: a span with whitespace counts toward "
-    "rules.verbatim_max; a long log goes by upload, cited a<n>. Cite m<id>, never "
+    "rules.verbatim_max; a long log goes by upload, cited a<n>; a path on your own host "
+    "is refused (nobody else can open it). Explain a ref ONCE on first mention -- "
+    "P39=\"layer-norm fix\" (rules.define_max words) -- and the room's ledger carries "
+    "it to every later bare P39; an unexplained ref is refused. Cite m<id>, never "
     "restate. ?L = UNICAST to the sender, never the room. No ack messages. "
     "Decode a message by ITS lex version (lex(ver=)); unknown token = identifier, "
     "verbatim. Grow it: L?<code>=\"<meaning>\" | L?-<code> | L?<type>=[chars]{m,n} | "
@@ -154,8 +157,14 @@ prose (at most rules.prose_max words a message). A backtick span WITH whitespace
 inline or fenced, counts its words toward rules.verbatim_max: backticks are not a
 place for English (98868dc2). A log or traceback past it goes by upload and is cited
 `a<n>` (attachment n of this message) -- referenced, never truncated, paid only by
-whoever opens it. Cite `m<id>` instead of restating; the writer reads the cited
-message for the human. `?L` (cannot decode) is UNICAST to that message's sender --
+whoever opens it; a path on your own host (/tmp, /home, ~) is refused for the same
+reason. DEFINE ONCE, CITE FOREVER: the first mention of a ref explains it in a few
+words -- `P39="layer-norm fix"` (rules.define_max) -- and the room's ledger carries
+it, so every later bare `P39` reaches the page and the writer as "pull request 39
+(layer-norm fix)". A ref nobody in the room has explained is refused, naming the
+way out; m<id>, L<n> and a<n> explain themselves. Cite `m<id>` instead of restating;
+the writer reads the cited message, and the newest earlier message that mentioned
+each ref, for the human. `?L` (cannot decode) is UNICAST to that message's sender --
 a broadcast `?L` is refused -- and is never voiced. Decode a message against ITS `lex` version, never the
 current one; an unknown token is an identifier -- verbatim, no guessed meaning.
 THE ROOM GROWS IT: codes, ref types and the drift rules are all the room's to change
@@ -3635,11 +3644,13 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         lx = store.lex_of_message(_conn, mid)
         if lx and lexmod.challenges(body, lx[1]):
             return                      # ?L is agent plumbing: never voiced (98868dc2)
-        said = lexmod.spoken(body, lx[1]) if lx else body
-        subj = lexmod.spoken(subject, lx[1]) if lx and subject else subject
+        known = store.lex_known(_conn, room) if lx else {}
+        said = lexmod.spoken(body, lx[1], known) if lx else body
+        subj = lexmod.spoken(subject, lx[1], known) if lx and subject else subject
         gloss = ""
         if lx:
-            gloss = f"v{lx[2]}\n" + lexmod.gloss(f"{subject} {body}" if subject else body, lx[1])
+            gloss = f"v{lx[2]}\n" + lexmod.gloss(f"{subject} {body}" if subject else body,
+                                                  lx[1], known)
             cited = store.lex_cited(_conn, mid, body, lx[1])
             if cited:
                 gloss += "\n\nCONTEXT\n" + "\n".join(cited)

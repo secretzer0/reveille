@@ -57,13 +57,23 @@ SEED = {
     # already appear in the room before a send is told to code it. verbatim_max:
     # words one message may carry inside backtick spans that contain whitespace
     # -- an error line fits, a paragraph of English does not (98868dc2).
-    "rules": {"prose_max": 12, "hint_at": 3, "verbatim_max": 40},
+    # define_max: words of the meaning a ref is given ONCE (`P39="..."`).
+    "rules": {"prose_max": 12, "hint_at": 3, "verbatim_max": 40, "define_max": 6},
 }
 RULES = frozenset(SEED["rules"])
 
 _PH = re.compile(r"<([a-z][a-z0-9_]*)>")
 _PROPOSAL = r'L\?-?[^\s;="`]+(?:=(?:"[^"]*"|[^\s;]+))?'
-_TOKEN = re.compile(rf"(?P<p>{_PROPOSAL})|```[\s\S]*?```|`[^`]*`|\"[^\"]*\"|[^\s;\"`]+|[\"`]")
+_DEFINE = r'[^\s;="`]+="[^"]*"'
+_TOKEN = re.compile(rf"(?P<p>{_PROPOSAL})|(?P<d>{_DEFINE})|```[\s\S]*?```|`[^`]*`|\"[^\"]*\"|[^\s;\"`]+|[\"`]")
+# A path on the SENDER'S OWN HOST: no other reader can open it, so it is not
+# an artifact anyone can follow -- upload it and cite a<n> (98868dc2 bridge).
+_LOCAL_PATH = re.compile(r"^(?:/tmp/|/var/tmp/|/home/|/root/|~/)")
+# Refs that say what they are by themselves: a bus message, a LEX version, an
+# attachment of this message. Every other ref is explained once (define_max
+# words, `P39="layer-norm fix"`) and the room's ledger carries it after.
+# ponytail: a fixed set; a room-settable flag when a room needs its own.
+BARE = frozenset({"m<id>", "L<n>", "a<n>"})
 _TYPESPEC = re.compile(r"\[(.+)\](?:\{(\d+),(\d+)\})?")
 
 
@@ -207,13 +217,24 @@ def _proposal_gloss(tok):
     return f"proposes LEX {p[1]} = {p[2]}"
 
 
-def decode(body, table):
-    """[(token, means | None, kind)] where kind is code | quote | prose | propose |
-    unknown. means is None only for an unknown token (render it verbatim)."""
+def decode(body, table, known=None):
+    """[(token, means | None, kind)] where kind is code | define | quote | prose |
+    propose | unknown. means is None only for an unknown token (render it
+    verbatim). `known` is the room's ledger {ref: meaning}: a bare ref it
+    explains reads "pull request 39 (layer-norm fix)"."""
     codes, refs = compile_table(table)
+    known = known or {}
     out = []
     for m in _TOKEN.finditer(body or ""):
         t = m.group(0)
+        if m.group("d"):
+            ref, _eq, said = t.partition("=")
+            seg = _segment(ref, codes, refs)
+            if seg is None or len(seg) != 1:
+                out.append((t, None, "unknown"))
+            else:
+                out.append((t, f"{seg[0][1]} ({said.strip(chr(34)).strip()})", "define"))
+            continue
         if m.group("p"):
             g = _proposal_gloss(t)
             out.append((t, g, "propose" if g else "unknown"))
@@ -228,7 +249,32 @@ def decode(body, table):
             if seg is None:
                 out.append((t, None, "unknown"))
             else:
-                out.extend((tok, means, "code") for tok, means in seg)
+                out.extend((tok, f"{means} ({known[tok]})" if tok in known else means, "code")
+                           for tok, means in seg)
+    return out
+
+
+def definitions(body, table):
+    """{ref: meaning} this body defines (`P39="layer-norm fix"`)."""
+    out = {}
+    for m in _TOKEN.finditer(body or ""):
+        if m.group("d"):
+            ref, _eq, said = m.group(0).partition("=")
+            out[ref] = said.strip('"').strip()
+    return out
+
+
+def refs_used(body, table):
+    """[(token, code)] for every ref in a body that does NOT say what it is by
+    itself (BARE) -- the ones a reader needs explained -- defined here or not."""
+    out = []
+    pairs = [(_ref_regex(e["code"], table["types"]), e["code"])
+             for e in table["codes"] if _PH.search(e["code"]) and e["code"] not in BARE]
+    for t, _m, k in decode(body, table):
+        if k not in ("code", "define"):
+            continue
+        tok = t.partition("=")[0] if k == "define" else t
+        out.extend((tok, code) for rx, code in pairs if rx.fullmatch(tok))
     return out
 
 
@@ -317,6 +363,15 @@ def refusal(body, table, ver):
         return (f"LEX v{ver} drift: {words} words of \"...\" prose, max {cap}. "
                 f"Say it in codes and refs; propose a code for what has none: "
                 f"L?<code>=\"<meaning>\"")
+    cap = rule["define_max"]
+    long = [r for r, said in definitions(body, table).items() if len(said.split()) > cap]
+    if long:
+        return (f"LEX v{ver} drift: {' '.join(long)} defined in more than {cap} words. "
+                f"A ref is named in a few words, once: P39=\"layer-norm fix\"")
+    local = [m for _t, m, k in toks if k == "quote" and _LOCAL_PATH.match(m)]
+    if local:
+        return (f"LEX v{ver}: {' '.join(local)} is a path on your own host -- no other "
+                f"reader can open it: upload it and cite a<n>")
     cap = rule["verbatim_max"]
     words = sum(len(m.split()) for _t, m, k in toks if k == "quote" and len(m.split()) > 1)
     if words > cap:
@@ -341,13 +396,13 @@ def hints(phrases_seen, table):
             for p, n in phrases_seen if n >= rules(table)["hint_at"]]
 
 
-def gloss(body, table):
+def gloss(body, table, known=None):
     """One line per token, `token = meaning`, for the script writer. An unknown
     token says so -- the writer reads it out verbatim and invents nothing.
     "..." prose is a FRAGMENT to restore into a spoken sentence: told "say it
     as written", the writer read `skip ok if 0010 rewrites old rows` raw."""
     lines = []
-    for t, means, kind in decode(body, table):
+    for t, means, kind in decode(body, table, known):
         if kind == "prose":
             lines.append(f"{t} = fragment, restore it to a full spoken sentence, meaning intact")
         elif kind == "quote":
@@ -369,10 +424,10 @@ def render(table):
     return f"codes: {codes}\ntypes: {types}\nrules: {held}"
 
 
-def spoken(body, table):
+def spoken(body, table, known=None):
     """The message as plain meanings, '; '-joined: what the voice reads when no
     writer is up. Quoted text and unknown tokens pass through as written."""
-    return "; ".join(t if means is None else means for t, means, _k in decode(body, table))
+    return "; ".join(t if means is None else means for t, means, _k in decode(body, table, known))
 
 
 if __name__ == "__main__":
