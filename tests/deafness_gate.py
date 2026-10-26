@@ -99,7 +99,7 @@ def main():
         row = presence_row(base, adm["secret"], ROLE)
         assert row and not row.get("deaf"), "deaf before any mail -- verdict is noise"
         post(base, "/send", adm["secret"],
-             {"from": "ana", "to": ROLE, "subject": "s1", "body": "unheard"})
+             {"from": "ana", "to": ROLE, "subject": '"s1"', "body": '"unheard"'})
         time.sleep(DEAF_AFTER + 1)
 
         row = presence_row(base, adm["secret"], ROLE)
@@ -144,7 +144,7 @@ def main():
 
             # -- 3. socket held, fresh mail, silence again -> not-draining ----
             post(base, "/send", adm["secret"],
-                 {"from": "ana", "to": ROLE, "subject": "s2", "body": "ringing"})
+                 {"from": "ana", "to": ROLE, "subject": '"s2"', "body": '"ringing"'})
             await asyncio.sleep(DEAF_AFTER + 1)
             row = presence_row(base, adm["secret"], ROLE)
             assert row and row.get("deaf") is True and \

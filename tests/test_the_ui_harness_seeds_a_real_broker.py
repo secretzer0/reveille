@@ -42,7 +42,8 @@ def test_the_seed_writes_messages_from_real_identities(seeded):
 
 def test_the_media_message_carries_servable_attachments(seeded):
     conn, db = seeded
-    mid = conn.execute("SELECT id FROM messages WHERE subject='deploy shots'").fetchone()
+    mid = conn.execute("SELECT id FROM messages WHERE subject=?",
+                       ('"deploy shots"',)).fetchone()
     assert mid, "media=True must add the carousel's message"
     atts = conn.execute("SELECT url FROM attachments WHERE message_id=?", (mid["id"],)).fetchall()
     assert len(atts) == 3, [dict(a) for a in atts]

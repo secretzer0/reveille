@@ -39,18 +39,19 @@ def room(tmp_path):
 
 def test_an_agents_lex_reaches_a_person_decoded_and_a_persons_words_never_are(room):
     c, rid = room["c"], room["room"]
+    store.send(c, room["quark"], "*", 'P880="writer fix"', room=rid)    # explained once
     a = store.send(c, room["quark"], "*", "+ P880 _", subject="P880", room=rid)
     h = store.send(c, room["human"], "*", "x marks the spot", room=rid)
     g = store.lex_glosses(c, [a["id"], h["id"]])
-    assert g == {a["id"]: {"gloss": "ok, done, yes; pull request 880; no reply wanted",
-                           "gloss_subject": "pull request 880"}}
+    assert g == {a["id"]: {"gloss": "ok, done, yes; pull request 880 (writer fix); no reply wanted",
+                           "gloss_subject": "pull request 880 (writer fix)"}}
 
 
 def test_the_gloss_decodes_against_the_version_the_message_was_written_under(room):
     c, rid = room["c"], room["room"]
-    a = store.send(c, room["quark"], "*", "P880", room=rid)
+    a = store.send(c, room["quark"], "*", 'P880="writer fix"', room=rid)
     store.lex_adopt(c, rid, 'L?P<n>="patch {}"', adopted_by="a")
-    assert store.lex_glosses(c, [a["id"]])[a["id"]]["gloss"] == "pull request 880"
+    assert store.lex_glosses(c, [a["id"]])[a["id"]]["gloss"] == "pull request 880 (writer fix)"
 
 
 def test_the_page_shows_the_gloss_and_the_codes_one_click_away():

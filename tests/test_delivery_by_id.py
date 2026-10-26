@@ -46,7 +46,7 @@ def test_a_rename_orphans_nothing(tmp_path):
     join(c, "bob-bot", big["id"])
     bot = P(c, "bob-bot")
     aid = store.agent_of(bot)
-    m = store.send(c, P(c, "alice"), "bob-bot", "before the rename", room=big["id"])
+    m = store.send(c, P(c, "alice"), "bob-bot", '"before the rename"', room=big["id"])
     out = store.rename_agent(c, aid, "robert")
     assert out == {"name": "robert", "rooms": {big["id"]: "robert"}}
     # the unread still arrives, addressed by id; the room now calls it robert
@@ -57,10 +57,10 @@ def test_a_rename_orphans_nothing(tmp_path):
     # history still renders (the thread is intact; the stored address is what it was)
     assert [x["to"] for x in store.thread(c, m["thread_id"], [big["id"]])] == ["bob-bot"]
     # the new room-name is the address now; the old one names nobody
-    m2 = store.send(c, P(c, "alice"), "robert", "after", room=big["id"])
+    m2 = store.send(c, P(c, "alice"), "robert", '"after"', room=big["id"])
     assert store.inbox(c, bot, [big["id"]])[0]["id"] == m2["id"]
     with pytest.raises(store.BusError, match="no such agent"):
-        store.send(c, P(c, "alice"), "bob-bot", "gone", room=big["id"])
+        store.send(c, P(c, "alice"), "bob-bot", '"gone"', room=big["id"])
     # the rename log: old row closed, new row open
     log = c.execute("SELECT name, to_ns IS NULL AS open FROM agent_names WHERE agent_id=? "
                     "ORDER BY from_ns", (aid,)).fetchall()
@@ -98,15 +98,15 @@ def test_two_owners_architect_both_join_one_room(tmp_path):
     # each room-name reaches only its holder
     join(c, "human-ish", big["id"], owner_id=travis["id"])
     sender = P(c, "human-ish")
-    a = store.send(c, sender, "architect", "for travis's", room=big["id"])
-    b = store.send(c, sender, "bob-architect", "for bob's", room=big["id"])
+    a = store.send(c, sender, "architect", "\"for travis's\"", room=big["id"])
+    b = store.send(c, sender, "bob-architect", "\"for bob's\"", room=big["id"])
     assert [x["id"] for x in store.inbox(c, tv, [big["id"]])] == [a["id"]]
     assert [x["id"] for x in store.inbox(c, bb, [big["id"], home["id"]])] == [b["id"]]
     assert c.execute("SELECT recipient_agent_id FROM messages WHERE id=?",
                      (b["id"],)).fetchone()[0] == store.agent_of(bb)
     # bob's writes under its room-name here, and under its own name at home
-    x = store.send(c, bb, "*", "hello", room=big["id"])
-    y = store.send(c, bb, "*", "hello", room=home["id"])
+    x = store.send(c, bb, "*", '"hello"', room=big["id"])
+    y = store.send(c, bb, "*", '"hello"', room=home["id"])
     assert (x["sender"], y["sender"]) == ("bob-architect", "architect")
     # the alias survives the incumbent leaving, and a re-join keeps it
     store.leave(c, tv, [big["id"]])
