@@ -222,7 +222,12 @@ def test_a_parked_session_rings_its_fork_and_never_the_spare(tmp_path):
         with open(p, "w") as f:
             json.dump(d, f)
 
-    tag(fork, jobId="1a3fa8bb")
+    # a CLI that writes neither field (pre-2.1.240): only the shell, as before
+    assert [s for _, s, _ in doorbell.inboxes_for(work, base=sess)] == ["/s/shell.sock"]
+
+    tag(fork, jobId="1a3fa8bb")                           # a bg nobody parked into
+    assert [s for _, s, _ in doorbell.inboxes_for(work, base=sess)] == ["/s/shell.sock"]
+
     tag(shell, parkedJobId="1a3fa8bb")
     assert [s for _, s, _ in doorbell.inboxes_for(work, base=sess)] == ["/s/fork.sock"]
 
