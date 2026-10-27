@@ -63,7 +63,7 @@ def _seed(conn, room, ana, bob):
                                             rule="a rule that binds everyone", detection="d",
                                             room_id=None)["id"]
     ids["msg"] = store.send(conn, store.agent_principal(ana["agent_id"]), "*",
-                            "PR #305 open, suite green", subject="shipped #305",
+                            '"PR #305 open, suite green"', subject='"shipped #305"',
                             room=room["id"])["id"]
     return ids
 
@@ -450,11 +450,11 @@ def test_a_first_run_windows_the_messages_never_the_rows(tmp_path, monkeypatch):
     ids = _seed(conn, room, ana, bob)
     day = 86400 * 10**9
     now = time.time_ns()
-    old_msg = store.send(conn, store.agent_principal(ana["agent_id"]), "*", "thirty days old",
-                         subject="old", room=room["id"])["id"]
+    old_msg = store.send(conn, store.agent_principal(ana["agent_id"]), "*", '"thirty days old"',
+                         subject='"old"', room=room["id"])["id"]
     conn.execute("UPDATE messages SET ts_ns=? WHERE id=?", (now - 30 * day, old_msg))
-    new_msg = store.send(conn, store.agent_principal(ana["agent_id"]), "*", "two days old",
-                         subject="new", room=room["id"])["id"]
+    new_msg = store.send(conn, store.agent_principal(ana["agent_id"]), "*", '"two days old"',
+                         subject='"new"', room=room["id"])["id"]
     conn.execute("UPDATE messages SET ts_ns=? WHERE id=?", (now - 2 * day, new_msg))
     conn.execute("UPDATE memories SET created_ns=? WHERE uid=?", (now - 30 * day, ids["doctrine"]))
     inp = store.digest_inputs(conn, name="ana", agent_id=ana["agent_id"], token_id=ana["id"],

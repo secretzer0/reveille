@@ -82,7 +82,7 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_mcp_plane(tmp_path, monkey
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
     ctx = _Ctx()
     store.send(c, store.agent_principal(store.mint_agent(c, uid, "picard")["id"]), "*",
-               "hello there", room=rid)
+               '"hello there"', room=rid)
     # READS answer.
     assert asyncio.run(daemon.rooms(ctx))["rooms"]
     assert len(asyncio.run(daemon.inbox(ctx))["messages"]) == 1
@@ -94,7 +94,7 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_mcp_plane(tmp_path, monkey
         "an unbound reader must not stand in presence"
     # ACTS refuse by name, and nothing lands.
     acts = [
-        lambda: daemon.send("*", "I speak", ctx=ctx),
+        lambda: daemon.send("*", '"I speak"', ctx=ctx),
         lambda: daemon.lesson_add("s", "sym", "root", "rule", "det", ctx=ctx),
         lambda: daemon.memory_add("fact", "decision", ctx=ctx),
         lambda: daemon.ack([1], ctx=ctx),
@@ -114,7 +114,7 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_mcp_plane(tmp_path, monkey
     # BOUND: the same calls act.
     who["p"] = _principal("agent", uid, rid, bound["agent_id"], bound["id"])
     asyncio.run(daemon.join(ctx=ctx))
-    asyncio.run(daemon.send("*", "I speak", ctx=ctx))
+    asyncio.run(daemon.send("*", '"I speak"', ctx=ctx))
     assert c.execute("SELECT count(*) FROM messages WHERE sender='ghost'").fetchone()[0] == 1
     assert any(a["name"] == "ghost" for a in store.presence(c, [rid]))
 
@@ -125,12 +125,12 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_http_plane(tmp_path, monke
     monkeypatch.setattr(daemon, "_principal", lambda request: who["p"])
     monkeypatch.setattr(daemon, "_feed_push", lambda room, msg: None)
     store.send(c, store.agent_principal(store.mint_agent(c, uid, "picard")["id"]), "*",
-               "hello there", room=rid)
+               '"hello there"', room=rid)
     # GET /messages: 200 (the curl-without-X-Agent read scripts/set-token depends on).
     r = asyncio.run(daemon.messages_http(_http("GET", "/messages")))
     assert r.status_code == 200
     # POST /send: 401 naming the remedy; nothing written.
-    r = asyncio.run(daemon.send_http(_http("POST", "/send", {"to": "*", "body": "hi", "room": rid})))
+    r = asyncio.run(daemon.send_http(_http("POST", "/send", {"to": "*", "body": '"hi"', "room": rid})))
     assert r.status_code == 401
     assert "reveille init" in json.loads(r.body)["detail"]
     assert c.execute("SELECT count(*) FROM messages WHERE sender='ghost'").fetchone()[0] == 0
@@ -142,7 +142,7 @@ def test_an_unbound_token_reads_and_cannot_act_on_the_http_plane(tmp_path, monke
     # Bound: the send lands.
     ghost = store.create_token(c, uid, "ghost body", agent_name="ghost", create=True)
     who["p"] = _principal("agent", uid, rid, ghost["agent_id"], ghost["id"])
-    r = asyncio.run(daemon.send_http(_http("POST", "/send", {"to": "*", "body": "hi", "room": rid})))
+    r = asyncio.run(daemon.send_http(_http("POST", "/send", {"to": "*", "body": '"hi"', "room": rid})))
     assert r.status_code == 200, r.body
     assert c.execute("SELECT count(*) FROM messages WHERE sender='ghost'").fetchone()[0] == 1
 

@@ -234,10 +234,22 @@ def inboxes_for(workdir, base=None):
     Skipped, and none of these is a failure to report: a descriptor with no
     socket path (a session that never published an inbox), one whose pid is
     gone (a hard-killed CLI leaves its json behind), and one that is not an
-    interactive CLI -- a `-p` run has no prompt to wake and no next turn."""
+    interactive CLI -- a `-p` run has no prompt to wake and no next turn.
+
+    A PARKED SESSION RINGS ITS FORK. Backgrounding a running turn (2.1.287)
+    moves the conversation into a daemon-hosted `--fork-session` with its own
+    pid, socket and sessionId, registered as kind "bg" with a `jobId`; the
+    interactive shell it left stays alive carrying `parkedJobId` = that jobId.
+    Measured 2026-10-26 (model-dev, ring 792): ringing the shell reached a
+    process the conversation had left, and the fork never got a turn. So the
+    interactive entry is replaced by the bg session whose jobId it names.
+    Other bg sessions in the directory (the daemon's spare, an unrelated
+    background agent) are not this identity's body and are never rung. A
+    parkedJobId naming no live session falls back to the shell: a duplicate
+    costs a turn, a skip costs every ring."""
     base = sessions_dir(base)
     want = os.path.abspath(workdir)
-    out = []
+    live = []
     for p in sorted(glob.glob(os.path.join(base, "*.json"))):
         try:
             with open(p) as f:
@@ -246,10 +258,16 @@ def inboxes_for(workdir, base=None):
             continue
         if not isinstance(d, dict) or os.path.abspath(d.get("cwd") or "") != want:
             continue
-        sock = d.get("messagingSocketPath") or ""
-        if not sock or d.get("kind") != "interactive" or not _alive(d.get("pid")):
+        if not d.get("messagingSocketPath") or not _alive(d.get("pid")):
             continue
-        out.append((d.get("pid"), sock, _token_for(d.get("pid"), base)))
+        live.append(d)
+    jobs = {d["jobId"]: d for d in live if d.get("kind") == "bg" and d.get("jobId")}
+    out = []
+    for d in live:
+        if d.get("kind") != "interactive":
+            continue
+        d = jobs.get(d.get("parkedJobId") or "", d)
+        out.append((d.get("pid"), d["messagingSocketPath"], _token_for(d.get("pid"), base)))
     return out
 
 

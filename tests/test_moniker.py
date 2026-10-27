@@ -157,7 +157,7 @@ def test_agent_sent_messages_carry_nothing_new(tmp_path):
     room = store.create_room(c, admin["id"], "r")
     store.join(c, "travis", "web:travis", room["id"], None)
     join(c, "arch", room["id"])
-    res = store.send(c, P(c, "arch"), "*", "status: green", room=room["id"])
+    res = store.send(c, P(c, "arch"), "*", '"status: green"', room=room["id"])
     assert res["sender_moniker"] is None
     rows = [m for m in store.tail(c, rooms=[room["id"]]) if m["id"] == res["id"]]
     assert "from_moniker" not in rows[0]

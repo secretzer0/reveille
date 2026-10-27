@@ -121,8 +121,8 @@ def main():
         asyncio.run(call("join", {"url": base}))
         assert ROLE in presence_names(base, adm["secret"])
         code, _ = post(base, "/send", adm["secret"],
-                       {"from": "ana", "to": ROLE, "subject": "before",
-                        "body": "reachable"})
+                       {"from": "ana", "to": ROLE, "subject": '"before"',
+                        "body": '"reachable"'})
         assert code == 200, code
 
         # -- 2. the outage: heartbeat goes stale, the row is reaped ----------
@@ -136,8 +136,8 @@ def main():
         assert ROLE not in presence_names(base, adm["secret"]), \
             "the reap must really have happened, or this gate proves nothing"
         code, body = post(base, "/send", adm["secret"],
-                          {"from": "ana", "to": ROLE, "subject": "during",
-                           "body": "should be refused"})
+                          {"from": "ana", "to": ROLE, "subject": '"during"',
+                           "body": '"should be refused"'})
         assert code != 200 and "joined" in json.dumps(body), (code, body)
 
         # -- 3. ONE ordinary call. Not join. Not a flag. ---------------------
@@ -149,10 +149,10 @@ def main():
             ("still invisible after an authenticated call -- the agent can work "
              "and cannot be seen or addressed, which is the defect")
         code, _ = post(base, "/send", adm["secret"],
-                       {"from": "ana", "to": ROLE, "subject": "after",
-                        "body": "reachable again"})
+                       {"from": "ana", "to": ROLE, "subject": '"after"',
+                        "body": '"reachable again"'})
         assert code == 200, "still unaddressable after readmit"
-        assert "before" in subjects, (
+        assert '"before"' in subjects, (
             "readmit ate the mail: the message sent BEFORE the outage must still "
             "be unread, which is why this is not implemented as a re-join")
 
@@ -163,8 +163,8 @@ def main():
         asyncio.run(call("leave"))
         assert ROLE not in presence_names(base, adm["secret"]), "leave() did nothing"
         code, body = post(base, "/send", adm["secret"],
-                          {"from": "ana", "to": ROLE, "subject": "after leaving",
-                           "body": "should be refused"})
+                          {"from": "ana", "to": ROLE, "subject": '"after leaving"',
+                           "body": '"should be refused"'})
         assert code != 200 and "joined" in json.dumps(body), (code, body)
         asyncio.run(call("inbox"))          # the ordinary call that used to undo it
         assert ROLE not in presence_names(base, adm["secret"]), \

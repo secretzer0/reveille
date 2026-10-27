@@ -62,21 +62,21 @@ def test_the_count_agrees_with_the_inbox_it_replaced(tmp_path):
     assert agrees(c, me, rooms) == {"last_send_ns": 0, "unread": 0, "direct": 0,
                                     "newest_id": 0}
 
-    unicast = store.send(c, peer, "me", "for you", room=big["id"])["id"]
-    bcast = store.send(c, peer, store.BROADCAST, "for the room", room=big["id"])["id"]
+    unicast = store.send(c, peer, "me", '"for you"', room=big["id"])["id"]
+    bcast = store.send(c, peer, store.BROADCAST, '"for the room"', room=big["id"])["id"]
     # MINE, AND A BROADCAST: this is the row that exercises the sender filter.
     # A unicast I send is already excluded by the recipient clause, so it
     # proves nothing -- only my own BROADCAST matches `recipient='*'` and has
     # to be dropped for being mine. (Written after manufacturing the filter's
     # removal and watching this gate stay green without it.)
-    store.send(c, me, store.BROADCAST, "from me, to the room", room=big["id"])
-    store.send(c, me, "peer", "from me", room=big["id"])
+    store.send(c, me, store.BROADCAST, '"from me, to the room"', room=big["id"])
+    store.send(c, me, "peer", '"from me"', room=big["id"])
     # READ: excluded by the NOT EXISTS, and it is the NEWEST, so a count that
     # forgot the receipts would also report the wrong newest_id.
-    read = store.send(c, peer, "me", "already seen", room=big["id"])["id"]
+    read = store.send(c, peer, "me", '"already seen"', room=big["id"])["id"]
     store.ack(c, me, [read], rooms)
     # ANOTHER ROOM: excluded while `rooms` names only Big.
-    far_one = store.send(c, peer, "me", "elsewhere", room=far["id"])["id"]
+    far_one = store.send(c, peer, "me", '"elsewhere"', room=far["id"])["id"]
 
     got = agrees(c, me, rooms)
     assert got["unread"] == 2 and got["direct"] == 1
@@ -99,8 +99,8 @@ def test_an_unbound_principal_sees_the_broadcasts(tmp_path):
     rooms = [big["id"]]
     peer = P(c, "peer")
 
-    store.send(c, peer, "me", "not for the room", room=big["id"])
-    bcast = store.send(c, peer, store.BROADCAST, "for the room", room=big["id"])["id"]
+    store.send(c, peer, "me", '"not for the room"', room=big["id"])
+    bcast = store.send(c, peer, store.BROADCAST, '"for the room"', room=big["id"])["id"]
 
     got = agrees(c, person, rooms)
     assert got["unread"] == 1 and got["direct"] == 0
@@ -111,6 +111,6 @@ def test_no_rooms_is_zero_not_a_scan(tmp_path):
     """A token that reaches no room has no mail by construction. inbox()
     returns [] before touching the db; the count returns the same shape."""
     c, _travis, big, _far = world(tmp_path)
-    store.send(c, P(c, "peer"), "me", "for you", room=big["id"])
+    store.send(c, P(c, "peer"), "me", '"for you"', room=big["id"])
     assert agrees(c, P(c, "me"), []) == {"last_send_ns": 0, "unread": 0,
                                          "direct": 0, "newest_id": 0}
