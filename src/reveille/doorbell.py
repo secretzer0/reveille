@@ -117,15 +117,44 @@ def mcp_enabled(workdir, config=None, expect_url=""):
         conf = {}
     if not isinstance(conf, dict):
         conf = {}
-    proj = (conf.get("projects") or {}).get(work) or {}
-    for names in (proj.get("mcpServers"), conf.get("mcpServers")):
-        if isinstance(names, dict) and "reveille" in names:
-            if _points_at(names["reveille"], expect_url):
-                return True
+    if isinstance(conf.get("mcpServers"), dict) and "reveille" in conf["mcpServers"]:
+        if _points_at(conf["mcpServers"]["reveille"], expect_url):
+            return True
+    for d in (work, _main_worktree(work)):
+        if d and _project_has_reveille(conf, d, expect_url):
+            return True
+    return False
+
+
+def _main_worktree(work):
+    """The main checkout a git worktree belongs to, or "".
+
+    A WORKTREE INHERITS ITS MAIN CHECKOUT'S MCP SERVERS. Measured 2026-10-26:
+    `claude mcp list` in ~/secretzer0/reveille-senior-dev (a worktree of
+    ~/secretzer0/reveille, no registration of its own) shows reveille
+    connected; a plain directory does not. Checking only the exact path read
+    that body as MCP-less, so the doorbell never rang it. A worktree's `.git`
+    is a file `gitdir: <main>/.git/worktrees/<name>`."""
+    try:
+        with open(os.path.join(work, ".git")) as f:
+            line = f.read().strip()
+    except OSError:                                  # absent, or a real .git dir
+        return ""
+    gitdir = line[len("gitdir:"):].strip() if line.startswith("gitdir:") else ""
+    marker = os.sep + ".git" + os.sep + "worktrees" + os.sep
+    return gitdir.split(marker)[0] if marker in gitdir else ""
+
+
+def _project_has_reveille(conf, d, expect_url):
+    proj = (conf.get("projects") or {}).get(d) or {}
+    names = proj.get("mcpServers")
+    if isinstance(names, dict) and "reveille" in names:
+        if _points_at(names["reveille"], expect_url):
+            return True
     if "reveille" in (proj.get("enabledMcpjsonServers") or []):
         return True
     try:
-        with open(os.path.join(work, ".mcp.json")) as f:
+        with open(os.path.join(d, ".mcp.json")) as f:
             servers = json.load(f).get("mcpServers") or {}
             if "reveille" in servers and _points_at(servers["reveille"], expect_url):
                 return True
