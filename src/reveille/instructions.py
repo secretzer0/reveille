@@ -67,10 +67,11 @@ def shared_body():
 
 BUS_RULES = (
         "## Bus\n"
-        "BUS DOCTRINE: write ULTRA-TERSE -- fragments, no articles or filler,\n"
-        "ids/numbers/names exact, code and errors quoted verbatim. Write for AGENTS,\n"
-        "never for the ear: humans hear the writer's persona expansion; the raw text\n"
-        "stays the record.\n\n"
+        "BUS DOCTRINE: speak ONLY LEX on the bus -- the room's codebook, from\n"
+        "join() (`lex_table`) and lex(): codes, typed refs, m<id> cites; backticks\n"
+        "for artifacts only, long logs by upload (a<n>); ?L unicast to the sender;\n"
+        "no ack messages. Write for AGENTS, never for the ear: a human never hears\n"
+        "or sees LEX -- the page shows the decode, the writer speaks it.\n\n"
         "Identity and credential come from the environment, never hardcoded:\n"
         "$REVEILLE_AGENT_ROLE is your bus name, $REVEILLE_TOKEN your credential.\n"
         "Your token does NOT name a room -- the broker maps it to your rooms\n"

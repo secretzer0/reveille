@@ -107,7 +107,7 @@ def world(tmp_path, monkeypatch):
     admin = store.setup_first_admin(c, "travis", "hunter2hunter2")
     room = store.create_room(c, admin["id"], "bridge")
     quark = store.agent_principal(store.mint_agent(c, admin["id"], "quark")["id"])
-    m = store.send(c, quark, "*", "terse body", room=room["id"])
+    m = store.send(c, quark, "*", '"terse body"', room=room["id"])
     store.voice_put(c, "quark", name="Quark", uploaded_by=admin["id"], seconds=6, nbytes=1)
     store.voice_patch(c, "quark", persona="A Ferengi bartender.")
     monkeypatch.setattr(daemon, "_conn", c)
@@ -384,7 +384,7 @@ def test_two_scripts_finishing_on_two_threads_both_leave_rows(llama, world):
     binds a connection to the thread that made it -- one process-global writer
     connection lost every row written from the second thread, quietly."""
     c, v = world["c"], world["voice"]
-    m2 = store.send(c, world["quark"], "*", "second body", room=world["room"])
+    m2 = store.send(c, world["quark"], "*", '"second body"', room=world["room"])
     item2 = (m2["id"], world["room"], "quark", "s. second body", daemon.clip_name(v), v, "s", "second body", "")
     _Llama.tokens = ["First one. ", "Second one."]
     _Llama.pace = 0.05
@@ -413,8 +413,8 @@ def test_live_before_asked_and_a_click_gets_its_own_budget(llama, world, caplog)
     _Llama.tokens = ["Slow ", "start ", "here. ", "Then more."]
     _Llama.pace = 0.7                                        # ~1.4 s to the first sentence
     n = world["item"]
-    a_id = store.send(world["c"], world["quark"], "*", "old one", room=world["room"])["id"]
-    l_id = store.send(world["c"], world["quark"], "*", "live one", room=world["room"])["id"]
+    a_id = store.send(world["c"], world["quark"], "*", '"old one"', room=world["room"])["id"]
+    l_id = store.send(world["c"], world["quark"], "*", '"live one"', room=world["room"])["id"]
     asked = (a_id,) + n[1:]                                  # a click on history
     live = (l_id,) + n[1:]                                   # a live arrival, newer id
     daemon._script_q.put(asked, asked=True)

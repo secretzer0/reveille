@@ -164,7 +164,7 @@ def main():
 
         # 1. attach; message -> spool -> watcher fires; drain like a real turn
         d1 = start_waked(port, toks[AGENT], base1)
-        send_to_agent(port, toks[SENDER], "ring one")
+        send_to_agent(port, toks[SENDER], '"ring one"')
         r = run_watch(base1)
         assert r.returncode == 0 and json.loads(r.stdout)["wake"] is True, r.stderr
         drain_discipline(port, toks[AGENT], base1)
@@ -174,7 +174,7 @@ def main():
         rc = d1.wait(timeout=15)
         assert rc == 2, f"superseded daemon exited {rc}, want 2"
         assert "superseded" in d1.stderr.read()
-        send_to_agent(port, toks[SENDER], "ring two")
+        send_to_agent(port, toks[SENDER], '"ring two"')
         r = run_watch(base2)
         assert json.loads(r.stdout)["wake"] is True  # rings land with the NEW holder
         drain_discipline(port, toks[AGENT], base2)
@@ -183,7 +183,7 @@ def main():
         d2.kill()
         d2.wait(timeout=10)
         d3 = start_waked(port, toks[AGENT], base1)
-        send_to_agent(port, toks[SENDER], "ring three")
+        send_to_agent(port, toks[SENDER], '"ring three"')
         r = run_watch(base1)
         assert json.loads(r.stdout)["wake"] is True
         drain_discipline(port, toks[AGENT], base1)
@@ -196,7 +196,7 @@ def main():
                                   stderr=subprocess.DEVNULL)
         wait_health(port)
         time.sleep(2)   # give the daemon's backoff a beat to reconnect
-        send_to_agent(port, toks[SENDER], "ring four")
+        send_to_agent(port, toks[SENDER], '"ring four"')
         r = run_watch(base1, timeout=60)
         assert json.loads(r.stdout)["wake"] is True
         assert d3.poll() is None, "daemon died across the broker restart"
@@ -214,7 +214,7 @@ def main():
         assert rc == 2
         wait_entry(base3, "idle-nudge")   # N1: the nudge fires at all
         time.sleep(1.5)
-        send_to_agent(port, toks[SENDER], "ring five")
+        send_to_agent(port, toks[SENDER], '"ring five"')
         real_ns = wait_entry(base3, "message")
         drain_discipline(port, toks[AGENT], base3)   # ack clears the poke gate
         nudge_ns = wait_entry(base3, "idle-nudge")
