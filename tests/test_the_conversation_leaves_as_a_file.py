@@ -43,9 +43,9 @@ def test_only_the_named_messages_and_only_from_your_rooms():
 
     mine, theirs = [], []
     for i in range(3):
-        mine.append(store.send(c, f"agent:{tok['agent_id']}", "*", f"mine {i}",
+        mine.append(store.send(c, f"agent:{tok['agent_id']}", "*", f'"mine {i}"',
                                room=room["id"])["id"])
-    theirs.append(store.send(c, f"agent:{otok['agent_id']}", "*", "not yours",
+    theirs.append(store.send(c, f"agent:{otok['agent_id']}", "*", '"not yours"',
                              room=other["id"])["id"])
 
     got = store.messages_by_ids(c, mine + theirs, [room["id"]])

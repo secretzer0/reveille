@@ -84,8 +84,8 @@ def hooked(c, toks, names):
 
 def thread_with_sibling(c, u, room, toks):
     """bravo roots a thread; charlie and the HUMAN both reply to the root."""
-    root = store.send(c, ap(toks["bravo"]), "*", "root", room=room["id"])
-    store.send(c, ap(toks["charlie"]), "*", "sibling", reply_to=root["id"],
+    root = store.send(c, ap(toks["bravo"]), "*", '"root"', room=room["id"])
+    store.send(c, ap(toks["charlie"]), "*", '"sibling"', reply_to=root["id"],
                room=room["id"])
     store.send(c, f"user:{u['id']}", "*", "human sibling", reply_to=root["id"],
                room=room["id"])
@@ -105,8 +105,8 @@ def test_a_parentless_broadcast_rings_nobody():
     prev = daemon._conn
     daemon._conn = c
     try:
-        res = store.send(c, ap(toks["alfa"]), "*", "shout", room=room["id"])
-        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), "shout")
+        res = store.send(c, ap(toks["alfa"]), "*", '"shout"', room=room["id"])
+        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), '"shout"')
         assert out["rung"] == [] and out["pended"] == []
         assert all(q.empty() for q in qs.values()), (
             "a parentless broadcast rings NOBODY -- the storm guard stands")
@@ -126,9 +126,9 @@ def test_a_reply_broadcast_rings_exactly_the_thread_agents():
     daemon._conn = c
     try:
         root = thread_with_sibling(c, u, room, toks)
-        res = store.send(c, ap(toks["alfa"]), "*", "the reply",
+        res = store.send(c, ap(toks["alfa"]), "*", '"the reply"',
                          reply_to=root["id"], room=room["id"])
-        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), "the reply")
+        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), '"the reply"')
         assert sorted(out["rung"]) == ["bravo", "charlie"]
         assert out["pended"] == []
         assert len(drain(qs["bravo"])) == 1 and len(drain(qs["charlie"])) == 1
@@ -136,9 +136,9 @@ def test_a_reply_broadcast_rings_exactly_the_thread_agents():
         assert qs["alfa"].empty(), "never yourself"
         # and the ring says WHY, so the woken agent reads it as thread mail
         got = None
-        res2 = store.send(c, ap(toks["alfa"]), "*", "again",
+        res2 = store.send(c, ap(toks["alfa"]), "*", '"again"',
                           reply_to=root["id"], room=room["id"])
-        daemon._thread_wake(room["id"], res2, ap(toks["alfa"]), "again")
+        daemon._thread_wake(room["id"], res2, ap(toks["alfa"]), '"again"')
         got = drain(qs["bravo"])[0]
         assert got["why"] == "thread-reply" and got["thread"] == res2["thread_id"]
     finally:
@@ -157,9 +157,9 @@ def test_mid_turn_means_pending_and_read_kills_the_pending():
     try:
         root = thread_with_sibling(c, u, room, toks)
         daemon._poke_pending[toks["bravo"]["id"]] = time.time_ns()
-        res = store.send(c, ap(toks["alfa"]), "*", "while busy",
+        res = store.send(c, ap(toks["alfa"]), "*", '"while busy"',
                          reply_to=root["id"], room=room["id"])
-        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), "while busy")
+        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), '"while busy"')
         assert "bravo" in out["pended"] and "bravo" not in out["rung"]
         assert qs["bravo"].empty()
         # bravo reads (inbox/ack stamps last_inbox_ns), then goes idle
@@ -180,7 +180,7 @@ def test_a_deferred_ring_fires_once_and_coalesces():
     try:
         root = thread_with_sibling(c, u, room, toks)
         daemon._poke_pending[toks["bravo"]["id"]] = time.time_ns()
-        for body in ("one", "two"):
+        for body in ('"one"', '"two"'):
             res = store.send(c, ap(toks["alfa"]), "*", body,
                              reply_to=root["id"], room=room["id"])
             daemon._thread_wake(room["id"], res, ap(toks["alfa"]), body)
@@ -207,10 +207,10 @@ def test_a_deferred_ring_fires_once_and_coalesces():
 
 
 def _run_room_hot(c, u, room, toks, n):
-    root = store.send(c, ap(toks["bravo"]), "*", "root", room=room["id"])
+    root = store.send(c, ap(toks["bravo"]), "*", '"root"', room=room["id"])
     for i in range(n):
         who = toks["bravo"] if i % 2 else toks["charlie"]
-        store.send(c, ap(who), "*", f"r{i}", reply_to=root["id"], room=room["id"])
+        store.send(c, ap(who), "*", f'"r{i}"', reply_to=root["id"], room=room["id"])
     return root
 
 
@@ -225,10 +225,10 @@ def test_at_k_everything_is_suppressed_including_deferred(caplog):
     daemon._conn = c
     try:
         root = _run_room_hot(c, u, room, toks, daemon.THREAD_WAKE_K)
-        res = store.send(c, ap(toks["alfa"]), "*", "the 13th",
+        res = store.send(c, ap(toks["alfa"]), "*", '"the 13th"',
                          reply_to=root["id"], room=room["id"])
         with caplog.at_level("INFO"):
-            out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), "the 13th")
+            out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), '"the 13th"')
         assert out["rung"] == [] and out["pended"] == []
         assert out["counter"] >= daemon.THREAD_WAKE_K
         assert all(q.empty() for q in qs.values())
@@ -255,9 +255,9 @@ def test_a_human_message_resets_the_counter_instantly():
         root = _run_room_hot(c, u, room, toks, daemon.THREAD_WAKE_K + 3)
         store.send(c, f"user:{u['id']}", "*", "steering", reply_to=root["id"],
                    room=room["id"])
-        res = store.send(c, ap(toks["alfa"]), "*", "after the human",
+        res = store.send(c, ap(toks["alfa"]), "*", '"after the human"',
                          reply_to=root["id"], room=room["id"])
-        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), "after the human")
+        out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]), '"after the human"')
         assert out["counter"] < daemon.THREAD_WAKE_K
         assert sorted(out["rung"]) == ["bravo", "charlie"], (
             "full speed resumes the instant a human speaks")
@@ -280,10 +280,10 @@ def test_a_human_in_another_thread_of_the_room_resets_this_one():
         # the human speaks in a DIFFERENT thread -- a new root, same room
         store.send(c, f"user:{u['id']}", "*", "steering from a sibling thread",
                    room=room["id"])
-        res = store.send(c, ap(toks["alfa"]), "*", "hot thread continues",
+        res = store.send(c, ap(toks["alfa"]), "*", '"hot thread continues"',
                          reply_to=root["id"], room=room["id"])
         out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
-                                  "hot thread continues")
+                                  '"hot thread continues"')
         assert out["counter"] < daemon.THREAD_WAKE_K
         assert sorted(out["rung"]) == ["bravo", "charlie"], (
             "steering is a property of the ROOM: a human anywhere in it "
@@ -370,11 +370,11 @@ def test_a_room_override_beats_the_default(caplog):
     try:
         store.set_wake_k(c, room["id"], u["id"], 2)
         root = _run_room_hot(c, u, room, toks, 3)   # 4 agent msgs incl. root
-        res = store.send(c, ap(toks["alfa"]), "*", "over the knob",
+        res = store.send(c, ap(toks["alfa"]), "*", '"over the knob"',
                          reply_to=root["id"], room=room["id"])
         with caplog.at_level("INFO"):
             out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
-                                      "over the knob")
+                                      '"over the knob"')
         assert out["rung"] == [] and all(q.empty() for q in qs.values()), (
             "the owner's 2 beats the default 40")
         assert any("K=2 (override)" in r.message for r in caplog.records), (
@@ -391,18 +391,18 @@ def test_zero_is_the_off_switch_and_default_says_so_too(caplog):
     try:
         store.set_wake_k(c, room["id"], u["id"], 0)
         root = thread_with_sibling(c, u, room, toks)
-        res = store.send(c, ap(toks["alfa"]), "*", "into a muted room",
+        res = store.send(c, ap(toks["alfa"]), "*", '"into a muted room"',
                          reply_to=root["id"], room=room["id"])
         out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
-                                  "into a muted room")
+                                  '"into a muted room"')
         assert out["rung"] == [], "wake_k=0 turns thread-wake off for the room"
         # and clearing the override restores the measured default, with its
         # source named on the next decision
         store.set_wake_k(c, room["id"], u["id"], None)
-        res2 = store.send(c, ap(toks["alfa"]), "*", "unmuted",
+        res2 = store.send(c, ap(toks["alfa"]), "*", '"unmuted"',
                           reply_to=root["id"], room=room["id"])
         with caplog.at_level("INFO"):
-            out2 = daemon._thread_wake(room["id"], res2, ap(toks["alfa"]), "unmuted")
+            out2 = daemon._thread_wake(room["id"], res2, ap(toks["alfa"]), '"unmuted"')
         assert out2["rung"], "NULL means the default again"
         assert any("(default)" in r.message for r in caplog.records)
     finally:
@@ -453,19 +453,19 @@ def test_ring_nobody_says_which_branch(caplog):
     prev = daemon._conn
     daemon._conn = c
     try:
-        res = store.send(c, ap(toks["alfa"]), "*", "shout", room=room["id"])
+        res = store.send(c, ap(toks["alfa"]), "*", '"shout"', room=room["id"])
         with caplog.at_level("INFO"):
-            daemon._thread_wake(room["id"], res, ap(toks["alfa"]), "shout")
+            daemon._thread_wake(room["id"], res, ap(toks["alfa"]), '"shout"')
         assert any("NO-TARGETS" in r.message and "parentless" in r.message
                    for r in caplog.records), "parentless names itself"
         caplog.clear()
-        mine = store.send(c, ap(toks["alfa"]), "*", "root by me",
+        mine = store.send(c, ap(toks["alfa"]), "*", '"root by me"',
                           room=room["id"])
-        res2 = store.send(c, ap(toks["alfa"]), "*", "self-reply",
+        res2 = store.send(c, ap(toks["alfa"]), "*", '"self-reply"',
                           reply_to=mine["id"], room=room["id"])
         with caplog.at_level("INFO"):
             out = daemon._thread_wake(room["id"], res2, ap(toks["alfa"]),
-                                      "self-reply")
+                                      '"self-reply"')
         assert out["rung"] == [] and out["pended"] == []
         assert any("NO-TARGETS" in r.message and "no other agent" in r.message
                    for r in caplog.records), (
@@ -486,11 +486,11 @@ def test_the_gate_lines_name_the_token(caplog):
     try:
         root = thread_with_sibling(c, u, room, toks)
         daemon._poke_pending[toks["charlie"]["id"]] = time.time_ns()
-        res = store.send(c, ap(toks["alfa"]), "*", "reply",
+        res = store.send(c, ap(toks["alfa"]), "*", '"reply"',
                          reply_to=root["id"], room=room["id"])
         with caplog.at_level("INFO"):
             out = daemon._thread_wake(room["id"], res, ap(toks["alfa"]),
-                                      "reply")
+                                      '"reply"')
         assert "bravo" in out["rung"] and "charlie" in out["pended"]
         assert any("RUNG" in r.message and toks["bravo"]["id"][:8] in r.message
                    for r in caplog.records), "RUNG names bravo's token"

@@ -525,6 +525,7 @@
  .row.scripted .scr{color:var(--gold)}
  .row.scripted .body{border-left:2px solid var(--gold);padding-left:.5rem}
  .scrlab{display:block;font-size:.62rem;letter-spacing:.1em;color:var(--faint);margin-bottom:.2rem}
+ .lexraw{display:inline-block;font-size:.62rem;letter-spacing:.1em;color:var(--faint);cursor:pointer;margin-top:.15rem;text-decoration:underline dotted}
  .head .del:hover{font-weight:900}
  .subj{font-weight:650;margin:.12rem 0 .05rem;font-size:.92rem}
  .body{color:#c3ccd8;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;
@@ -1713,7 +1714,7 @@ function matches(m){
  }
  const f=$('filter').value.trim().toLowerCase();
  if(!f)return true;
- const hay=(m.from+' '+m.to+' '+(m.subject||'')+' '+m.body).toLowerCase();
+ const hay=(m.from+' '+m.to+' '+(m.subject||'')+' '+m.body+' '+(m.gloss||'')).toLowerCase();
  return f.split(/\s+/).some(w=>hay.includes(w));
 }
 
@@ -1968,10 +1969,30 @@ async function genOne(m){
   vAsked.add(m.id);                          // queued or in flight: the audio frame plays it
  }catch(e){m.gen_pending=false;paintIcons(m);toast(e.message);}
 }
+// ---- LEX-PURE-BEGIN
+// A HUMAN NEVER SEES LEX (ruling 98868dc2): an agent's LEX message arrives with
+// `gloss`, the broker's exact decode (a table lookup, no model), and the row
+// shows THAT. The codes stay the record, one click away (`raw`). A person's
+// own words carry no gloss and render as written.
+function bodyView(m){
+ if(m.gloss!=null&&!m.raw)return{text:m.gloss,subject:m.gloss_subject||m.subject||'',kind:'gloss'};
+ return{text:m.body||'',subject:m.subject||'',kind:m.gloss!=null?'raw':'plain'};
+}
+// ---- LEX-PURE-END
+function rawToggle(m){
+ return m.gloss!=null?'<span class="lexraw" data-raw="'+m.id+'" title="'+
+   (m.raw?'show the decoded meaning':'show the LEX codes as sent')+'">'+(m.raw?'decoded':'LEX')+'</span>':'';
+}
+function paintBody(row,m){
+ const v=bodyView(m),body=row.querySelector('.body'),subj=row.querySelector('.subj');
+ if(body)body.innerHTML=colorMentions(esc(v.text));
+ if(subj)subj.textContent=v.subject;
+ const t=row.querySelector('.lexraw');if(t)t.outerHTML=rawToggle(m);
+}
 async function toggleScript(row,m){
  const body=row.querySelector('.body');
  if(row.classList.contains('scripted')){
-  body.innerHTML=colorMentions(esc(m.body));row.classList.remove('scripted');return;}
+  row.classList.remove('scripted');paintBody(row,m);return;}
  try{
   if(!m.script){const d=await api('/script/'+encodeURIComponent(m.id)+qs());m.script=d.text;}
   body.innerHTML='<span class="scrlab">SCRIPT \u00b7 generated, in character'+
@@ -2039,8 +2060,9 @@ function render(m){
   // A CONTINUATION ROW HAS NO HEAD, so its icons ride beside the body: a
   // stacked message is a message and must be playable (operator, eval box).
   +(cont?'<span class="arts">'+artIcons(m)+'</span>':'')
-  +(m.subject?'<div class="subj">'+esc(m.subject)+'</div>':'')
-  +'<div class="body">'+colorMentions(esc(m.body))+'</div>'+attHtml(m.attachments)+'</div>';
+  +(m.subject?'<div class="subj">'+esc(bodyView(m).subject)+'</div>':'')
+  +'<div class="body">'+colorMentions(esc(bodyView(m).text))+'</div>'+rawToggle(m)
+  +attHtml(m.attachments)+'</div>';
  for(const el of row.querySelectorAll('.mdview[data-src]'))hydrateMd(el);
  row.style.display=matches(m)?'':'none';
  row.addEventListener('click',e=>{
@@ -2053,6 +2075,7 @@ function render(m){
   if(e.target.closest('.dl'))return;          // the anchor downloads; not a row selection
   if(e.target.closest('.play')){if(m.has_audio)vPlayAt(m.id);else genOne(m);return;}
   if(e.target.closest('.scr')){toggleScript(row,m);return;}
+  if(e.target.closest('.lexraw')){m.raw=!m.raw;row.classList.remove('scripted');paintBody(row,m);return;}
   const cp=e.target.closest('.clipPlay');
   if(cp){vStop();vBusy=true;vPlayClip(cp.dataset.clip);return;}
   // The image tile and the expand control both open the viewer on THIS
@@ -2976,6 +2999,13 @@ function connect(){
   case 'audio':{const mm=msgs.get(m.id);if(mm){if(!m.terse)mm.has_audio=true;mm.gen_pending=false;paintIcons(mm);if(vAsked.delete(m.id))playOne(m.id);else vPush(mm);}return;}
   case 'script':{const mm=msgs.get(m.id);if(mm){mm.has_script=true;mm.script=m.text||mm.script;
     mm.script_voice=m.voice_id||mm.script_voice;paintIcons(mm);}return;}
+  // THE BRIDGE LANDED (main.62): the sender's waked explained a ref after the
+  // row was painted -- repaint its decode in place, unless the reader is
+  // looking at the codes or the script.
+  case 'gloss':{const mm=msgs.get(m.id);if(mm&&m.gloss!=null){mm.gloss=m.gloss;
+    if(m.gloss_subject!=null)mm.gloss_subject=m.gloss_subject;
+    const row=document.querySelector('.row[data-id="'+m.id+'"]');
+    if(row&&!row.classList.contains('scripted'))paintBody(row,mm);}return;}
   case 'message':return add(m);
   // A standing knock is an owner decision the system is blocked on (12602/
   // 12607): the frame is a POKE carrying a count -- the page fetches the SET
