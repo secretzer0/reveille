@@ -184,6 +184,22 @@ def test_a_session_without_the_reveille_mcp_is_not_rung(tmp_path):
     assert doorbell.mcp_enabled(work, empty) is True
 
 
+def test_a_worktree_inherits_its_main_checkouts_mcp(tmp_path):
+    """A git worktree has no project entry of its own; the CLI gives it the
+    main checkout's MCP servers. Measured: reveille-senior-dev, a worktree of
+    reveille, was never rung because only its exact path was checked."""
+    main = tmp_path / "main"
+    tree = tmp_path / "tree"
+    (main / ".git" / "worktrees" / "tree").mkdir(parents=True)
+    tree.mkdir()
+    (tree / ".git").write_text(f"gitdir: {main}/.git/worktrees/tree\n")
+    conf = _config(tmp_path, str(main))                  # registered on main only
+    assert doorbell.mcp_enabled(str(tree), conf) is True
+
+    (tree / ".git").write_text("gitdir: /elsewhere/not-a-worktree\n")
+    assert doorbell.mcp_enabled(str(tree), conf) is False
+
+
 def test_only_a_live_interactive_cli_is_rung(tmp_path):
     """Only ACTIVE cli agents (operator). A descriptor is a claim about a
     process: a hard-killed CLI leaves its json behind, and a `-p` run has no

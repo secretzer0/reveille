@@ -447,6 +447,14 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.321",
+     "0.2.321 A WORKTREE HEARS ITS DOORBELL. A git worktree has no MCP registration of\n"
+     "its own; Claude Code gives it the main checkout's servers (measured: `claude mcp\n"
+     "list` in reveille-senior-dev, a worktree of reveille, shows reveille connected).\n"
+     "doorbell.mcp_enabled checked only the exact path, read that body as MCP-less, and\n"
+     "never rang it -- seven rings sat in its spool while it idled. It now also checks\n"
+     "the main checkout named by the worktree's `.git` file. Waked converges to this on\n"
+     "its next reconnect."),
     ("0.2.320",
      "0.2.320 LEX IS THE BUS, AND A HUMAN NEVER SEES IT (ruling 98868dc2, operator\n"
      "31560; schema v51).\n"
