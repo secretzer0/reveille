@@ -213,7 +213,7 @@ def test_voice_put_replaces_in_place_and_the_bank_is_capped():
 def test_the_script_row_dies_with_the_message_and_flags_the_listing():
     c = db()
     admin, user, r1, r2, a1, a2 = world(c)
-    m = store.send(c, f"agent:{a1['id']}", "*", "terse", room=r1["id"])
+    m = store.send(c, f"agent:{a1['id']}", "*", '"terse"', room=r1["id"])
     store.script_put(c, m["id"], "In character.", "picard", "qwen", 1234)
     rows = store._with_artifacts(c, [{"id": m["id"]}])
     assert rows[0]["has_script"] is True and rows[0]["has_audio"] is False

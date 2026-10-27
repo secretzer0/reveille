@@ -46,6 +46,7 @@ SEED = {
         {"code": "^H", "means": "needs a human"},
         {"code": "m<id>", "means": "bus message {}"},
         {"code": "L<n>", "means": "LEX version {} adopted"},
+        {"code": "a<n>", "means": "attachment {} of this message"},
     ],
     "types": {
         "id": {"chars": "0123456789", "min": 1, "max": 20},
@@ -53,14 +54,32 @@ SEED = {
         "sha": {"chars": "0123456789abcdef", "min": 7, "max": 40},
     },
     # prose_max: "..." words one message may carry. hint_at: times a phrase must
-    # already appear in the room before a send is told to code it.
-    "rules": {"prose_max": 12, "hint_at": 3},
+    # already appear in the room before a send is told to code it. verbatim_max:
+    # words one message may carry inside backtick spans that contain whitespace
+    # -- an error line fits, a paragraph of English does not (98868dc2).
+    # define_max: words of the meaning a ref is given ONCE (`P39="..."`).
+    "rules": {"prose_max": 12, "hint_at": 3, "verbatim_max": 40, "define_max": 6},
 }
 RULES = frozenset(SEED["rules"])
 
 _PH = re.compile(r"<([a-z][a-z0-9_]*)>")
-_PROPOSAL = r'L\?-?[^\s;="`]+(?:=(?:"[^"]*"|[^\s;]+))?'
-_TOKEN = re.compile(rf"(?P<p>{_PROPOSAL})|```[\s\S]*?```|`[^`]*`|\"[^\"]*\"|[^\s;\"`]+|[\"`]")
+_PROPOSAL = r'L\?-?[^\s;="`]+(?:=(?:"[^"]*"(?:@[a-z_]+)?|[^\s;]+))?'
+_DEFINE = r'[^\s;="`]+="[^"]*"'
+_TOKEN = re.compile(rf"(?P<p>{_PROPOSAL})|(?P<d>{_DEFINE})|```[\s\S]*?```|`[^`]*`|\"[^\"]*\"|[^\s;\"`]+|[\"`]")
+# A path on the SENDER'S OWN HOST: no other reader can open it, so it is not
+# an artifact anyone can follow -- upload it and cite a<n> (98868dc2 bridge).
+_LOCAL_PATH = re.compile(r"^(?:/tmp/|/var/tmp/|/home/|/root/|~/)")
+# Refs that say what they are by themselves: a bus message, a LEX version, an
+# attachment of this message. Every other ref is explained once (define_max
+# words, `P39="layer-norm fix"`) and the room's ledger carries it after.
+# ponytail: a fixed set; a room-settable flag when a room needs its own.
+BARE = frozenset({"m<id>", "L<n>", "a<n>"})
+# WHO CAN EXPLAIN A REF NOBODY DEFINED: the sender's own waked, which sits beside
+# the agent's repo and its gh login (main.62). A code names one of these
+# (`L?P<n>="pull request {}"@gh_pr`); the broker hands waked the resolver NAME
+# and an argument checked here -- never a command, never free text. waked owns
+# the commands (waked.RESOLVE_CMDS).
+RESOLVERS = {"gh_pr": re.compile(r"[0-9]{1,9}")}
 _TYPESPEC = re.compile(r"\[(.+)\](?:\{(\d+),(\d+)\})?")
 
 
@@ -126,6 +145,9 @@ def lint(table):
             bad.append(f"{code!r}: no whitespace, ';', '=', quotes, backticks, or leading 'L?'")
             continue
         phs = list(_PH.finditer(code))
+        if e.get("resolve") is not None and (e["resolve"] not in RESOLVERS or len(phs) != 1):
+            bad.append(f"{code!r}: resolver {e['resolve']!r} -- one of {sorted(RESOLVERS)}, "
+                       f"on a ref with exactly one placeholder")
         for m in phs:
             name = m.group(1)
             if name not in types:
@@ -177,6 +199,9 @@ def _parse_proposal(tok):
     code, eq, val = body.partition("=")
     if not eq:
         raise LexError(f"{tok}: needs =<value>")
+    resolve = None
+    if val[:1] == '"' and '"@' in val:
+        val, _at, resolve = val.rpartition("@")
     val = val[1:-1] if val[:1] == '"' else val
     ph = re.fullmatch(r"<([a-z][a-z0-9_]*)>", code)
     if ph:
@@ -189,7 +214,7 @@ def _parse_proposal(tok):
         if not val.isdigit():
             raise LexError(f"{tok}: a rule is an int")
         return ("rule", code, int(val))
-    return ("code", code, val)
+    return ("code", code, val, resolve)
 
 
 def _proposal_gloss(tok):
@@ -204,13 +229,24 @@ def _proposal_gloss(tok):
     return f"proposes LEX {p[1]} = {p[2]}"
 
 
-def decode(body, table):
-    """[(token, means | None, kind)] where kind is code | quote | prose | propose |
-    unknown. means is None only for an unknown token (render it verbatim)."""
+def decode(body, table, known=None):
+    """[(token, means | None, kind)] where kind is code | define | quote | prose |
+    propose | unknown. means is None only for an unknown token (render it
+    verbatim). `known` is the room's ledger {ref: meaning}: a bare ref it
+    explains reads "pull request 39 (layer-norm fix)"."""
     codes, refs = compile_table(table)
+    known = known or {}
     out = []
     for m in _TOKEN.finditer(body or ""):
         t = m.group(0)
+        if m.group("d"):
+            ref, _eq, said = t.partition("=")
+            seg = _segment(ref, codes, refs)
+            if seg is None or len(seg) != 1:
+                out.append((t, None, "unknown"))
+            else:
+                out.append((t, f"{seg[0][1]} ({said.strip(chr(34)).strip()})", "define"))
+            continue
         if m.group("p"):
             g = _proposal_gloss(t)
             out.append((t, g, "propose" if g else "unknown"))
@@ -225,7 +261,49 @@ def decode(body, table):
             if seg is None:
                 out.append((t, None, "unknown"))
             else:
-                out.extend((tok, means, "code") for tok, means in seg)
+                out.extend((tok, f"{means} ({known[tok]})" if tok in known else means, "code")
+                           for tok, means in seg)
+    return out
+
+
+def definitions(body, table):
+    """{ref: meaning} this body defines (`P39="layer-norm fix"`)."""
+    out = {}
+    for m in _TOKEN.finditer(body or ""):
+        if m.group("d"):
+            ref, _eq, said = m.group(0).partition("=")
+            out[ref] = said.strip('"').strip()
+    return out
+
+
+def resolvable(refs, table):
+    """[{ref, resolver, arg}] for the refs in `refs` (from refs_used) whose code
+    names a resolver and whose argument that resolver accepts."""
+    by_code = {e["code"]: e for e in table["codes"]}
+    out = []
+    for tok, code in refs:
+        e = by_code.get(code) or {}
+        name = e.get("resolve")
+        if not name:
+            continue
+        m = _ref_regex(code, table["types"]).fullmatch(tok)
+        arg = m.group(1) if m and m.groups() else ""
+        if RESOLVERS[name].fullmatch(arg):
+            out.append({"ref": tok, "resolver": name, "arg": arg})
+    return out
+
+
+def refs_used(body, table):
+    """[(token, code)] for every ref in a body that does NOT say what it is by
+    itself (BARE) -- the ones a reader needs explained -- defined here or not."""
+    out = []
+    pairs = [(_ref_regex(e["code"], table["types"]), e["code"])
+             for e in table["codes"] if _PH.search(e["code"]) and e["code"] not in BARE]
+    for t, _m, k in decode(body, table):
+        if k not in ("code", "define"):
+            continue
+        tok = t.partition("=")[0] if k == "define" else t
+        out.extend((tok, code) for rx, code in pairs if rx.fullmatch(tok))
     return out
 
 
@@ -243,7 +321,7 @@ def proposals(body):
         elif p[0] == "rule":
             ch["rules"][p[1]] = p[2]
         else:
-            ch["add"].append({"code": p[1], "means": p[2]})
+            ch["add"].append({"code": p[1], "means": p[2], **({"resolve": p[3]} if p[3] else {})})
     return ch if any(ch.values()) else None
 
 
@@ -257,27 +335,81 @@ def apply(table, change):
     add = list(change.get("add", ()))
     new = {e["code"] for e in add}
     codes = [e for e in table["codes"] if e["code"] not in retire and e["code"] not in new]
-    out = {"codes": codes + [{"code": e["code"], "means": e["means"]} for e in add],
+    out = {"codes": codes + [{"code": e["code"], "means": e["means"],
+                              **({"resolve": e["resolve"]} if e.get("resolve") else {})}
+                             for e in add],
            "types": {**table["types"], **change.get("types", {})},
            "rules": {**table["rules"], **change.get("rules", {})}}
     lint(out)
     return out
 
 
+def rules(table):
+    """The rules a table is held to: the seed's value for every rule it never
+    set. A room that adopted before a rule existed is held to the seed's."""
+    return {**SEED["rules"], **table["rules"]}
+
+
+def codes_used(body, table):
+    """The table entries a body used -- `m<id>` for m29844 -- so a room can
+    see which of its codes nobody speaks."""
+    codes, _refs = compile_table(table)
+    refs = [(_ref_regex(e["code"], table["types"]), e["code"])
+            for e in table["codes"] if _PH.search(e["code"])]
+    used = set()
+    for t, _m, k in decode(body, table):
+        if k != "code":
+            continue
+        if t in codes:
+            used.add(t)
+        else:
+            used.update(code for rx, code in refs if rx.fullmatch(t))
+    return used
+
+
+def challenges(body, table):
+    """Does this message challenge with `?L`? A challenge is the sender's
+    business alone: it goes unicast and is never voiced (98868dc2)."""
+    return any(t == "?L" and k == "code" for t, _m, k in decode(body, table))
+
+
 def refusal(body, table, ver):
-    """None if `body` is valid LEX, else the refusal text naming the way out."""
+    """None if `body` is valid LEX, else the refusal text naming the way out.
+
+    BACKTICKS ARE FOR ARTIFACTS, NOT ENGLISH (98868dc2): 7/7 fleet reviews
+    found 86-97% of agent tokens in backtick prose. A span with no whitespace
+    (path, sha, id, flag) is free; every word of a span WITH whitespace, inline
+    or fenced, counts toward rules.verbatim_max. Past it the artifact goes by
+    upload -- referenced, never truncated, paid only by whoever fetches it."""
     toks = decode(body, table)
     unknown = [t for t, _m, k in toks if k == "unknown"]
     if unknown:
         return (f"not LEX v{ver}: {' '.join(unknown)}. Use a code from lex(), put "
                 f"code/errors/paths in `...`, prose in \"...\", or propose a code: "
                 f"L?<code>=\"<meaning>\"")
-    cap = table["rules"]["prose_max"]
+    rule = rules(table)
+    cap = rule["prose_max"]
     words = sum(len(m.split()) for _t, m, k in toks if k == "prose")
     if words > cap:
         return (f"LEX v{ver} drift: {words} words of \"...\" prose, max {cap}. "
                 f"Say it in codes and refs; propose a code for what has none: "
                 f"L?<code>=\"<meaning>\"")
+    cap = rule["define_max"]
+    long = [r for r, said in definitions(body, table).items() if len(said.split()) > cap]
+    if long:
+        return (f"LEX v{ver} drift: {' '.join(long)} defined in more than {cap} words. "
+                f"A ref is named in a few words, once: P39=\"layer-norm fix\"")
+    local = [m for _t, m, k in toks if k == "quote" and _LOCAL_PATH.match(m)]
+    if local:
+        return (f"LEX v{ver}: {' '.join(local)} is a path on your own host -- no other "
+                f"reader can open it: upload it and cite a<n>")
+    cap = rule["verbatim_max"]
+    words = sum(len(m.split()) for _t, m, k in toks if k == "quote" and len(m.split()) > 1)
+    if words > cap:
+        return (f"LEX v{ver} drift: {words} words inside backticks, verbatim_max {cap}. "
+                f"Backticks carry artifacts, not English: put a path, sha or id in `...`, "
+                f"say the rest in codes, and send a long log or traceback by upload "
+                f"and cite it as a<n>")
     return None
 
 
@@ -292,16 +424,20 @@ def hints(phrases_seen, table):
     """Pushback for a sender: [(phrase, times)] already counted in the room ->
     one line per phrase at or past rules.hint_at, naming the proposal to send."""
     return [f'"{p}" x{n} in room: propose L?<code>="{p}"'
-            for p, n in phrases_seen if n >= table["rules"]["hint_at"]]
+            for p, n in phrases_seen if n >= rules(table)["hint_at"]]
 
 
-def gloss(body, table):
+def gloss(body, table, known=None):
     """One line per token, `token = meaning`, for the script writer. An unknown
-    token says so -- the writer reads it out verbatim and invents nothing."""
+    token says so -- the writer reads it out verbatim and invents nothing.
+    "..." prose is a FRAGMENT to restore into a spoken sentence: told "say it
+    as written", the writer read `skip ok if 0010 rewrites old rows` raw."""
     lines = []
-    for t, means, kind in decode(body, table):
-        if kind in ("quote", "prose"):
-            lines.append(f"{t} = free text, say it as written")
+    for t, means, kind in decode(body, table, known):
+        if kind == "prose":
+            lines.append(f"{t} = fragment, restore it to a full spoken sentence, meaning intact")
+        elif kind == "quote":
+            lines.append(f"{t} = verbatim artifact, speak it by the mouth rules, give it no meaning")
         elif means is None:
             lines.append(f"{t} = identifier, say it verbatim, give it no meaning")
         else:
@@ -315,14 +451,14 @@ def render(table):
     codes = " | ".join(f"{e['code']} {e['means']}" for e in table["codes"])
     types = " ".join(f"<{k}>=[{t['chars']}]{{{t['min']},{t['max']}}}"
                      for k, t in table["types"].items())
-    rules = " ".join(f"{k}={v}" for k, v in table["rules"].items())
-    return f"codes: {codes}\ntypes: {types}\nrules: {rules}"
+    held = " ".join(f"{k}={v}" for k, v in rules(table).items())
+    return f"codes: {codes}\ntypes: {types}\nrules: {held}"
 
 
-def spoken(body, table):
+def spoken(body, table, known=None):
     """The message as plain meanings, '; '-joined: what the voice reads when no
     writer is up. Quoted text and unknown tokens pass through as written."""
-    return "; ".join(t if means is None else means for t, means, _k in decode(body, table))
+    return "; ".join(t if means is None else means for t, means, _k in decode(body, table, known))
 
 
 if __name__ == "__main__":

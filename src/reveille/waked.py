@@ -74,6 +74,7 @@ import asyncio
 import contextlib
 import fcntl
 import signal
+import subprocess
 import hashlib
 import json
 import os
@@ -338,7 +339,7 @@ def _doorbell(agent, obj, path):
             # has no way to learn it landed. It means the write to the session
             # succeeded -- not that the body read it, which is the body's to
             # say by calling the bus.
-            report(rung=True)
+            report(agent, rung=True)
             print(f"reveille-waked: doorbell rang {rung} session(s) for {agent}",
                   file=sys.stderr)
         elif why:
@@ -584,7 +585,7 @@ async def _session_watcher(agent, workdir, interval_s, state, url, token,
         # serves, body or no body. The count is the honest answer and this is
         # the only place that knows it. Sent on CHANGE: a state, not a stream.
         if live != state.get("sessions"):
-            report(sessions=len(live))
+            report(agent, sessions=len(live))
         first = "sessions" not in state
         arrived, departed = session_events(state.get("sessions", set()), live, first)
         state["sessions"] = live
@@ -670,15 +671,20 @@ async def _heartbeat(ws):
 # of each is the only one worth sending, and a flush that misses a tick coalesces
 # instead of falling behind.
 REPORT_FLUSH_S = 2
-_report = {}
+# PER IDENTITY: a host waked serves every agent on the machine from ONE
+# process. A single shared dict let whichever agent's reporter flushed next
+# carry another agent's `sessions` and `rung` onto ITS OWN socket -- the
+# broker then credited them to the wrong body.
+_report: dict[str, dict] = {}
 
 
-def report(**facts):
-    """Queue what this daemon observed. Sync, so any caller can reach it."""
-    _report.update(facts)
+def report(agent, **facts):
+    """Queue what this daemon observed about `agent`. Sync, so any caller can
+    reach it."""
+    _report.setdefault(agent, {}).update(facts)
 
 
-async def _reporter(ws):
+async def _reporter(ws, agent):
     """Flush observations onto the socket the daemon already holds.
 
     NO NEW CONNECTION AND NO NEW ENDPOINT: the wake socket is open, is already
@@ -689,10 +695,11 @@ async def _reporter(ws):
     """
     while True:
         await asyncio.sleep(REPORT_FLUSH_S)
-        if not _report:
+        mine = _report.get(agent)
+        if not mine:
             continue
-        facts = dict(_report)
-        _report.clear()
+        facts = dict(mine)
+        mine.clear()
         try:
             await ws.send(json.dumps(facts))
         except Exception:                                        # noqa: BLE001
@@ -701,7 +708,51 @@ async def _reporter(ws):
             # next change -- which for a body that just went quiet is never.
             # Newer facts win: this fills gaps, it does not overwrite.
             for key, value in facts.items():
-                _report.setdefault(key, value)
+                _report.setdefault(agent, {}).setdefault(key, value)
+
+
+# WHAT A RESOLVER RUNS, by name. The broker sends a NAME and an argument it
+# already checked (lex.RESOLVERS); this table is the only place a command
+# exists, the argument is re-checked here, and nothing is ever run through a
+# shell. The agent's own repo directory is the cwd, so `gh` answers for the
+# repo the agent works in, with the login the agent already uses.
+RESOLVE_CMDS = {
+    "gh_pr": lambda arg: ["gh", "pr", "view", arg, "--json", "title,state",
+                          "-q", '.title + ", " + (.state | ascii_downcase)'],
+}
+RESOLVE_TIMEOUT_S = 5
+
+
+def resolve_refs(workdir, refs):
+    """{ref: meaning} for the refs this machine can explain; silence for the
+    rest -- a ref left unexplained is the broker's to refuse, not ours."""
+    if os.environ.get("REVEILLE_RESOLVE", "").lower() == "off":
+        return {}
+    from reveille import lex
+    out = {}
+    for r in refs or ():
+        name, arg = r.get("resolver"), str(r.get("arg", ""))
+        if name not in RESOLVE_CMDS or not lex.RESOLVERS[name].fullmatch(arg):
+            continue
+        try:
+            done = subprocess.run(RESOLVE_CMDS[name](arg), cwd=workdir or None,
+                                  capture_output=True, text=True, timeout=RESOLVE_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        said = done.stdout.strip()
+        if done.returncode == 0 and said:
+            out[r["ref"]] = said
+    return out
+
+
+async def _answer_resolve(ws, agent, workdir, obj):
+    said = await asyncio.to_thread(resolve_refs, workdir, obj.get("refs"))
+    if not said:
+        return
+    with contextlib.suppress(Exception):
+        await ws.send(json.dumps({"resolved": {"room": obj.get("room"), "mid": obj.get("mid"),
+                                               "refs": said}}))
+    print(f"reveille-waked: explained {sorted(said)} for {agent}", file=sys.stderr)
 
 
 async def _session(uri, agent, state):
@@ -709,7 +760,7 @@ async def _session(uri, agent, state):
     reconnect."""
     async with websockets.connect(uri) as ws:
         hb = asyncio.create_task(_heartbeat(ws))
-        rep = asyncio.create_task(_reporter(ws))
+        rep = asyncio.create_task(_reporter(ws, agent))
         try:
             async for frame in ws:
                 # THE BROKER SPOKE. Registration and refusal both arrive as
@@ -792,6 +843,12 @@ async def _session(uri, agent, state):
                           f"already holds. `reveille init` also works.",
                           file=sys.stderr)
                     return PARKED
+                if obj.get("reason") == "resolve":
+                    # NOT A RING: the broker asks this machine to explain refs
+                    # its agent cited (main.62). Off the loop -- gh is a
+                    # network call -- and never written to the spool.
+                    asyncio.create_task(_answer_resolve(ws, agent, state.get("workdir"), obj))
+                    continue
                 if obj.get("wake"):
                     write_ring(agent, frame)
                     state["last"] = time.time_ns()   # real rings reset the nudge
@@ -1433,7 +1490,7 @@ async def _run(url, agent, idle_nudge_s, no_rooms_window_s=NO_ROOMS_WINDOW_S,
     uri = wake_uri(url, sep, agent, token, workdir)
     # Daemon start counts as activity AND arms one nudge: whatever the agent
     # parked before this daemon existed has never been asked about.
-    state = {"last": time.time_ns(), "armed": True}
+    state = {"last": time.time_ns(), "armed": True, "workdir": workdir or os.getcwd()}
     nudger = asyncio.create_task(_nudger(agent, idle_nudge_s, state))
     # BESIDE the connect loop, like the nudger and for the same reason: the
     # probe is worth most exactly when the socket is down.

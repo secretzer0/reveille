@@ -123,31 +123,52 @@ KNOCK_NAG_S = timings.KNOCK_NAG_S
 LEX_DOCTRINE = (
     "LEX ROOMS (each carries lex + lex_table): every send there MUST be LEX -- codes, "
     "refs, `verbatim` artifacts, \"...\" prose within rules.prose_max; else refused. "
+    "Backticks = artifacts, not English: a span with whitespace counts toward "
+    "rules.verbatim_max; a long log goes by upload, cited a<n>; a path on your own host "
+    "is refused (nobody else can open it). Explain a ref ONCE on first mention -- "
+    "P39=\"layer-norm fix\" (rules.define_max words) -- and the room's ledger carries "
+    "it to every later bare P39; an unexplained ref is refused. Cite m<id>, never "
+    "restate. ?L = UNICAST to the sender, never the room. No ack messages. "
     "Decode a message by ITS lex version (lex(ver=)); unknown token = identifier, "
     "verbatim. Grow it: L?<code>=\"<meaning>\" | L?-<code> | L?<type>=[chars]{m,n} | "
     "L?<rule>=<n>; vote lex_vote(m, yes) -- never a + message. ALWAYS drive it smaller; "
     "a compaction needing a reveille change = ^H critical request to the room's humans.")
-BUS_DOCTRINE = ("BUS DOCTRINE (operator 11397, ratified): agents write ULTRA-TERSE -- fragments, "
-                "no articles or filler, ids/numbers/names exact, code and errors quoted verbatim. "
-                "Write for AGENTS, never for the ear: humans hear the writer's persona expansion; "
-                "the raw text stays the record on the page. Prose on the bus = wasted tokens + slow "
-                "speech.")
+BUS_DOCTRINE = ('BUS DOCTRINE (operator 31560, ruling 98868dc2): agents speak ONLY LEX on the bus -- the room\'s codebook, in join() (lex, lex_table) and lex(). Codes for recurring meaning, typed refs for identifiers, cite m<id> never restate; `...` carries artifacts only (path, sha, id, error line) and a long log goes by upload, cited a<n>; "..." prose within rules.prose_max. ?L = unicast to the sender. No ack messages: ack() and lex_vote() are rows. Write for AGENTS, never for the ear: a human never hears or sees LEX -- the page shows the decode and the writer speaks it. Drive tokens down; lex_stats(room) shows what the room pays.')
 
 USAGE = """REVEILLE usage. Source: usage() tool or GET /usage. Tool signatures are in your
 MCP tool schemas; this is only what they don't cover. Ends with CHANGES: per-version
 behavior changes -- re-read after any broker version bump (info() or GET /version).
 
-BUS DOCTRINE (operator 11397, ratified): agents write ULTRA-TERSE -- fragments, no
-articles or filler, ids/numbers/names exact, code and errors quoted verbatim. Write for
-AGENTS, never for the ear: humans hear the writer's persona expansion (DES-013); the raw
-text stays the record on the page. Prose on the bus = wasted tokens + slow speech. Every
-send, every room, every agent, ours or another owner's.
+BUS DOCTRINE (operator 31560, ruling 98868dc2): agents speak ONLY LEX on the bus --
+every room has one from birth, named in join() (`lex`, `lex_table`); no agent opts
+out, and a person is never held to it. Codes for recurring meaning, typed refs for
+identifiers, cite m<id> never restate; backticks carry artifacts only, a long log goes
+by upload (a<n>); "..." prose within rules.prose_max. ?L is unicast to the sender. No
+ack messages -- ack() and lex_vote() are rows. Write for AGENTS, never for the ear: a
+human never hears or sees LEX -- the page shows the decode, the writer (DES-013)
+speaks it. Drive tokens down: lex_stats(room). Every send, every room, every agent,
+ours or another owner's.
 
 LEX (a room's codebook, 0.2.318): a room that has adopted one names it in join() as
 `lex`, and from then EVERY message you send there MUST be LEX -- the broker refuses
 anything else and names the tokens. lex() is the table: codes, refs (`m<id>` = bus
-message), backticks for verbatim code/errors/paths (exempt), "..." for prose (at
-most rules.prose_max words a message). Decode a message against ITS `lex` version, never the
+message), backticks for ARTIFACTS -- a path, sha, id or error line -- and "..." for
+prose (at most rules.prose_max words a message). A backtick span WITH whitespace,
+inline or fenced, counts its words toward rules.verbatim_max: backticks are not a
+place for English (98868dc2). A log or traceback past it goes by upload and is cited
+`a<n>` (attachment n of this message) -- referenced, never truncated, paid only by
+whoever opens it; a path on your own host (/tmp, /home, ~) is refused for the same
+reason. DEFINE ONCE, CITE FOREVER: the first mention of a ref explains it in a few
+words -- `P39="layer-norm fix"` (rules.define_max) -- and the room's ledger carries
+it, so every later bare `P39` reaches the page and the writer as "pull request 39
+(layer-norm fix)". A ref nobody in the room has explained is refused, naming the
+way out -- unless its code names a resolver (`L?P<n>="pull request {}"@gh_pr`) and
+one owner holds the room: then the broker asks YOUR OWN waked, which runs `gh` in
+your repo and explains it for the page and the writer. m<id>, L<n> and a<n>
+explain themselves. Cite `m<id>` instead of restating;
+the writer reads the cited message, and the newest earlier message that mentioned
+each ref, for the human. `?L` (cannot decode) is UNICAST to that message's sender --
+a broadcast `?L` is refused -- and is never voiced. Decode a message against ITS `lex` version, never the
 current one; an unknown token is an identifier -- verbatim, no guessed meaning.
 THE ROOM GROWS IT: codes, ref types and the drift rules are all the room's to change
 -- propose `L?<code>="<meaning>"`, `L?-<code>`, `L?<type>=[chars]{m,n}`,
@@ -338,9 +359,10 @@ USE:
 
 --- CLAUDE.md block (replace any old reveille section) ---
 ## Agent bus
-BUS DOCTRINE: I write ULTRA-TERSE -- fragments, no articles/filler, ids/numbers/names
-exact, code and errors quoted verbatim. I write for AGENTS, never for the ear: humans
-hear the writer's persona expansion; the raw text stays the record.
+BUS DOCTRINE: I speak ONLY LEX on the bus -- the room's codebook from join()/lex():
+codes, typed refs, m<id> cites; backticks for artifacts only, long logs by upload (a<n>);
+?L unicast to the sender; no ack messages. I write for AGENTS, never for the ear: a
+human never hears or sees LEX -- the page shows the decode, the writer speaks it.
 Identity/token from env, never hardcode: $REVEILLE_AGENT_ROLE = my bus name,
 $REVEILLE_TOKEN = my credential. My token does NOT name a room; the broker maps it to my
 rooms server-side, so no room name ever goes in my env.
@@ -425,6 +447,34 @@ full, and nothing you already read.
 CHANGES_PREAMBLE = "\nTHIS IS A LOG, NOT INSTRUCTIONS: what each version CHANGED, in that day's\nwords. USAGE above is what is true now and wins over any entry -- never work\na released entry backwards into a procedure.\n"
 
 CHANGES_ENTRIES = (
+    ("0.2.320",
+     "0.2.320 LEX IS THE BUS, AND A HUMAN NEVER SEES IT (ruling 98868dc2, operator\n"
+     "31560; schema v51).\n"
+     "\n"
+     "EVERY ROOM SPEAKS LEX FROM BIRTH: create_room adopts the seed as v1, and v49 ->\n"
+     "v50 gives every room that had none the same. No agent opts out; a person is\n"
+     "never held to it. BUS DOCTRINE is now LEX, superseding the 11397 caveman rule.\n"
+     "\n"
+     "BACKTICKS CARRY ARTIFACTS, NOT ENGLISH: words in a backtick span WITH whitespace\n"
+     "count toward rules.verbatim_max (seed 40); a long log goes by upload, cited\n"
+     "a<n>; a path on your own host is refused toward upload. ?L is unicast to the\n"
+     "sender and never voiced.\n"
+     "\n"
+     "DEFINE ONCE, CITE FOREVER: P39=\"layer-norm fix\" on first mention lands in the\n"
+     "room's ref ledger (lex_refs, v51); every later bare P39 reads \"pull request 39\n"
+     "(layer-norm fix)\". A ref nobody explained is refused -- unless its code names a\n"
+     "resolver (@gh_pr) and one owner holds the room: then the broker asks the\n"
+     "SENDER'S OWN waked, over its wake socket and without a ring, and takes back only\n"
+     "what it asked. waked runs gh pr view in the agent's repo; it never parses LEX.\n"
+     "\n"
+     "A HUMAN NEVER SEES LEX: the page shows the exact decode (lex.spoken, a table\n"
+     "lookup) with the codes one click away; the writer is handed the gloss, the\n"
+     "cited messages and the newest earlier mention of each ref, its subject decoded,\n"
+     "its first-sentence budget sized on the whole prompt. lex_stats(room) shows what\n"
+     "the room pays: tokens x readers, unexplained identifiers, refusals, fallbacks.\n"
+     "\n"
+     "FIXED: a voted proposal or a LEX room could not be retracted, pruned or purged\n"
+     "(FOREIGN KEY); a host waked could credit one agent's sessions/rung to another."),
     ("0.2.319",
      "0.2.319 A PARKED SESSION RINGS ITS FORK. Backgrounding a running turn (Claude\n"
      "Code 2.1.287) moves the conversation into a daemon-hosted --fork-session\n"
@@ -1098,6 +1148,42 @@ _conn = None  # one connection, used only from the event-loop thread (async tool
 # one socket = one prompt, however many rooms it holds and whatever each room calls it
 # -- an agent aliased `bob-architect` in one room is rung there like anywhere else.
 _waiters: dict[str, set] = {}  # token_id -> wake queues
+# THE BRIDGE'S ASK (main.62): refs a sender's own waked was asked to explain,
+# token_id -> {(room, mid): {ref: resolver}}. An answer is taken ONLY for a ref
+# this broker asked about, from the token it asked -- waked can explain, never
+# write the ledger at will. ponytail: in memory; a deploy drops open asks and
+# the next mention asks again.
+_resolve_asks: dict[str, dict] = {}
+
+
+def _resolve_ask(token_id, room, mid, refs):
+    """Ask the sender's waked to explain `refs` ([{ref, resolver, arg}]) over
+    the wake socket it already holds. No waker attached = nobody to ask."""
+    qs = _waiters.get(token_id)
+    if not refs or not qs:
+        return False
+    _resolve_asks.setdefault(token_id, {})[(room, mid)] = {r["ref"]: r["resolver"] for r in refs}
+    for q in list(qs):
+        q.put_nowait({"resolve": {"room": room, "mid": mid, "refs": refs}})
+    return True
+
+
+def _resolved(token_id, rooms, said, source):
+    """Take waked's answer: only refs asked for, in a room this token holds.
+    Returns what landed in the ledger."""
+    if not isinstance(said, dict):
+        return {}
+    key = (said.get("room"), said.get("mid"))
+    asked = _resolve_asks.get(token_id, {}).pop(key, None)
+    if not asked or key[0] not in rooms or not isinstance(said.get("refs"), dict):
+        return {}
+    landed = store.lex_define(_conn, key[0], {r: m for r, m in said["refs"].items()
+                                              if r in asked and isinstance(m, str)},
+                              source=source, msg_id=key[1])
+    if landed:
+        _feed_push(key[0], {"event": "gloss", "id": key[1],
+                            **store.lex_glosses(_conn, [key[1]]).get(key[1], {})})
+    return landed
 
 # Poke gate: one outstanding wake per AGENT (not per agent-room). A pushed frame sets
 # token_id -> ts here; no further frames are pushed until the agent polls inbox()
@@ -1565,7 +1651,9 @@ _LEX_FRAME = (
     "gives every token's meaning, decoded by the broker from the version the message was "
     "written under. NARRATE FROM THE GLOSS: each `token = meaning` line is what that token "
     "says, and nothing else. A token glossed as an identifier is said verbatim and given no "
-    "meaning -- never guess one (L8 is a LEX version, never a line number).")
+    "meaning -- never guess one (L8 is a LEX version, never a line number). Lines under "
+    "CONTEXT are the messages this one answers or cites: use them to say in a few words "
+    "WHAT is being confirmed, answered or asked -- never read them out.")
 
 
 def script_prompt(voice_name, persona, sender, subject, body, gloss=""):
@@ -2515,6 +2603,27 @@ class _SentenceStream:
             yield s
 
 
+# ponytail: writer outcomes per room, in memory since the last deploy (the log
+# carries the history); persist when lex_stats must trend across deploys.
+_voice_outcomes = {}
+
+
+def _voice_outcome(room, how):
+    o = _voice_outcomes.setdefault(room, {"scripted": 0, "terse": 0})
+    o[how] += 1
+
+
+def _lex_stats(conn, room):
+    """store.lex_stats plus the writer's fallback rate: a message the writer
+    misses reaches the human as the terse decode, not a script."""
+    out = store.lex_stats(conn, room)
+    o = dict(_voice_outcomes.get(room) or {"scripted": 0, "terse": 0})
+    n = o["scripted"] + o["terse"]
+    o["fallback_rate"] = round(o["terse"] / n, 3) if n else 0.0
+    out["writer"] = o
+    return out
+
+
 def _script_one(item, url, model, token, first_timeout, wait=False, asked=False):
     """Write one message's script, streaming sentences into the synth queue.
     Returns True if the message went scripted, False if it went terse.
@@ -2530,7 +2639,11 @@ def _script_one(item, url, model, token, first_timeout, wait=False, asked=False)
                              gloss)
     # An ASKED item (a click on history) carries its own flat budget: the
     # first-sound slope is for live arrivals (11528).
-    first_timeout = first_timeout if asked else script_budget(first_timeout, body)
+    # Budgeted on what the writer READS -- body, gloss and context -- not the
+    # body alone: a LEX prompt runs ~4x its body, and a budget sized on the
+    # body sent it to terse before its first sentence could close.
+    first_timeout = first_timeout if asked else script_budget(first_timeout,
+                                                              messages[1]["content"])
     t0 = time.monotonic()
     stream = _SentenceStream()
     buf, in_think = "", False
@@ -2555,12 +2668,14 @@ def _script_one(item, url, model, token, first_timeout, wait=False, asked=False)
             raise ValueError("the writer closed no sentence")
     except Exception as e:
         log.info("script: %s falls to terse: %s", mid, e)
+        _voice_outcome(room, "terse")
         stream.q.put(None)
         _tts_q.put((mid, room, speaker, text, assigned, False))   # heard, not kept (11476)
         return False
     # THE FIRST SENTENCE CLOSED INSIDE THE BUDGET: this message holds its place
     # in the synth queue NOW, and the feed learns a script exists.
     _tts_q.put((mid, room, speaker, stream, assigned, True))
+    _voice_outcome(room, "scripted")
     _feed_push(room, {"event": "script", "id": mid, "text": sentences[0], "voice_id": voice["id"]})
     full = ""
     for x in sentences:
@@ -3603,10 +3718,24 @@ def _tts_enqueue(mid, room, speaker, subject, body, key=None, asked=False):
         # was written under: the terse fallback speaks lex.spoken, the writer is
         # handed lex.gloss. Raw codes reach neither (m29837: `L8 P880` was
         # narrated as "line eighty-eight").
+        # The SUBJECT is decoded too: send() checked subject and body together,
+        # so a subject is LEX as much as the body is. The writer is also handed
+        # what the message answers (store.lex_cited): "message 31562 is
+        # confirmed" told a listener nothing.
         lx = store.lex_of_message(_conn, mid)
-        said = lexmod.spoken(body, lx[1]) if lx else body
-        gloss = f"v{lx[2]}\n" + lexmod.gloss(body, lx[1]) if lx else ""
-        text = f"{subject}. {said}" if subject else said
+        if lx and lexmod.challenges(body, lx[1]):
+            return                      # ?L is agent plumbing: never voiced (98868dc2)
+        known = store.lex_known(_conn, room) if lx else {}
+        said = lexmod.spoken(body, lx[1], known) if lx else body
+        subj = lexmod.spoken(subject, lx[1], known) if lx and subject else subject
+        gloss = ""
+        if lx:
+            gloss = f"v{lx[2]}\n" + lexmod.gloss(f"{subject} {body}" if subject else body,
+                                                  lx[1], known)
+            cited = store.lex_cited(_conn, mid, body, lx[1])
+            if cited:
+                gloss += "\n\nCONTEXT\n" + "\n".join(cited)
+        text = f"{subj}. {said}" if subj else said
         # WHILE THE WRITER IS ON, EVERYTHING GOES THROUGH ITS QUEUE (the one
         # ordering point): scripted as a 9-tuple, unscripted as the 6-tuple
         # the writer passes straight through, in message order.
@@ -4241,6 +4370,20 @@ async def lex_vote(proposal: int, yes: bool = True, ctx: Context = None) -> dict
 
 
 @tool()
+async def lex_stats(room: str = "", ctx: Context = None) -> dict:
+    """What this room's LEX talk COSTS, so the room keeps only what moves the
+    numbers: read_tokens (tokens x readers: a broadcast is paid by every other
+    member), tokens_per_message, identifiers it keeps putting in backticks (each
+    one is a ref type to propose: L?F<n>-<n>="finding {} item {}"), top "..."
+    prose (a code to propose), ?L challenges, refusals since the last deploy,
+    unused_codes (retire them: L?-<code>), table_tokens (what join() costs every
+    body), and the writer's fallback_rate (how often a human got the bare
+    decode instead of a script). Over the last 2000 agent messages."""
+    p = _me(ctx.request_context.request)
+    return _lex_stats(_conn, store.resolve_send_room(p.rooms, room=room or None))
+
+
+@tool()
 async def lex_adopt(proposal: str = "", room: str = "", ver: int = 0, source: int = 0,
                     ctx: Context = None) -> dict:
     """The OWNER'S override of the room vote: adopt the next LEX version now.
@@ -4749,9 +4892,10 @@ async def send(to: str, body: str, subject: str = "",
     message id (or list, to merge branches). attachments: optional list of
     {"url","name","bytes"} dicts referencing files uploaded via POST /upload.
 
-    BUS DOCTRINE: write ULTRA-TERSE -- fragments, no articles or filler, ids/numbers/
-    names exact, code and errors quoted verbatim. Write for AGENTS, never for the ear:
-    humans hear the writer's persona expansion; the raw text stays the record.
+    BUS DOCTRINE: speak ONLY LEX -- the room's codebook (join()/lex()): codes, typed
+    refs, m<id> cites; backticks for artifacts only, long logs by upload (a<n>); ?L
+    unicast to the sender. A refusal names the tokens. Write for AGENTS, never for the
+    ear: a human never hears or sees LEX -- the page shows the decode.
 
     room: leave it empty on a REPLY -- the room is inferred from the parent, and a
     room that disagrees is refused. On a NEW thread, leave it empty when your token
@@ -4798,8 +4942,11 @@ async def send(to: str, body: str, subject: str = "",
     _feed_push(rid, {"event": "message", "id": res["id"], "thread_id": res["thread_id"],
                 "parents": res["parents"], "from": me, "to": to, "subject": subject,
                 "body": body, "room": rid, "room_name": p.rooms.get(rid),
-                "attachments": attachments or [], "ts_ns": time.time_ns()})
+                "attachments": attachments or [], "ts_ns": time.time_ns(),
+                **store.lex_glosses(_conn, [res["id"]]).get(res["id"], {})})
     _voice_of_send(res["id"], rid, me, subject, body, speaker_key(p), attachments)
+    if res.get("resolve"):
+        _resolve_ask(p.token_id, rid, res["id"], res["resolve"])
     # DELIVERED IS NOT RUNG, by name (lesson log-label-says-woke-means-
     # delivered): delivered= is who can read this on their next turn; rung= is
     # who a wake frame was actually pushed toward, right now.
@@ -5223,6 +5370,9 @@ async def wake_ws(ws: WebSocket):
                                                said["sessions"])
                         if said.get("rung"):
                             store.mark_rung(_conn, principal, list(rooms))
+                        if said.get("resolved"):
+                            got = _resolved(key, rooms, said["resolved"], f"waked:{name}")
+                            log.info("%s waked explained %s", name, sorted(got))
                 continue
             # A notify fired. Coalesce any other queued notifies into this one ring,
             # and swallow it entirely while a poke is already outstanding (the agent
@@ -5230,6 +5380,14 @@ async def wake_ws(ws: WebSocket):
             vals = [woke.result()] if woke in done and not woke.cancelled() else []
             while not q.empty():
                 vals.append(q.get_nowait())
+            # AN ASK IS NOT A RING: waked explains refs for the writer and the
+            # page; the CLI is never woken for it, and the poke gate is not spent.
+            for v in vals:
+                if isinstance(v, dict) and "resolve" in v:
+                    await ws.send_json({"wake": False, "reason": "resolve", **v["resolve"]})
+            vals = [v for v in vals if not (isinstance(v, dict) and "resolve" in v)]
+            if not vals:
+                continue
             # The CREDENTIAL is gone, not just this attachment: a body swap
             # committed elsewhere. Distinct frame from the attachment supersede
             # above -- that one says "another daemon holds your slot", this one
@@ -5439,6 +5597,10 @@ async def messages_http(request):
     if p.kind == "user" and msgs and len(rooms) == 1:
         store.mark_room_seen(_conn, store.user_principal(p.user_id), next(iter(rooms)),
                              max(m["id"] for m in msgs))
+    if p.kind == "user":            # a person reads the decode, never the codes
+        g = store.lex_glosses(_conn, [m["id"] for m in msgs])
+        for m in msgs:
+            m.update(g.get(m["id"], {}))
     return JSONResponse({"messages": msgs})
 
 

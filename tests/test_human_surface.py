@@ -30,8 +30,8 @@ def _two_architects(tmp_path):
 
 def test_the_same_message_renders_the_room_name_with_and_without_an_alias(tmp_path):
     c, travis, bob, big, home, tv, bb = _two_architects(tmp_path)
-    x = store.send(c, bb, "*", "same words", room=big["id"])
-    y = store.send(c, bb, "*", "same words", room=home["id"])
+    x = store.send(c, bb, "*", '"same words"', room=big["id"])
+    y = store.send(c, bb, "*", '"same words"', room=home["id"])
     # the store's own render (what inbox/history/the feed show)
     seen = {m["room"]: m["from"] for m in store.inbox(c, tv, [big["id"]])}
     assert seen == {big["id"]: "bob-architect"}
@@ -42,10 +42,10 @@ def test_the_same_message_renders_the_room_name_with_and_without_an_alias(tmp_pa
     assert x["owner"] == "bob" and y["owner"] == "bob"
     # readers render the room-name too: bob's architect read travis's message in
     # BigProject as bob-architect, its own at home as architect
-    m = store.send(c, tv, "*", "from travis's", room=big["id"])
+    m = store.send(c, tv, "*", '"from travis\'s"', room=big["id"])
     store.ack(c, bb, [m["id"]], [big["id"], home["id"]])
     assert store.readers(c, m["id"]) == ["bob-architect"]
-    n = store.send(c, P(c, "human-ish"), "*", "note", room=big["id"])
+    n = store.send(c, P(c, "human-ish"), "*", '"note"', room=big["id"])
     store.ack(c, tv, [n["id"]], [big["id"]])
     assert store.readers(c, n["id"]) == ["architect"]
 
@@ -81,18 +81,18 @@ def test_an_aliased_agents_ring_lands_on_its_token(tmp_path):
     daemon._waiters[t_bob] = {q_bob}
     daemon._waiters[t_tv] = {q_tv}
     try:
-        res = store.send(c, P(c, "human-ish"), "bob-architect", "for bob's", subject="hi",
+        res = store.send(c, P(c, "human-ish"), "bob-architect", '"for bob\'s"', subject='"hi"',
                          room=big["id"])
         assert res["wake"] == ["bob-architect"], "delivered_to reads the room-name"
         assert res["wake_principals"] == [bb]
         daemon._notify(big["id"], res["wake_principals"], res["id"], res["sender"],
-                       "hi", owner=res["owner"])
+                       '"hi"', owner=res["owner"])
         assert q_bob.qsize() == 1 and q_tv.qsize() == 0
         fact = q_bob.get_nowait()
         assert fact == {"id": res["id"], "from": "human-ish", "owner": "travis",
-                        "subject": "hi", "room": big["id"]}
+                        "subject": '"hi"', "room": big["id"]}
         # broadcast: every live member but the sender, by identity
-        res = store.send(c, P(c, "human-ish"), "*", "all", room=big["id"])
+        res = store.send(c, P(c, "human-ish"), "*", '"all"', room=big["id"])
         assert sorted(res["wake"]) == ["architect", "bob-architect"]
         daemon._notify(big["id"], res["wake_principals"], res["id"], res["sender"], "")
         assert q_bob.qsize() == 1 and q_tv.qsize() == 1
